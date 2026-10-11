@@ -570,6 +570,7 @@
       "description": "Managed rules, custom rules and rate limiting for this site.",
       "tabCc": "Rate limiting & challenge",
       "performanceHint": "Higher interception rate at a proportional performance cost.",
+      "postureMode": "Site mode",
       "postureTitle": "Current effective posture",
       "postureHint": "What the data plane enforces right now — click an item to jump to its settings.",
       "postureOn": "ON",

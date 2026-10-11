@@ -275,6 +275,17 @@ pub struct UpstreamInfo {
     ///
     /// If set to `None`, there is no time limit for the retry process.
     pub max_retry_window: Option<Duration>,
+    /// Whether this request incremented the upstream's processing counter
+    /// (i.e. a peer was produced on the first attempt). `logging()` must
+    /// pair the decrement with it; a request that never produced a peer
+    /// (e.g. every candidate rejected) would otherwise drive the counter
+    /// permanently negative.
+    pub processing_counted: bool,
+    /// The address whose inflight counter was acquired (least-connections
+    /// algorithm, first attempt only). Releasing must target this address:
+    /// `upstream.address` holds the *final* peer after retries, which was
+    /// never acquired and would skew the balancing counters.
+    pub inflight_address: Option<String>,
 }
 
 /// State related to the current request being processed.

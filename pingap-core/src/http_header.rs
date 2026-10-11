@@ -393,8 +393,9 @@ static TRUSTED_PROXIES: ArcSwapOption<TrustedProxies> =
 ///
 /// When a non-empty list is configured, forwarded headers are only trusted for
 /// connections coming directly from one of these addresses. Passing `None` or
-/// an empty list restores the default behaviour of trusting forwarded headers
-/// unconditionally (backwards compatible). Safe to call repeatedly on reload.
+/// an empty list restores the default: forwarded headers are honoured only
+/// from loopback/private-range direct peers, and a public peer always resolves
+/// to its own address. Safe to call repeatedly on reload.
 pub fn set_trusted_proxies(proxies: &Option<Vec<String>>) {
     let parsed = match proxies {
         Some(list) if !list.is_empty() => Some(TrustedProxies::parse(list)),
@@ -412,6 +413,23 @@ fn is_trusted_proxy(peer: IpAddr) -> bool {
         .load()
         .as_ref()
         .is_some_and(|trusted| trusted.contains(peer))
+}
+
+/// Heuristic for the unconfigured default: addresses a same-host or
+/// private-network load balancer plausibly connects from. A direct client
+/// from a public address must not influence client-IP resolution.
+fn is_plausible_internal_proxy(peer: IpAddr) -> bool {
+    match peer {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unique_local()
+                // IPv4-mapped peers (::ffff:a.b.c.d) follow v4 semantics.
+                || v6
+                    .to_ipv4_mapped()
+                    .is_some_and(|v4| v4.is_loopback() || v4.is_private())
+        },
+    }
 }
 
 /// Ensures `ctx.conn.client_ip` is populated and returns a borrowed reference.
@@ -432,26 +450,48 @@ pub fn ensure_client_ip<'a>(session: &Session, ctx: &'a mut Ctx) -> &'a str {
 /// When trusted proxies are configured, `X-Forwarded-For` / `X-Real-IP` are
 /// only honoured if the direct TCP peer is a trusted proxy; otherwise the
 /// peer's own address is returned. When no trusted proxies are configured the
-/// lookup order is:
+/// forwarded headers are honoured only for connections whose direct peer is a
+/// loopback or private-range address — the usual shape for a same-host or
+/// private-network load balancer. A client arriving directly from a public
+/// address controls its own forwarded headers, so honouring them would let
+/// anyone forge the identity every IP rule keys on; such connections always
+/// resolve to their TCP peer. Deployments behind a proxy with public addresses
+/// (e.g. some cloud load balancers) must configure `basic.trusted_proxies`.
+/// The lookup order within the honoured path is:
 /// 1. `X-Forwarded-For` (taking the first IP in the list)
 /// 2. `X-Real-IP`
 /// 3. The remote address of the direct TCP connection
 pub fn get_client_ip(session: &Session) -> String {
-    // When trusted proxies are configured, a direct (untrusted) peer's
-    // forwarded headers must be ignored to prevent client-IP spoofing.
+    // When no peer address is available (unit-test mock sessions, exotic
+    // setups) trust cannot be judged either way; keep the legacy
+    // header-first behaviour rather than resolving to nothing.
+    let peer = session
+        .client_addr()
+        .and_then(|addr| addr.as_inet())
+        .map(|addr| addr.ip());
+    let peer = match peer {
+        Some(ip) => ip,
+        None => return forwarded_client_ip(session),
+    };
     if TRUSTED_PROXIES_ENABLED.load(Ordering::Relaxed) {
         // Compare the address itself; formatting it only to parse it back
         // would cost an allocation per request.
-        let peer = session
-            .client_addr()
-            .and_then(|addr| addr.as_inet())
-            .map(|addr| addr.ip());
-        match peer {
-            Some(ip) if is_trusted_proxy(ip) => {},
-            Some(ip) => return ip.to_string(),
-            None => return String::new(),
+        if !is_trusted_proxy(peer) {
+            return peer.to_string();
+        }
+    } else {
+        // Unconfigured: the fail-open default is a public peer's own
+        // address — its forwarded headers are attacker-controlled.
+        if !is_plausible_internal_proxy(peer) {
+            return peer.to_string();
         }
     }
+    forwarded_client_ip(session)
+}
+
+/// The legacy lookup order: `X-Forwarded-For` (first entry), then
+/// `X-Real-IP`, then the connection's remote address.
+fn forwarded_client_ip(session: &Session) -> String {
     // 1. Check `X-Forwarded-For`.
     if let Some(value) = session.get_header(HTTP_HEADER_X_FORWARDED_FOR) {
         // Efficiently take the first IP without creating an intermediate Vec.
@@ -1168,36 +1208,60 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_client_ip() {
-        let session = new_test_session(
+        // Default mode: a private-range direct peer (internal LB shape)
+        // honours forwarded headers.
+        let session = new_test_session_with_peer(
             &["X-Forwarded-For:192.168.1.1"],
             "/vicanso/pingap?size=1",
+            "10.0.0.9".parse().unwrap(),
         )
         .await;
         assert_eq!(get_client_ip(&session), "192.168.1.1");
 
-        let session = new_test_session(
+        let session = new_test_session_with_peer(
             &["X-Real-Ip:192.168.1.2"],
             "/vicanso/pingap?size=1",
+            "10.0.0.9".parse().unwrap(),
         )
         .await;
         assert_eq!(get_client_ip(&session), "192.168.1.2");
 
-        // With trusted proxies configured, a forwarded header from an untrusted
-        // direct peer (the mock session has no trusted peer address) must be
-        // ignored instead of being taken at face value.
-        set_trusted_proxies(&Some(vec!["10.0.0.0/8".to_string()]));
-        let session = new_test_session(
+        // A public direct peer controls its own forwarded headers, so they
+        // must be ignored: the peer itself is the client IP.
+        let session = new_test_session_with_peer(
             &["X-Forwarded-For:192.168.1.1"],
             "/vicanso/pingap?size=1",
+            "93.184.216.34".parse().unwrap(),
         )
         .await;
-        assert_ne!(get_client_ip(&session), "192.168.1.1");
+        assert_eq!(get_client_ip(&session), "93.184.216.34");
 
-        // Restoring the default trusts forwarded headers again.
-        set_trusted_proxies(&None);
-        let session = new_test_session(
+        // With trusted proxies configured, the strict list wins: a trusted
+        // peer's header is honoured, a private-but-unlisted peer's is not.
+        set_trusted_proxies(&Some(vec!["10.0.0.0/8".to_string()]));
+        let session = new_test_session_with_peer(
             &["X-Forwarded-For:192.168.1.1"],
             "/vicanso/pingap?size=1",
+            "10.0.0.9".parse().unwrap(),
+        )
+        .await;
+        assert_eq!(get_client_ip(&session), "192.168.1.1");
+
+        let session = new_test_session_with_peer(
+            &["X-Forwarded-For:192.168.1.1"],
+            "/vicanso/pingap?size=1",
+            "192.168.5.5".parse().unwrap(),
+        )
+        .await;
+        assert_eq!(get_client_ip(&session), "192.168.5.5");
+
+        // Restoring the default honours forwarded headers from private
+        // peers again.
+        set_trusted_proxies(&None);
+        let session = new_test_session_with_peer(
+            &["X-Forwarded-For:192.168.1.1"],
+            "/vicanso/pingap?size=1",
+            "10.0.0.9".parse().unwrap(),
         )
         .await;
         assert_eq!(get_client_ip(&session), "192.168.1.1");

@@ -1152,7 +1152,13 @@ impl RateLimitPolicy {
             if entry.window != window {
                 entry.window = window;
                 entry.count = 0;
-                entry.blocked_until = 0;
+                // A mitigation ban outlives the window it was triggered in
+                // (mitigation_secs may be much larger than period_secs);
+                // resetting it here would let attackers ride out the ban by
+                // waiting for the next window. Only expired bans are cleared.
+                if now >= entry.blocked_until {
+                    entry.blocked_until = 0;
+                }
             }
             let retry_after = if rule.mitigation_secs > 0 {
                 rule.mitigation_secs
@@ -2394,11 +2400,20 @@ impl Plugin for WafPlugin {
         };
 
         // ── Full-request log capture: snapshot headers (capped) and keep the
-        // configured body prefix. Pingora's retry buffer replays bytes
-        // consumed here to the upstream, so reading does not interfere with
-        // forwarding. Skipped for the challenge verify endpoint, whose
-        // handler consumes the body itself. WAF body inspection reuses the
-        // same read pass. ──
+        // configured body prefix. Pingora only replays body bytes consumed
+        // here to the upstream when the retry buffer is enabled BEFORE the
+        // read: H2 streams and the first request on an H1 connection have no
+        // buffer yet, so without it the inspected prefix would silently
+        // vanish from the forwarded body (upstream sees Content-Length but
+        // misses the bytes). The buffer holds at most 64 KB and a write past
+        // the limit discards it entirely, so capturing stops at that
+        // boundary: bodies up to the cap reach the upstream intact, larger
+        // bodies degrade to prefix loss — never worse than not buffering.
+        // Skipped for the challenge verify endpoint, whose handler consumes
+        // the body itself. WAF body inspection reuses the same read pass. ──
+        /// Pingora's per-session body retry buffer capacity
+        /// (`pingora-core BODY_BUF_LIMIT`, 64 KB). Not exported upstream.
+        const RETRY_BUF_LIMIT: usize = 64 * 1024;
         let body_limit = log_body_limit();
         let log_headers = cap_headers(
             headers
@@ -2419,21 +2434,32 @@ impl Plugin for WafPlugin {
         if (agent.is_some() && body_limit > 0 || should_inspect)
             && !(method == "POST" && path == VERIFY_ENDPOINT)
         {
+            session.as_mut().enable_retry_buffering();
+            let inspect_cap = if should_inspect {
+                self.max_body_size.min(RETRY_BUF_LIMIT)
+            } else {
+                0
+            };
+            let mut captured_total = 0usize;
             let mut interrupted = false;
             loop {
+                // Hard stop at the retry-buffer boundary: one more read
+                // could overflow the 64 KB buffer, which would discard the
+                // whole buffered prefix instead of just missing the tail.
+                if captured_total >= RETRY_BUF_LIMIT
+                    || (should_inspect && inspect_buf.len() >= inspect_cap)
+                {
+                    interrupted = true;
+                    break;
+                }
                 let Some(chunk) = session.read_request_body().await? else {
                     break;
                 };
+                captured_total += chunk.len();
                 let chunk = chunk.as_ref();
                 log_body_prefix.absorb(chunk);
                 if should_inspect {
                     inspect_buf.put(chunk);
-                }
-                // Inspection needs the prefix; the log needs its own. Stop
-                // once neither can learn anything from more bytes.
-                if should_inspect && inspect_buf.len() >= self.max_body_size {
-                    interrupted = true;
-                    break;
                 }
                 if !should_inspect && log_body_prefix.limit_hit() {
                     interrupted = true;

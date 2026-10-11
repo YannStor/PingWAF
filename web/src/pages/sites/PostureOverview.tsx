@@ -90,6 +90,20 @@ export function PostureOverview({
           </span>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
+          {/* The site-level mode is the outermost gate: per-category badges
+              below show what each rule pack would do, but nothing enforces
+              unless this is monitor/block. Always render it first. */}
+          <PostureBadge
+            label={t('pages.protection.postureMode')}
+            value={t(`pages.waf.mode_${enforcement.mode}`, enforcement.mode)}
+            tone={
+              enforcement.mode === 'block'
+                ? 'success'
+                : enforcement.mode === 'monitor'
+                  ? 'warning'
+                  : 'neutral'
+            }
+          />
           <PostureBadge
             label={t('pages.protection.postureWaf')}
             value={engine === 'on' ? on : off}

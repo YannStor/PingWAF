@@ -570,6 +570,7 @@
       "description": "本站点的托管规则、自定义规则与限流质询配置。",
       "tabCc": "限流与质询",
       "performanceHint": "拦截率更高，性能开销相应增加。",
+      "postureMode": "站点模式",
       "postureTitle": "当前生效姿态",
       "postureHint": "数据面当前实际执行的检测与动作，点击条目跳转对应配置。",
       "postureOn": "开启",

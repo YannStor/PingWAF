@@ -94,10 +94,12 @@ export function poolFormFromPool(pool: UpstreamPool): PoolFormState {
  */
 export function validatePoolHealthCheck(form: PoolFormState): string | null {
   const path = form.healthCheckPath.trim()
+  // The server counts UTF-8 bytes, not UTF-16 code units — multi-byte
+  // characters must not slip past the front end.
   if (
     !path.startsWith('/') ||
     /[ ?#]/.test(path) ||
-    path.length > 255
+    new TextEncoder().encode(path).length > 255
   ) {
     return 'healthPathInvalid'
   }
@@ -111,6 +113,55 @@ export function validatePoolHealthCheck(form: PoolFormState): string | null {
   const healthy = int(form.healthCheckHealthy)
   if (!(healthy >= 1 && healthy <= 10)) return 'healthThresholdInvalid'
   return null
+}
+
+/**
+ * Health-check fields as submitted to the server. While the probe is
+ * disabled the inputs are not rendered, so an out-of-range stored value
+ * (API-written data, older server, partial response) must never block the
+ * dialog: the server validates stored values unconditionally, so invalid
+ * hidden values are silently normalized to the server defaults instead.
+ * Valid values — including custom ones — pass through unchanged.
+ */
+export function poolHealthCheckPayload(form: PoolFormState): {
+  health_check_enabled: boolean
+  health_check_path: string
+  health_check_interval_seconds: number
+  health_check_timeout_ms: number
+  health_check_unhealthy_threshold: number
+  health_check_healthy_threshold: number
+} {
+  if (form.healthCheckEnabled && validatePoolHealthCheck(form) === null) {
+    return {
+      health_check_enabled: true,
+      health_check_path: form.healthCheckPath.trim(),
+      health_check_interval_seconds: Number(form.healthCheckInterval.trim()),
+      health_check_timeout_ms: Number(form.healthCheckTimeout.trim()),
+      health_check_unhealthy_threshold: Number(form.healthCheckUnhealthy.trim()),
+      health_check_healthy_threshold: Number(form.healthCheckHealthy.trim()),
+    }
+  }
+  // Server defaults (PoolHealthCheck::default_values). Used verbatim when
+  // the probe is on and every field is valid, and to normalize inert
+  // out-of-range values when it is off.
+  const defaults = emptyPoolForm()
+  const int = (raw: string, min: number, max: number, fallback: number) => {
+    const n = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : NaN
+    return n >= min && n <= max ? n : fallback
+  }
+  const path = form.healthCheckPath.trim()
+  const validPath =
+    path.startsWith('/') && !/[ ?#]/.test(path) && new TextEncoder().encode(path).length <= 255
+  return {
+    health_check_enabled: false,
+    health_check_path: validPath ? path : defaults.healthCheckPath,
+    health_check_interval_seconds: int(
+      form.healthCheckInterval, 5, 3600, 10,
+    ),
+    health_check_timeout_ms: int(form.healthCheckTimeout, 100, 30000, 3000),
+    health_check_unhealthy_threshold: int(form.healthCheckUnhealthy, 1, 10, 2),
+    health_check_healthy_threshold: int(form.healthCheckHealthy, 1, 10, 1),
+  }
 }
 
 export interface NodeFormState {

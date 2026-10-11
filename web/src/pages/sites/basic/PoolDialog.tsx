@@ -16,6 +16,7 @@ import {
   isHashKeyType,
   LB_OPTION_KEYS,
   poolFormFromPool,
+  poolHealthCheckPayload,
   validatePoolHealthCheck,
   type PoolFormState,
 } from './types'
@@ -96,21 +97,18 @@ export function PoolDialog({
       }
     }
 
-    // Mirrors the server's PoolHealthCheck validation; the stored values are
-    // checked even while the check is disabled.
-    const healthError = validatePoolHealthCheck(form)
-    if (healthError) {
-      setError(t(`pages.basic.errors.${healthError}`))
-      return
+    // Inline validation only while the probe is enabled — the fields are
+    // hidden otherwise, and an error the user cannot see or fix would make
+    // the dialog unsavable. poolHealthCheckPayload normalizes hidden
+    // out-of-range values to the server defaults so submission always passes.
+    if (form.healthCheckEnabled) {
+      const healthError = validatePoolHealthCheck(form)
+      if (healthError) {
+        setError(t(`pages.basic.errors.${healthError}`))
+        return
+      }
     }
-    const healthCheck = {
-      health_check_enabled: form.healthCheckEnabled,
-      health_check_path: form.healthCheckPath.trim(),
-      health_check_interval_seconds: Number(form.healthCheckInterval.trim()),
-      health_check_timeout_ms: Number(form.healthCheckTimeout.trim()),
-      health_check_unhealthy_threshold: Number(form.healthCheckUnhealthy.trim()),
-      health_check_healthy_threshold: Number(form.healthCheckHealthy.trim()),
-    }
+    const healthCheck = poolHealthCheckPayload(form)
 
     if (editing) {
       // Empty SNI clears the field server-side, disabling HTTPS origin.

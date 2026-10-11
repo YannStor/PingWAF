@@ -1372,7 +1372,13 @@ impl ProxyHttp for Server {
             return Err(no_available_upstream(ctx));
         };
         ctx.upstream.address = peer.address().to_string();
-
+        if first_attempt {
+            // Pairing markers for logging(): the processing increment and
+            // the least-connections inflight acquire both happen inside
+            // new_http_peer exactly on the first successful attempt.
+            ctx.upstream.processing_counted = true;
+            ctx.upstream.inflight_address = Some(ctx.upstream.address.clone());
+        }
         // start connect to upstream
         ctx.timing.upstream_connect =
             Some(get_start_time(&ctx.timing.created_at));
@@ -1883,8 +1889,23 @@ impl ProxyHttp for Server {
         }
         // get from cache does not connect to upstream
         if let Some(upstream_instance) = &ctx.upstream.upstream_instance {
-            ctx.upstream.processing_count = Some(upstream_instance.completed());
-            upstream_instance.release(&ctx.upstream.address);
+            // Only decrement when this request actually incremented the
+            // counter: a peer-selection failure (upstream_peer returned an
+            // error before any peer was produced) never incremented, and
+            // an unconditional completed() would drive the counter
+            // permanently negative.
+            if ctx.upstream.processing_counted {
+                ctx.upstream.processing_count =
+                    Some(upstream_instance.completed());
+            }
+            // Release the address whose inflight counter was acquired —
+            // the first attempt's choice, not the final peer after retries.
+            let inflight_addr = ctx
+                .upstream
+                .inflight_address
+                .as_deref()
+                .unwrap_or(&ctx.upstream.address);
+            upstream_instance.release(inflight_addr);
         }
         if ctx.state.status.is_none()
             && let Some(header) = session.response_written()

@@ -27,6 +27,7 @@ import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { RuleDialog } from '@/components/waf/RuleDialog'
 import { deriveWafConfig, ruleKeys, rulesApi } from '@/api/rules'
+import { wafSettingsApi, wafSettingsKeys } from '@/api/wafSettings'
 import { siteKeys } from '@/api/sites'
 import { useCanWrite, useDebouncedValue } from '@/hooks'
 import { cn } from '@/lib/utils'
@@ -90,6 +91,19 @@ export function CustomRulesPanel() {
     [allRules, groups],
   )
 
+  // The banner must reflect the *enforced* posture, which lives in the
+  // settings row (mode + paranoia level), not in a re-derivation from the
+  // rule list — a rule kept at mode=block while the site runs monitor would
+  // otherwise make this banner contradict the Protection page card.
+  const settingsQuery = useQuery({
+    queryKey: wafSettingsKeys.settings(siteId),
+    queryFn: () => wafSettingsApi.get(siteId),
+    enabled: Boolean(siteId),
+  })
+  const settings = settingsQuery.data
+  const effectiveMode = settings?.mode ?? waf.mode
+  const effectiveParanoia = settings?.paranoia_level ?? waf.paranoia_level
+
   const visibleRules = useMemo(() => {
     const filtered = allRules.filter((r) => {
       if (groupFilter === 'none' && r.group_id !== null) return false
@@ -106,6 +120,11 @@ export function CustomRulesPanel() {
     void queryClient.invalidateQueries({ queryKey: ruleKeys.all(siteId) })
     void queryClient.invalidateQueries({ queryKey: ruleKeys.groups(siteId) })
     void queryClient.invalidateQueries({ queryKey: siteKeys.detail(siteId) })
+    // Rule changes feed the derived posture and the settings row's
+    // lazy-created mode seed — refresh both instead of waiting for the
+    // posture poll.
+    void queryClient.invalidateQueries({ queryKey: wafSettingsKeys.posture(siteId) })
+    void queryClient.invalidateQueries({ queryKey: wafSettingsKeys.settings(siteId) })
   }
 
   /* ── Mutations ───────────────────────────────────────────────────── */
@@ -373,7 +392,8 @@ export function CustomRulesPanel() {
     [groups, t],
   )
 
-  const loading = rulesQuery.isPending || groupsQuery.isPending
+  const loading =
+    rulesQuery.isPending || groupsQuery.isPending || settingsQuery.isPending
   const failed = (rulesQuery.isError && !rulesQuery.data) || (groupsQuery.isError && !groupsQuery.data)
 
   return (
@@ -396,8 +416,8 @@ export function CustomRulesPanel() {
             <div
               className={cn(
                 'mb-4 flex flex-wrap items-center gap-4 rounded-lg border px-4 py-3',
-                waf.enabled
-                  ? waf.mode === 'block'
+                effectiveMode !== 'off'
+                  ? effectiveMode === 'block'
                     ? 'border-danger/35 bg-danger/8'
                     : 'border-warning/35 bg-warning/8'
                   : 'border-line bg-elevated',
@@ -406,15 +426,15 @@ export function CustomRulesPanel() {
               <span
                 className={cn(
                   'flex h-10 w-10 shrink-0 items-center justify-center rounded-lg',
-                  waf.enabled
-                    ? waf.mode === 'block'
+                  effectiveMode !== 'off'
+                    ? effectiveMode === 'block'
                       ? 'bg-danger/15 text-fg-danger'
                       : 'bg-warning/15 text-fg-warning'
                     : 'bg-recessed text-fg-subtle',
                 )}
               >
-                {waf.enabled ? (
-                  waf.mode === 'block' ? (
+                {effectiveMode !== 'off' ? (
+                  effectiveMode === 'block' ? (
                     <ShieldCheck weight="duotone" className="h-5 w-5" />
                   ) : (
                     <ShieldWarning weight="duotone" className="h-5 w-5" />
@@ -425,8 +445,8 @@ export function CustomRulesPanel() {
               </span>
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-semibold text-fg-strong">
-                  {waf.enabled
-                    ? waf.mode === 'block'
+                  {effectiveMode !== 'off'
+                    ? effectiveMode === 'block'
                       ? t('pages.waf.postureBlocking')
                       : t('pages.waf.postureMonitoring')
                     : t('pages.waf.postureOff')}
@@ -439,13 +459,16 @@ export function CustomRulesPanel() {
                 </p>
               </div>
               <div className="flex items-center gap-4">
-                <PostureStat label={t('pages.waf.paranoiaLevel')} value={waf.paranoia_level} />
+                <PostureStat
+                  label={t('pages.waf.paranoiaLevel')}
+                  value={effectiveParanoia}
+                />
                 <PostureStat
                   label={t('pages.waf.activeRules')}
                   value={`${waf.active_rules}/${waf.total_rules}`}
                 />
-                <Badge tone={MODE_TONE[waf.mode] ?? 'neutral'} dot>
-                  {t(`pages.waf.mode_${waf.mode}`)}
+                <Badge tone={MODE_TONE[effectiveMode] ?? 'neutral'} dot>
+                  {t(`pages.waf.mode_${effectiveMode}`)}
                 </Badge>
                 {canWrite && (
                   <>
