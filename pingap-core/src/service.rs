@@ -50,6 +50,12 @@ pub trait BackgroundTask: Sync + Send {
     async fn execute(&self, count: u32) -> Result<bool, Error>;
 }
 
+/// Mirror hook invoked when a cycle overruns the interval, called with
+/// `(service name, stalled tasks, elapsed)`. Lets a subsystem mirror the
+/// warning into its own log feed — tracing targets must be compile-time
+/// constants, so the mirror lives with the caller.
+pub type StalledHook = Box<dyn Fn(&str, &str, &str) + Sync + Send>;
+
 /// A unified background service runner that can handle one or more named tasks.
 pub struct BackgroundTaskService {
     name: String,
@@ -58,6 +64,7 @@ pub struct BackgroundTaskService {
     interval: Duration,
     immediately: bool,
     initial_delay: Option<Duration>,
+    on_stalled: Option<StalledHook>,
 }
 
 impl BackgroundTaskService {
@@ -74,6 +81,7 @@ impl BackgroundTaskService {
             interval,
             immediately: false,
             initial_delay: None,
+            on_stalled: None,
         }
     }
     /// A convenience constructor for creating a service with a single task.
@@ -91,6 +99,11 @@ impl BackgroundTaskService {
     }
     pub fn set_initial_delay(&mut self, initial_delay: Option<Duration>) {
         self.initial_delay = initial_delay;
+    }
+    /// Mirror the "still running past the interval" warning to a subsystem's
+    /// own log feed (see [`StalledHook`] for why this is a callback).
+    pub fn set_on_stalled(&mut self, hook: Option<StalledHook>) {
+        self.on_stalled = hook;
     }
     /// Add a task to the service
     /// This is useful for adding tasks to the service after it has been created
@@ -175,6 +188,19 @@ impl BackgroundService for BackgroundTaskService {
                                     elapsed = duration_to_string(cycle_start.elapsed()),
                                     "background tasks still running past the interval"
                                 );
+                                // Mirror onto the subsystem's own feed so a
+                                // stalled cycle shows up where its operator
+                                // actually looks (e.g. the certificate
+                                // issuance log for the ACME task).
+                                if let Some(hook) = &self.on_stalled {
+                                    hook(
+                                        &self.name,
+                                        &running.join(", "),
+                                        &duration_to_string(
+                                            cycle_start.elapsed(),
+                                        ),
+                                    );
+                                }
                             }
                         }
                     };

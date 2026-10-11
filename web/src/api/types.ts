@@ -1286,6 +1286,8 @@ export interface SslCertificate {
   acme_dns_provider: string | null
   acme_dns_config: unknown | null
   status: CertificateStatus | string
+  /** Why the last ACME issuance was given up on; null while healthy. */
+  failure_reason: string | null
   has_certificate: boolean
   has_private_key: boolean
   created_at: string
@@ -1450,6 +1452,7 @@ export type CertEventType =
   | 'renewal_requested'
   | 'renewed'
   | 'failed'
+  | 'issuance_failed'
   | 'deleted'
   | 'acme_raw'
 
@@ -1458,6 +1461,7 @@ export const CERT_EVENT_TYPES: CertEventType[] = [
   'renewal_requested',
   'renewed',
   'failed',
+  'issuance_failed',
   'deleted',
   'acme_raw',
 ]
@@ -1659,6 +1663,40 @@ export interface BlockedIp {
 
 export interface UnblockIpResponse {
   ip: string
+  agents: number
+  delivered: number
+}
+
+/**
+ * One (site, IP) dynamic block as shown on the global blacklist page: the
+ * per-site `BlockedIp` extended with the site's identity so rows from
+ * different sites can be told apart.
+ */
+export interface GlobalBlockedIp {
+  ip: string
+  site_id: string
+  site_name: string
+  reason: string | null
+  blocked_at: string
+  /** null = permanent block (no automatic expiry). */
+  expires_at: string | null
+  agent_count: number
+  attack_count: number
+  last_attack_at: string | null
+}
+
+export interface ManualBlockIpRequest {
+  site_id: string
+  ip: string
+  /** Seconds the block stays in force; 0/omitted = permanent until unblocked. */
+  duration_seconds?: number
+  reason?: string
+}
+
+export interface ManualBlockIpResponse {
+  ip: string
+  site_id: string
+  duration_seconds: number
   agents: number
   delivered: number
 }

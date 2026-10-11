@@ -61,6 +61,22 @@ fn get_value_from_env(value: &str) -> String {
         .unwrap_or_else(|| value.to_string())
 }
 
+/// Builds the HTTP client every DNS provider task uses. Hard timeouts are
+/// the point: a provider API that accepts the connection and then goes
+/// silent must fail the order within seconds, not wedge the renewal task —
+/// and with it, through the background service's `join_all`, every other
+/// background task — forever.
+fn new_dns_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| Error::Fail {
+            category: "build_http_client".to_string(),
+            message: e.to_string(),
+        })
+}
+
 /// Acme DNS task
 #[async_trait]
 pub trait AcmeDnsTask: Sync + Send {

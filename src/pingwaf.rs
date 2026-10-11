@@ -1104,6 +1104,19 @@ pub async fn start_data_plane(
     );
     background_tasks.set_immediately(true);
     background_tasks.set_initial_delay(Some(Duration::from_secs(3)));
+    // A stalled ACME cycle is mirrored onto the `pingap::acme` target, which
+    // the agent's certificate-event capture ships to the control plane — so
+    // an issuance that hangs shows up in the panel's certificate log instead
+    // of only in the data plane's own log file.
+    background_tasks.set_on_stalled(Some(Box::new(|name, tasks, elapsed| {
+        warn!(
+            target: "pingap::acme",
+            name,
+            tasks,
+            elapsed,
+            "background tasks still running past the interval"
+        );
+    })));
     if acme_enabled {
         background_tasks.add_task(
             "lets_encrypt",

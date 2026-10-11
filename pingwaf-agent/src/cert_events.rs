@@ -116,12 +116,90 @@ impl<S: Subscriber> Layer<S> for AcmeCaptureLayer {
     }
 }
 
+/// One site's worth of attribution data: every hostname its certificate
+/// covers (apex, wildcard and alternates, lowercased) plus the ids events
+/// should be stamped with.
+#[derive(Debug, Clone)]
+pub struct CertAttribution {
+    pub domains: Vec<String>,
+    pub site_id: String,
+    pub certificate_id: String,
+}
+
+/// True when `message` contains `domain` as a whole token. The leading
+/// boundary rejects alphanumerics, `-` and `*` but accepts `.` — ACME logs
+/// routinely name subdomains of the zone (`_acme-challenge.example.com`,
+/// `www.example.com`), and those belong to the same site; the trailing
+/// boundary additionally rejects `.` so `example.com` matches neither
+/// `example.com.cn` nor `example.com.evil.com`.
+fn contains_domain(message: &str, domain: &str) -> bool {
+    let bytes = message.as_bytes();
+    let mut start = 0;
+    while let Some(offset) = message[start..].find(domain) {
+        let at = start + offset;
+        let before_ok = at == 0 || {
+            let b = bytes[at - 1];
+            !(b.is_ascii_alphanumeric() || b == b'-' || b == b'*')
+        };
+        let after = at + domain.len();
+        let after_ok = after >= bytes.len() || {
+            let b = bytes[after];
+            !(b.is_ascii_alphanumeric() || b == b'-' || b == b'.' || b == b'*')
+        };
+        if before_ok && after_ok {
+            return true;
+        }
+        start = at + 1;
+    }
+    false
+}
+
+/// Stamps buffered ACME events with the site and certificate they belong
+/// to. The capture layer cannot know the topology, so events arrive with
+/// empty ids and are attributed here — at ship time, against the agent's
+/// current site rules — by matching the domains each message names. The
+/// longest matching domain wins, so `example.com` never shadows
+/// `www.example.com`; a wildcard also matches its apex form because the
+/// ACME flow logs identifiers with the `*.` prefix stripped. Events already
+/// carrying a site id are left alone.
+pub fn attribute_events(
+    entries: &mut [proto::CertEventEntry],
+    attributions: &[CertAttribution],
+) {
+    if entries.is_empty() || attributions.is_empty() {
+        return;
+    }
+    // (match text, attribution) pairs, longest first.
+    let mut matchers: Vec<(&str, &CertAttribution)> = Vec::new();
+    for attribution in attributions {
+        for domain in &attribution.domains {
+            matchers.push((domain.as_str(), attribution));
+            if let Some(apex) = domain.strip_prefix("*.") {
+                matchers.push((apex, attribution));
+            }
+        }
+    }
+    matchers.sort_by_key(|(domain, _)| std::cmp::Reverse(domain.len()));
+
+    for entry in entries.iter_mut() {
+        if !entry.site_id.is_empty() {
+            continue;
+        }
+        for (domain, attribution) in &matchers {
+            if contains_domain(&entry.message, domain) {
+                entry.site_id = attribution.site_id.clone();
+                entry.certificate_id = attribution.certificate_id.clone();
+                break;
+            }
+        }
+    }
+}
+
 /// Visitor that extracts the `message` field of a tracing event.
 #[derive(Default)]
 struct MessageVisitor {
     message: Option<String>,
 }
-
 impl Visit for MessageVisitor {
     fn record_str(&mut self, field: &Field, value: &str) {
         if field.name() == "message" {
@@ -206,5 +284,79 @@ mod tests {
         assert_eq!(drained[0].target, "pingap::acme");
         assert_eq!(drained[1].level, "WARN");
         assert_eq!(drained[1].message, "challenge failed: dns timeout");
+    }
+
+    fn entry(message: &str) -> proto::CertEventEntry {
+        proto::CertEventEntry {
+            agent_id: String::new(),
+            site_id: String::new(),
+            certificate_id: String::new(),
+            event_type: "acme_raw".to_string(),
+            level: "INFO".to_string(),
+            target: ACME_TARGET_PREFIX.to_string(),
+            message: message.to_string(),
+            timestamp: None,
+        }
+    }
+
+    #[test]
+    fn attribution_matches_the_longest_domain() {
+        let attributions = vec![
+            CertAttribution {
+                domains: vec!["example.com".to_string()],
+                site_id: "site-apex".to_string(),
+                certificate_id: "cert-apex".to_string(),
+            },
+            CertAttribution {
+                domains: vec!["www.example.com".to_string()],
+                site_id: "site-www".to_string(),
+                certificate_id: "cert-www".to_string(),
+            },
+        ];
+        let mut entries = vec![
+            entry("save let's encrypt http-01 challenge token www.example.com"),
+            entry("acme from let's encrypt example.com"),
+            entry("order created for unattributed.org"),
+        ];
+        attribute_events(&mut entries, &attributions);
+        assert_eq!(entries[0].site_id, "site-www");
+        assert_eq!(entries[0].certificate_id, "cert-www");
+        assert_eq!(entries[1].site_id, "site-apex");
+        assert_eq!(entries[2].site_id, "");
+    }
+
+    #[test]
+    fn attribution_matches_wildcards_and_respects_token_boundaries() {
+        let attributions = vec![CertAttribution {
+            domains: vec!["*.example.com".to_string()],
+            site_id: "site-wild".to_string(),
+            certificate_id: "cert-wild".to_string(),
+        }];
+        let mut entries = vec![
+            // The ACME flow strips the `*.` prefix from identifiers.
+            entry("start add dns txt record for _acme-challenge.example.com"),
+            // Lookalike names must not match.
+            entry("order created for notexample.com"),
+            entry("order created for example.com.cn"),
+        ];
+        attribute_events(&mut entries, &attributions);
+        assert_eq!(entries[0].site_id, "site-wild");
+        assert_eq!(entries[1].site_id, "");
+        assert_eq!(entries[2].site_id, "");
+    }
+
+    #[test]
+    fn attribution_leaves_stamped_events_alone() {
+        let attributions = vec![CertAttribution {
+            domains: vec!["example.com".to_string()],
+            site_id: "site-new".to_string(),
+            certificate_id: "cert-new".to_string(),
+        }];
+        let mut stamped = entry("order created for example.com");
+        stamped.site_id = "site-original".to_string();
+        let mut entries = vec![stamped];
+        attribute_events(&mut entries, &attributions);
+        assert_eq!(entries[0].site_id, "site-original");
+        assert_eq!(entries[0].certificate_id, "");
     }
 }

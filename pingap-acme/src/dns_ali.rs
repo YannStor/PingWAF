@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{AcmeDnsTask, Error};
+use super::{AcmeDnsTask, Error, new_dns_http_client};
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::Utc;
@@ -200,7 +200,7 @@ impl AliDnsTask {
         }
 
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: new_dns_http_client()?,
             access_key_id,
             access_key_secret,
             endpoint,

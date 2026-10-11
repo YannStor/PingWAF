@@ -14,7 +14,9 @@ use pingwaf_proto::control_plane::{
 };
 
 use crate::cache::{BlockedIpEntry, RuleCache};
-use crate::cert_events::cert_event_buffer;
+use crate::cert_events::{
+    attribute_events, cert_event_buffer, CertAttribution,
+};
 use crate::config::AgentConfig;
 use crate::heartbeat::{MetricsCollector, SystemMetrics};
 use crate::probe::{self, HostSample, ProbeBuffer};
@@ -926,7 +928,7 @@ impl ControlPlaneClient {
 
         loop {
             if self.shutdown_signal.load(Ordering::Relaxed) {
-                let entries = cert_event_buffer().drain(agent_id);
+                let entries = self.drain_cert_events(agent_id);
                 if !entries.is_empty() {
                     Self::flush_cert_events(&mut client, entries, &agent_token)
                         .await;
@@ -936,14 +938,14 @@ impl ControlPlaneClient {
 
             tokio::select! {
                 _ = interval.tick() => {
-                    let entries = cert_event_buffer().drain(agent_id);
+                    let entries = self.drain_cert_events(agent_id);
                     if !entries.is_empty() {
                         Self::flush_cert_events(&mut client, entries, &agent_token)
                             .await;
                     }
                 }
                 _ = self.wait_for_shutdown() => {
-                    let entries = cert_event_buffer().drain(agent_id);
+                    let entries = self.drain_cert_events(agent_id);
                     if !entries.is_empty() {
                         Self::flush_cert_events(&mut client, entries, &agent_token)
                             .await;
@@ -954,6 +956,40 @@ impl ControlPlaneClient {
         }
 
         Ok(())
+    }
+
+    /// Drain the capture buffer and stamp each event with its site and
+    /// certificate, resolved against the current site rules: the tracing
+    /// layer sees only log text, so attribution happens here, where the
+    /// domain → site topology lives (see [`attribute_events`]).
+    fn drain_cert_events(&self, agent_id: &str) -> Vec<proto::CertEventEntry> {
+        let mut entries = cert_event_buffer().drain(agent_id);
+        if entries.iter().any(|entry| entry.site_id.is_empty()) {
+            let sites = self.rule_cache.all_sites();
+            let attributions: Vec<CertAttribution> = sites
+                .sites
+                .values()
+                .map(|site| {
+                    let mut domains = vec![site.domain.to_lowercase()];
+                    domains.extend(
+                        site.alternate_domains
+                            .iter()
+                            .map(|domain| domain.to_lowercase()),
+                    );
+                    CertAttribution {
+                        domains,
+                        site_id: site.site_id.clone(),
+                        certificate_id: site
+                            .ssl_config
+                            .as_ref()
+                            .map(|ssl| ssl.certificate_id.clone())
+                            .unwrap_or_default(),
+                    }
+                })
+                .collect();
+            attribute_events(&mut entries, &attributions);
+        }
+        entries
     }
 
     /// Flush a batch of certificate events to the server.

@@ -59,6 +59,9 @@ pub struct CertificateResponse {
     pub acme_dns_provider: Option<String>,
     pub acme_dns_config: Option<serde_json::Value>,
     pub status: String,
+    /// Why the last ACME issuance attempt was given up on; null while an
+    /// order is healthy or after it succeeded.
+    pub failure_reason: Option<String>,
     pub has_certificate: bool,
     pub has_private_key: bool,
     pub created_at: DateTime<Utc>,
@@ -80,6 +83,7 @@ impl From<site_certificates::Model> for CertificateResponse {
             acme_dns_provider: m.acme_dns_provider,
             acme_dns_config: m.acme_dns_config,
             status: m.status,
+            failure_reason: m.failure_reason,
             has_certificate: m.cert_pem.is_some(),
             has_private_key: m.key_pem.is_some(),
             created_at: m.created_at,
@@ -349,6 +353,7 @@ async fn insert_certificate(
         acme_dns_provider: Set(payload.acme_dns_provider),
         acme_dns_config: Set(payload.acme_dns_config),
         status: Set(status.to_string()),
+        failure_reason: Set(None),
         created_at: Set(timestamp),
         updated_at: Set(timestamp),
     }
@@ -473,7 +478,12 @@ async fn update_certificate(
                 "invalid certificate status '{status}'"
             )));
         }
-        active.status = Set(status);
+        active.status = Set(status.clone());
+        // Re-arming an order discards the reason the previous one was given
+        // up on, so a stale failure never outlives its retry.
+        if status == cert_status::PENDING {
+            active.failure_reason = Set(None);
+        }
     }
     active.updated_at = Set(Utc::now());
 
@@ -534,9 +544,11 @@ async fn renew_certificate(
     }
 
     let domain = row.domain.clone();
-    // Mark as pending renewal
+    // Mark as pending renewal; the previous failure (if any) is superseded
+    // by this retry.
     let mut active: site_certificates::ActiveModel = row.into();
     active.status = Set(cert_status::PENDING.to_string());
+    active.failure_reason = Set(None);
     active.updated_at = Set(Utc::now());
     active.update(&state.db).await?;
 
@@ -550,6 +562,12 @@ async fn renew_certificate(
         None,
     )
     .await;
+
+    // Without this the renewal used to be a dud: only the status column
+    // changed, the agents were never told to re-pull the site config, and
+    // the edge kept serving the old certificate until it lapsed.
+    touch_site(&state, id).await?;
+    notify_config_changed(&state, id, Some(&current.email)).await;
 
     Ok(Json(serde_json::json!({
         "message": "renewal initiated",

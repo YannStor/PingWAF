@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{AcmeDnsTask, Error};
+use super::{AcmeDnsTask, Error, new_dns_http_client};
 use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::sync::Mutex;
@@ -198,7 +198,7 @@ impl CfDnsTask {
             return Err(new_error("token is required"));
         }
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: new_dns_http_client()?,
             endpoint,
             api_token: token,
             zone: Mutex::new(String::new()),

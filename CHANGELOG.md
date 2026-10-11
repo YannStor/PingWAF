@@ -8,6 +8,57 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.25.2] — Unreleased
+
+The SSL issuance observability batch — an ACME order can no longer hang
+silently or sit in "pending" forever — plus a global IP blacklist page.
+
+### ✨ Features
+
+- *(server, web)* **Global IP blacklist page** (`/blocked-ips`): every
+  dynamic block in force across all visible sites — WAF/rate-limit
+  auto-blocks and manual blocks — folded per (site, IP) with attack
+  counts, block time and expiry. One-click unblock fans out to every
+  enforcing agent; a manual-block dialog issues a `BlockIp` command to
+  every registered agent (queued for offline ones) with a configurable
+  duration.
+- *(web)* The sidebar entry "IP 黑白名单" is renamed "IP 组" (zh locale),
+  and the AI assistant entry is removed from the menu (the page itself
+  stays reachable at `/assistant`).
+
+### 🐛 Bug Fixes
+
+- *(acme)* **Certificate issuance can no longer hang forever.** Every
+  ACME network round trip (account load/create, order placement,
+  authorization fetch, challenge-ready, finalize, and both polling
+  stages) now runs under a hard timeout, and the four DNS provider
+  clients (Ali, Cloudflare, Huawei, Tencent) are built with connect and
+  total timeouts. instant-acme's bundled hyper client has no timeout of
+  its own, so a CA endpoint that accepted the connection and went silent
+  used to wedge the renewal task — and, through the background service's
+  `join_all`, every other background task with it.
+- *(server)* A certificate whose ACME order stays `pending` for more
+  than 30 minutes is now marked `failed` with a `failure_reason`, and an
+  `issuance_failed` event is recorded (previously nothing ever wrote
+  `failed`, so a wedged order spun in the dashboard forever). The reason
+  clears on retry or when the edge reports the certificate live.
+- *(server)* Manual renewal (`POST …/certificates/{id}/renew`) actually
+  reaches the edge now: it touches the site and notifies the agents.
+  Before, only the status column changed — the renewal request never
+  left the control plane.
+- *(agent)* Raw ACME log events are attributed to their site and
+  certificate by matching the domains they name against the agent's site
+  rules (longest domain wins; wildcards also match their apex form, and
+  ACME challenge subdomains resolve to the zone's site), so the panel's
+  certificate log no longer shows them unattributed.
+- *(core, agent)* A background cycle that overruns its interval with the
+  ACME task still working now mirrors the warning onto the
+  `pingap::acme` feed, so a stalled issuance surfaces in the panel's
+  certificate log.
+- *(web)* The global SSL page polls every 10 s while any certificate is
+  pending, shows how long an order has been waiting (highlighted past 10
+  minutes), and renders the failure reason on failed rows.
+
 ## [PingWAF 0.25.1] — 2026-10-11
 
 A data-plane correctness batch from the October deep review, plus posture

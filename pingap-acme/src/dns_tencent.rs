@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{AcmeDnsTask, Error};
+use super::{AcmeDnsTask, Error, new_dns_http_client};
 use async_trait::async_trait;
 use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
@@ -259,7 +259,7 @@ impl TencentDnsTask {
             ));
         }
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: new_dns_http_client()?,
             host,
             endpoint,
             access_key_id,

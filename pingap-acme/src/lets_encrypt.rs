@@ -55,6 +55,44 @@ use tracing::{debug, error, info, warn};
 
 static WELL_KNOWN_PATH_PREFIX: &str = "/.well-known/acme-challenge/";
 
+/// Hard ceiling for one ACME network round trip. instant-acme's built-in
+/// hyper client sets no timeout of its own, so a CA endpoint that accepts
+/// the connection and then goes silent would otherwise wedge the renewal
+/// task — and, through the background service's `join_all`, every other
+/// task sharing it — forever.
+const ACME_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Longer ceiling for the polling stages: `RetryPolicy` bounds the total
+/// wait, but each individual poll shares the same unbounded HTTP client, so
+/// an outer timeout covers a poll that never returns at all.
+const ACME_POLL_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Awaits one instant-acme call with a hard timeout, folding both failure
+/// modes into this crate's error type with the stage as the category so the
+/// logs name where an order stalled.
+async fn acme_call<T>(
+    category: &'static str,
+    timeout: Duration,
+    fut: impl std::future::Future<
+        Output = std::result::Result<T, instant_acme::Error>,
+    >,
+) -> Result<T> {
+    match tokio::time::timeout(timeout, fut).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(source)) => Err(Error::Instant {
+            category: category.to_string(),
+            source,
+        }),
+        Err(_) => Err(Error::Fail {
+            category: category.to_string(),
+            message: format!(
+                "no response from the ACME server within {}s; check outbound connectivity to the CA",
+                timeout.as_secs()
+            ),
+        }),
+    }
+}
+
 /// ACME talks rustls even when the proxy TLS backend is OpenSSL, so the
 /// process still needs a CryptoProvider. Prefer the shared installer when
 /// the rustls backend owns it; otherwise install aws-lc-rs here once.
@@ -646,7 +684,12 @@ async fn load_or_create_account(
                         category: "create_account".to_string(),
                         source: e,
                     })?;
-                builder.from_credentials(credentials).await
+                acme_call(
+                    "load_account",
+                    ACME_HTTP_TIMEOUT,
+                    builder.from_credentials(credentials),
+                )
+                .await
             },
             Err(e) => {
                 warn!(
@@ -674,25 +717,25 @@ async fn create_account(
     url: &str,
     name: &str,
 ) -> Result<Account> {
-    let (account, credentials) = Account::builder()
-        .map_err(|e| Error::Instant {
-            category: "create_account".to_string(),
-            source: e,
-        })?
-        .create(
-            &NewAccount {
-                contact: &[],
-                terms_of_service_agreed: true,
-                only_return_existing: false,
-            },
-            url.to_string(),
-            None,
-        )
-        .await
-        .map_err(|e| Error::Instant {
-            category: "create_account".to_string(),
-            source: e,
-        })?;
+    let (account, credentials) = acme_call(
+        "create_account",
+        ACME_HTTP_TIMEOUT,
+        Account::builder()
+            .map_err(|e| Error::Instant {
+                category: "create_account".to_string(),
+                source: e,
+            })?
+            .create(
+                &NewAccount {
+                    contact: &[],
+                    terms_of_service_agreed: true,
+                    only_return_existing: false,
+                },
+                url.to_string(),
+                None,
+            ),
+    )
+    .await?;
     info!(target: LOG_TARGET, "create let's encrypt account success");
     // Best effort: an order can proceed with an account that could not be
     // stored; the next one registers again.
@@ -744,6 +787,10 @@ fn new_txt_resolver() -> Result<Resolver<TokioRuntimeProvider>> {
             (ResolverConfig::default(), ResolverOpts::default())
         });
     resolver_options.cache_size = 0;
+    // Explicit per-lookup ceiling (the default too, but say it): a silent
+    // resolver must surface as a lookup error within seconds, not stall the
+    // propagation check.
+    resolver_options.timeout = Duration::from_secs(5);
     let mut resolver_builder = Resolver::builder_with_config(
         resolver_config,
         TokioRuntimeProvider::default(),
@@ -800,18 +847,16 @@ async fn new_lets_encrypt(
     let account =
         load_or_create_account(&config_manager, url, production).await?;
 
-    let mut order = account
-        .new_order(&NewOrder::new(
-            &domains
-                .iter()
-                .map(|item| Identifier::Dns(item.to_owned()))
-                .collect::<Vec<Identifier>>(),
-        ))
-        .await
-        .map_err(|e| Error::Instant {
-            category: "new_order".to_string(),
-            source: e,
-        })?;
+    let identifiers = domains
+        .iter()
+        .map(|item| Identifier::Dns(item.to_owned()))
+        .collect::<Vec<Identifier>>();
+    let mut order = acme_call(
+        "new_order",
+        ACME_HTTP_TIMEOUT,
+        account.new_order(&NewOrder::new(&identifiers)),
+    )
+    .await?;
 
     let state = order.state();
     if !matches!(state.status, OrderStatus::Pending) {
@@ -830,7 +875,27 @@ async fn new_lets_encrypt(
 
     let result = (async {
         let mut authorizations = order.authorizations();
-        while let Some(result) = authorizations.next().await {
+        loop {
+            // Each fetch is a network call on the same unbounded client;
+            // without the timeout a silent CA wedges the order here.
+            let next = match tokio::time::timeout(
+                ACME_HTTP_TIMEOUT,
+                authorizations.next(),
+            )
+            .await
+            {
+                Ok(next) => next,
+                Err(_) => {
+                    return Err(Error::Fail {
+                        category: "authorizations".to_string(),
+                        message: format!(
+                            "no response from the ACME server within {}s while fetching authorizations",
+                            ACME_HTTP_TIMEOUT.as_secs()
+                        ),
+                    });
+                },
+            };
+            let Some(result) = next else { break };
             let mut authz = result.map_err(|e| Error::Instant {
                 category: "authorizations".to_string(),
                 source: e,
@@ -1007,21 +1072,22 @@ async fn new_lets_encrypt(
                 );
                 challenge
             };
-            challenge.set_ready().await.map_err(|e| Error::Instant {
-                category: "set_challenge_ready".to_string(),
-                source: e,
-            })?;
+            acme_call(
+                "set_challenge_ready",
+                ACME_HTTP_TIMEOUT,
+                challenge.set_ready(),
+            )
+            .await?;
         }
 
-        let status = order
-            .poll_ready(
+        let status = acme_call(
+            "poll_ready",
+            ACME_POLL_TIMEOUT,
+            order.poll_ready(
                 &RetryPolicy::default().timeout(Duration::from_secs(60)),
-            )
-            .await
-            .map_err(|e| Error::Instant {
-                category: "poll_ready".to_string(),
-                source: e,
-            })?;
+            ),
+        )
+        .await?;
 
         if status != OrderStatus::Ready {
             return Err(Error::Fail {
@@ -1046,19 +1112,15 @@ async fn new_lets_encrypt(
     result?;
 
     let private_key_pem =
-        order.finalize().await.map_err(|e| Error::Instant {
-            category: "finalize".to_string(),
-            source: e,
-        })?;
-    let cert_chain_pem = order
-        .poll_certificate(
+        acme_call("finalize", ACME_HTTP_TIMEOUT, order.finalize()).await?;
+    let cert_chain_pem = acme_call(
+        "poll_certificate",
+        ACME_POLL_TIMEOUT,
+        order.poll_certificate(
             &RetryPolicy::default().timeout(Duration::from_secs(60)),
-        )
-        .await
-        .map_err(|e| Error::Instant {
-            category: "poll_certificate".to_string(),
-            source: e,
-        })?;
+        ),
+    )
+    .await?;
 
     Ok((cert_chain_pem, private_key_pem))
 }

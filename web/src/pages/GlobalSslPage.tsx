@@ -111,11 +111,23 @@ export function GlobalSslPage() {
   const summaryQuery = useQuery({
     queryKey: sslKeys.summary(),
     queryFn: () => sslApi.summary(),
+    // Issuance is asynchronous: while any order is pending, keep the
+    // numbers moving so a success (or the stale-pending failure) shows up
+    // without a manual refresh.
+    refetchInterval: (query) =>
+      (query.state.data?.pending ?? 0) > 0 ? 10_000 : false,
   })
   const certsQuery = useQuery({
     queryKey: sslKeys.global(filter),
     queryFn: () => sslApi.listAll(filter),
+    refetchInterval: (query) =>
+      query.state.data?.items.some((cert) => cert.status === 'pending')
+        ? 10_000
+        : false,
   })
+
+  const certs = useMemo(() => certsQuery.data?.items ?? [], [certsQuery.data])
+  const hasPending = certs.some((cert) => cert.status === 'pending')
 
   const eventsQuery = useQuery({
     queryKey: sslKeys.events({
@@ -125,9 +137,10 @@ export function GlobalSslPage() {
       sslApi.listAllEvents({
         event_type: eventTypeFilter || undefined,
       }),
+    // The issuance log grows while an order runs; poll alongside the list.
+    refetchInterval: hasPending ? 10_000 : false,
   })
 
-  const certs = useMemo(() => certsQuery.data?.items ?? [], [certsQuery.data])
   const summary = summaryQuery.data
   const filtersActive = Boolean(siteFilter || statusFilter)
 
@@ -321,11 +334,50 @@ export function GlobalSslPage() {
       key: 'status',
       header: t('common.status'),
       accessor: (r) => r.status,
-      cell: (r) => (
-        <Badge tone={STATUS_TONE[r.status] ?? 'neutral'} dot size="sm">
-          {t(`pages.sslGlobal.status_${r.status}`, { defaultValue: r.status })}
-        </Badge>
-      ),
+      cell: (r) => {
+        // `updated_at` is when the order was last (re)armed; the control
+        // plane fails a certificate that stays pending past its grace
+        // window, so a long wait is worth highlighting before that.
+        const waitingMinutes =
+          r.status === 'pending'
+            ? Math.max(
+                0,
+                Math.floor(
+                  (now - new Date(r.updated_at).getTime()) / 60_000,
+                ),
+              )
+            : 0
+        return (
+          <div className="flex flex-col items-start gap-0.5">
+            <Badge tone={STATUS_TONE[r.status] ?? 'neutral'} dot size="sm">
+              {t(`pages.sslGlobal.status_${r.status}`, {
+                defaultValue: r.status,
+              })}
+            </Badge>
+            {r.status === 'pending' && (
+              <span
+                className={
+                  waitingMinutes >= 10
+                    ? 'text-xs text-fg-warning'
+                    : 'text-xs text-fg-subtle'
+                }
+              >
+                {t('pages.sslGlobal.pendingFor', {
+                  minutes: waitingMinutes,
+                })}
+              </span>
+            )}
+            {r.status === 'failed' && r.failure_reason && (
+              <span
+                className="line-clamp-2 max-w-56 text-xs text-fg-danger"
+                title={r.failure_reason}
+              >
+                {r.failure_reason}
+              </span>
+            )}
+          </div>
+        )
+      },
     },
     {
       key: 'expires',
@@ -348,6 +400,7 @@ export function GlobalSslPage() {
     renewal_requested: 'info',
     renewed: 'success',
     failed: 'danger',
+    issuance_failed: 'danger',
     deleted: 'warning',
     acme_raw: 'brand',
   }

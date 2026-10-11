@@ -863,6 +863,8 @@ async fn persist_heartbeat(
 
     persist_site_certificates(db, &message.site_statuses).await;
 
+    sweep_stale_pending_certificates(db).await;
+
     sweep_offline_agents(db).await;
 }
 
@@ -898,6 +900,8 @@ async fn persist_site_certificates(
 
         // The guard keeps a steady fleet from writing the same values every
         // heartbeat: only rows whose status or expiry actually change match.
+        // A live certificate also clears whatever failure the stale-pending
+        // sweep recorded for the order that produced it.
         let result = site_certificates::Entity::update_many()
             .col_expr(
                 site_certificates::Column::Status,
@@ -906,6 +910,10 @@ async fn persist_site_certificates(
             .col_expr(
                 site_certificates::Column::ExpiresAt,
                 Expr::value(expires_at),
+            )
+            .col_expr(
+                site_certificates::Column::FailureReason,
+                Expr::value(Option::<String>::None),
             )
             .col_expr(site_certificates::Column::UpdatedAt, Expr::value(now))
             .filter(site_certificates::Column::SiteId.eq(site_id))
@@ -945,6 +953,87 @@ async fn persist_site_certificates(
                     "could not persist certificate state"
                 );
             },
+        }
+    }
+}
+
+/// How long an ACME order may sit in `pending` with no sign of life before
+/// the control plane gives up on it and marks the row `failed`.
+const PENDING_CERTIFICATE_GRACE: chrono::Duration =
+    chrono::Duration::minutes(30);
+
+/// Marks ACME certificate rows `failed` when their order has been pending
+/// longer than [`PENDING_CERTIFICATE_GRACE`], recording why.
+///
+/// Issuance runs entirely on the edge, so a wedged order — the CA
+/// unreachable, a stalled DNS provider, a challenge that never validates —
+/// otherwise leaves the row in `pending` forever and the dashboard spins
+/// with no explanation. Only ACME rows (no stored PEM, an ACME email set)
+/// are swept: an uploaded certificate can be marked pending by hand and is
+/// not the control plane's to fail. `updated_at` is the last time anyone
+/// touched the row — the request that (re)armed the order — which is what
+/// the grace window is measured from.
+async fn sweep_stale_pending_certificates(db: &DatabaseConnection) {
+    let now = Utc::now();
+    let cutoff = now - PENDING_CERTIFICATE_GRACE;
+    let stale = match site_certificates::Entity::find()
+        .filter(site_certificates::Column::Status.eq(cert_status::PENDING))
+        .filter(site_certificates::Column::CertPem.is_null())
+        .filter(site_certificates::Column::AcmeEmail.is_not_null())
+        .filter(site_certificates::Column::UpdatedAt.lt(cutoff))
+        .all(db)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not sweep stale pending certificates"
+            );
+            return;
+        },
+    };
+
+    for row in stale {
+        let reason = format!(
+            "ACME issuance did not finish within {} minutes of the last \
+             request. The edge may be offline, the CA or DNS provider may \
+             be unreachable, or the challenge never validated — see the \
+             certificate events for the raw ACME log.",
+            PENDING_CERTIFICATE_GRACE.num_minutes(),
+        );
+        let cert_id = row.id;
+        let site_id = row.site_id;
+        let mut active: site_certificates::ActiveModel = row.into();
+        active.status = Set(cert_status::FAILED.to_string());
+        active.failure_reason = Set(Some(reason.clone()));
+        active.updated_at = Set(now);
+        if let Err(err) = active.update(db).await {
+            tracing::warn!(
+                %cert_id,
+                error = %err,
+                "could not fail stale pending certificate"
+            );
+            continue;
+        }
+        tracing::info!(
+            %cert_id,
+            %site_id,
+            "stale pending certificate marked failed"
+        );
+        // Best-effort, like every certificate event: recording must never
+        // break the sweep.
+        let event = certificate_events::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            certificate_id: Set(Some(cert_id)),
+            site_id: Set(Some(site_id)),
+            event_type: Set("issuance_failed".to_string()),
+            message: Set(reason),
+            details: Set(None),
+            created_at: Set(now),
+        };
+        if let Err(err) = event.insert(db).await {
+            tracing::warn!(%err, "failed to write certificate event");
         }
     }
 }

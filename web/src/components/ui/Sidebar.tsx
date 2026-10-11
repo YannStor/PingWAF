@@ -9,9 +9,9 @@ import {
   Desktop,
   Gear,
   FunnelSimple,
+  Prohibit,
   UserCircle,
   FlowArrow,
-  Sparkle,
   Bell,
   type Icon,
 } from '@phosphor-icons/react'
@@ -40,12 +40,12 @@ export function Sidebar({ collapsed, onNavigate }: SidebarProps) {
     { to: '/dashboard', labelKey: 'nav.dashboard', icon: House },
     { to: '/sites', labelKey: 'nav.sites', icon: Globe },
     { to: '/ip-groups', labelKey: 'nav.ipGroups', icon: FunnelSimple },
+    { to: '/blocked-ips', labelKey: 'nav.blockedIps', icon: Prohibit },
     // SSL/TLS and traffic in the sidebar are the *global* surfaces; each site's
     // own certificates and traffic live in that site's tab bar.
     { to: '/ssl', labelKey: 'nav.ssl', icon: Lock },
     { to: '/traffic', labelKey: 'nav.traffic', icon: ChartLine },
     { to: '/logs', labelKey: 'nav.logs', icon: List },
-    { to: '/assistant', labelKey: 'nav.assistant', icon: Sparkle },
     { to: '/agents', labelKey: 'nav.agents', icon: Desktop },
     { to: '/notifications', labelKey: 'nav.notifications', icon: Bell },
     { to: '/lifecycle', labelKey: 'nav.lifecycle', icon: FlowArrow },

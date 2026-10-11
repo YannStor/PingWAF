@@ -30,6 +30,9 @@ pub mod site_certificates {
         #[sea_orm(column_type = "JsonBinary")]
         pub acme_dns_config: Option<Json>,
         pub status: String,
+        /// Why the control plane last gave up on an ACME issuance; set when a
+        /// `pending` order goes stale, cleared on retry or success.
+        pub failure_reason: Option<String>,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
     }
