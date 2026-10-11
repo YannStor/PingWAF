@@ -8,7 +8,7 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
-## [PingWAF 0.25.2] — Unreleased
+## [PingWAF 0.25.2] — 2026-10-12
 
 The SSL issuance observability batch — an ACME order can no longer hang
 silently or sit in "pending" forever — plus a global IP blacklist page,
