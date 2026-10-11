@@ -8,6 +8,43 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.25.1] — 2026-10-11
+
+A data-plane correctness batch from the October deep review, plus posture
+dashboard alignment.
+
+### 🐛 Bug Fixes
+
+- *(plugin)* **Request bodies were silently truncated when the WAF captured
+  them.** Pingora only replays body bytes through the retry buffer when it is
+  enabled before the bytes are read; the proxy enables it deep inside the
+  forwarding path, so the WAF's capture pass in the request phase lost every
+  byte it read — H2 streams and the first request on an H1 connection lost
+  the whole captured prefix (the entire body for payloads ≤ 8 KiB). The WAF
+  now enables retry buffering before its read loop and stops capturing at
+  the 64 KiB buffer boundary, so bodies up to the cap reach the upstream
+  intact.
+- *(plugin)* Rate-limit mitigation bans no longer reset when the counter
+  window rolls over: `blocked_until` survives until it expires, so a ban
+  longer than the window cannot be waited out.
+- *(core)* `get_client_ip` no longer honors `X-Forwarded-For` /
+  `X-Real-IP` from public direct peers when no `trusted_proxies` are
+  configured — those headers were attacker-controlled and poisoned every
+  IP rule (allowlists, rate limiting, auto-block, geo). Private/loopback
+  peers keep working out of the box; explicit `trusted_proxies` remains the
+  strict path.
+- *(proxy)* `upstream_peer` failures no longer drive `Upstream.processing`
+  permanently negative (each "no available upstream" 503 leaked a −1).
+- *(proxy)* least-connections + retry no longer leak inflight counts: the
+  release targets the address acquired on the first attempt instead of the
+  final peer address after retries.
+- *(web)* The custom-rules posture banner and the posture overview now
+  reflect the enforced site mode (`settings.mode`) instead of re-deriving
+  it from the rule list; the site mode badge is shown first.
+- *(web)* Hidden health-check fields no longer block pool saving when
+  stored values are out of range; path length is validated in UTF-8 bytes
+  to match the server.
+
 ## [PingWAF 0.25.0] — 2026-10-09
 
 A security-update batch (control-plane hardening, stricter proxy trust,
