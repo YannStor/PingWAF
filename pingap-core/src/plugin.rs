@@ -134,6 +134,41 @@ pub trait Plugin: Sync + Send {
         Ok(RequestPluginResult::Skipped)
     }
 
+    /// Filters a request body chunk on its way from the client to the
+    /// upstream — the request-direction counterpart of
+    /// [`Self::handle_response_body`].
+    ///
+    /// A plugin may withhold bytes from the upstream by replacing `body`
+    /// with `Some(Bytes::new())`: pingora skips empty chunks entirely, so
+    /// nothing is written upstream and no end-of-body signal leaks (it
+    /// must NEVER set `body` to `None` for this — `None` signals end of
+    /// body and would truncate the upstream request). On `end_of_stream`
+    /// the plugin flushes whatever it staged by assigning the full buffer
+    /// to `body`.
+    ///
+    /// # Parameters
+    /// * `_session` - Mutable reference to the downstream HTTP session
+    /// * `_ctx` - Mutable reference to the request context
+    /// * `_body` - Mutable reference to the current body chunk
+    /// * `_end_of_stream` - `true` once the client sent the last byte
+    ///
+    /// # Returns
+    /// * `Ok(None)` - Continue proxying (possibly with `body` rewritten)
+    /// * `Ok(Some(response))` - The plugin answers the request itself
+    ///   (e.g. a WAF block page); the server writes it to the client and
+    ///   aborts the upstream exchange
+    /// * `Err` - Abort the exchange with an error
+    #[inline]
+    fn handle_request_body(
+        &self,
+        _session: &mut Session,
+        _ctx: &mut Ctx,
+        _body: &mut Option<bytes::Bytes>,
+        _end_of_stream: bool,
+    ) -> pingora::Result<Option<HttpResponse>> {
+        Ok(None)
+    }
+
     /// Processes an HTTP response at a specified lifecycle step.
     ///
     /// # Parameters

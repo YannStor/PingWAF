@@ -35,7 +35,7 @@ use crate::challenge::{
     resolve_cookie_secret,
 };
 use async_trait::async_trait;
-use bytes::{BufMut, BytesMut};
+use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use ipnet::IpNet;
 use pingap_config::{PluginCategory, PluginConf};
@@ -80,6 +80,10 @@ use tracing::{debug, warn};
 type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Which engine handles the current request.
+///
+/// `Clone` so the request-body filter can snapshot the choice made in the
+/// request phase and re-run the verdict on the completed body.
+#[derive(Clone)]
 enum EngineChoice {
     /// Locally configured engine (standalone mode).
     Base,
@@ -1500,20 +1504,6 @@ impl LogBodyPrefix {
         }
     }
 
-    /// Whether the prefix has everything it will ever keep; the read loop
-    /// stops once this holds.
-    fn limit_hit(&self) -> bool {
-        self.limit > 0
-            && self.body.as_ref().is_some_and(|buf| buf.len() > self.limit)
-    }
-
-    /// Marks the capture as interrupted (the read loop stopped before the body
-    /// signalled completion), so the kept prefix may be shorter than the real
-    /// body even though it fits within the limit.
-    fn interrupted(&mut self) {
-        self.truncated = true;
-    }
-
     fn finish(mut self) -> (Option<Vec<u8>>, u64, bool) {
         if let Some(buf) = self.body.as_mut()
             && buf.len() > self.limit
@@ -1549,6 +1539,111 @@ fn register_pending_access(request_id: &str, pending: PendingAccess) {
     PENDING_ACCESS.insert(request_id.to_string(), pending);
 }
 
+/// Backfills the request-body facts of a pending access entry once the
+/// request-body filter has seen the body. A no-op when the entry is gone
+/// (the request was already answered or swept).
+fn amend_pending_access_body(
+    request_id: &str,
+    body: Option<Vec<u8>>,
+    size: u64,
+    truncated: bool,
+) {
+    if let Some(mut entry) = PENDING_ACCESS.get_mut(request_id) {
+        entry.request_body = body;
+        entry.request_body_size = size;
+        entry.request_body_truncated = truncated;
+    }
+}
+
+/// What a completed (or capped) body inspection concluded, shared by the
+/// request phase and the request-body filter.
+enum VerdictOutcome {
+    /// No engine ran for this request; proxying continues untouched.
+    Skipped,
+    /// The request passed (or the verdict was only recorded); proxying
+    /// continues.
+    Continue,
+    /// The plugin answers the request itself (block or challenge page).
+    Respond(HttpResponse),
+}
+
+/// The verdict context a deferred body needs once its bytes are complete:
+/// snapshotted in the request phase, consumed by the request-body filter.
+struct DeferredVerdict {
+    choice: EngineChoice,
+    context: Option<Arc<SiteContext>>,
+    observe: bool,
+    site_id: String,
+    host: String,
+    request_data: RequestData,
+}
+
+/// Per-request body staging: chunks the request-body filter withholds
+/// from the upstream until the client is done, so the engine can inspect
+/// the complete body before a single byte reaches the source. Entries
+/// live in `DEFERRED_BODY` keyed by request id, are removed on completion
+/// and swept when a request dies mid-exchange.
+struct DeferredBody {
+    /// Bytes withheld from the upstream so far.
+    buffer: BytesMut,
+    /// Once the staged body passed the inspection cap the rest flows
+    /// upstream untouched (only the prefix is inspected) — the old retry
+    /// buffer silently lost those bytes instead.
+    passthrough: bool,
+    /// Whether the engine runs on this body at completion; `false` for
+    /// log-capture-only requests.
+    inspect: bool,
+    /// Access-log body prefix capture.
+    log_prefix: LogBodyPrefix,
+    /// `Some` for inspect entries: everything the completion-time verdict
+    /// needs, snapshotted in the request phase.
+    deferred: Option<DeferredVerdict>,
+    created_at: Instant,
+}
+
+static DEFERRED_BODY: LazyLock<DashMap<String, DeferredBody>> =
+    LazyLock::new(DashMap::new);
+
+/// Decides what happens to one streaming body chunk. Pure so the staging
+/// state machine is unit-testable without a proxy session.
+///
+/// * `Withhold` — the chunk was absorbed into `buffer` and must not reach
+///   the upstream: the caller replaces the outgoing body with an empty
+///   chunk (pingora skips empty chunks entirely — never `None`, which
+///   signals end of body and would truncate the upstream request).
+/// * `Flush(bytes)` — the cap was hit with this chunk: inspect `buffer`
+///   (now holding the prefix plus this chunk) once, then hand these bytes
+///   upstream and let the rest through.
+/// * `PassThrough` — staging is off (log-capture-only entry, or already
+///   past the cap): leave the chunk as-is.
+fn stage_chunk(
+    cap: usize,
+    inspect: bool,
+    passthrough: &mut bool,
+    buffer: &mut BytesMut,
+    chunk: Option<&[u8]>,
+) -> StageAction {
+    if !inspect || *passthrough {
+        return StageAction::PassThrough;
+    }
+    if let Some(chunk) = chunk {
+        buffer.extend_from_slice(chunk);
+    }
+    if buffer.len() > cap {
+        *passthrough = true;
+        StageAction::Flush(std::mem::take(buffer).freeze())
+    } else {
+        StageAction::Withhold
+    }
+}
+
+/// The per-chunk decision [`stage_chunk`] returns.
+enum StageAction {
+    Withhold,
+    Flush(Bytes),
+    PassThrough,
+}
+
 /// Ships, or drops, entries whose exchange never completed: a client that
 /// vanished mid-body (or an upstream that died before responding) would
 /// otherwise leave its entry behind forever. Entries that already hold
@@ -1575,7 +1670,12 @@ pub fn sweep_stale_access(ttl: Duration) -> usize {
             emit_access(agent, &request_id, pending, facts);
         }
     }
-    swept
+    // Body-staging entries abandoned mid-exchange — a client that vanished
+    // while sending, or an upstream that answered before the body was fully
+    // read — hold staged bytes hostage. Drop them on the same window.
+    let before = DEFERRED_BODY.len();
+    DEFERRED_BODY.retain(|_, v| v.created_at.elapsed() < ttl);
+    swept + (before - DEFERRED_BODY.len())
 }
 
 /// Emit an access log entry, either when the response is complete or
@@ -2196,6 +2296,168 @@ impl WafPlugin {
         emit_generated_access(agent, request_id, &response);
         RequestPluginResult::Respond(response)
     }
+
+    /// Runs the detection engine for an assembled request and maps the
+    /// verdict onto proxy behaviour. Shared by the request phase (headers
+    /// only — the body has not arrived yet) and the request-body filter
+    /// (complete body, or the staged prefix of an over-cap body).
+    #[allow(clippy::too_many_arguments)]
+    fn enforce_verdict(
+        &self,
+        agent: Option<&Arc<PingWafAgent>>,
+        site_id: &str,
+        request_id: &str,
+        host: &str,
+        request_data: &RequestData,
+        choice: &EngineChoice,
+        context: Option<&Arc<SiteContext>>,
+        observe: bool,
+    ) -> VerdictOutcome {
+        match choice {
+            EngineChoice::Disabled => {
+                if let Some(agent) = agent {
+                    agent.record_request(false);
+                }
+                return VerdictOutcome::Continue;
+            },
+            EngineChoice::Base if self.mode == WafMode::Off => {
+                if let Some(agent) = agent {
+                    agent.record_request(false);
+                }
+                return VerdictOutcome::Skipped;
+            },
+            _ => {},
+        }
+        let verdict = match choice {
+            EngineChoice::Site(engine) => engine.inspect(request_data),
+            EngineChoice::Base => {
+                let guard =
+                    self.engine.read().unwrap_or_else(|e| e.into_inner());
+                guard.inspect(request_data)
+            },
+            EngineChoice::Disabled | EngineChoice::FailClosed => {
+                unreachable!("handled above")
+            },
+        };
+
+        // Custom rule ids carry no name of their own; the site context maps
+        // the one that fired back to its configured name.
+        let rule_name_of = |verdict: &WafVerdict| -> String {
+            let Some(id) = verdict.matched_rules.first() else {
+                return String::new();
+            };
+            context
+                .and_then(|context| context.rule_names.get(id))
+                .cloned()
+                .unwrap_or_default()
+        };
+
+        if verdict.action == WafAction::Pass {
+            if let Some(agent) = agent {
+                agent.record_request(false);
+            }
+            return VerdictOutcome::Continue;
+        }
+
+        // Monitor: log the event but let the request through.
+        if verdict.action == WafAction::Monitor {
+            let rule_name = rule_name_of(&verdict);
+            Self::log_event(
+                site_id,
+                request_id,
+                host,
+                request_data,
+                &verdict,
+                &rule_name,
+                Self::engine_event_type(&verdict),
+            );
+            return VerdictOutcome::Continue;
+        }
+
+        // Observation mode: a Block/Challenge verdict is recorded as a
+        // monitor event — nothing was actually blocked — and the request
+        // proceeds.
+        if observe {
+            let rule_name = rule_name_of(&verdict);
+            tracing::info!(
+                site_id = %site_id,
+                request_id = %request_id,
+                path = %request_data.path,
+                would_have = ?verdict.action,
+                score = verdict.score,
+                "[observation] WAF verdict recorded without enforcing"
+            );
+            let observed = WafVerdict {
+                action: WafAction::Monitor,
+                ..verdict.clone()
+            };
+            Self::log_event(
+                site_id,
+                request_id,
+                host,
+                request_data,
+                &observed,
+                &rule_name,
+                Self::engine_event_type(&observed),
+            );
+            return VerdictOutcome::Continue;
+        }
+
+        // Block / Challenge: log the security event, then emit the access
+        // entry with the real status — a Respond result never reaches
+        // handle_response, so this is the only chance to log it.
+        let rule_name = rule_name_of(&verdict);
+        Self::log_event(
+            site_id,
+            request_id,
+            host,
+            request_data,
+            &verdict,
+            &rule_name,
+            Self::engine_event_type(&verdict),
+        );
+        let response = if verdict.action == WafAction::Block {
+            // Auto-block the client for a grace window: repeat requests are
+            // refused at the edge (see the entry check above) instead of
+            // running the engine every time.
+            if let Some(agent) = agent {
+                agent.block_ip(
+                    site_id,
+                    &request_data.client_ip,
+                    Some(Duration::from_secs(WAF_AUTO_BLOCK_SECS)),
+                    &format!("waf: {rule_name}"),
+                );
+            }
+            block_page(request_id, &verdict.details)
+        } else {
+            // Challenge verdict. A client that already holds a valid
+            // clearance for this site solved its challenge before: issuing
+            // the same challenge again would loop forever, so let it
+            // through.
+            if clearance_valid(clearance_cookie(&request_data.headers), site_id)
+            {
+                if let Some(agent) = agent {
+                    agent.record_request(false);
+                }
+                return VerdictOutcome::Continue;
+            }
+            // Challenge verdict — delegate to the challenge subsystem.
+            let original_url = if request_data.query.is_empty() {
+                request_data.path.clone()
+            } else {
+                format!("{}?{}", request_data.path, request_data.query)
+            };
+            build_challenge_response(
+                request_id,
+                &original_url,
+                site_id,
+                self.pow_difficulty,
+                ChallengeKind::Js,
+            )
+        };
+        emit_generated_access(agent, request_id, &response);
+        VerdictOutcome::Respond(response)
+    }
 }
 
 impl TryFrom<&PluginConf> for WafPlugin {
@@ -2399,29 +2661,25 @@ impl Plugin for WafPlugin {
             None
         };
 
-        // ── Full-request log capture: snapshot headers (capped) and keep the
-        // configured body prefix. Pingora only replays body bytes consumed
-        // here to the upstream when the retry buffer is enabled BEFORE the
-        // read: H2 streams and the first request on an H1 connection have no
-        // buffer yet, so without it the inspected prefix would silently
-        // vanish from the forwarded body (upstream sees Content-Length but
-        // misses the bytes). The buffer holds at most 64 KB and a write past
-        // the limit discards it entirely, so capturing stops at that
-        // boundary: bodies up to the cap reach the upstream intact, larger
-        // bodies degrade to prefix loss — never worse than not buffering.
-        // Skipped for the challenge verify endpoint, whose handler consumes
-        // the body itself. WAF body inspection reuses the same read pass. ──
-        /// Pingora's per-session body retry buffer capacity
-        /// (`pingora-core BODY_BUF_LIMIT`, 64 KB). Not exported upstream.
-        const RETRY_BUF_LIMIT: usize = 64 * 1024;
+        // ── Full-request log capture and body inspection moved to the
+        // request-body filter: body bytes are no longer read here. Reading
+        // on the hot path forced pingora's retry buffer (a hard 64 KB cap
+        // whose overflow discarded the whole buffered prefix); now the
+        // bytes stream through `handle_request_body`, which stages chunks
+        // until the client is done, inspects the complete body once, and
+        // then either flushes it intact or answers with a block page — a
+        // blocked request never exposes a single body byte to the source,
+        // and bodies beyond 64 KB forward complete again. This block only
+        // snapshots what that stage needs. Requests the plugin answers in
+        // the request phase (paused sites, IP/mTLS/access denials) never
+        // reach the filter, so their access log carries no body prefix —
+        // the refusal reason itself is logged regardless. ──
         let body_limit = log_body_limit();
         let log_headers = cap_headers(
             headers
                 .iter()
                 .map(|(name, value)| (name.clone(), value.as_str())),
         );
-        let mut log_body_prefix = LogBodyPrefix::new(body_limit);
-        let mut inspect_buf = BytesMut::new();
         // Advanced-mode sites ask for body inspection even when the plugin
         // switch is off; the plugin-level switch stays authoritative for the
         // truncation cap.
@@ -2430,48 +2688,20 @@ impl Plugin for WafPlugin {
         let should_inspect = self.inspect_body || site_inspect_body;
         // Log capture only matters when an agent consumes it; body inspection
         // works standalone — a static deployment blocks POST payloads just
-        // the same.
-        if (agent.is_some() && body_limit > 0 || should_inspect)
-            && !(method == "POST" && path == VERIFY_ENDPOINT)
-        {
-            session.as_mut().enable_retry_buffering();
-            let inspect_cap = if should_inspect {
-                self.max_body_size.min(RETRY_BUF_LIMIT)
-            } else {
-                0
-            };
-            let mut captured_total = 0usize;
-            let mut interrupted = false;
-            loop {
-                // Hard stop at the retry-buffer boundary: one more read
-                // could overflow the 64 KB buffer, which would discard the
-                // whole buffered prefix instead of just missing the tail.
-                if captured_total >= RETRY_BUF_LIMIT
-                    || (should_inspect && inspect_buf.len() >= inspect_cap)
-                {
-                    interrupted = true;
-                    break;
-                }
-                let Some(chunk) = session.read_request_body().await? else {
-                    break;
-                };
-                captured_total += chunk.len();
-                let chunk = chunk.as_ref();
-                log_body_prefix.absorb(chunk);
-                if should_inspect {
-                    inspect_buf.put(chunk);
-                }
-                if !should_inspect && log_body_prefix.limit_hit() {
-                    interrupted = true;
-                    break;
-                }
-            }
-            if interrupted {
-                log_body_prefix.interrupted();
-            }
-        }
-        let (log_body, log_body_size, log_body_truncated) =
-            log_body_prefix.finish();
+        // the same. Skipped for the challenge verify endpoint, whose handler
+        // consumes the body itself, and for requests that cannot carry a
+        // body at all (the filter would only ever see the end-of-stream
+        // call with no bytes behind it).
+        let wants_body = (agent.is_some() && body_limit > 0) || should_inspect;
+        let has_body = {
+            let headers = &session.req_header().headers;
+            headers.contains_key(http::header::TRANSFER_ENCODING.as_str())
+                || headers
+                    .get(http::header::CONTENT_LENGTH)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .is_some_and(|len| len > 0)
+        };
 
         // Track the request for access logging until the response phase —
         // including WAF-disabled sites, so traffic data stays complete.
@@ -2497,9 +2727,12 @@ impl Plugin for WafPlugin {
                         .to_string(),
                     country_code: country.clone().unwrap_or_default(),
                     request_headers: log_headers,
-                    request_body: log_body,
-                    request_body_size: log_body_size,
-                    request_body_truncated: log_body_truncated,
+                    // The body prefix is backfilled by the request-body
+                    // filter (`amend_pending_access_body`) once the bytes
+                    // have streamed through it.
+                    request_body: None,
+                    request_body_size: 0,
+                    request_body_truncated: false,
                     body_limit,
                     response: None,
                     start: Instant::now(),
@@ -2507,7 +2740,7 @@ impl Plugin for WafPlugin {
             );
         }
 
-        let mut request_data = RequestData {
+        let request_data = RequestData {
             method,
             path: path.clone(),
             query: query.clone(),
@@ -2881,144 +3114,202 @@ impl Plugin for WafPlugin {
         }
 
         // ── Inspect ──
-        // The body (if any) was already read during log capture; when body
-        // inspection is enabled the engine sees the same prefix.
-        request_data.body = if should_inspect && !inspect_buf.is_empty() {
-            Some(inspect_buf.to_vec())
-        } else {
-            None
-        };
-        let verdict = match &choice {
-            EngineChoice::Site(engine) => engine.inspect(&request_data),
-            EngineChoice::Base => {
-                let guard =
-                    self.engine.read().unwrap_or_else(|e| e.into_inner());
-                guard.inspect(&request_data)
-            },
-            EngineChoice::Disabled => unreachable!("handled above"),
-            EngineChoice::FailClosed => unreachable!("handled above"),
-        };
-
-        // Custom rule ids carry no name of their own; the site context maps
-        // the one that fired back to its configured name.
-        let rule_name_of = |verdict: &WafVerdict| -> String {
-            let Some(id) = verdict.matched_rules.first() else {
-                return String::new();
-            };
-            context
-                .as_ref()
-                .and_then(|context| context.rule_names.get(id))
-                .cloned()
-                .unwrap_or_default()
-        };
-
-        if verdict.action == WafAction::Pass {
-            if let Some(agent) = &agent {
-                agent.record_request(false);
-            }
-            return Ok(RequestPluginResult::Continue);
-        }
-
-        // Monitor: log the event but let the request through.
-        if verdict.action == WafAction::Monitor {
-            let rule_name = rule_name_of(&verdict);
-            Self::log_event(
-                &site_id,
-                &request_id,
-                &host,
-                &request_data,
-                &verdict,
-                &rule_name,
-                Self::engine_event_type(&verdict),
-            );
-            return Ok(RequestPluginResult::Continue);
-        }
-
-        // Observation mode: a Block/Challenge verdict is recorded as a
-        // monitor event — nothing was actually blocked — and the request
-        // proceeds.
-        if observe {
-            let rule_name = rule_name_of(&verdict);
-            tracing::info!(
-                site_id = %site_id,
-                request_id = %request_id,
-                path = %request_data.path,
-                would_have = ?verdict.action,
-                score = verdict.score,
-                "[observation] WAF verdict recorded without enforcing"
-            );
-            let observed = WafVerdict {
-                action: WafAction::Monitor,
-                ..verdict.clone()
-            };
-            Self::log_event(
-                &site_id,
-                &request_id,
-                &host,
-                &request_data,
-                &observed,
-                &rule_name,
-                Self::engine_event_type(&observed),
-            );
-            return Ok(RequestPluginResult::Continue);
-        }
-
-        // Block / Challenge: log the security event, then emit the access
-        // entry with the real status — a Respond result never reaches
-        // handle_response, so this is the only chance to log it.
-        let rule_name = rule_name_of(&verdict);
-        Self::log_event(
+        // The request phase sees headers only: the body has not arrived
+        // yet — it streams through `handle_request_body`, which re-runs
+        // this verdict with the full body once the client is done.
+        let outcome = self.enforce_verdict(
+            agent.as_ref(),
             &site_id,
             &request_id,
             &host,
             &request_data,
-            &verdict,
-            &rule_name,
-            Self::engine_event_type(&verdict),
+            &choice,
+            context.as_ref(),
+            observe,
         );
-        let response = if verdict.action == WafAction::Block {
-            // Auto-block the client for a grace window: repeat requests are
-            // refused at the edge (see the entry check above) instead of
-            // running the engine every time.
-            if let Some(agent) = &agent {
-                agent.block_ip(
-                    &site_id,
-                    &request_data.client_ip,
-                    Some(Duration::from_secs(WAF_AUTO_BLOCK_SECS)),
-                    &format!("waf: {rule_name}"),
-                );
-            }
-            block_page(&request_id, &verdict.details)
-        } else {
-            // Challenge verdict. A client that already holds a valid
-            // clearance for this site solved its challenge before: issuing
-            // the same challenge again would loop forever, so let it
-            // through.
-            if clearance_valid(
-                clearance_cookie(&request_data.headers),
-                &site_id,
-            ) {
-                if let Some(agent) = &agent {
-                    agent.record_request(false);
-                }
-                return Ok(RequestPluginResult::Continue);
-            }
-            // Challenge verdict — delegate to the challenge subsystem.
-            let original_url = if query.is_empty() {
-                path
-            } else {
-                format!("{path}?{query}")
+        if let VerdictOutcome::Respond(response) = outcome {
+            return Ok(RequestPluginResult::Respond(response));
+        }
+
+        // The request is on its way to the upstream: register the body
+        // stage so the request-body filter can withhold and inspect the
+        // incoming chunks. A request the plugin answered above never
+        // reaches the filter and creates no entry.
+        if wants_body
+            && has_body
+            && !(request_data.method == "POST"
+                && request_data.path == VERIFY_ENDPOINT)
+        {
+            let engine_runs = match &choice {
+                EngineChoice::Site(_) => true,
+                EngineChoice::Base => self.mode != WafMode::Off,
+                EngineChoice::Disabled | EngineChoice::FailClosed => false,
             };
-            build_challenge_response(
-                &request_id,
-                &original_url,
-                &site_id,
-                self.pow_difficulty,
-                ChallengeKind::Js,
-            )
+            let inspect = should_inspect && engine_runs;
+            DEFERRED_BODY.insert(
+                request_id.clone(),
+                DeferredBody {
+                    buffer: BytesMut::new(),
+                    passthrough: !inspect,
+                    inspect,
+                    log_prefix: LogBodyPrefix::new(body_limit),
+                    deferred: inspect.then(|| DeferredVerdict {
+                        choice: choice.clone(),
+                        context: context.clone(),
+                        observe,
+                        site_id: site_id.clone(),
+                        host: host.clone(),
+                        request_data: request_data.clone(),
+                    }),
+                    created_at: Instant::now(),
+                },
+            );
+        }
+
+        Ok(match outcome {
+            VerdictOutcome::Continue => RequestPluginResult::Continue,
+            VerdictOutcome::Skipped => RequestPluginResult::Skipped,
+            VerdictOutcome::Respond(_) => {
+                unreachable!("handled above")
+            },
+        })
+    }
+
+    fn handle_request_body(
+        &self,
+        _session: &mut Session,
+        ctx: &mut Ctx,
+        body: &mut Option<bytes::Bytes>,
+        end_of_stream: bool,
+    ) -> pingora::Result<Option<HttpResponse>> {
+        let Some(request_id) = ctx.state.request_id.clone() else {
+            return Ok(None);
         };
-        emit_generated_access(agent.as_ref(), &request_id, &response);
-        Ok(RequestPluginResult::Respond(response))
+        // Take the entry out: every path below either completes it (and
+        // leaves it out) or re-inserts it for the next chunk.
+        let Some(mut entry) = DEFERRED_BODY.remove(&request_id).map(|e| e.1)
+        else {
+            return Ok(None);
+        };
+        if let Some(chunk) = body.as_deref() {
+            entry.log_prefix.absorb(chunk);
+        }
+
+        if !end_of_stream {
+            if let Some(chunk) = body.as_deref() {
+                match stage_chunk(
+                    self.max_body_size,
+                    entry.inspect,
+                    &mut entry.passthrough,
+                    &mut entry.buffer,
+                    Some(chunk),
+                ) {
+                    StageAction::Withhold => {
+                        // An empty chunk: pingora skips it entirely, so
+                        // the upstream stays byte-silent and keeps its
+                        // end-of-body state. Never `None` — that would
+                        // truncate the upstream request.
+                        *body = Some(Bytes::new());
+                    },
+                    StageAction::Flush(staged) => {
+                        // The cap was hit mid-body: what is staged (prefix
+                        // plus this chunk) is inspected once, here, while
+                        // the upstream still has no body byte; the rest of
+                        // the body then flows through untouched.
+                        if let Some(dv) = entry.deferred.as_mut() {
+                            dv.request_data.body = Some(staged.to_vec());
+                            let agent = PingWafAgent::instance();
+                            let (log_body, log_body_size, log_truncated) =
+                                entry.log_prefix.finish();
+                            amend_pending_access_body(
+                                &request_id,
+                                log_body,
+                                log_body_size,
+                                log_truncated,
+                            );
+                            let outcome = self.enforce_verdict(
+                                agent.as_ref(),
+                                &dv.site_id,
+                                &request_id,
+                                &dv.host,
+                                &dv.request_data,
+                                &dv.choice,
+                                dv.context.as_ref(),
+                                dv.observe,
+                            );
+                            if let VerdictOutcome::Respond(response) = outcome {
+                                return Ok(Some(response));
+                            }
+                            // The verdict passed: hand the staged bytes
+                            // over and stop withholding. The entry is done
+                            // — its log capture is amended and the rest of
+                            // the body flows through — so it is dropped
+                            // instead of re-inserted; later chunks (and the
+                            // end-of-stream call) find no entry and pass
+                            // through untouched.
+                            *body = Some(staged);
+                            return Ok(None);
+                        }
+                        // An inspect entry without a verdict snapshot
+                        // cannot exist, but fall through to passthrough
+                        // semantics if it ever does.
+                        entry.passthrough = true;
+                    },
+                    StageAction::PassThrough => {},
+                }
+            } else if entry.inspect && !entry.passthrough {
+                // A body chunk was expected but nothing arrived; keep
+                // staging.
+                *body = Some(Bytes::new());
+            }
+            DEFERRED_BODY.insert(request_id, entry);
+            return Ok(None);
+        }
+
+        // Completion: the client is done sending. Log capture and — for
+        // staged bodies — the full-body verdict run once, then the entry
+        // is gone.
+        let (log_body, log_body_size, log_body_truncated) =
+            entry.log_prefix.finish();
+        amend_pending_access_body(
+            &request_id,
+            log_body,
+            log_body_size,
+            log_body_truncated,
+        );
+        if entry.inspect && !entry.passthrough {
+            if let Some(chunk) = body.as_deref() {
+                entry.buffer.extend_from_slice(chunk);
+            }
+            let full = std::mem::take(&mut entry.buffer).freeze();
+            let agent = PingWafAgent::instance();
+            if let Some(dv) = entry.deferred.as_mut() {
+                dv.request_data.body = Some(full.to_vec());
+                let outcome = self.enforce_verdict(
+                    agent.as_ref(),
+                    &dv.site_id,
+                    &request_id,
+                    &dv.host,
+                    &dv.request_data,
+                    &dv.choice,
+                    dv.context.as_ref(),
+                    dv.observe,
+                );
+                // The block page goes back through the proxy; the
+                // staged body is dropped with the aborted upstream
+                // exchange — the source never saw a byte of it.
+                if let VerdictOutcome::Respond(response) = outcome {
+                    return Ok(Some(response));
+                }
+            }
+            // Passed: hand the complete body upstream in one write, which
+            // also carries the end-of-body flag.
+            *body = Some(full);
+            return Ok(None);
+        }
+        // Log-only or already-passthrough entries left the chunk (if any)
+        // untouched.
+        Ok(None)
     }
 
     async fn handle_response(
@@ -3149,6 +3440,83 @@ pub(crate) mod tests {
     use pingwaf_challenge::ClearanceLevel;
     use pingwaf_proto::control_plane as proto;
     use tokio_test::io::Builder;
+
+    #[test]
+    fn request_body_staging_withholds_until_the_cap() {
+        let mut passthrough = false;
+        let mut buffer = BytesMut::new();
+
+        // Chunks accumulate in the buffer and are withheld from the
+        // upstream (the caller replaces the outgoing chunk with an empty
+        // one).
+        assert!(matches!(
+            stage_chunk(
+                10,
+                true,
+                &mut passthrough,
+                &mut buffer,
+                Some(b"12345".as_slice())
+            ),
+            StageAction::Withhold
+        ));
+        assert!(matches!(
+            stage_chunk(
+                10,
+                true,
+                &mut passthrough,
+                &mut buffer,
+                Some(b"6789".as_slice())
+            ),
+            StageAction::Withhold
+        ));
+        assert_eq!(&buffer[..], b"123456789");
+        assert!(!passthrough);
+
+        // Crossing the cap flushes prefix plus current chunk as one piece
+        // and switches the entry to passthrough.
+        let StageAction::Flush(staged) = stage_chunk(
+            10,
+            true,
+            &mut passthrough,
+            &mut buffer,
+            Some(b"0123".as_slice()),
+        ) else {
+            panic!("expected a flush once the cap is crossed");
+        };
+        assert_eq!(&staged[..], b"1234567890123");
+        assert!(passthrough);
+        assert!(buffer.is_empty());
+
+        // Later chunks flow through untouched.
+        assert!(matches!(
+            stage_chunk(
+                10,
+                true,
+                &mut passthrough,
+                &mut buffer,
+                Some(b"x".as_slice())
+            ),
+            StageAction::PassThrough
+        ));
+    }
+
+    #[test]
+    fn request_body_staging_is_skipped_for_log_only_entries() {
+        let mut passthrough = false;
+        let mut buffer = BytesMut::new();
+        assert!(matches!(
+            stage_chunk(
+                10,
+                false,
+                &mut passthrough,
+                &mut buffer,
+                Some(b"data".as_slice())
+            ),
+            StageAction::PassThrough
+        ));
+        assert!(buffer.is_empty());
+        assert!(!passthrough);
+    }
 
     #[test]
     fn test_waf_params() {
@@ -4893,14 +5261,6 @@ advanced_mode = true
         assert_eq!(1024 + 8, size);
         assert!(truncated);
 
-        // An interrupted read marks even a small prefix as partial.
-        let mut prefix = LogBodyPrefix::new(1024);
-        prefix.absorb(b"partial");
-        prefix.interrupted();
-        let (body, _, truncated) = prefix.finish();
-        assert_eq!(b"partial".to_vec(), body.unwrap());
-        assert!(truncated);
-
         // No body at all.
         let (body, size, truncated) = LogBodyPrefix::new(1024).finish();
         assert!(body.is_none());
@@ -4994,6 +5354,22 @@ advanced_mode = true
             .await
             .unwrap();
         assert!(result == RequestPluginResult::Continue);
+
+        // The request body is captured when it streams through the
+        // request-body filter — the request phase no longer reads it (the
+        // headers arrive before any body byte).
+        assert!(
+            plugin
+                .handle_request_body(
+                    &mut session,
+                    &mut ctx,
+                    &mut Some(bytes::Bytes::from(body)),
+                    true,
+                )
+                .unwrap()
+                .is_none(),
+            "the request was not blocked"
+        );
 
         // The access entry only ships once the response arrives.
         assert!(agent.client.pop_log().await.is_none());

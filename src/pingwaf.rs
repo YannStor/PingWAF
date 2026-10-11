@@ -552,6 +552,11 @@ fn cached_rules_to_pingap_config(
                     host: Some(host.clone()),
                     path: Some("/".to_string()),
                     plugins: Some(site_plugins.clone()),
+                    // The fallback must sort behind every route: with the
+                    // auto weight (128) any route whose priority was 127 or
+                    // less ranked below this catch-all `/` location and
+                    // never matched. Pin it to the floor instead.
+                    weight: Some(0),
                     ..Default::default()
                 },
             );
@@ -661,51 +666,44 @@ fn cached_rules_to_pingap_config(
         return None;
     }
 
-    // TLS is a per-server switch in pingap: `global_certificates` turns it on
-    // for every address that server listens on, so 80 and 443 cannot share
-    // one server — a merged listener ran plaintext HTTP through TLS
+    // TLS is a per-server switch in pingap: `global_certificates` turns it
+    // on for every address that server listens on, so 80 and 443 cannot
+    // share one server — a merged listener ran plaintext HTTP through TLS
     // handshakes, which also broke ACME HTTP-01 validation on port 80.
-    let has_certs = !certificates.is_empty();
-    let mut servers: HashMap<String, PingapServerConf> = HashMap::new();
-    if has_certs {
-        servers.insert(
-            "pingwaf".to_string(),
-            PingapServerConf {
-                addr: "0.0.0.0:80".to_string(),
-                locations: Some(location_names.clone()),
-                global_certificates: Some(false),
-                ..Default::default()
-            },
-        );
-        servers.insert(
-            "pingwaf_tls".to_string(),
-            PingapServerConf {
-                addr: "0.0.0.0:443".to_string(),
-                locations: Some(location_names),
-                global_certificates: Some(true),
-                client_ca_pem: (!mtls_ca_bundle.is_empty())
-                    .then_some(mtls_ca_bundle),
-                ..Default::default()
-            },
-        );
-    } else {
-        // Nothing to serve over TLS yet: bind only the plaintext port.
-        // Serving HTTP on 443 would train clients into a broken TLS
-        // endpoint; the next reload after the first certificate lands
-        // splits the listeners.
+    //
+    // 443 is bound even before the first certificate exists: the listener
+    // comes up with an empty provider and handshakes fail until issuance
+    // completes, but the moment a certificate is issued or uploaded the
+    // provider serves it — no restart, no listener rebuild. Binding 443
+    // only once a certificate existed left fresh deployments with the port
+    // closed until the whole process restarted.
+    if certificates.is_empty() {
         warn!(
-            "data plane: no certificates yet — binding 0.0.0.0:80 only; \
-             443 will open once a certificate is issued or uploaded"
-        );
-        servers.insert(
-            "pingwaf".to_string(),
-            PingapServerConf {
-                addr: "0.0.0.0:80".to_string(),
-                locations: Some(location_names),
-                ..Default::default()
-            },
+            "data plane: no certificates yet — TLS handshakes on 443 will \
+             fail until one is issued or uploaded"
         );
     }
+    let mut servers: HashMap<String, PingapServerConf> = HashMap::new();
+    servers.insert(
+        "pingwaf".to_string(),
+        PingapServerConf {
+            addr: "0.0.0.0:80".to_string(),
+            locations: Some(location_names.clone()),
+            global_certificates: Some(false),
+            ..Default::default()
+        },
+    );
+    servers.insert(
+        "pingwaf_tls".to_string(),
+        PingapServerConf {
+            addr: "0.0.0.0:443".to_string(),
+            locations: Some(location_names),
+            global_certificates: Some(true),
+            client_ca_pem: (!mtls_ca_bundle.is_empty())
+                .then_some(mtls_ca_bundle),
+            ..Default::default()
+        },
+    );
 
     Some(PingapConfig {
         basic: BasicConf::default(),
@@ -1673,7 +1671,10 @@ mod tests {
         assert_eq!(loc.path.as_deref(), Some("/"));
         assert_eq!(loc.upstream.as_deref(), Some("site1_upstream"));
         assert_eq!(loc.host.as_deref(), Some("a.example.com"));
-        assert_eq!(loc.weight, None);
+        // The catch-all sorts behind every route: pinned to the floor so
+        // even priority-1 routes match first (see
+        // low_priority_routes_still_beat_the_site_fallback).
+        assert_eq!(loc.weight, Some(0));
     }
 
     #[test]
@@ -1908,7 +1909,7 @@ mod tests {
             .expect("default pool fallback location");
         assert_eq!(fallback.upstream.as_deref(), Some("pool-a"));
         assert_eq!(fallback.path.as_deref(), Some("/"));
-        assert_eq!(fallback.weight, None);
+        assert_eq!(fallback.weight, Some(0));
 
         let api = config
             .locations
@@ -2248,7 +2249,10 @@ mod tests {
     }
 
     #[test]
-    fn sites_without_certificates_bind_only_http() {
+    fn sites_without_certificates_still_bind_tls() {
+        // 443 comes up even with an empty certificate provider: handshakes
+        // fail until the first certificate lands, but the port is listening
+        // and the certificate takes effect without a restart.
         let mut site = site_rules("site1", "a.example.com");
         let mut default_pool = pool("pool1", vec![peer("10.0.0.1:8080")]);
         default_pool.is_default = true;
@@ -2259,10 +2263,47 @@ mod tests {
         )
         .expect("config should build");
 
-        assert_eq!(config.servers.len(), 1);
+        assert_eq!(config.servers.len(), 2);
         let server = config.servers.get("pingwaf").expect("server");
         assert_eq!(server.addr, "0.0.0.0:80");
-        assert_eq!(server.global_certificates, None);
+        assert_eq!(server.global_certificates, Some(false));
+        let tls = config.servers.get("pingwaf_tls").expect("tls server");
+        assert_eq!(tls.addr, "0.0.0.0:443");
+        assert_eq!(tls.global_certificates, Some(true));
+    }
+
+    #[test]
+    fn low_priority_routes_still_beat_the_site_fallback() {
+        // Regression: the fallback location used to carry the auto weight
+        // (128), so a route with priority ≤ 127 sorted behind the catch-all
+        // `/` location and never matched. The fallback now pins weight 0.
+        let mut site = site_rules("site1", "a.example.com");
+        let mut default_pool = pool("pool1", vec![peer("10.0.0.1:8080")]);
+        default_pool.is_default = true;
+        site.upstreams = vec![default_pool];
+        let mut routed_pool = pool("pool2", vec![peer("10.0.0.2:8080")]);
+        routed_pool.is_default = false;
+        site.upstreams.push(routed_pool);
+        let mut r = route("r1", "prefix", "/api", "pool2");
+        r.priority = Some(1);
+        site.routes.push(r);
+
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+
+        let fallback = config
+            .locations
+            .get("site1_loc")
+            .expect("fallback location");
+        assert_eq!(fallback.weight, Some(0));
+        let routed = config
+            .locations
+            .get("site1_route_r1")
+            .expect("route location");
+        assert_eq!(routed.weight, Some(1));
     }
 
     #[test]

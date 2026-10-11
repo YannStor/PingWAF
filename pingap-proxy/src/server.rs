@@ -1118,6 +1118,68 @@ impl Server {
         result
     }
 
+    /// Runs the request-body plugins (downstream → upstream direction).
+    ///
+    /// A plugin returning `Some(response)` answers the request itself
+    /// (e.g. a WAF block page decided once the staged body is complete):
+    /// the client has not seen a single response byte yet, so the response
+    /// is written here and the upstream exchange is aborted with an error
+    /// — `fail_to_proxy` sees the response as already written and sends
+    /// nothing more.
+    #[inline]
+    pub async fn handle_request_body_plugin(
+        &self,
+        session: &mut Session,
+        ctx: &mut Ctx,
+        body: &mut Option<bytes::Bytes>,
+        end_of_stream: bool,
+    ) -> pingora::Result<()> {
+        let plugins = match ctx.plugins.take() {
+            Some(p) => p,
+            None => return Ok(()), // No plugins, exit early.
+        };
+        if plugins.is_empty() {
+            ctx.plugins = Some(plugins);
+            return Ok(());
+        }
+        let mut result = Ok(());
+        for (name, plugin) in plugins.iter() {
+            let now = Instant::now();
+            let Some(resp) = plugin.handle_request_body(
+                session,
+                ctx,
+                body,
+                end_of_stream,
+            )?
+            else {
+                continue;
+            };
+            let elapsed = now.elapsed().as_millis() as u32;
+            ctx.add_plugin_processing_time(name, elapsed);
+            debug!(
+                target: LOG_TARGET,
+                name = &**name, elapsed,
+                "request body plugin answered the request"
+            );
+            // ignore status >= 900, mirroring handle_request_plugin
+            let status = resp.status.as_u16();
+            if status < 900 {
+                ctx.state.status = Some(resp.status);
+                if let Err(e) = resp.send(session).await {
+                    result = Err(e);
+                    break;
+                }
+            }
+            result = Err(new_internal_error(
+                status,
+                "request answered by a request-body plugin",
+            ));
+            break;
+        }
+        ctx.plugins = Some(plugins);
+        result
+    }
+
     #[inline]
     pub fn handle_response_body_plugin(
         &self,
@@ -1488,9 +1550,9 @@ impl ProxyHttp for Server {
     /// Tracks payload size and enforces size limits.
     async fn request_body_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         body: &mut Option<Bytes>,
-        _end_of_stream: bool,
+        end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> pingora::Result<()>
     where
@@ -1510,6 +1572,11 @@ impl ProxyHttp for Server {
                 }
             }
         }
+        // Plugins run after the size accounting above so the 413 limit
+        // always sees the bytes the client actually sent, even when a
+        // plugin withholds the chunk from the upstream (WAF body staging).
+        self.handle_request_body_plugin(session, ctx, body, end_of_stream)
+            .await?;
         Ok(())
     }
     /// Generates cache keys for request caching.

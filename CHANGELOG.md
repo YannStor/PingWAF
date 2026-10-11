@@ -11,9 +11,36 @@ verbatim for reference and attribution, and is not maintained here.
 ## [PingWAF 0.25.2] — Unreleased
 
 The SSL issuance observability batch — an ACME order can no longer hang
-silently or sit in "pending" forever — plus a global IP blacklist page.
+silently or sit in "pending" forever — plus a global IP blacklist page,
+full request-body inspection without the 64 KB ceiling, and two
+routing/rules resolution fixes.
 
 ### ✨ Features
+
+- *(plugin)* **Request-body inspection is streaming and unbounded by the
+  old 64 KB retry buffer.** Body bytes are no longer read in the request
+  phase (which forced pingora's retry buffer, a hard 64 KB cap whose
+  overflow discarded the whole buffered prefix). They now stream through
+  a new `handle_request_body` plugin hook on the proxy's request-body
+  filter: chunks worth inspecting are withheld from the upstream (empty
+  chunk — never `None`, which would truncate the upstream request),
+  inspected once the client is done, then either flushed intact or
+  answered with a block page before a single body byte reaches the
+  source. Bodies beyond `max_body_size` switch to prefix inspection and
+  zero-copy passthrough — the tail is forwarded complete instead of
+  being lost. `max_body_size` regains its real meaning as the
+  configuration cap (previously silently clamped to 64 KB). Behavior
+  notes: an attack that only the body reveals is now answered after the
+  upstream request headers were sent (no body bytes, connection aborted);
+  requests the plugin answers in the request phase (paused sites,
+  IP/mTLS/access denials) log without a body prefix; requests served
+  from cache skip body inspection.
+- *(server)* **443 listens from the first boot.** A fresh deployment
+  with no certificate yet still binds the TLS listener (handshakes fail
+  until one is issued or uploaded) — the first certificate takes effect
+  immediately instead of requiring a process restart.
+
+### 🐛 Bug Fixes
 
 - *(server, web)* **Global IP blacklist page** (`/blocked-ips`): every
   dynamic block in force across all visible sites — WAF/rate-limit
@@ -22,11 +49,20 @@ silently or sit in "pending" forever — plus a global IP blacklist page.
   enforcing agent; a manual-block dialog issues a `BlockIp` command to
   every registered agent (queued for offline ones) with a configurable
   duration.
+- *(agent)* **Wildcard sites keep their protections.** `*.example.com`
+  sites resolve rule lookups for their subdomains through a level-by-
+  level wildcard fallback (exact site first, most specific wildcard
+  wins, apex never matches `*.` — the routing layer's own semantics).
+  Before, a wildcard site lost its WAF rules, cache policy, challenge,
+  error pages and rewrites entirely, and its disconnected failover
+  policy never applied.
+- *(server)* **Routes with priority ≤ 127 are no longer dead.** A
+  site's fallback location carried the auto weight 128, so any route
+  with an explicit priority below it never matched; the fallback now
+  sits at the lowest weight (0) and every explicit priority beats it.
 - *(web)* The sidebar entry "IP 黑白名单" is renamed "IP 组" (zh locale),
   and the AI assistant entry is removed from the menu (the page itself
   stays reachable at `/assistant`).
-
-### 🐛 Bug Fixes
 
 - *(acme)* **Certificate issuance can no longer hang forever.** Every
   ACME network round trip (account load/create, order placement,

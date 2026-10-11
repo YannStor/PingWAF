@@ -215,6 +215,39 @@ fn failover_registry_from(
     registry
 }
 
+/// Exact lookup with wildcard fallback, mirroring the routing layer's
+/// `HostSelector::Suffix` semantics: `*.example.com` covers strict
+/// subdomains only, never the apex itself. `www.a.example.com` tries the
+/// exact key first, then `*.a.example.com`, `*.example.com`, … — most
+/// specific wildcard wins, so a wildcard site never shadows an exact one
+/// and a longer wildcard beats a shorter one.
+///
+/// Exact hits cost a single lookup and no allocation; the wildcard walk
+/// only runs on a miss and reuses one buffer.
+fn lookup_with_wildcard<'a, V>(
+    map: &'a HashMap<String, V>,
+    domain: &str,
+) -> Option<&'a V> {
+    if let Some(value) = map.get(domain) {
+        return Some(value);
+    }
+    let mut buf = String::with_capacity(domain.len() + 2);
+    let mut rest = domain;
+    while let Some((_, suffix)) = rest.split_once('.') {
+        if suffix.is_empty() {
+            break;
+        }
+        buf.clear();
+        buf.push_str("*.");
+        buf.push_str(suffix);
+        if let Some(value) = map.get(&buf) {
+            return Some(value);
+        }
+        rest = suffix;
+    }
+    None
+}
+
 /// The site's effective WAF enforcement state: `(engine mode, observation)`.
 /// A missing WAF config means the engine is off.
 fn site_enforcement(site: Option<&SiteRules>) -> (WafMode, bool) {
@@ -1241,16 +1274,24 @@ impl RuleCache {
     ///
     /// Hot path: only the `Arc` is cloned, the rules themselves are shared
     /// with the cache.
+    ///
+    /// An exact-miss falls back to wildcard sites: `www.a.example.com`
+    /// tries `*.a.example.com`, then `*.example.com`, and so on — the same
+    /// semantics `pingap_location`'s `HostSelector::Suffix` uses for
+    /// routing, so a wildcard site routed to a location no longer loses
+    /// its WAF rules, cache policy, challenge and error pages.
     pub fn get_site_rules(&self, domain: &str) -> Option<Arc<SiteRules>> {
         let rules = self.inner.load();
-        let site_id = rules.domain_index.get(domain)?;
+        let site_id = lookup_with_wildcard(&rules.domain_index, domain)?;
         rules.sites.get(site_id).cloned()
     }
 
     /// The site's disconnected policy for `domain`, when the control plane
-    /// has one registered (primary or alternate domain match).
+    /// has one registered (primary or alternate domain match, including a
+    /// wildcard match with the same fallback as [`Self::get_site_rules`]).
     pub fn failover_for_domain(&self, domain: &str) -> Option<FailoverMode> {
-        self.inner.load().failover_registry.get(domain).copied()
+        let rules = self.inner.load();
+        lookup_with_wildcard(&rules.failover_registry, domain).copied()
     }
 
     /// The control-plane-wide fail-open default, when it has ever been
@@ -2061,6 +2102,83 @@ mod tests {
         assert_eq!(cache.blocked_reason("site-2", "203.0.113.1"), None);
         // The surviving site is untouched.
         assert!(cache.get_site_rules_by_id("site-1").is_some());
+    }
+
+    #[test]
+    fn wildcard_sites_resolve_subdomains_via_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache =
+            RuleCache::new(dir.path().to_path_buf(), "test".to_string())
+                .unwrap();
+
+        let policies = vec![
+            proto::SitePolicy {
+                domain: "*.example.com".to_string(),
+                alternate_domains: Vec::new(),
+                mode: proto::FailoverMode::FailoverClosed as i32,
+            },
+            proto::SitePolicy {
+                domain: "app.example.com".to_string(),
+                alternate_domains: Vec::new(),
+                mode: proto::FailoverMode::FailoverOpen as i32,
+            },
+        ];
+        let site = |id: &str, domain: &str| proto::Site {
+            id: id.to_string(),
+            name: id.to_string(),
+            domain: domain.to_string(),
+            alternate_domains: Vec::new(),
+            status: 0,
+            rules: Some(proto::RuleBundle {
+                site_id: id.to_string(),
+                config_hash: "hash".to_string(),
+                site_policies: policies.clone(),
+                ..Default::default()
+            }),
+            trust_proxy_headers: false,
+            trusted_header: String::new(),
+            trust_last_hop: false,
+            trusted_proxy_ranges: Vec::new(),
+        };
+        cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![
+                    site("site-exact", "app.example.com"),
+                    site("site-wild", "*.example.com"),
+                    site("site-deep", "*.a.example.com"),
+                ],
+                ..Default::default()
+            })
+            .unwrap();
+
+        let id_of = |domain: &str| {
+            cache.get_site_rules(domain).map(|r| r.site_id.clone())
+        };
+
+        // An exact site always wins over any wildcard.
+        assert_eq!(id_of("app.example.com").as_deref(), Some("site-exact"));
+        // Direct subdomains fall back to the wildcard site — before this
+        // fix a wildcard site lost its WAF rules, cache policy, challenge
+        // and error pages entirely.
+        assert_eq!(id_of("foo.example.com").as_deref(), Some("site-wild"));
+        // The most specific wildcard wins for deeper names.
+        assert_eq!(id_of("a.example.com").as_deref(), Some("site-wild"));
+        assert_eq!(id_of("www.a.example.com").as_deref(), Some("site-deep"));
+        // The apex itself is not covered by a wildcard — the same
+        // semantics as `HostSelector::Suffix` in the routing layer.
+        assert!(cache.get_site_rules("example.com").is_none());
+
+        // The failover registry follows the same fallback, so a wildcard
+        // site's disconnected policy actually applies to its subdomains.
+        assert_eq!(
+            cache.failover_for_domain("app.example.com"),
+            Some(FailoverMode::Open)
+        );
+        assert_eq!(
+            cache.failover_for_domain("foo.example.com"),
+            Some(FailoverMode::Closed)
+        );
+        assert_eq!(cache.failover_for_domain("example.com"), None);
     }
 
     #[test]
