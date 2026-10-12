@@ -8,6 +8,40 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.25.9] — 2026-10-13
+
+The cache management batch — global cache settings, cache analytics, and
+per-site / per-content-type size limits.
+
+### ✨ Features
+
+- **Global cache settings.** The settings page gains a "Cache" card with a
+  master switch, a per-file size cap (default 16 MB, hard limit 1 GB), a
+  global cache space budget (default 10 GB, hard limit 1 TB), and a default
+  edge TTL used as the fallback for cache rules without an explicit TTL.
+  All values are pushed to the data plane through the agent RuleBundle and
+  take effect without restarts; turning the master switch off detaches the
+  cache plugin entirely.
+- **Cache hit-rate and bytes-saved analytics.** The site traffic page shows
+  two new cards: cache hit rate and traffic saved by the cache. Access logs
+  now record the real cache phase per request — previously `cache_status`
+  was written as an empty string, so hit-based analytics could never be
+  non-zero. Historical logs carry no cache status; the cards fill up as new
+  traffic flows through.
+- **Per-site and per-content-type file size limits.** The site caching page
+  gains a per-site max cacheable file size plus per-type caps for HTML,
+  CSS, JS, images, fonts, media, and other content. The effective limit is
+  `min(global, site, type)`, enforced by the edge before a response body is
+  written to disk; oversized responses are simply not cached. Site and type
+  values are validated against the global cap on both the server and the
+  frontend, with explicit error messages.
+
+### 🔧 Internal
+
+- New `cache_settings` singleton table and two nullable columns on `sites`
+  (`cache_max_file_size_mb`, `cache_type_limits_mb`); RuleBundle carries the
+  new optional cache fields (26/27), byte-compatible with older agents.
+
 ## [PingWAF 0.25.8] — 2026-10-12
 
 The logs page usability batch — search autocomplete, one-click actions on
