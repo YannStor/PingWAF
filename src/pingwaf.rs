@@ -477,7 +477,13 @@ fn cached_rules_to_pingap_config(
                 } else {
                     Some(up.sni.clone())
                 },
-                verify_cert: up.verify_cert,
+                // Verification is opt-in. Normalize here as well as in the
+                // agent's gRPC conversion: a rule cache restored from the
+                // persisted snapshot (sites.json) carries `verify_cert: null`
+                // and never passes through that conversion, and a `None` left
+                // intact means pingora's default - strict verification - so
+                // self-signed origins would 502 with InvalidCert.
+                verify_cert: Some(up.verify_cert.unwrap_or(false)),
                 connection_timeout: if up.connection_timeout_ms > 0 {
                     Some(Duration::from_millis(up.connection_timeout_ms as u64))
                 } else {
@@ -1948,6 +1954,21 @@ mod tests {
         tls_pool.algo = "hash:cookie:session".to_string();
         site.upstreams = vec![tls_pool];
 
+        // A cache restored from the persisted snapshot carries `null`: the
+        // default must be lenient, not pingora's strict.
+        let mut snapshot_pool =
+            pool("pool-c", vec![peer("https://10.0.0.3:8443")]);
+        snapshot_pool.sni = "origin.example.com".to_string();
+        snapshot_pool.verify_cert = None;
+        site.upstreams.push(snapshot_pool);
+
+        // Strict stays strict: an operator who opted in keeps it.
+        let mut strict_pool =
+            pool("pool-d", vec![peer("https://10.0.0.4:8443")]);
+        strict_pool.sni = "origin.example.com".to_string();
+        strict_pool.verify_cert = Some(true);
+        site.upstreams.push(strict_pool);
+
         let mut legacy_pool = pool("pool-b", vec![peer("10.0.0.2:8080")]);
         legacy_pool.algo = "lbconsistenthash".to_string();
         site.upstreams.push(legacy_pool);
@@ -1976,6 +1997,17 @@ mod tests {
             config.upstreams.get("pool-b").unwrap().algo,
             None,
             "legacy enum debug names collapse to the round_robin default"
+        );
+
+        assert_eq!(
+            config.upstreams.get("pool-c").unwrap().verify_cert,
+            Some(false),
+            "snapshot null becomes the lenient default"
+        );
+        assert_eq!(
+            config.upstreams.get("pool-d").unwrap().verify_cert,
+            Some(true),
+            "explicit opt-in keeps strict verification"
         );
     }
 
