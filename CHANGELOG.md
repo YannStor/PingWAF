@@ -8,6 +8,20 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.25.4] — 2026-10-12
+
+### 🐛 Bug Fixes
+
+- *(proxy)* **Snapshot-restored pools get the lenient verification default
+  too.** A rule cache restored from the persisted snapshot (`sites.json`)
+  carries `verify_cert=null` and never passes through the agent's gRPC
+  conversion where the lenient default is applied — the null reached the
+  pingora peer builder untouched and meant strict verification there, so
+  pools with an SNI but no explicit flag kept failing against self-signed
+  origins with `InvalidCert` 502s even after 0.25.3's opt-in change. The
+  cache-to-config conversion now normalizes as well: `null`/`None` becomes
+  lenient, an explicit opt-in keeps strict validation.
+
 ## [PingWAF 0.25.3] — 2026-10-12
 
 The certificate issuance unblocking batch — fixes the two defects that left
