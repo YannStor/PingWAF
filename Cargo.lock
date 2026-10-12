@@ -4650,6 +4650,7 @@ dependencies = [
  "pingwaf-pprof",
  "pingwaf-server",
  "pretty_assertions",
+ "rcgen",
  "regex",
  "rust-embed",
  "rustls",

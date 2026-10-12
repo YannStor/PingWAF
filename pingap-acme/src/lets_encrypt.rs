@@ -812,6 +812,16 @@ fn is_valid_challenge_token(token: &str) -> bool {
 }
 
 /// Generates a new certificate from Let's Encrypt for the given domains.
+/// A fresh order is `Pending`. Let's Encrypt answers `Ready` directly when
+/// every authorization of the order is still valid (< 30 days old): the
+/// challenges have already been validated, so the order can proceed to
+/// finalize without repeating them. Everything else (Processing, Valid,
+/// Invalid) is not actionable for us and must fail loudly instead of
+/// spinning in the renewal loop.
+fn order_is_actionable(status: &OrderStatus) -> bool {
+    matches!(status, OrderStatus::Pending | OrderStatus::Ready)
+}
+
 /// The ACME protocol flow:
 /// 1. Creates/retrieves an ACME account with Let's Encrypt
 /// 2. Creates a new order for the domains to be certified
@@ -859,15 +869,18 @@ async fn new_lets_encrypt(
     .await?;
 
     let state = order.state();
-    if !matches!(state.status, OrderStatus::Pending) {
+    if !order_is_actionable(&state.status) {
         return Err(Error::Fail {
             message: format!(
-                "order is not pending, status: {:?}",
+                "order is not actionable, status: {:?}",
                 state.status
             ),
             category: "order_status".to_string(),
         });
     }
+    // Only a `Pending` order needs its authorizations/challenges (re)run;
+    // a `Ready` order skips straight to poll_ready + finalize below.
+    let need_challenge = state.status == OrderStatus::Pending;
 
     let mut dns_tasks = vec![];
     // Built on the first DNS-01 challenge and shared by the order's others.
@@ -875,7 +888,12 @@ async fn new_lets_encrypt(
 
     let result = (async {
         let mut authorizations = order.authorizations();
-        loop {
+        // `need_challenge` is false for a `Ready` order: its authorizations
+        // are still valid, so re-fetching/validating them is pointless. The
+        // condition is constant by design - this is an `if` wrapped around a
+        // loop, spelled as `while` to keep the break-driven body flat.
+        #[allow(clippy::while_immutable_condition)]
+        while need_challenge {
             // Each fetch is a network call on the same unbounded client;
             // without the timeout a silent CA wedges the order here.
             let next = match tokio::time::timeout(
@@ -1273,5 +1291,23 @@ mod tests {
         assert!(!is_valid_challenge_token("..%2Fcertificate"));
         assert!(!is_valid_challenge_token("a.b"));
         assert!(!is_valid_challenge_token("a/b"));
+    }
+
+    #[test]
+    fn test_order_is_actionable() {
+        use super::order_is_actionable;
+        use instant_acme::OrderStatus;
+
+        // Fresh order: challenges must be run.
+        assert!(order_is_actionable(&OrderStatus::Pending));
+        // Let's Encrypt returns Ready directly when every authorization is
+        // still valid (< 30 days old) - this exact case used to be rejected
+        // with "order is not pending" and wedged issuance in a loop.
+        assert!(order_is_actionable(&OrderStatus::Ready));
+
+        // Nothing we can do about these: fail loudly instead of looping.
+        assert!(!order_is_actionable(&OrderStatus::Processing));
+        assert!(!order_is_actionable(&OrderStatus::Valid));
+        assert!(!order_is_actionable(&OrderStatus::Invalid));
     }
 }

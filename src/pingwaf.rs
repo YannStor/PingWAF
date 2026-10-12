@@ -1253,29 +1253,26 @@ pub async fn start_data_plane(
                 last_hash = hash;
                 continue;
             };
-            let prev_toml = watcher_config_manager
-                .load_all_raw()
+            // Fetch-merge-save must be atomic with respect to ACME's own
+            // read-modify-write: an issuance completing while the reload was
+            // reading a PEM-less snapshot used to be clobbered by the reload
+            // save, dropping the certificate from storage (and then from the
+            // SNI table on the next provider rebuild).
+            let config = match watcher_config_manager
+                .update_raw(|prev_toml| {
+                    merge_config_state(&new_toml, &prev_toml)
+                })
                 .await
-                .unwrap_or_default();
-            let merged_toml = merge_config_state(&new_toml, &prev_toml);
-            let config = match PingapTomlConfig::from_toml(&merged_toml)
-                .and_then(|toml_config| toml_config.to_pingap_config(true))
             {
                 Ok(config) => config,
                 Err(e) => {
                     warn!(
                         error = %e,
-                        "data plane: merged reload config failed to parse, using freshly converted config"
+                        "data plane: merged reload config failed, using freshly converted config"
                     );
                     converted
                 },
             };
-            if let Ok(toml_config) = PingapTomlConfig::from_toml(&merged_toml)
-                && let Err(e) =
-                    watcher_config_manager.save_all(&toml_config).await
-            {
-                warn!(error = %e, "data plane: failed to persist merged config");
-            }
             watcher_config_manager.set_current_config(config.clone());
             if let Err(e) = try_init_upstreams(&config.upstreams, None) {
                 error!(error = %e, "data plane: reload upstreams failed");

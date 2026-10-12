@@ -80,8 +80,38 @@ pub fn try_update_certificates(
 ) -> (Vec<String>, String) {
     // Certificates whose configuration did not change are carried over
     // as they are, not parsed and loaded again.
-    let (new_certs, errors, updated_certificates) =
-        update_certificates(certificate_configs, &CERTIFICATE_PROVIDER.list());
+    let previous = CERTIFICATE_PROVIDER.list();
+    let (mut new_certs, errors, updated_certificates) =
+        update_certificates(certificate_configs, &previous);
+
+    // A configuration entry without a PEM (an ACME certificate still being
+    // issued, or one whose PEM a lost race failed to persist) is skipped by
+    // the update above - and because the provider is replaced wholesale, it
+    // used to take the previously served certificate for its domains out of
+    // the SNI table, rejecting every TLS handshake until the next issuance.
+    // Carry the old entries over by domain so TLS keeps serving; they are
+    // replaced as soon as the PEM for that entry shows up.
+    for conf in certificate_configs.values() {
+        if conf.tls_cert.is_some() && conf.tls_key.is_some() {
+            continue;
+        }
+        let Some(domains) = &conf.domains else {
+            continue;
+        };
+        for domain in domains
+            .split(',')
+            .map(str::trim)
+            .filter(|domain| !domain.is_empty())
+        {
+            // A domain also served by an entry that does have a PEM wins -
+            // never overwrite a freshly loaded certificate with the old one.
+            if !new_certs.contains_key(domain)
+                && let Some(cert) = previous.get(domain)
+            {
+                new_certs.insert(domain.to_string(), Arc::clone(cert));
+            }
+        }
+    }
 
     let error_messages: Vec<String> = errors
         .into_iter()
@@ -90,4 +120,94 @@ pub fn try_update_certificates(
 
     CERTIFICATE_PROVIDER.store(new_certs);
     (updated_certificates, error_messages.join(";"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::try_update_certificates;
+    use pingap_certificate::CertificateProvider;
+    use pingap_certificate::TlsCertificate;
+    use pingap_config::CertificateConf;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn seed_provider(domain: &str, name: &str, hash: &str) {
+        let mut map = ahash::AHashMap::new();
+        map.insert(
+            domain.to_string(),
+            Arc::new(TlsCertificate {
+                name: Some(name.to_string()),
+                hash_key: hash.to_string(),
+                ..Default::default()
+            }),
+        );
+        super::CERTIFICATE_PROVIDER.store(map);
+    }
+
+    fn conf_with(
+        domains: &str,
+        tls_cert: Option<&str>,
+        tls_key: Option<&str>,
+    ) -> CertificateConf {
+        CertificateConf {
+            domains: Some(domains.to_string()),
+            tls_cert: tls_cert.map(str::to_string),
+            tls_key: tls_key.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// A certificate entry whose PEM has not (yet) been persisted - the
+    /// reload race window or a freshly created ACME entry - must not take
+    /// the previously served certificate for its domains out of the SNI
+    /// table: TLS would reject every handshake until the next issuance.
+    #[test]
+    fn test_entries_without_pem_keep_serving_the_previous_certificate() {
+        seed_provider("carry-a.example.com", "old", "old-hash");
+        let mut configs = HashMap::new();
+        configs.insert(
+            "panel".to_string(),
+            conf_with("carry-a.example.com", None, None),
+        );
+
+        let (_, errors) = try_update_certificates(&configs);
+        assert!(errors.is_empty(), "{errors}");
+
+        let certs = super::CERTIFICATE_PROVIDER.list();
+        let cert = certs
+            .get("carry-a.example.com")
+            .expect("domain must still be served");
+        assert_eq!("old-hash", cert.hash_key);
+    }
+
+    /// The carry-over must never shadow a configuration that does have a
+    /// PEM: a fresh upload (or a completed ACME issuance) replaces the old
+    /// entry even for the same domains.
+    #[test]
+    fn test_fresh_certificate_wins_over_the_carried_over_one() {
+        let certified_key = rcgen::generate_simple_self_signed(vec![
+            "carry-b.example.com".to_string(),
+        ])
+        .unwrap();
+        let tls_cert = certified_key.cert.pem();
+        let tls_key = certified_key.signing_key.serialize_pem();
+
+        seed_provider("carry-b.example.com", "old", "old-hash");
+        let mut configs = HashMap::new();
+        configs.insert(
+            "upload".to_string(),
+            conf_with("carry-b.example.com", Some(&tls_cert), Some(&tls_key)),
+        );
+
+        let (updated, errors) = try_update_certificates(&configs);
+        assert!(errors.is_empty(), "{errors}");
+        assert_eq!(&["upload".to_string()], updated.as_slice());
+
+        let certs = super::CERTIFICATE_PROVIDER.list();
+        let cert = certs
+            .get("carry-b.example.com")
+            .expect("domain must be served by the new certificate");
+        assert!(cert.certificate.is_some(), "the loaded cert must win");
+        assert_ne!("old-hash", cert.hash_key);
+    }
 }

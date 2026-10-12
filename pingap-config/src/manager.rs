@@ -461,6 +461,10 @@ impl ConfigManager {
     }
     pub async fn save_all(&self, config: &PingapTomlConfig) -> Result<()> {
         let _guard = self.write_lock.lock().await;
+        self.save_all_locked(config).await
+    }
+
+    async fn save_all_locked(&self, config: &PingapTomlConfig) -> Result<()> {
         match self.mode {
             ConfigMode::Single => {
                 self.storage
@@ -517,6 +521,31 @@ impl ConfigManager {
 
         Ok(())
     }
+    /// Atomically rewrites the whole configuration document: fetch → `f` →
+    /// save, all under the same write lock as [`ConfigManager::update`] and
+    /// [`ConfigManager::save_all`].
+    ///
+    /// A plain `load_all_raw()` → mutate → `save_all()` sequence is not safe
+    /// against a concurrent read-modify-write: the hot-reload path used to
+    /// merge against a snapshot fetched without the lock, and an ACME
+    /// issuance completing in between was clobbered by the reload's save -
+    /// the freshly issued PEM vanished from storage (and then from the SNI
+    /// table) until the next successful issuance.
+    ///
+    /// Returns the merged configuration converted for use, so the caller can
+    /// feed providers from exactly what was persisted.
+    pub async fn update_raw(
+        &self,
+        f: impl FnOnce(String) -> String,
+    ) -> Result<PingapConfig> {
+        let _guard = self.write_lock.lock().await;
+        let raw = self.storage.fetch("").await?;
+        let merged = f(raw);
+        let toml_config = PingapTomlConfig::from_toml(&merged)?;
+        self.save_all_locked(&toml_config).await?;
+        toml_config.to_pingap_config(true)
+    }
+
     pub async fn update<T: Serialize + Send + Sync>(
         &self,
         category: Category,
@@ -1506,5 +1535,45 @@ addrs = ["127.0.0.1:7080"]
                 "upstream up{i} was lost to a concurrent write"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_update_raw_merges_the_latest_committed_state() {
+        let file = tempfile::NamedTempFile::with_suffix(".toml").unwrap();
+        let manager =
+            new_file_config_manager(&file.path().to_string_lossy()).unwrap();
+
+        // A write that commits before update_raw takes the lock must be
+        // visible to the merge closure and must survive the rewrite - this
+        // is the ACME PEM that the unlocked reload snapshot used to clobber.
+        let value: toml::Value =
+            toml::from_str(r#"addrs = ["127.0.0.1:7080"]"#).unwrap();
+        manager
+            .update(Category::Upstream, "u1", &value)
+            .await
+            .unwrap();
+
+        let config = manager
+            .update_raw(|raw| {
+                assert_eq!(
+                    true,
+                    raw.contains("u1"),
+                    "merge must see u1: {raw}"
+                );
+                let mut config = PingapTomlConfig::from_toml(&raw).unwrap();
+                let v: toml::Value =
+                    toml::from_str(r#"addrs = ["127.0.0.1:7081"]"#).unwrap();
+                config.update(&Category::Upstream, "u2", v);
+                config.to_toml().unwrap()
+            })
+            .await
+            .unwrap();
+
+        // Both entries are persisted...
+        let persisted = manager.load_all().await.unwrap();
+        assert_eq!(true, persisted.get(&Category::Upstream, "u1").is_some());
+        assert_eq!(true, persisted.get(&Category::Upstream, "u2").is_some());
+        // ...and the returned config is exactly what was persisted.
+        assert_eq!(true, config.upstreams.contains_key("u2"));
     }
 }
