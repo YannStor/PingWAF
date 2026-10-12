@@ -81,7 +81,11 @@ fn invalid(message: impl Into<String>) -> Error {
 /// Shared CSS for the built-in pages. Registered as a partial so the individual
 /// pages stay small and consistent. Supports light/dark via
 /// `prefers-color-scheme` and uses the PingWAF orange accent.
-const PW_STYLE: &str = r##"<style>
+///
+/// `pub(crate)` so the challenge plugin's short-circuit pages (WAF block,
+/// rate limit, …) render in the same visual family — those responses bypass
+/// the response-phase plugin pipeline entirely.
+pub(crate) const PW_STYLE: &str = r##"<style>
 :root{
   --bg:#f6f7f9;--card:#ffffff;--fg:#141417;--muted:#6b6b73;--border:#e7e7ea;
   --accent:#f6821f;--code-bg:#fafafb;--shadow:0 24px 60px rgba(20,20,25,.10);
@@ -135,60 +139,17 @@ h1{font-size:24px;margin:0 0 10px;letter-spacing:-.015em;font-weight:650}
 .brand b{color:var(--accent);font-weight:700}
 </style>"##;
 
-/// 403 Forbidden — WAF block page.
-const PAGE_403: &str = r##"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Access Denied · PingWAF</title>
-{% include "_pw_style" %}
-</head>
-<body>
-<div class="card">
-  <div class="icon"><svg viewBox="0 0 24 24"><path d="M12 3l7 3v5.5c0 4.4-2.9 7.6-7 9-4.1-1.4-7-4.6-7-9V6z"/><path d="M9.6 9.6l4.8 4.8M14.4 9.6l-4.8 4.8"/></svg></div>
-  <div class="code">Error {{ error_code }}</div>
-  <h1>Access Denied</h1>
-  <p class="msg">Your request has been blocked by the web application firewall. If you believe this is a mistake, contact the site administrator with the event ID below.</p>
-  <div class="details">
-    <div class="row"><span class="k">Request ID</span><span class="v">{{ request_id }}</span></div>
-    <div class="row"><span class="k">Time</span><span class="v">{{ timestamp }}</span></div>
-    <div class="row"><span class="k">Your IP</span><span class="v">{{ client_ip }}</span></div>
-    <div class="row"><span class="k">Path</span><span class="v">{{ method }} {{ path }}</span></div>
-    {% if waf_rule %}<div class="row"><span class="k">Rule</span><span class="v">{{ waf_rule }}</span></div>{% endif %}
-  </div>
-  <p class="brand">Protected by <b>PingWAF</b></p>
-</div>
-</body>
-</html>"##;
+// NOTE: there are deliberately no built-in 403/429 pages. An origin-returned
+// 403 used to be replaced with a WAF-style "Access Denied" page, which made
+// every visitor (and every site owner) believe the WAF had blocked them.
+// Following Cloudflare's model, origin responses are passed through untouched;
+// only gateway-class failures — which the edge itself produces when the
+// upstream is unreachable — get a branded page. Administrators can still
+// configure custom pages for any status via the control plane.
 
-/// 429 Too Many Requests — rate limit page.
-const PAGE_429: &str = r##"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Rate Limit Exceeded · PingWAF</title>
-{% include "_pw_style" %}
-</head>
-<body>
-<div class="card">
-  <div class="icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 13V9M9 2h6"/></svg></div>
-  <div class="code">Error {{ error_code }}</div>
-  <h1>Rate Limit Exceeded</h1>
-  <p class="msg">You have sent too many requests in a short period of time. Please slow down and try again shortly.</p>
-  <div class="details">
-    <div class="row"><span class="k">Request ID</span><span class="v">{{ request_id }}</span></div>
-    <div class="row"><span class="k">Time</span><span class="v">{{ timestamp }}</span></div>
-    <div class="row"><span class="k">Your IP</span><span class="v">{{ client_ip }}</span></div>
-    {% if retry_after %}<div class="row"><span class="k">Retry after</span><span class="v">{{ retry_after }}s</span></div>{% endif %}
-  </div>
-  <p class="brand">Protected by <b>PingWAF</b></p>
-</div>
-</body>
-</html>"##;
-
-/// 5xx — upstream/service unavailable page (shared by 502/503/504).
+/// 5xx — origin/gateway failure page (shared by 502/503/504). The copy must
+/// make clear that the *website's server* failed, so nobody mistakes it for a
+/// security block.
 const PAGE_5XX: &str = r##"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -201,15 +162,15 @@ const PAGE_5XX: &str = r##"<!DOCTYPE html>
 <div class="card">
   <div class="icon"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg></div>
   <div class="code">Error {{ error_code }}</div>
-  <h1>Service Temporarily Unavailable</h1>
-  <p class="msg">The server could not complete your request right now. This is usually temporary — please try again in a few moments.</p>
+  <h1>{{ error_code }} — Origin Server Error</h1>
+  <p class="msg">The website's origin server failed to complete this request. <b>This is not a security block</b> — the request reached the website, and the website (or its gateway) answered with an error. Please try again in a few moments.</p>
   <div class="details">
     <div class="row"><span class="k">Request ID</span><span class="v">{{ request_id }}</span></div>
     <div class="row"><span class="k">Time</span><span class="v">{{ timestamp }}</span></div>
     <div class="row"><span class="k">Host</span><span class="v">{{ host }}</span></div>
     <div class="row"><span class="k">Path</span><span class="v">{{ method }} {{ path }}</span></div>
   </div>
-  <p class="brand">Protected by <b>PingWAF</b></p>
+  <p class="brand">Routed via <b>PingWAF</b></p>
 </div>
 </body>
 </html>"##;
@@ -581,11 +542,10 @@ impl TryFrom<&PluginConf> for ErrorPagePlugin {
             })?;
         let mut map: HashMap<u16, CompiledErrorPage> = HashMap::new();
 
-        // Built-in PingWAF pages.
+        // Built-in PingWAF pages: gateway-class failures only. Origin 4xx
+        // responses pass through untouched (see the note above PAGE_5XX).
         if use_defaults {
-            let defaults: [(u16, &str, &str, &str); 5] = [
-                (403, "pw_default_403", PAGE_403, "PingWAF Forbidden"),
-                (429, "pw_default_429", PAGE_429, "PingWAF Rate Limit"),
+            let defaults: [(u16, &str, &str, &str); 3] = [
                 (502, "pw_default_5xx", PAGE_5XX, "PingWAF Bad Gateway"),
                 (503, "pw_default_5xx", PAGE_5XX, "PingWAF Unavailable"),
                 (504, "pw_default_5xx", PAGE_5XX, "PingWAF Gateway Timeout"),
@@ -714,13 +674,18 @@ use_defaults = true
         .unwrap();
         assert!(plugin.use_defaults);
         let map = plugin.templates.load_full();
-        for status in [403u16, 429, 502, 503, 504] {
+        for status in [502u16, 503, 504] {
             assert!(map.contains_key(&status), "missing default {status}");
         }
+        // Origin-returned 4xx responses must pass through untouched: the
+        // built-in WAF-style 403/429 pages were the reason every origin 403
+        // looked like a security block.
+        assert!(!map.contains_key(&403), "403 must not be a default page");
+        assert!(!map.contains_key(&429), "429 must not be a default page");
     }
 
     #[test]
-    fn test_render_default_403() {
+    fn test_render_default_5xx_names_the_origin() {
         let plugin = ErrorPagePlugin::new(
             &toml::from_str::<PluginConf>(r###"category = "error_page""###)
                 .unwrap(),
@@ -728,14 +693,17 @@ use_defaults = true
         .unwrap();
         let mut ctx = Context::new();
         ctx.insert("request_id", "req-123");
-        ctx.insert("error_code", &403u16);
+        ctx.insert("error_code", &502u16);
         ctx.insert("timestamp", "2025-01-01T00:00:00Z");
         ctx.insert("client_ip", "10.0.0.1");
         ctx.insert("method", "GET");
-        ctx.insert("path", "/admin");
-        ctx.insert("waf_rule", "");
-        let out = plugin.tera.render("pw_default_403", &ctx).unwrap();
-        assert_eq!(true, out.contains("Access Denied"));
+        ctx.insert("path", "/");
+        ctx.insert("host", "example.com");
+        let out = plugin.tera.render("pw_default_5xx", &ctx).unwrap();
+        assert_eq!(true, out.contains("Origin Server Error"));
+        // The copy must rule out a security block: that ambiguity is exactly
+        // what made origin failures indistinguishable from WAF blocks.
+        assert_eq!(true, out.contains("not a security block"));
         assert_eq!(true, out.contains("req-123"));
         assert_eq!(true, out.contains("PingWAF"));
     }
@@ -789,9 +757,9 @@ template = '{"error":"rate_limit_exceeded","request_id":"{{ request_id }}"}'
 
         // Not a host agent-mode tests register: resolve() defers to the
         // process-global agent when it has pages for the host, so
-        // "example.com" here races with agent tests running in parallel.
-        let mut s = session("GET", "/secret", "errorpage.test").await;
-        let mut resp = ResponseHeader::build_no_case(403, None).unwrap();
+        // "errorpage.test" here races with agent tests running in parallel.
+        let mut s = session("GET", "/", "errorpage.test").await;
+        let mut resp = ResponseHeader::build_no_case(502, None).unwrap();
         let result = plugin
             .handle_response(&mut s, &mut Ctx::default(), &mut resp)
             .await
@@ -805,6 +773,25 @@ template = '{"error":"rate_limit_exceeded","request_id":"{{ request_id }}"}'
             "private, no-store",
             resp.headers.get("cache-control").unwrap().to_str().unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn test_origin_403_passes_through() {
+        let plugin = ErrorPagePlugin::new(
+            &toml::from_str::<PluginConf>(r###"category = "error_page""###)
+                .unwrap(),
+        )
+        .unwrap();
+
+        // The whole point of dropping the default 403 page: an origin's own
+        // 403 must reach the visitor as the origin produced it.
+        let mut s = session("GET", "/", "errorpage.test").await;
+        let mut resp = ResponseHeader::build_no_case(403, None).unwrap();
+        let result = plugin
+            .handle_response(&mut s, &mut Ctx::default(), &mut resp)
+            .await
+            .unwrap();
+        assert_eq!(ResponsePluginResult::Unchanged, result);
     }
 
     #[tokio::test]
@@ -954,14 +941,23 @@ template = '{"error":"rate_limit_exceeded","request_id":"{{ request_id }}"}'
                 .unwrap();
             assert_eq!(ResponsePluginResult::Unchanged, result);
 
-            // Another host (no agent pages) still gets the built-in defaults.
+            // Another host (no agent pages) still gets the built-in defaults
+            // — but only for gateway-class statuses; an origin 403 passes
+            // through untouched.
+            let mut s = session("GET", "/x", "other.example.com").await;
+            let mut resp = ResponseHeader::build_no_case(502, None).unwrap();
+            let result = plugin
+                .handle_response(&mut s, &mut Ctx::default(), &mut resp)
+                .await
+                .unwrap();
+            assert_eq!(ResponsePluginResult::Modified, result);
             let mut s = session("GET", "/x", "other.example.com").await;
             let mut resp = ResponseHeader::build_no_case(403, None).unwrap();
             let result = plugin
                 .handle_response(&mut s, &mut Ctx::default(), &mut resp)
                 .await
                 .unwrap();
-            assert_eq!(ResponsePluginResult::Modified, result);
+            assert_eq!(ResponsePluginResult::Unchanged, result);
         }
     }
 }

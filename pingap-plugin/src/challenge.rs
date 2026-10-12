@@ -205,19 +205,154 @@ pub(crate) fn build_challenge_response(
     HttpResponse::builder(StatusCode::SERVICE_UNAVAILABLE)
         .body(body)
         .header(HTTP_HEADER_CONTENT_HTML.clone())
+        .header(edge_server_header())
+        .header(mitigated_header(Mitigation::Challenge))
         .no_store()
         .finish()
 }
 
-/// A simple 403 HTML block page.
-pub(crate) fn block_page(request_id: &str, reason: &str) -> HttpResponse {
-    let body = format!(
-        "<html><body><h1>403 Forbidden</h1><p>Request blocked by PingWAF.</p>\
-<p>Reason: {reason}</p><p>Request ID: {request_id}</p></body></html>"
+// ─────────────────────────────────────────────────────────────
+// Branded short-circuit pages
+// ─────────────────────────────────────────────────────────────
+
+/// The `Server` header every edge-generated response carries: visitors (and
+/// site owners) can tell at a glance the response came through PingWAF, the
+/// way `server: cloudflare` works.
+pub(crate) fn edge_server_header() -> (header::HeaderName, HeaderValue) {
+    (header::SERVER, HeaderValue::from_static("pingwaf"))
+}
+
+/// What kind of edge action produced the response, mirroring Cloudflare's
+/// `cf-mitigated`: a visitor (or the site owner debugging a report) sees from
+/// the header alone whether security intervened.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Mitigation {
+    /// A WAF verdict or defense-mode IP block.
+    Block,
+    /// A challenge was issued and must be solved.
+    Challenge,
+}
+
+impl Mitigation {
+    fn value(self) -> &'static str {
+        match self {
+            Mitigation::Block => "block",
+            Mitigation::Challenge => "challenge",
+        }
+    }
+}
+
+fn mitigated_header(
+    mitigation: Mitigation,
+) -> (header::HeaderName, HeaderValue) {
+    (
+        header::HeaderName::from_static("x-pingwaf-mitigated"),
+        HeaderValue::from_static(mitigation.value()),
+    )
+}
+
+/// Minimal HTML escaping for values embedded in brand pages. Reasons come
+/// from rule descriptions today, but any future user-influenced text keeps
+/// the page inert this way.
+fn escape_html(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Wraps short-circuit page content in the same visual family as the
+/// error_page plugin's built-in templates (shared `PW_STYLE` partial).
+///
+/// `details` rows are pre-built `<div class="row">…</div>` markup — callers
+/// escape their values via [`escape_html`].
+fn brand_page(
+    title: &str,
+    icon: &str,
+    code_label: &str,
+    heading: &str,
+    message_html: &str,
+    details: &str,
+) -> String {
+    format!(
+        r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title} · PingWAF</title>
+<style>{pw_style}</style>
+</head>
+<body>
+<div class="card">
+  <div class="icon"><svg viewBox="0 0 24 24">{icon}</svg></div>
+  <div class="code">{code_label}</div>
+  <h1>{heading}</h1>
+  <p class="msg">{message_html}</p>
+  <div class="details">{details}</div>
+  <p class="brand">Protected by <b>PingWAF</b></p>
+</div>
+</body>
+</html>"##,
+        title = escape_html(title),
+        icon = icon,
+        code_label = escape_html(code_label),
+        heading = escape_html(heading),
+        message_html = message_html,
+        details = details,
+        pw_style = super::error_page::PW_STYLE,
+    )
+}
+
+/// One `Request ID`/value pair for a brand page's details block.
+fn detail_row(label: &str, value: &str) -> String {
+    format!(
+        r#"<div class="row"><span class="k">{label}</span><span class="v">{}</span></div>"#,
+        escape_html(value)
+    )
+}
+
+/// The shared block-page body: makes unmistakably clear that *PingWAF
+/// Security* issued the block — the exact distinction that used to be lost
+/// when origin errors borrowed a WAF-styled page.
+fn block_body(request_id: &str, reason: &str) -> String {
+    let details = format!(
+        "{}{}{}",
+        detail_row("Request ID", request_id),
+        detail_row("Reason", reason),
+        detail_row(
+            "Time",
+            &chrono::Utc::now()
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        ),
     );
+    brand_page(
+        "Request Blocked",
+        r#"<path d="M12 3l7 3v5.5c0 4.4-2.9 7.6-7 9-4.1-1.4-7-4.6-7-9V6z"/><path d="M9.6 9.6l4.8 4.8M14.4 9.6l-4.8 4.8"/>"#,
+        "Error 403",
+        "Request Blocked",
+        "Your request was blocked by <b>PingWAF Security</b> before it reached \
+the website. If you believe this is a mistake, contact the site \
+administrator with the Request ID below.",
+        &details,
+    )
+}
+
+/// A 403 HTML block page.
+pub(crate) fn block_page(request_id: &str, reason: &str) -> HttpResponse {
     HttpResponse::builder(StatusCode::FORBIDDEN)
-        .body(body)
+        .body(block_body(request_id, reason))
         .header(HTTP_HEADER_CONTENT_HTML.clone())
+        .header(edge_server_header())
+        .header(mitigated_header(Mitigation::Block))
         .no_store()
         .finish()
 }
@@ -230,10 +365,19 @@ pub(crate) fn basic_auth_page(
     reason: &str,
 ) -> HttpResponse {
     let challenge = format!(r#"Basic realm="{realm}""#);
-    let body = format!(
-        "<html><body><h1>401 Unauthorized</h1>\
-<p>This resource requires basic authentication.</p>\
-<p>Reason: {reason}</p><p>Request ID: {request_id}</p></body></html>"
+    let details = format!(
+        "{}{}",
+        detail_row("Request ID", request_id),
+        detail_row("Reason", reason),
+    );
+    let body = brand_page(
+        "Authentication Required",
+        r#"<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/>"#,
+        "Error 401",
+        "Authentication Required",
+        "This resource requires basic authentication. Sign in with the \
+credentials the site owner gave you to continue.",
+        &details,
     );
     HttpResponse::builder(StatusCode::UNAUTHORIZED)
         .body(body)
@@ -244,6 +388,7 @@ pub(crate) fn basic_auth_page(
                 HeaderValue::from_static("Basic realm=\"Restricted\""),
             ),
         ))
+        .header(edge_server_header())
         .no_store()
         .finish()
 }
@@ -253,10 +398,15 @@ pub(crate) fn basic_auth_page(
 /// log pipeline live, so the dashboard still shows the traffic.
 pub(crate) fn paused_page(request_id: &str) -> HttpResponse {
     const RETRY_AFTER_SECS: &str = "3600";
-    let body = format!(
-        "<html><body><h1>503 Service Unavailable</h1>\
-<p>This site is temporarily paused.</p>\
-<p>Request ID: {request_id}</p></body></html>"
+    let details = detail_row("Request ID", request_id);
+    let body = brand_page(
+        "Site Paused",
+        r#"<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/>"#,
+        "Error 503",
+        "Site Temporarily Paused",
+        "The site owner has paused this website. It should be back shortly — \
+please try again later.",
+        &details,
     );
     HttpResponse::builder(StatusCode::SERVICE_UNAVAILABLE)
         .body(body)
@@ -265,6 +415,7 @@ pub(crate) fn paused_page(request_id: &str) -> HttpResponse {
             header::RETRY_AFTER,
             HeaderValue::from_static(RETRY_AFTER_SECS),
         ))
+        .header(edge_server_header())
         .no_store()
         .finish()
 }
@@ -274,11 +425,16 @@ pub(crate) fn paused_page(request_id: &str) -> HttpResponse {
 /// instead of proxied unprotected.
 pub(crate) fn fail_closed_page(request_id: &str) -> HttpResponse {
     const RETRY_AFTER_SECS: &str = "30";
-    let body = format!(
-        "<html><body><h1>503 Service Unavailable</h1>\
-<p>This site is temporarily unavailable: the edge node cannot reach its \
-control plane and is configured to refuse traffic in the meantime.</p>\
-<p>Request ID: {request_id}</p></body></html>"
+    let details = detail_row("Request ID", request_id);
+    let body = brand_page(
+        "Temporarily Unavailable",
+        r#"<path d="M12 3l7 3v5.5c0 4.4-2.9 7.6-7 9-4.1-1.4-7-4.6-7-9V6z"/><path d="M12 8v4M12 15h.01"/>"#,
+        "Error 503",
+        "Temporarily Unavailable",
+        "This site is protected by PingWAF in fail-closed mode. The edge node \
+cannot reach its control plane right now, so requests are refused instead \
+of proxied unprotected. Please retry in a moment.",
+        &details,
     );
     HttpResponse::builder(StatusCode::SERVICE_UNAVAILABLE)
         .body(body)
@@ -287,6 +443,7 @@ control plane and is configured to refuse traffic in the meantime.</p>\
             header::RETRY_AFTER,
             HeaderValue::from_static(RETRY_AFTER_SECS),
         ))
+        .header(edge_server_header())
         .no_store()
         .finish()
 }
@@ -299,17 +456,37 @@ pub(crate) fn rate_limit_page(
     retry_after_secs: u64,
 ) -> HttpResponse {
     let retry_hint = if retry_after_secs > 0 {
-        format!("<p>Please try again in about {retry_after_secs} seconds.</p>")
+        format!("Please try again in about <b>{retry_after_secs}</b> seconds.")
     } else {
-        String::new()
+        "Please slow down and try again shortly.".to_string()
     };
-    let body = format!(
-        "<html><body><h1>429 Too Many Requests</h1><p>Rate limit exceeded.</p>\
-<p>Reason: {reason}</p>{retry_hint}<p>Request ID: {request_id}</p></body></html>"
+    let mut details = format!(
+        "{}{}",
+        detail_row("Request ID", request_id),
+        detail_row("Reason", reason),
+    );
+    if retry_after_secs > 0 {
+        details.push_str(&detail_row(
+            "Retry after",
+            &format!("{retry_after_secs}s"),
+        ));
+    }
+    let body = brand_page(
+        "Rate Limit Exceeded",
+        r#"<circle cx="12" cy="13" r="8"/><path d="M12 13V9M9 2h6"/>"#,
+        "Error 429",
+        "Rate Limit Exceeded",
+        &format!(
+            "You have sent too many requests in a short period of time. \
+{retry_hint}"
+        ),
+        &details,
     );
     let mut response = HttpResponse::builder(StatusCode::TOO_MANY_REQUESTS)
         .body(body)
         .header(HTTP_HEADER_CONTENT_HTML.clone())
+        .header(edge_server_header())
+        .header(mitigated_header(Mitigation::Block))
         .no_store();
     if retry_after_secs > 0 {
         response = response.header((
@@ -872,6 +1049,87 @@ mod tests {
     use pingap_core::PluginStep;
     use pingora::proxy::Session;
     use tokio_test::io::Builder;
+
+    /// Reads one response header value, case-insensitively.
+    fn header_value(resp: &HttpResponse, name: &str) -> Option<String> {
+        resp.headers
+            .as_ref()?
+            .iter()
+            .find(|(n, _)| n.as_str().eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.to_str().unwrap_or_default().to_string())
+    }
+
+    #[test]
+    fn block_page_is_branded_and_stamped() {
+        let resp = block_page("req-abc", "SQLi rule matched");
+        assert_eq!(StatusCode::FORBIDDEN, resp.status);
+        let body = String::from_utf8_lossy(&resp.body).to_string();
+        // The page must make clear *who* blocked the request, and carry the
+        // identifiers a site owner needs to look the event up.
+        assert!(body.contains("Request Blocked"), "body: {body}");
+        assert!(body.contains("PingWAF Security"), "body: {body}");
+        assert!(body.contains("req-abc"), "body: {body}");
+        assert!(body.contains("SQLi rule matched"), "body: {body}");
+        assert_eq!(Some("pingwaf"), header_value(&resp, "server").as_deref());
+        assert_eq!(
+            Some("block"),
+            header_value(&resp, "x-pingwaf-mitigated").as_deref()
+        );
+    }
+
+    #[test]
+    fn block_page_escapes_reason_html() {
+        let resp = block_page("req-1", r#"<script>alert("x")</script>"#);
+        let body = String::from_utf8_lossy(&resp.body).to_string();
+        assert!(!body.contains("<script>"), "body: {body}");
+        assert!(body.contains("&lt;script&gt;"), "body: {body}");
+    }
+
+    #[test]
+    fn challenge_response_carries_mitigation_headers() {
+        let resp = build_challenge_response(
+            "req-ch",
+            "/original",
+            "site-1",
+            0,
+            ChallengeKind::Js,
+        );
+        assert_eq!(StatusCode::SERVICE_UNAVAILABLE, resp.status);
+        assert_eq!(Some("pingwaf"), header_value(&resp, "server").as_deref());
+        assert_eq!(
+            Some("challenge"),
+            header_value(&resp, "x-pingwaf-mitigated").as_deref()
+        );
+    }
+
+    #[test]
+    fn status_pages_are_branded_edge_responses() {
+        let paused = paused_page("req-p");
+        assert_eq!(StatusCode::SERVICE_UNAVAILABLE, paused.status);
+        let body = String::from_utf8_lossy(&paused.body).to_string();
+        assert!(body.contains("Temporarily Paused"), "body: {body}");
+        assert_eq!(Some("pingwaf"), header_value(&paused, "server").as_deref());
+        // A paused site is a site-owner action, not a security mitigation:
+        // no mitigated header, or dashboards would read it as a block.
+        assert_eq!(None, header_value(&paused, "x-pingwaf-mitigated"));
+
+        let rate = rate_limit_page("req-r", "over threshold", 30);
+        assert_eq!(StatusCode::TOO_MANY_REQUESTS, rate.status);
+        let body = String::from_utf8_lossy(&rate.body).to_string();
+        assert!(body.contains("Rate Limit Exceeded"), "body: {body}");
+        assert_eq!(
+            Some("block"),
+            header_value(&rate, "x-pingwaf-mitigated").as_deref()
+        );
+
+        let auth = basic_auth_page("req-a", "restricted", "login required");
+        assert_eq!(StatusCode::UNAUTHORIZED, auth.status);
+        assert_eq!(Some("pingwaf"), header_value(&auth, "server").as_deref());
+
+        let closed = fail_closed_page("req-f");
+        assert_eq!(StatusCode::SERVICE_UNAVAILABLE, closed.status);
+        assert_eq!(Some("pingwaf"), header_value(&closed, "server").as_deref());
+    }
 
     #[test]
     fn safe_redirect_target_keeps_same_origin_paths_only() {

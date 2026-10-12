@@ -4297,7 +4297,7 @@ advanced_mode = true
             .as_deref()
             .map(String::from_utf8_lossy)
             .unwrap_or_default();
-        assert!(body.contains("temporarily paused"), "body: {body}");
+        assert!(body.contains("Temporarily Paused"), "body: {body}");
         assert_eq!(
             entry.response_body_size,
             body.len() as u64,
@@ -4507,7 +4507,10 @@ advanced_mode = true
             .as_deref()
             .map(String::from_utf8_lossy)
             .unwrap_or_default();
-        assert!(body.contains("403 Forbidden"), "body: {body}");
+        assert!(
+            body.contains("Request Blocked") && body.contains("PingWAF"),
+            "body: {body}"
+        );
         assert_eq!(entry.response_body_size, body.len() as u64);
         assert!(!entry.response_body_truncated);
     }

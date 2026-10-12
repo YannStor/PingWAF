@@ -24,10 +24,11 @@ enum Segment {
     Version,
     Content,
     ErrorType,
+    RequestId,
 }
 
-/// A pre-parsed error page template with `{{version}}`, `{{content}}` and
-/// `{{error_type}}` placeholders.
+/// A pre-parsed error page template with `{{version}}`, `{{content}}`,
+/// `{{error_type}}` and `{{request_id}}` placeholders.
 #[derive(Debug, Clone)]
 pub struct ErrorTemplate {
     segments: Vec<Segment>,
@@ -51,6 +52,7 @@ impl ErrorTemplate {
                 "version" => Segment::Version,
                 "content" => Segment::Content,
                 "error_type" => Segment::ErrorType,
+                "request_id" => Segment::RequestId,
                 // Not a placeholder: keep the text and look past it.
                 _ => {
                     let end = start + 2 + len + 2;
@@ -103,9 +105,14 @@ impl ErrorTemplate {
         version: &str,
         content: &str,
         error_type: &str,
+        request_id: &str,
     ) -> String {
         let mut out = String::with_capacity(
-            self.literal_len + version.len() + content.len() + error_type.len(),
+            self.literal_len
+                + version.len()
+                + content.len()
+                + error_type.len()
+                + request_id.len(),
         );
         for segment in &self.segments {
             out.push_str(match segment {
@@ -113,6 +120,7 @@ impl ErrorTemplate {
                 Segment::Version => version,
                 Segment::Content => content,
                 Segment::ErrorType => error_type,
+                Segment::RequestId => request_id,
             });
         }
         out
@@ -130,9 +138,13 @@ mod tests {
         let expected = template
             .replace("{{version}}", "1.2.3")
             .replace("{{content}}", "boom")
-            .replace("{{error_type}}", "InternalError");
+            .replace("{{error_type}}", "InternalError")
+            .replace("{{request_id}}", "req-1");
         let parsed = ErrorTemplate::new(template);
-        assert_eq!(expected, parsed.render("1.2.3", "boom", "InternalError"));
+        assert_eq!(
+            expected,
+            parsed.render("1.2.3", "boom", "InternalError", "req-1")
+        );
         assert_eq!(false, parsed.is_json());
     }
 
@@ -144,15 +156,24 @@ mod tests {
         assert_eq!(true, parsed.is_json());
         assert_eq!(
             r#"{"v":"1","e":"T","m":"c","x":"{{other}}","y":"{{"}"#,
-            parsed.render("1", "c", "T")
+            parsed.render("1", "c", "T", "r")
         );
         // A placeholder can appear more than once, and text without any is
         // returned as it is.
         assert_eq!(
             "a-a",
-            ErrorTemplate::new("{{content}}-{{content}}").render("v", "a", "t")
+            ErrorTemplate::new("{{content}}-{{content}}")
+                .render("v", "a", "t", "r")
         );
-        assert_eq!("plain", ErrorTemplate::new("plain").render("v", "c", "t"));
-        assert_eq!("", ErrorTemplate::new("").render("v", "c", "t"));
+        assert_eq!(
+            "plain",
+            ErrorTemplate::new("plain").render("v", "c", "t", "r")
+        );
+        assert_eq!("", ErrorTemplate::new("").render("v", "c", "t", "r"));
+        // The request id placeholder renders the id it is given.
+        assert_eq!(
+            "id=r9",
+            ErrorTemplate::new("id={{request_id}}").render("v", "c", "t", "r9")
+        );
     }
 }

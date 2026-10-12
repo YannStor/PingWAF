@@ -1695,6 +1695,12 @@ impl ProxyHttp for Server {
         self.handle_response_plugin(session, ctx, upstream_response)
             .await?;
 
+        // Identity stamp: every response leaving the edge says `server:
+        // pingwaf`, the way `server: cloudflare` does. Visitors and site
+        // owners see from the response alone that the edge served it, and a
+        // support request with the x-request-id is attributable in seconds.
+        let _ = upstream_response.insert_header("server", "pingwaf");
+
         // add server-timing response header
         if self.enable_server_timing {
             let _ = upstream_response
@@ -1878,10 +1884,14 @@ impl ProxyHttp for Server {
         }
 
         let mut resp = error_response_header(code);
+        // The edge generated this error itself (upstream unreachable, …) —
+        // stamp it like every other edge response.
+        let _ = resp.insert_header("server", "pingwaf");
         let content = self.error_template.render(
             pingap_util::get_pkg_version(),
             &e.to_string(),
             error_type,
+            ctx.state.request_id.as_deref().unwrap_or(""),
         );
         let buf = Bytes::from(content);
         let content_type = if self.error_template.is_json() {
