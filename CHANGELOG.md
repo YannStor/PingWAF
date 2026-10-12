@@ -8,6 +8,62 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.25.6] — 2026-10-12
+
+The diagnosis and presentation batch — fixes the four defects that stalled
+live certificate issuance (the pursearea.cn incident), and makes every
+response exit path self-identifying so a blocked page can never be mistaken
+for an origin failure again (Cloudflare's model).
+
+### 🐛 Bug Fixes
+
+- *(site API)* **A missing `max_tls_version` no longer means "max = lowest".**
+  `TlsPosture::merged()` treated an absent ceiling as `lowest_tls_version`
+  itself, so any site saved without an explicit maximum rejected its own
+  HTTPS handshake with `unsupported TLS version`. Absence now means
+  unbounded — the full 1.0–1.3 range is accepted.
+- *(site API)* **Global certificate creation is atomic.** Certificate insert,
+  TLS posture save and the site's `ssl_enabled` flip now run in one
+  transaction; the ACME announcement, certificate event and config-push
+  side effects fire only after the commit succeeds. A mid-flight failure
+  previously stranded a half-created certificate with no event trail.
+- *(control plane)* **Agent registration no longer auto-binds the owner's
+  only site.** With exactly one site in the account, a registering agent
+  was silently pinned to it; any later site/SSL save then pushed a payload
+  scoped to that one site, so the unbound remainder of the fleet silently
+  dropped the site — the root cause of the certificate task that sat in
+  Pending forever. Agents now register unbound and receive the
+  full-owner-bundle payload until explicitly bound.
+- *(control plane)* **Config pushes reach every agent whose visibility
+  includes the site.** Push delivery is derived from actual agent
+  visibility (bound agents get site-scoped payloads, unbound ones the
+  owner-wide bundle) instead of assuming a single-site owner, and a
+  skipped push is logged as a warning instead of debug noise.
+- *(site API)* **Deleting a certificate no longer trips an FK violation.**
+  The deletion event is written with `certificate_id = None` — the event
+  row referenced the certificate being cascade-deleted.
+
+### ✨ Features
+
+- **Every response identifies the edge.** Responses from both exit paths —
+  origin passthrough and edge-generated errors — carry `server: pingwaf`.
+- **Origin 4xx answers pass through untouched.** The default error-page
+  plugin no longer intercepts 403/429 (a misattributed "Access Denied"
+  page that masked origin problems); defaults now cover only 502/503/504
+  and clearly say "Origin Server Error — this is not a security block".
+- **Cloudflare-parity mitigation signalling.** WAF block pages add
+  `x-pingwaf-mitigated: block`, challenge and rate-limit pages add
+  `challenge` — the `cf-mitigated` equivalent, machine-readable by
+  monitoring and integrations.
+- **Branded block, challenge and status pages.** All WAF-terminated pages
+  (block, challenge, basic-auth, paused site, fail-closed, rate-limit) share
+  the branded card layout, stamp the request id / reason / time, and
+  HTML-escape rule-provided reasons.
+- **Branded edge error template.** The gateway's own failure page (upstream
+  unreachable, timeouts) is rewritten in the same visual family and now
+  shows the request id, error type and detail — with the same explicit
+  "this is not a security block" wording.
+
 ## [PingWAF 0.25.5] — 2026-10-12
 
 The identity split: global configuration stays in the sidebar's account
