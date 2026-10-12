@@ -1358,8 +1358,8 @@
       "ruleActionHint": "先に「アクセス制限 → Basic 認証」で認証情報を設定してください。"
     },
     "account": {
-      "title": "アカウント",
-      "description": "プロフィール・パスワード・API キーを管理します。",
+      "title": "API キーとユーザー",
+      "description": "API キーとダッシュボードアカウントを管理します。プロフィールやパスワードは右上の「アカウント設定」から変更してください。",
       "forceChange": {
         "title": "新しいパスワードを設定",
         "description": "セキュリティのため、初回ログイン時に初期パスワードを変更する必要があります。",
@@ -1386,7 +1386,9 @@
         "disable": "無効化",
         "enable": "有効化",
         "disableTitle": "アカウントを無効化",
-        "disableDescription": "無効化されるとログインできなくなり、既存のセッションも直ちに失効します。"
+        "disableDescription": "無効化されるとログインできなくなり、既存のセッションも直ちに失効します。",
+        "colLastLogin": "最終ログイン",
+        "neverLoggedIn": "未ログイン"
       }
     },
     "settings": {
@@ -1629,7 +1631,18 @@
       "aboutProject": "プロジェクト",
       "aboutOpenProject": "プロジェクトページを開く",
       "aboutNote": "リリース、ドキュメント、課題の追跡は上記リポジトリで行われます。",
-      "aboutGrpcPlaintext": "gRPC コントロールプレーンが平文で通信しています（TLS 無効）。エージェント接続とルール同期は暗号化されていません。grpc_tls_mode = \"tls\" を設定して暗号化を復元してください。"
+      "aboutGrpcPlaintext": "gRPC コントロールプレーンが平文で通信しています（TLS 無効）。エージェント接続とルール同期は暗号化されていません。grpc_tls_mode = \"tls\" を設定して暗号化を復元してください。",
+      "keyCreator": "作成者",
+      "keySystem": "システム",
+      "revokeSystemTitle": "システムキーを削除",
+      "revokeSystemDescription": "このキーはエージェント登録やオールインワン起動のためにシステムが自動生成したものです。削除すると、新しいキーを発行するまで依存するノードの再登録ができなくなります。慎重に操作してください。",
+      "revokeSystemConfirmLabel": "確認のためキー名 {name} を入力してください",
+      "revokeSystemMismatch": "入力された名前がキー名と一致しません。",
+      "passkeySwitch": "パスキーログインを有効化",
+      "passkeySwitchHint": "オフにするとログイン画面にパスキーが表示されなくなり、新しいパスキーの登録もできません。既存の資格情報は保持され、再度有効化すると復帰します。",
+      "passkeySwitchDescription": "デプロイ全体のスイッチ。パスキーの登録と管理は右上の「アカウント設定」で行います。",
+      "passkeySwitchOn": "パスキーログインを有効にしました。",
+      "passkeySwitchOff": "パスキーログインを無効にしました。"
     },
     "geo": {
       "title": "地域制限",
@@ -2105,6 +2118,10 @@
         "headerCf": "CF-Connecting-IP（Cloudflare）",
         "headerTrueClient": "True-Client-IP"
       }
+    },
+    "profile": {
+      "title": "アカウント設定",
+      "description": "表示名・ログイン名・パスワード・パスキーを管理します。"
     }
   },
   "challengeLevels": {

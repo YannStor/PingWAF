@@ -1358,8 +1358,8 @@
       "ruleActionHint": "需先在「访问限制 → Basic 认证」中配置凭据。"
     },
     "account": {
-      "title": "账户",
-      "description": "管理个人资料、登录密码与 API 密钥。",
+      "title": "API 密钥与用户",
+      "description": "管理 API 密钥与后台账户。个人资料与登录密码请通过右上角\"账户设置\"修改。",
       "forceChange": {
         "title": "设置新密码",
         "description": "出于安全考虑，首次登录需要修改初始密码。",
@@ -1386,7 +1386,9 @@
         "disable": "禁用",
         "enable": "启用",
         "disableTitle": "禁用账户",
-        "disableDescription": "禁用后该账户将无法登录，现有会话立即失效。"
+        "disableDescription": "禁用后该账户将无法登录，现有会话立即失效。",
+        "colLastLogin": "上次登录",
+        "neverLoggedIn": "从未登录"
       }
     },
     "settings": {
@@ -1629,7 +1631,18 @@
       "aboutProject": "项目地址",
       "aboutOpenProject": "打开项目页面",
       "aboutNote": "版本发布、文档与问题跟踪均在上面的仓库中进行。",
-      "aboutGrpcPlaintext": "gRPC 控制面正在以明文方式提供服务（TLS 已关闭）。Agent 连接与规则同步均未加密——请设置 grpc_tls_mode = \"tls\" 以恢复加密。"
+      "aboutGrpcPlaintext": "gRPC 控制面正在以明文方式提供服务（TLS 已关闭）。Agent 连接与规则同步均未加密——请设置 grpc_tls_mode = \"tls\" 以恢复加密。",
+      "keyCreator": "创建人",
+      "keySystem": "系统",
+      "revokeSystemTitle": "删除系统密钥",
+      "revokeSystemDescription": "这是系统自动生成的密钥，用于节点注册或一体机自举。删除后，依赖它的节点将无法重新注册，直到重新生成密钥。请谨慎操作。",
+      "revokeSystemConfirmLabel": "请输入密钥名称 {name} 以确认删除",
+      "revokeSystemMismatch": "输入的名称与密钥名称不一致。",
+      "passkeySwitch": "启用 Passkey 登录",
+      "passkeySwitchHint": "关闭后登录页不再提供 Passkey 登录，也无法绑定新的 Passkey；已绑定的凭据会保留，重新开启后即可恢复使用。",
+      "passkeySwitchDescription": "部署级总开关。Passkey 的绑定与管理在右上角\"账户设置\"中。",
+      "passkeySwitchOn": "已启用 Passkey 登录。",
+      "passkeySwitchOff": "已禁用 Passkey 登录。"
     },
     "geo": {
       "title": "地域限制",
@@ -2105,6 +2118,10 @@
         "headerCf": "CF-Connecting-IP（Cloudflare）",
         "headerTrueClient": "True-Client-IP"
       }
+    },
+    "profile": {
+      "title": "账户设置",
+      "description": "管理个人资料、登录名、登录密码与 Passkey。"
     }
   },
   "challengeLevels": {

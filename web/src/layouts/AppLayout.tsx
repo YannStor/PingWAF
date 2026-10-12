@@ -47,6 +47,7 @@ const crumbKeys: Record<string, string> = {
   rewrite: 'pages.rewrite.title',
   'error-pages': 'pages.errorPages.title',
   account: 'pages.account.title',
+  profile: 'pages.profile.title',
   settings: 'pages.settings.title',
   logs: 'pages.logs.title',
   assistant: 'pages.assistant.title',
@@ -269,7 +270,9 @@ export function AppLayout() {
                     icon={<UserCircle className="h-4 w-4" />}
                     onClick={() => {
                       setUserMenuOpen(false)
-                      navigate('/account')
+                      // Personal settings (profile, password, passkeys) —
+                      // /account in the sidebar is global configuration only.
+                      navigate('/profile')
                     }}
                   >
                     {t('user.account')}

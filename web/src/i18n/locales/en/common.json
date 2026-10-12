@@ -1358,8 +1358,8 @@
       "ruleActionHint": "Configure credentials on the Access control → Basic auth tab first."
     },
     "account": {
-      "title": "Account",
-      "description": "Manage your profile, sign-in password and API keys.",
+      "title": "API Keys & Users",
+      "description": "Manage API keys and dashboard accounts. For your profile and sign-in password, use \"Account settings\" in the top-right menu.",
       "forceChange": {
         "title": "Set a new password",
         "description": "For security, the initial password must be replaced before continuing.",
@@ -1386,7 +1386,9 @@
         "disable": "Disable",
         "enable": "Enable",
         "disableTitle": "Disable account",
-        "disableDescription": "A disabled account cannot sign in and its sessions stop working immediately."
+        "disableDescription": "A disabled account cannot sign in and its sessions stop working immediately.",
+        "colLastLogin": "Last login",
+        "neverLoggedIn": "Never signed in"
       }
     },
     "settings": {
@@ -1629,7 +1631,18 @@
       "aboutProject": "Project",
       "aboutOpenProject": "Open project page",
       "aboutNote": "Releases, documentation and issue tracking all live in the repository above.",
-      "aboutGrpcPlaintext": "The gRPC control plane is serving plaintext traffic (TLS disabled). Agent connections and rule syncs are unencrypted — set grpc_tls_mode = \"tls\" to restore encryption."
+      "aboutGrpcPlaintext": "The gRPC control plane is serving plaintext traffic (TLS disabled). Agent connections and rule syncs are unencrypted — set grpc_tls_mode = \"tls\" to restore encryption.",
+      "keyCreator": "Creator",
+      "keySystem": "System",
+      "revokeSystemTitle": "Delete system key",
+      "revokeSystemDescription": "This key was minted by the system for agent enrollment or all-in-one bootstrap. Deleting it stops dependent nodes from re-registering until a new key is issued. Proceed with care.",
+      "revokeSystemConfirmLabel": "Type the key name {name} to confirm deletion",
+      "revokeSystemMismatch": "The typed name does not match the key name.",
+      "passkeySwitch": "Enable passkey sign-in",
+      "passkeySwitchHint": "When off, the login form no longer offers passkeys and new passkeys cannot be bound. Existing credentials are kept and work again once re-enabled.",
+      "passkeySwitchDescription": "Deployment-wide switch. Passkey binding and management live under \"Account settings\" in the top-right menu.",
+      "passkeySwitchOn": "Passkey sign-in enabled.",
+      "passkeySwitchOff": "Passkey sign-in disabled."
     },
     "geo": {
       "title": "Geo Restrictions",
@@ -2105,6 +2118,10 @@
         "headerCf": "CF-Connecting-IP (Cloudflare)",
         "headerTrueClient": "True-Client-IP"
       }
+    },
+    "profile": {
+      "title": "Account settings",
+      "description": "Manage your display name, login name, password and passkeys."
     }
   },
   "challengeLevels": {

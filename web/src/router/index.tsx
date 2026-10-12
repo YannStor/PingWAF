@@ -18,6 +18,7 @@ import { AssistantPage } from '@/pages/AssistantPage'
 import { SettingsPage } from '@/pages/SettingsPage'
 import { NotificationsPage } from '@/pages/NotificationsPage'
 import { AccountPage } from '@/pages/AccountPage'
+import { ProfilePage } from '@/pages/ProfilePage'
 import { BotPage as BotProtectionPage } from '@/pages/sites/BotPage'
 import {
   ProtectionPage,
@@ -128,6 +129,9 @@ export const router = createBrowserRouter([
       { path: 'ssl', element: <GlobalSslPage /> },
       { path: 'traffic', element: <GlobalTrafficPage /> },
       { path: 'account', element: <AccountPage /> },
+      // Personal settings (profile, password, passkeys) — reached from the
+      // top-right user menu, deliberately absent from the sidebar.
+      { path: 'profile', element: <ProfilePage /> },
       { path: 'notifications', element: <NotificationsPage /> },
       { path: 'settings', element: <SettingsPage /> },
       { path: '*', element: <NotFoundPage /> },
