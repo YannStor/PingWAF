@@ -27,7 +27,7 @@ use pingap_cache::{HttpCache, new_cache_backend};
 use pingap_config::{PluginCategory, PluginConf};
 use pingap_core::{
     Ctx, HttpResponse, Plugin, PluginStep, RequestPluginResult,
-    ensure_client_ip, get_cache_key, get_host,
+    ResponsePluginResult, ensure_client_ip, get_cache_key, get_host,
 };
 use pingap_util::IpRules;
 use pingora::cache::CacheOptionOverrides;
@@ -37,6 +37,7 @@ use pingora::cache::key::CacheHashKey;
 use pingora::cache::lock::{CacheKeyLock, CacheLock};
 use pingora::cache::predictor::{CacheablePredictor, Predictor};
 use pingora::http::RequestHeader;
+use pingora::http::ResponseHeader;
 use pingora::proxy::Session;
 use pingwaf_agent::PingWafAgent;
 use pingwaf_agent::cache::{
@@ -119,6 +120,12 @@ struct SiteCacheRules {
     namespace: String,
     requirements: Requirements,
     rules: Vec<CompiledCacheRule>,
+    /// Site-level single-file cap in bytes; `None` follows the plugin's
+    /// global `max_file_size`.
+    max_file_size: Option<usize>,
+    /// Per-content-type single-file caps in bytes, keyed by the
+    /// `cache_type_of` families; a missing key follows `max_file_size`.
+    type_limits: HashMap<String, usize>,
 }
 
 /// A cached per-site rule set plus the fingerprint it was built from.
@@ -239,6 +246,50 @@ fn build_site_cache_rules(site: &AgentSiteRules) -> SiteCacheRules {
         namespace: site.domain.clone(),
         requirements,
         rules,
+        max_file_size: site
+            .cache_settings
+            .as_ref()
+            .and_then(|settings| settings.max_file_size_mb)
+            .map(|mb| mb as usize * 1024 * 1024),
+        type_limits: site
+            .cache_settings
+            .as_ref()
+            .map(|settings| {
+                settings
+                    .type_max_file_size_mb
+                    .iter()
+                    .map(|(key, mb)| (key.clone(), *mb as usize * 1024 * 1024))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+/// Maps a response `Content-Type` onto one of the control-plane's cache
+/// type families (`html/css/js/image/font/media/other`). Cloudflare-style:
+/// the response header is authoritative even when it disagrees with the
+/// URL extension.
+fn cache_type_of(content_type: &str) -> &'static str {
+    let ct = content_type
+        .split(';')
+        .next()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ct.contains("text/html") || ct.contains("xhtml") {
+        "html"
+    } else if ct.contains("text/css") {
+        "css"
+    } else if ct.contains("javascript") || ct.ends_with("/ecmascript") {
+        "js"
+    } else if ct.starts_with("image/") {
+        "image"
+    } else if ct.starts_with("font/") || ct.contains("font") {
+        "font"
+    } else if ct.starts_with("video/") || ct.starts_with("audio/") {
+        "media"
+    } else {
+        "other"
     }
 }
 
@@ -897,6 +948,54 @@ impl Plugin for Cache {
 
         Ok(RequestPluginResult::Continue)
     }
+
+    /// Tightens the single-file cap for this response before its body
+    /// streams: the control plane lets a site (and, per content type, each
+    /// response family) pin caps below the plugin's global `max_file_size`,
+    /// and pingora refuses to store a body that outgrows the tracker
+    /// (`ResponseTooLarge`). Must run at the response-header stage — the
+    /// tracker has to be in place before the first body chunk is counted.
+    ///
+    /// Without agent rules (static-file deployments) this is a no-op and
+    /// the global ceiling alone applies.
+    async fn handle_response(
+        &self,
+        session: &mut Session,
+        _ctx: &mut Ctx,
+        upstream_response: &mut ResponseHeader,
+    ) -> pingora::Result<ResponsePluginResult> {
+        let host = get_host(session.req_header());
+        let Some(host) = host.as_deref().filter(|host| !host.is_empty()) else {
+            return Ok(ResponsePluginResult::Unchanged);
+        };
+        let Some(site_rules) = self.resolve_site_rules(host) else {
+            return Ok(ResponsePluginResult::Unchanged);
+        };
+        let mut effective = site_rules.max_file_size;
+        let content_type = upstream_response
+            .headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        if !content_type.is_empty()
+            && let Some(type_cap) =
+                site_rules.type_limits.get(cache_type_of(content_type))
+        {
+            effective = Some(match effective {
+                Some(current) => current.min(*type_cap),
+                None => *type_cap,
+            });
+        }
+        if let Some(cap) = effective
+            && session
+                .cache
+                .max_file_size_bytes()
+                .is_none_or(|current| cap < current)
+        {
+            session.cache.set_max_file_size_bytes(cap);
+        }
+        Ok(ResponsePluginResult::Unchanged)
+    }
 }
 
 register_plugin!("cache", Cache);
@@ -1181,6 +1280,7 @@ purge_ip_list = ["192.168.1.1"]
             basic_auth: None,
             observation_mode: false,
             proxy_trust: pingwaf_agent::cache::ProxyTrustConfig::default(),
+            cache_settings: None,
         }
     }
 
@@ -1232,6 +1332,52 @@ purge_ip_list = ["192.168.1.1"]
         assert_eq!(None, site.rules[0].max_ttl);
         assert_eq!(None, site.rules[0].browser_ttl);
         assert!(!site.rules[0].cache_eligible);
+    }
+
+    #[test]
+    fn test_cache_type_classification() {
+        assert_eq!("html", cache_type_of("text/html; charset=utf-8"));
+        assert_eq!("html", cache_type_of("application/xhtml+xml"));
+        assert_eq!("css", cache_type_of("text/css"));
+        assert_eq!("js", cache_type_of("application/javascript"));
+        assert_eq!("js", cache_type_of("text/javascript; charset=utf-8"));
+        assert_eq!("image", cache_type_of("image/webp"));
+        assert_eq!("font", cache_type_of("font/woff2"));
+        assert_eq!("font", cache_type_of("application/font-woff"));
+        assert_eq!("media", cache_type_of("video/mp4"));
+        assert_eq!("media", cache_type_of("audio/mpeg"));
+        assert_eq!("other", cache_type_of("application/json"));
+        assert_eq!("other", cache_type_of(""));
+    }
+
+    #[test]
+    fn test_site_cache_settings_build_limits() {
+        let mut site = agent_site_rules(vec![cache_rule(
+            r#"http.request.uri.path contains "/static/""#,
+            true,
+        )]);
+        // No settings: everything follows the global ceiling.
+        let compiled = build_site_cache_rules(&site);
+        assert_eq!(None, compiled.max_file_size);
+        assert!(compiled.type_limits.is_empty());
+
+        site.cache_settings = Some(pingwaf_agent::cache::SiteCacheSettings {
+            max_file_size_mb: Some(8),
+            type_max_file_size_mb: [
+                ("image".to_string(), 20),
+                ("js".to_string(), 2),
+            ]
+            .into_iter()
+            .collect(),
+        });
+        let compiled = build_site_cache_rules(&site);
+        assert_eq!(Some(8 * 1024 * 1024), compiled.max_file_size);
+        assert_eq!(
+            Some(&(20 * 1024 * 1024)),
+            compiled.type_limits.get("image")
+        );
+        assert_eq!(Some(&(2 * 1024 * 1024)), compiled.type_limits.get("js"));
+        assert!(!compiled.type_limits.contains_key("html"));
     }
 
     #[test]

@@ -3,7 +3,9 @@ import type {
   EsConfig,
   EsSettingsView,
   EsTestResult,
+  GlobalCacheSettings,
   LogRetentionSettings,
+  UpdateGlobalCacheSettingsRequest,
   UpdateLogRetentionRequest,
 } from './types'
 
@@ -46,6 +48,17 @@ export const settingsApi = {
 
   saveLogRetention: (windows: UpdateLogRetentionRequest) =>
     apiClient.put<LogRetentionSettings>('/settings/log-retention', windows),
+
+  /**
+   * Cache ceiling — `/api/v1/settings/cache` (administrators only). The
+   * largest single cacheable object, the total disk budget, the master
+   * switch and the fallback edge TTL; everything rides inside each rule
+   * bundle, so a save reaches the edges with the next push.
+   */
+  getCache: () => apiClient.get<GlobalCacheSettings>('/settings/cache'),
+
+  saveCache: (payload: UpdateGlobalCacheSettingsRequest) =>
+    apiClient.put<GlobalCacheSettings>('/settings/cache', payload),
 }
 
 /** Drops `***` placeholders so a save never overwrites a real secret with a mask. */
@@ -80,6 +93,7 @@ export const settingsKeys = {
   all: ['settings'] as const,
   elasticsearch: () => [...settingsKeys.all, 'elasticsearch'] as const,
   logRetention: () => [...settingsKeys.all, 'log-retention'] as const,
+  cache: () => [...settingsKeys.all, 'cache'] as const,
 }
 
 export default settingsApi

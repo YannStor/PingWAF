@@ -13,9 +13,10 @@ use chrono::{DateTime, TimeZone, Utc};
 use pingwaf_proto::control_plane::{
     BasicAuthConfig, BasicAuthCredential, BotProtectionConfig, CacheRule,
     ChallengeConfig, CustomErrorPage, FailoverMode, GeoConfig,
-    HealthCheckConfig, IpAccessRule, RateLimitRule, RewriteOperation,
-    RewriteRule, RouteConfig, RuleBundle, Site, SiteConfig, SitePolicy,
-    SslConfig, UpstreamConfig, UpstreamPeer, WafConfig, WafRule,
+    GlobalCacheSettings, HealthCheckConfig, IpAccessRule, RateLimitRule,
+    RewriteOperation, RewriteRule, RouteConfig, RuleBundle, Site,
+    SiteCacheSettings, SiteConfig, SitePolicy, SslConfig, UpstreamConfig,
+    UpstreamPeer, WafConfig, WafRule,
 };
 use prost::Message;
 use prost_types::Timestamp;
@@ -438,6 +439,33 @@ fn cache_rule_to_proto(
         stale_while_revalidate_seconds: 0,
         enabled: row.enabled,
     }
+}
+
+/// Maps the site's cache-limit columns onto the proto message; `None` when
+/// the site overrides nothing (no cap, no type map), which keeps old bundles
+/// byte-identical.
+fn site_cache_settings_to_proto(
+    site: &site::Model,
+) -> Option<SiteCacheSettings> {
+    let type_limits: Option<std::collections::HashMap<String, u32>> = site
+        .cache_type_limits_mb
+        .as_ref()
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .map(|limits: std::collections::HashMap<String, i32>| {
+            limits
+                .into_iter()
+                .map(|(key, value)| (key, value.max(0) as u32))
+                .collect()
+        });
+    if site.cache_max_file_size_mb.is_none() && type_limits.is_none() {
+        return None;
+    }
+    Some(SiteCacheSettings {
+        max_file_size_mb: site
+            .cache_max_file_size_mb
+            .map(|value| value.max(0) as u32),
+        type_max_file_size_mb: type_limits.unwrap_or_default(),
+    })
 }
 
 fn ssl_to_proto(
@@ -1075,6 +1103,20 @@ pub async fn build_rule_bundle(
     // the agent can resolve a site's disconnected behaviour even for hosts
     // whose rule bundle was never synced.
     let site_policies = load_site_policies(db).await?;
+    // Global cache ceiling + site-level cache limits; both optional so an
+    // old row shape (or a read failure short of an error) degrades to the
+    // agent-side defaults.
+    let cache_settings_row = crate::api::cache_settings::load(db).await.ok();
+    let global_cache =
+        cache_settings_row.as_ref().map(|row| GlobalCacheSettings {
+            max_file_size_mb: Some(row.max_file_size_mb.max(0) as u32),
+            max_space_mb: Some(row.max_space_mb.max(0) as u32),
+            master_enabled: Some(row.master_enabled),
+            default_edge_ttl_seconds: Some(
+                row.default_edge_ttl_seconds.max(0) as u32
+            ),
+        });
+    let site_cache_settings = site_cache_settings_to_proto(site_row);
 
     let custom_rules: Vec<WafRule> =
         rules_rows.iter().map(rule_to_proto).collect();
@@ -1116,6 +1158,8 @@ pub async fn build_rule_bundle(
         observation_mode,
         site_policies,
         default_fail_open: Some(default_fail_open),
+        global_cache,
+        cache_settings: site_cache_settings,
     };
 
     bundle.config_hash = fingerprint(&bundle);

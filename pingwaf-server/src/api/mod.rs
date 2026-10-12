@@ -13,6 +13,7 @@ pub mod auth;
 pub mod blocked_ips;
 pub mod bot;
 pub mod cache;
+pub mod cache_settings;
 pub mod challenge;
 pub mod common;
 pub mod config_versions;
@@ -104,6 +105,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(debug::routes())
         .merge(system_tls::routes())
         .merge(defense::routes())
+        .merge(cache_settings::routes())
         .merge(api_protection::routes())
         .merge(ai::routes())
         .merge(mcp::routes())

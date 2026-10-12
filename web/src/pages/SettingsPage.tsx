@@ -105,6 +105,7 @@ const SETTINGS_NAV = [
   { id: 'control-plane-tls', labelKey: 'pages.settings.controlPlaneTls' },
   { id: 'observation-mode', labelKey: 'pages.settings.observationMode' },
   { id: 'api-protection', labelKey: 'pages.settings.apiProtection' },
+  { id: 'cache', labelKey: 'pages.settings.cache' },
   { id: 'ai-assistant', labelKey: 'pages.settings.aiAssistant' },
   { id: 'mcp', labelKey: 'pages.settings.mcp' },
   { id: 'elasticsearch', labelKey: 'pages.settings.elasticsearch' },
@@ -162,6 +163,13 @@ export function SettingsPage() {
               <ApiProtectionCard canWrite={canWrite} />
             ) : (
               <AdminOnlyCard title={t('pages.settings.apiProtection')} />
+            )}
+          </section>
+          <section id="cache" className="scroll-mt-6">
+            {isAdmin ? (
+              <CacheSettingsCard canWrite={canWrite} />
+            ) : (
+              <AdminOnlyCard title={t('pages.settings.cache')} />
             )}
           </section>
           <section id="ai-assistant" className="scroll-mt-6">
@@ -1567,6 +1575,200 @@ function ObservationModeCard({ canWrite }: { canWrite: boolean }) {
             <p className="flex items-start gap-2 text-xs leading-relaxed text-fg-subtle">
               <Eye weight="duotone" className="mt-0.5 h-4 w-4 shrink-0" />
               {t('pages.settings.observationModeHint')}
+            </p>
+          </>
+        )}
+      </CardBody>
+    </Card>
+  )
+}
+
+/* ── Global cache ceiling ───────────────────────────────────────────── */
+
+const CACHE_FILE_MAX = 1024
+const CACHE_SPACE_MAX = 1024 * 1024
+const CACHE_TTL_MAX = 30 * 24 * 3600
+
+function CacheSettingsCard({ canWrite }: { canWrite: boolean }) {
+  const { t } = useTranslation()
+  const toast = useToast()
+  const queryClient = useQueryClient()
+
+  const settings = useQuery({
+    queryKey: settingsKeys.cache(),
+    queryFn: () => settingsApi.getCache(),
+  })
+
+  const [fileSize, setFileSize] = useState('')
+  const [space, setSpace] = useState('')
+  const [defaultTtl, setDefaultTtl] = useState('')
+  const [errors, setErrors] = useState<Record<string, string>>({})
+
+  const save = useMutation({
+    mutationFn: (payload: {
+      max_file_size_mb?: number
+      max_space_mb?: number
+      default_edge_ttl_seconds?: number
+    }) => settingsApi.saveCache(payload),
+    onSuccess: (row) => {
+      queryClient.setQueryData(settingsKeys.cache(), row)
+      setFileSize('')
+      setSpace('')
+      setDefaultTtl('')
+      setErrors({})
+      toast.success(t('pages.settings.cacheSaved'))
+    },
+    onError: () => toast.error(t('common.saveFailed')),
+  })
+
+  const toggleMaster = useMutation({
+    mutationFn: (master_enabled: boolean) =>
+      settingsApi.saveCache({ master_enabled }),
+    onSuccess: (row) => {
+      queryClient.setQueryData(settingsKeys.cache(), row)
+      toast.success(t('pages.settings.cacheSaved'))
+    },
+  })
+
+  const data = settings.data
+  const submit = () => {
+    const next: Record<string, string> = {}
+    const payload: {
+      max_file_size_mb?: number
+      max_space_mb?: number
+      default_edge_ttl_seconds?: number
+    } = {}
+    if (fileSize !== '') {
+      const value = Number(fileSize)
+      if (!Number.isInteger(value) || value < 1 || value > CACHE_FILE_MAX) {
+        next.fileSize = t('pages.settings.cacheFileSizeInvalid', {
+          max: CACHE_FILE_MAX,
+        })
+      } else {
+        payload.max_file_size_mb = value
+      }
+    }
+    if (space !== '') {
+      const value = Number(space)
+      if (!Number.isInteger(value) || value < 0 || value > CACHE_SPACE_MAX) {
+        next.space = t('pages.settings.cacheSpaceInvalid', {
+          max: CACHE_SPACE_MAX,
+        })
+      } else {
+        payload.max_space_mb = value
+      }
+    }
+    if (defaultTtl !== '') {
+      const value = Number(defaultTtl)
+      if (!Number.isInteger(value) || value < 0 || value > CACHE_TTL_MAX) {
+        next.defaultTtl = t('pages.settings.cacheTtlInvalid', {
+          max: CACHE_TTL_MAX,
+        })
+      } else {
+        payload.default_edge_ttl_seconds = value
+      }
+    }
+    setErrors(next)
+    if (Object.keys(next).length === 0 && Object.keys(payload).length > 0) {
+      save.mutate(payload)
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader
+        title={t('pages.settings.cache')}
+        description={t('pages.settings.cacheDescription')}
+        action={
+          data && (
+            <Badge tone={data.master_enabled ? 'success' : 'neutral'} dot>
+              {data.master_enabled
+                ? t('pages.settings.cacheOn')
+                : t('pages.settings.cacheOff')}
+            </Badge>
+          )
+        }
+      />
+      <CardBody className="flex flex-col gap-4">
+        {settings.isError && !data ? (
+          <ErrorState
+            variant="inline"
+            error={settings.error}
+            onRetry={() => settings.refetch()}
+            retrying={settings.isFetching}
+          />
+        ) : !data ? (
+          <SkeletonRows rows={2} columns={2} />
+        ) : (
+          <>
+            <Switch
+              checked={data.master_enabled}
+              disabled={!canWrite || toggleMaster.isPending}
+              onCheckedChange={(next) => toggleMaster.mutate(next)}
+              label={t('pages.settings.cacheMasterToggle')}
+              description={t('pages.settings.cacheMasterToggleHint')}
+            />
+            <div className="grid gap-4 sm:grid-cols-3">
+              <Input
+                type="number"
+                min={1}
+                max={CACHE_FILE_MAX}
+                label={t('pages.settings.cacheFileSize')}
+                hint={t('pages.settings.cacheFileSizeHint', {
+                  current: data.max_file_size_mb,
+                })}
+                value={fileSize === '' ? String(data.max_file_size_mb) : fileSize}
+                onChange={(event) => setFileSize(event.target.value)}
+                error={errors.fileSize}
+                disabled={!canWrite || save.isPending}
+              />
+              <Input
+                type="number"
+                min={0}
+                max={CACHE_SPACE_MAX}
+                label={t('pages.settings.cacheSpace')}
+                hint={t('pages.settings.cacheSpaceHint', {
+                  current: data.max_space_mb,
+                })}
+                value={space === '' ? String(data.max_space_mb) : space}
+                onChange={(event) => setSpace(event.target.value)}
+                error={errors.space}
+                disabled={!canWrite || save.isPending}
+              />
+              <Input
+                type="number"
+                min={0}
+                max={CACHE_TTL_MAX}
+                label={t('pages.settings.cacheTtl')}
+                hint={t('pages.settings.cacheTtlHint', {
+                  current: data.default_edge_ttl_seconds,
+                })}
+                value={
+                  defaultTtl === ''
+                    ? String(data.default_edge_ttl_seconds)
+                    : defaultTtl
+                }
+                onChange={(event) => setDefaultTtl(event.target.value)}
+                error={errors.defaultTtl}
+                disabled={!canWrite || save.isPending}
+              />
+            </div>
+            <div>
+              <Button
+                variant="primary"
+                onClick={submit}
+                disabled={
+                  !canWrite ||
+                  save.isPending ||
+                  (fileSize === '' && space === '' && defaultTtl === '')
+                }
+              >
+                {t('common.save')}
+              </Button>
+            </div>
+            <p className="flex items-start gap-2 text-xs leading-relaxed text-fg-subtle">
+              <Database weight="duotone" className="mt-0.5 h-4 w-4 shrink-0" />
+              {t('pages.settings.cacheScopeHint')}
             </p>
           </>
         )}

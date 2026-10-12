@@ -401,27 +401,51 @@ fn cached_rules_to_pingap_config(
         toml::from_str::<PluginConf>(r###"category = "error_page""###)
             .unwrap_or_default(),
     );
-    if has_cache_rules {
+    // The cache master switch gates everything: with it off the data plane
+    // never sees a cache plugin, regardless of the rules any site carries.
+    let global_cache = cached.global_cache.clone().unwrap_or_default();
+    let cache_enabled = has_cache_rules && global_cache.master_enabled();
+    if cache_enabled {
         let mut cache_conf = PluginConf::new();
         cache_conf.insert(
             "category".to_string(),
             toml::Value::String("cache".to_string()),
         );
-        cache_conf.insert(
-            "directory".to_string(),
-            toml::Value::String(cache_dir.to_string_lossy().to_string()),
-        );
+        // The disk budget rides on the directory URL (`FileCacheParams`
+        // parses `?max_size=`): pingora's `ensure_disk_space` then evicts by
+        // LRU across every namespace sharing the backend. `0` = unlimited.
+        let directory = match global_cache.max_space_mb() {
+            0 => cache_dir.to_string_lossy().to_string(),
+            space_mb => {
+                format!("{}?max_size={space_mb}mb", cache_dir.to_string_lossy())
+            },
+        };
+        cache_conf
+            .insert("directory".to_string(), toml::Value::String(directory));
         // pingora's default 1MB ceiling silently refuses to cache anything
         // larger (the response header stage rejects it before the body ever
         // fills). Magento-style merged JS/CSS bundles run several MB and are
         // exactly the assets caching exists for, so the ceiling is raised
-        // here. `ByteSize` parses decimal units — this is 16_000_000 bytes,
-        // comfortably above a ~10MB bundle. Actual disk usage stays bounded
-        // by each site's `disk_quota_mb` and the LRU eviction manager.
+        // here. `ByteSize` parses decimal units — the 16 MiB default is
+        // 16_000_000 bytes, comfortably above a ~10MB bundle. Actual disk
+        // usage stays bounded by each site's `disk_quota_mb` and the LRU
+        // eviction manager.
         cache_conf.insert(
             "max_file_size".to_string(),
-            toml::Value::String("16mb".to_string()),
+            toml::Value::String(format!(
+                "{}mb",
+                global_cache.max_file_size_mb()
+            )),
         );
+        // A rule without an explicit edge TTL falls back to this floor;
+        // `0` (the default) keeps the old behaviour of no fallback at all.
+        let default_ttl = global_cache.default_edge_ttl_seconds();
+        if default_ttl > 0 {
+            cache_conf.insert(
+                "max_ttl".to_string(),
+                toml::Value::String(format!("{default_ttl}s")),
+            );
+        }
         plugins.insert(CACHE_PLUGIN_NAME.to_string(), cache_conf);
     }
     let mut location_plugins: Vec<String> = vec![
@@ -430,7 +454,7 @@ fn cached_rules_to_pingap_config(
         REWRITE_PLUGIN_NAME.to_string(),
         ERROR_PAGE_PLUGIN_NAME.to_string(),
     ];
-    if has_cache_rules {
+    if cache_enabled {
         location_plugins.push(CACHE_PLUGIN_NAME.to_string());
     }
 
@@ -1566,8 +1590,8 @@ fn log_directives(rust_log: Option<&str>) -> String {
 mod tests {
     use super::*;
     use pingwaf_agent::cache::{
-        CachedRules, ProxyTrustConfig, RouteConfig, SiteRules, UpstreamConfig,
-        UpstreamPeer,
+        CacheRule as AgentCacheRule, CachedRules, GlobalCacheSettings,
+        ProxyTrustConfig, RouteConfig, SiteRules, UpstreamConfig, UpstreamPeer,
     };
 
     #[test]
@@ -1609,6 +1633,7 @@ mod tests {
             basic_auth: None,
             observation_mode: false,
             proxy_trust: ProxyTrustConfig::default(),
+            cache_settings: None,
         }
     }
 
@@ -1659,6 +1684,95 @@ mod tests {
         let mut cached = CachedRules::default();
         cached.sites.insert(site.site_id.clone(), Arc::new(site));
         cached
+    }
+
+    fn enabled_cache_rule(disk_quota_mb: u32) -> AgentCacheRule {
+        AgentCacheRule {
+            id: "rule-1".to_string(),
+            name: "static".to_string(),
+            match_expression: String::new(),
+            edge_ttl_seconds: 300,
+            browser_ttl_seconds: 60,
+            disk_quota_mb,
+            cache_eligible: true,
+            cache_key_headers: Vec::new(),
+            respect_origin_headers: true,
+            stale_while_revalidate_seconds: 0,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn cache_plugin_conf_follows_global_settings() {
+        // Defaults (no global_cache): the historical shape — 16 MiB cap, no
+        // budget, no fallback TTL.
+        let mut site = site_rules("site1", "a.example.com");
+        site.cache_rules = vec![enabled_cache_rule(0)];
+        site.upstreams = vec![pool("", vec![peer("10.0.0.1:8080")])];
+        let mut cached = one_site_cache(site);
+        let config = cached_rules_to_pingap_config(
+            &cached,
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+        let cache_conf =
+            config.plugins.get(CACHE_PLUGIN_NAME).expect("cache plugin");
+        assert_eq!(
+            cache_conf.get("max_file_size").and_then(|v| v.as_str()),
+            Some("16mb")
+        );
+        assert_eq!(
+            cache_conf.get("directory").and_then(|v| v.as_str()),
+            Some("/tmp/pingwaf-test-cache")
+        );
+        assert_eq!(cache_conf.get("max_ttl"), None);
+
+        // Global settings: cap, budget and fallback TTL all land in the
+        // generated configuration.
+        cached.global_cache = Some(GlobalCacheSettings {
+            max_file_size_mb: Some(64),
+            max_space_mb: Some(2048),
+            master_enabled: Some(true),
+            default_edge_ttl_seconds: Some(600),
+        });
+        let config = cached_rules_to_pingap_config(
+            &cached,
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+        let cache_conf =
+            config.plugins.get(CACHE_PLUGIN_NAME).expect("cache plugin");
+        assert_eq!(
+            cache_conf.get("max_file_size").and_then(|v| v.as_str()),
+            Some("64mb")
+        );
+        assert_eq!(
+            cache_conf.get("directory").and_then(|v| v.as_str()),
+            Some("/tmp/pingwaf-test-cache?max_size=2048mb")
+        );
+        assert_eq!(
+            cache_conf.get("max_ttl").and_then(|v| v.as_str()),
+            Some("600s")
+        );
+
+        // Master switch off: no cache plugin at all, not even in locations.
+        cached.global_cache = Some(GlobalCacheSettings {
+            master_enabled: Some(false),
+            ..Default::default()
+        });
+        let config = cached_rules_to_pingap_config(
+            &cached,
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+        assert!(!config.plugins.contains_key(CACHE_PLUGIN_NAME));
+        for loc in config.locations.values() {
+            let plugins = loc.plugins.as_deref().unwrap_or(&[]);
+            assert!(
+                !plugins.iter().any(|name| name == CACHE_PLUGIN_NAME),
+                "master-off must drop the cache plugin from locations"
+            );
+        }
     }
 
     #[test]

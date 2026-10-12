@@ -12,6 +12,7 @@ use sea_orm::{
     PaginatorTrait, QueryFilter, QueryOrder, Set,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::api::common::{
@@ -42,6 +43,13 @@ pub struct SiteResponse {
     pub plan: String,
     /// Disk budget, in MiB, the agents may use for this site's cache.
     pub cache_quota_mb: i32,
+    /// Site-level single-file cache cap in MiB; `None` follows the global
+    /// ceiling.
+    pub cache_max_file_size_mb: Option<i32>,
+    /// Per-content-type single-file caps in MiB, keyed by
+    /// `html/css/js/image/font/media/other`; missing keys follow
+    /// `cache_max_file_size_mb`.
+    pub cache_type_limits_mb: Option<HashMap<String, i32>>,
     /// Security features key on the forwarded-header client IP.
     pub trust_proxy_headers: bool,
     /// Lower-case forwarded header the client IP is read from.
@@ -69,6 +77,10 @@ impl From<site::Model> for SiteResponse {
             status: model.status,
             plan: model.plan,
             cache_quota_mb: model.cache_quota_mb,
+            cache_max_file_size_mb: model.cache_max_file_size_mb,
+            cache_type_limits_mb: model
+                .cache_type_limits_mb
+                .and_then(|value| serde_json::from_value(value).ok()),
             trust_proxy_headers: model.trust_proxy_headers,
             trusted_header: model.trusted_header,
             trust_last_hop: model.trust_last_hop,
@@ -890,6 +902,8 @@ async fn create(
         status: Set(status),
         plan: Set(plan),
         cache_quota_mb: Set(crate::defaults::DEFAULT_CACHE_QUOTA_MB),
+        cache_max_file_size_mb: Set(None),
+        cache_type_limits_mb: Set(None),
         trust_proxy_headers: Set(false),
         trusted_header: Set(crate::models::trusted_header::DEFAULT.to_string()),
         trust_last_hop: Set(true),

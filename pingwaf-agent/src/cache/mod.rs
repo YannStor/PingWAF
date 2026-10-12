@@ -42,6 +42,11 @@ pub struct CachedRules {
     /// `config.fail_open`.
     #[serde(default)]
     pub global_fail_open: Option<bool>,
+    /// Deployment-wide cache ceiling; `None` when the server never sent it
+    /// (old control plane) — the generator and quota logic then fall back to
+    /// their built-in defaults.
+    #[serde(default)]
+    pub global_cache: Option<GlobalCacheSettings>,
     /// When the cache was last updated from the server
     pub updated_at: DateTime<Utc>,
     /// Hash of the configuration (for delta sync). An `Arc` so the hot path
@@ -56,6 +61,7 @@ impl Default for CachedRules {
             domain_index: HashMap::new(),
             failover_registry: HashMap::new(),
             global_fail_open: None,
+            global_cache: None,
             updated_at: Utc::now(),
             config_hash: Arc::from(""),
         }
@@ -95,6 +101,10 @@ pub struct SiteRules {
     /// WAF, IP/geo rules, bot protection and rate limiting only record.
     #[serde(default)]
     pub observation_mode: bool,
+    /// Site-level cache limits; `None` when the site overrides nothing and
+    /// every limit follows the global ceiling.
+    #[serde(default)]
+    pub cache_settings: Option<SiteCacheSettings>,
     /// Forwarded-header client IP resolution; disabled when the site has no
     /// CDN / reverse proxy in front of it.
     #[serde(default)]
@@ -505,6 +515,53 @@ pub struct CacheRule {
     pub enabled: bool,
 }
 
+/// Deployment-wide cache ceiling, mirrored from the control plane's
+/// `cache_settings` row. Absent fields fall back to the built-in defaults
+/// the agent used before the ceiling existed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct GlobalCacheSettings {
+    #[serde(default)]
+    pub max_file_size_mb: Option<u32>,
+    #[serde(default)]
+    pub max_space_mb: Option<u32>,
+    #[serde(default)]
+    pub master_enabled: Option<bool>,
+    #[serde(default)]
+    pub default_edge_ttl_seconds: Option<u32>,
+}
+
+impl GlobalCacheSettings {
+    /// Built-in default: the ceiling the configuration generator hardcoded
+    /// before the setting existed.
+    pub fn max_file_size_mb(&self) -> u32 {
+        self.max_file_size_mb.unwrap_or(16)
+    }
+
+    /// `0` = unlimited (no `?max_size=` on the cache directory).
+    pub fn max_space_mb(&self) -> u32 {
+        self.max_space_mb.unwrap_or(0)
+    }
+
+    pub fn master_enabled(&self) -> bool {
+        self.master_enabled.unwrap_or(true)
+    }
+
+    /// `0` = no fallback TTL for rules without an explicit one.
+    pub fn default_edge_ttl_seconds(&self) -> u32 {
+        self.default_edge_ttl_seconds.unwrap_or(0)
+    }
+}
+
+/// Site-level cache limits, mirrored from the `sites` cache columns. `None`
+/// fields fall back level by level: type limit → site cap → global cap.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct SiteCacheSettings {
+    #[serde(default)]
+    pub max_file_size_mb: Option<u32>,
+    #[serde(default)]
+    pub type_max_file_size_mb: HashMap<String, u32>,
+}
+
 // ─── Challenge ──────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -890,15 +947,31 @@ impl RuleCache {
     /// otherwise be unenforceable anyway.
     pub fn apply_cache_quotas(&self) {
         let rules = self.inner.load();
+        // The global disk budget is the ceiling every site quota is clamped
+        // against: an unlimited site (`0`) may use up to the budget, a
+        // capped site is lowered to `min(site, global)`. No budget (`0`)
+        // leaves the site quotas untouched.
+        let global_space_mb = rules
+            .global_cache
+            .as_ref()
+            .map(|g| u64::from(g.max_space_mb()))
+            .unwrap_or(0);
         let mut tracked: HashMap<String, u64> = HashMap::new();
         for site in rules.sites.values() {
-            let quota_mb = site
+            let mut quota_mb = site
                 .cache_rules
                 .iter()
                 .filter(|rule| rule.enabled && rule.cache_eligible)
                 .map(|rule| u64::from(rule.disk_quota_mb))
                 .max()
                 .unwrap_or(0);
+            if global_space_mb > 0 {
+                quota_mb = if quota_mb == 0 {
+                    global_space_mb
+                } else {
+                    quota_mb.min(global_space_mb)
+                };
+            }
             for domain in site.all_domains() {
                 if domain.is_empty() {
                     continue;
@@ -1093,6 +1166,10 @@ impl RuleCache {
             if let Some(default_fail_open) = bundle.default_fail_open {
                 updated.global_fail_open = Some(default_fail_open);
             }
+            if let Some(global_cache) = &bundle.global_cache {
+                updated.global_cache =
+                    Some(Self::convert_global_cache(global_cache));
+            }
             updated.config_hash = bundle.config_hash.as_str().into();
             updated.updated_at = Utc::now();
             Arc::new(updated)
@@ -1161,6 +1238,10 @@ impl RuleCache {
                         failover_registry_from(&bundle.site_policies);
                     if let Some(default_fail_open) = bundle.default_fail_open {
                         updated.global_fail_open = Some(default_fail_open);
+                    }
+                    if let Some(global_cache) = &bundle.global_cache {
+                        updated.global_cache =
+                            Some(Self::convert_global_cache(global_cache));
                     }
                     break;
                 }
@@ -1666,6 +1747,30 @@ impl RuleCache {
                 .map(Self::convert_basic_auth),
             observation_mode: bundle.observation_mode,
             proxy_trust: ProxyTrustConfig::default(),
+            cache_settings: bundle
+                .cache_settings
+                .as_ref()
+                .map(Self::convert_site_cache_settings),
+        }
+    }
+
+    fn convert_global_cache(
+        g: &proto::GlobalCacheSettings,
+    ) -> GlobalCacheSettings {
+        GlobalCacheSettings {
+            max_file_size_mb: g.max_file_size_mb,
+            max_space_mb: g.max_space_mb,
+            master_enabled: g.master_enabled,
+            default_edge_ttl_seconds: g.default_edge_ttl_seconds,
+        }
+    }
+
+    fn convert_site_cache_settings(
+        s: &proto::SiteCacheSettings,
+    ) -> SiteCacheSettings {
+        SiteCacheSettings {
+            max_file_size_mb: s.max_file_size_mb,
+            type_max_file_size_mb: s.type_max_file_size_mb.clone(),
         }
     }
 
@@ -2224,6 +2329,7 @@ mod tests {
                     basic_auth: None,
                     observation_mode: false,
                     proxy_trust: ProxyTrustConfig::default(),
+                    cache_settings: None,
                     ssl_config: None,
                     upstreams: vec![UpstreamConfig {
                         name: "default".to_string(),
@@ -2260,6 +2366,7 @@ mod tests {
                 FailoverMode::Closed,
             )]),
             global_fail_open: Some(true),
+            global_cache: None,
             updated_at: Utc::now(),
             config_hash: "abc".into(),
         };
@@ -2340,6 +2447,94 @@ mod tests {
         assert!(ssl.mtls_revoked_fingerprints.is_empty());
         assert!(ssl.mtls_organization.is_empty());
         assert!(ssl.mtls_requires_cert());
+        // The cache ceiling fields default when a pre-ceiling cache loads.
+        assert!(cached.global_cache.is_none());
+        assert!(site.cache_settings.is_none());
+    }
+
+    #[test]
+    fn global_space_clamps_site_quotas() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache =
+            RuleCache::new(dir.path().to_path_buf(), "test".to_string())
+                .unwrap();
+        const DOMAIN: &str = "clamp-test.example.com";
+
+        let site = |quota_mb: u32| {
+            Arc::new(SiteRules {
+                site_id: "site-1".to_string(),
+                domain: DOMAIN.to_string(),
+                alternate_domains: Vec::new(),
+                status: site_status::ACTIVE.to_string(),
+                waf_config: None,
+                rate_limit_rules: Vec::new(),
+                ip_access_rules: Vec::new(),
+                geo_config: None,
+                cache_rules: vec![CacheRule {
+                    id: "r1".to_string(),
+                    name: "static".to_string(),
+                    match_expression: String::new(),
+                    edge_ttl_seconds: 300,
+                    browser_ttl_seconds: 60,
+                    disk_quota_mb: quota_mb,
+                    cache_eligible: true,
+                    cache_key_headers: Vec::new(),
+                    respect_origin_headers: true,
+                    stale_while_revalidate_seconds: 0,
+                    enabled: true,
+                }],
+                challenge_config: None,
+                rewrite_rules: Vec::new(),
+                error_pages: Vec::new(),
+                ssl_config: None,
+                upstreams: Vec::new(),
+                routes: Vec::new(),
+                bot_protection: None,
+                basic_auth: None,
+                observation_mode: false,
+                proxy_trust: ProxyTrustConfig::default(),
+                cache_settings: None,
+            })
+        };
+        let store = |global_space_mb: Option<u32>, quota_mb: u32| {
+            cache.inner.store(Arc::new(CachedRules {
+                sites: [(DOMAIN.to_string(), site(quota_mb))]
+                    .into_iter()
+                    .collect(),
+                domain_index: HashMap::new(),
+                failover_registry: HashMap::new(),
+                global_fail_open: None,
+                global_cache: global_space_mb.map(|max_space_mb| {
+                    GlobalCacheSettings {
+                        max_space_mb: Some(max_space_mb),
+                        ..Default::default()
+                    }
+                }),
+                updated_at: Utc::now(),
+                config_hash: Arc::from(""),
+            }));
+        };
+
+        // No budget: the site quota passes through untouched.
+        store(None, 2048);
+        cache.apply_cache_quotas();
+        assert_eq!(quota::configured_quota_mb(DOMAIN), Some(2048));
+
+        // A budget caps an explicit site quota.
+        store(Some(1024), 2048);
+        cache.apply_cache_quotas();
+        assert_eq!(quota::configured_quota_mb(DOMAIN), Some(1024));
+
+        // An unlimited site is capped at the budget.
+        store(Some(1024), 0);
+        cache.apply_cache_quotas();
+        assert_eq!(quota::configured_quota_mb(DOMAIN), Some(1024));
+
+        // No budget at all leaves unlimited as unlimited — parking 0 clears
+        // the parked ceiling entirely (`configured_quota_mb` answers None).
+        store(None, 0);
+        cache.apply_cache_quotas();
+        assert_eq!(quota::configured_quota_mb(DOMAIN), None);
     }
 
     #[test]

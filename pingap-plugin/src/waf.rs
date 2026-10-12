@@ -1380,6 +1380,9 @@ struct ResponseFacts {
     body_size: u64,
     /// The stream never finished; whatever arrived is all there was to log.
     abandoned: bool,
+    /// pingora cache phase for this response (`hit`/`miss`/…); empty when
+    /// caching was not in play (plugin-generated answers, cache disabled).
+    cache_status: String,
 }
 
 impl ResponseFacts {
@@ -1394,6 +1397,8 @@ impl ResponseFacts {
             body: None,
             body_size: 0,
             abandoned: false,
+            // A plugin-generated answer never consulted the cache.
+            cache_status: String::new(),
         }
     }
 
@@ -1704,7 +1709,7 @@ fn emit_access(
         upstream_addr: response.upstream_addr,
         upstream_latency_ms: response.upstream_latency_ms,
         total_latency_ms,
-        cache_status: String::new(),
+        cache_status: response.cache_status.clone(),
         user_agent: pending.user_agent,
         referer: pending.referer,
         tls_version: pending.tls_version,
@@ -3314,7 +3319,7 @@ impl Plugin for WafPlugin {
 
     async fn handle_response(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         ctx: &mut Ctx,
         upstream_response: &mut ResponseHeader,
     ) -> pingora::Result<ResponsePluginResult> {
@@ -3328,6 +3333,15 @@ impl Plugin for WafPlugin {
         let status = upstream_response.status.as_u16();
         let upstream_latency_ms =
             ctx.timing.upstream_processing.unwrap_or(0).max(0) as u64;
+        // Runs after `handle_cache_headers`, which stamped the same phase
+        // into `x-cache-status`: the phase is final here, and this is the
+        // only stage where the cache state is reachable (the body stage has
+        // no cache accessor).
+        let cache_status = if session.cache.enabled() {
+            session.cache.phase().as_str().to_string()
+        } else {
+            String::new()
+        };
         let headers = cap_headers(upstream_response.headers.iter().filter_map(
             |(name, value)| {
                 value
@@ -3358,6 +3372,7 @@ impl Plugin for WafPlugin {
                     body: None,
                     body_size: 0,
                     abandoned: false,
+                    cache_status,
                 });
                 return Ok(ResponsePluginResult::Unchanged);
             }
@@ -3377,6 +3392,7 @@ impl Plugin for WafPlugin {
                 body: None,
                 body_size: announced_body_size(upstream_response),
                 abandoned: false,
+                cache_status,
             },
         );
         Ok(ResponsePluginResult::Unchanged)

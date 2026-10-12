@@ -789,6 +789,8 @@ export interface AnalyticsSummary {
   unique_ips: number
   cache_hits: number
   cache_hit_rate: number
+  /** Outbound bytes served straight from the edge cache in the window. */
+  cache_saved_bytes: number
   avg_latency_ms: number
   max_latency_ms: number
   client_errors: number
@@ -804,6 +806,7 @@ export interface TimeBucket {
   bucket: string
   requests: number
   cache_hits: number
+  cache_saved_bytes: number
   client_errors: number
   server_errors: number
   avg_latency_ms: number
@@ -1513,6 +1516,14 @@ export type UpdateCacheRuleRequest = Partial<CreateCacheRuleRequest>
 export interface CacheSettings {
   site_id: string
   quota_mb: number
+  /** Site-level single-file cap in MiB; null follows the global ceiling. */
+  max_file_size_mb: number | null
+  /** Per-content-type single-file caps in MiB (html/css/js/image/font/media/other). */
+  type_limits: Record<string, number> | null
+  /** The global single-file ceiling every site value is clamped against. */
+  global_max_file_size_mb: number
+  /** Resolved cap: min(global, max_file_size_mb?). */
+  effective_max_file_size_mb: number
   /** True while at least one cache rule of the site is enabled. */
   cache_enabled: boolean
   rule_count: number
@@ -1521,6 +1532,29 @@ export interface CacheSettings {
 
 export interface UpdateCacheSettingsRequest {
   quota_mb?: number
+  /** Absent = unchanged; null = follow the global ceiling again. */
+  max_file_size_mb?: number | null
+  /** Absent = unchanged; empty object clears every override. */
+  type_limits?: Record<string, number> | null
+}
+
+/**
+ * `models::cache_settings::Model` — the deployment-wide cache ceiling. All
+ * knobs ride inside every rule bundle, so saving takes effect on the next
+ * configuration push (which the API triggers immediately).
+ */
+export interface GlobalCacheSettings {
+  max_file_size_mb: number
+  max_space_mb: number
+  master_enabled: boolean
+  default_edge_ttl_seconds: number
+}
+
+export interface UpdateGlobalCacheSettingsRequest {
+  max_file_size_mb?: number
+  max_space_mb?: number
+  master_enabled?: boolean
+  default_edge_ttl_seconds?: number
 }
 
 /**

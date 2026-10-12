@@ -277,6 +277,41 @@ message RuleBundle {
   // Explicit presence (`optional`): an old server leaves the field unset,
   // which the agent must distinguish from an explicit `false`.
   optional bool default_fail_open = 25;
+
+  // Deployment-wide cache ceiling (single-file cap, total disk budget,
+  // master switch, default edge TTL). Absent = old server: the agent falls
+  // back to its built-in defaults.
+  optional GlobalCacheSettings global_cache = 26;
+
+  // Site-level cache limits (single-file cap + per-content-type caps).
+  // Absent = no site-level override.
+  optional SiteCacheSettings cache_settings = 27;
+}
+
+// Deployment-wide cache limits, mirrored from the `cache_settings` table.
+message GlobalCacheSettings {
+  // Largest single cacheable object, in megabytes (0 = old-server default
+  // of 16 MiB applies).
+  optional uint32 max_file_size_mb = 1;
+  // Total disk budget across all sites, in megabytes; 0 = unlimited.
+  optional uint32 max_space_mb = 2;
+  // Master switch: false removes the cache plugin from the generated
+  // configuration entirely.
+  optional bool master_enabled = 3;
+  // Edge TTL (seconds) used when a cache rule does not configure one;
+  // 0 = no fallback.
+  optional uint32 default_edge_ttl_seconds = 4;
+}
+
+// One site's cache limits. Values the site did not set are absent and the
+// consumer falls back: type limit → site cap → global cap.
+message SiteCacheSettings {
+  // Site-level single-file cap in megabytes; absent = follow the global
+  // ceiling.
+  optional uint32 max_file_size_mb = 1;
+  // Per-content-type single-file caps keyed by
+  // html/css/js/image/font/media/other.
+  map<string, uint32> type_max_file_size_mb = 2;
 }
 
 // How one site behaves while the control plane is unreachable and the host

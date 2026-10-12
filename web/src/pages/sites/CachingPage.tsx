@@ -30,10 +30,26 @@ import { cachingApi, cacheKeys } from '@/api/caching'
 import { useCanWrite } from '@/hooks'
 import { cn } from '@/lib/utils'
 import { formatDateTime, formatNumber, formatPercent, formatSize } from '@/lib/format'
-import type { CacheRule, CacheSettings, CreateCacheRuleRequest } from '@/api/types'
+import type {
+  CacheRule,
+  CacheSettings,
+  CreateCacheRuleRequest,
+  UpdateCacheSettingsRequest,
+} from '@/api/types'
 
 /** `MAX_DISK_QUOTA_MB` on the server — reject out-of-range values up front. */
 const MAX_QUOTA_MB = 1024 * 1024
+
+/** `CACHE_TYPE_KEYS` on the server — the per-type single-file cap families. */
+const CACHE_TYPE_KEYS = [
+  'html',
+  'css',
+  'js',
+  'image',
+  'font',
+  'media',
+  'other',
+] as const
 
 interface FormState {
   name: string
@@ -98,6 +114,12 @@ export function CachingPage() {
   const [justActivated, setJustActivated] = useState(false)
   const [quotaInput, setQuotaInput] = useState('0')
   const [quotaError, setQuotaError] = useState<string | null>(null)
+  const [fileSizeInput, setFileSizeInput] = useState('')
+  const [fileSizeError, setFileSizeError] = useState<string | null>(null)
+  const [typeLimitsInput, setTypeLimitsInput] = useState<
+    Record<string, string>
+  >({})
+  const [typeLimitsError, setTypeLimitsError] = useState<string | null>(null)
 
   /* ── Site-wide cache state (activation + disk budget) ─────────────── */
   const settingsQuery = useQuery({
@@ -165,6 +187,30 @@ export function CachingPage() {
   if (appliedQuotaMb !== lastQuotaMb) {
     setLastQuotaMb(appliedQuotaMb)
     setQuotaInput(String(appliedQuotaMb))
+  }
+
+  /* ── Single-file caps (site + per-type) ────────────────────────────── */
+  const limitsSeed = settings
+    ? `${settings.max_file_size_mb ?? ''}:${JSON.stringify(
+        settings.type_limits ?? {},
+      )}`
+    : ''
+  const [lastLimitsSeed, setLastLimitsSeed] = useState<string | null>(null)
+  if (settings && limitsSeed !== lastLimitsSeed) {
+    setLastLimitsSeed(limitsSeed)
+    setFileSizeInput(
+      settings.max_file_size_mb === null
+        ? ''
+        : String(settings.max_file_size_mb),
+    )
+    setTypeLimitsInput(
+      Object.fromEntries(
+        Object.entries(settings.type_limits ?? {}).map(([key, value]) => [
+          key,
+          String(value),
+        ]),
+      ),
+    )
   }
 
   const invalidate = () => {
@@ -268,6 +314,19 @@ export function CachingPage() {
     onError: (e) => setQuotaError(errorText(e)),
   })
 
+  const saveLimits = useMutation({
+    mutationFn: (payload: UpdateCacheSettingsRequest) =>
+      cachingApi.updateSettings(siteId, payload),
+    onSuccess: (next) => {
+      queryClient.setQueryData<CacheSettings>(cacheKeys.settings(siteId), next)
+      setFileSizeError(null)
+      setTypeLimitsError(null)
+      toast.success(t('pages.caching.limitsSaved'))
+      invalidate()
+    },
+    onError: (e) => setTypeLimitsError(errorText(e)),
+  })
+
   /* ── Rules ────────────────────────────────────────────────────────── */
 
   const save = useMutation({
@@ -353,6 +412,67 @@ export function CachingPage() {
       return
     }
     saveQuota.mutate(value)
+  }
+
+  const globalMaxFileSize = settings?.global_max_file_size_mb ?? 16
+  const effectiveMaxFileSize = settings?.effective_max_file_size_mb ?? 16
+  const fileSizeDirty =
+    fileSizeInput.trim() !==
+    (settings?.max_file_size_mb == null
+      ? ''
+      : String(settings.max_file_size_mb))
+  const typeLimitsDirty = CACHE_TYPE_KEYS.some(
+    (key) =>
+      (typeLimitsInput[key]?.trim() ?? '') !==
+      String(settings?.type_limits?.[key] ?? ''),
+  )
+  const limitsDirty = fileSizeDirty || typeLimitsDirty
+
+  const submitLimits = () => {
+    setFileSizeError(null)
+    setTypeLimitsError(null)
+    let siteCap: number | null = null
+    if (fileSizeInput.trim() !== '') {
+      const value = Number(fileSizeInput)
+      if (
+        !Number.isInteger(value) ||
+        value < 1 ||
+        value > globalMaxFileSize
+      ) {
+        setFileSizeError(
+          t('pages.caching.maxFileSizeInvalid', { max: globalMaxFileSize }),
+        )
+        return
+      }
+      siteCap = value
+    }
+    // Per-type values are measured against the cap this request installs,
+    // falling back to the currently effective one.
+    const cap = siteCap ?? effectiveMaxFileSize
+    const typeLimits: Record<string, number> = {}
+    for (const key of CACHE_TYPE_KEYS) {
+      const raw = typeLimitsInput[key]?.trim() ?? ''
+      if (raw === '') continue
+      const value = Number(raw)
+      if (!Number.isInteger(value) || value < 1 || value > cap) {
+        setTypeLimitsError(
+          t('pages.caching.typeLimitInvalid', { type: key, max: cap }),
+        )
+        return
+      }
+      typeLimits[key] = value
+    }
+    const payload: UpdateCacheSettingsRequest = {}
+    if (fileSizeDirty) {
+      payload.max_file_size_mb = siteCap
+    }
+    if (typeLimitsDirty) {
+      payload.type_limits = typeLimits
+    }
+    if (Object.keys(payload).length === 0) {
+      return
+    }
+    saveLimits.mutate(payload)
   }
 
   const submitPurgeUrls = () => {
@@ -758,6 +878,91 @@ export function CachingPage() {
               </CardBody>
             </Card>
           </div>
+
+          {/* ── Single-file caps ────────────────────────────────────── */}
+          <Card className="mb-4">
+            <CardHeader
+              title={t('pages.caching.limitsTitle')}
+              description={t('pages.caching.limitsHint', {
+                global: settings?.global_max_file_size_mb ?? 16,
+              })}
+            />
+            <CardBody className="flex flex-col gap-3">
+              {settingsQuery.isPending && !settings ? (
+                <Skeleton className="h-20 w-full" />
+              ) : (
+                <>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={globalMaxFileSize}
+                    className="tabular-nums"
+                    label={t('pages.caching.maxFileSizeLabel')}
+                    value={fileSizeInput}
+                    placeholder={t('pages.caching.maxFileSizePlaceholder')}
+                    hint={t('pages.caching.maxFileSizeHint', {
+                      effective: formatNumber(effectiveMaxFileSize),
+                      global: formatNumber(globalMaxFileSize),
+                    })}
+                    error={fileSizeError}
+                    disabled={!canWrite || saveLimits.isPending}
+                    onChange={(e) => {
+                      setFileSizeError(null)
+                      setFileSizeInput(e.target.value)
+                    }}
+                  />
+                  <div>
+                    <p className="mb-2 text-xs font-medium uppercase tracking-wide text-fg-subtle">
+                      {t('pages.caching.typeLimitsLabel')}
+                    </p>
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
+                      {CACHE_TYPE_KEYS.map((key) => (
+                        <Input
+                          key={key}
+                          type="number"
+                          min={1}
+                          max={globalMaxFileSize}
+                          className="tabular-nums"
+                          label={t(`pages.caching.type.${key}`)}
+                          value={typeLimitsInput[key] ?? ''}
+                          placeholder={t('pages.caching.typeFollow')}
+                          disabled={!canWrite || saveLimits.isPending}
+                          onChange={(e) => {
+                            setTypeLimitsError(null)
+                            setTypeLimitsInput((prev) => ({
+                              ...prev,
+                              [key]: e.target.value,
+                            }))
+                          }}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                  {typeLimitsError && (
+                    <p className="text-xs text-fg-danger">{typeLimitsError}</p>
+                  )}
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <span className="text-xs text-fg-subtle">
+                      {t('pages.caching.limitsEffectiveHint', {
+                        effective: formatNumber(effectiveMaxFileSize),
+                      })}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={
+                        !canWrite || !limitsDirty || saveLimits.isPending
+                      }
+                      loading={saveLimits.isPending}
+                      onClick={submitLimits}
+                    >
+                      {t('common.save')}
+                    </Button>
+                  </div>
+                </>
+              )}
+            </CardBody>
+          </Card>
 
           {/* ── Rules ───────────────────────────────────────────────── */}
           <Card className="mb-4">

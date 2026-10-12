@@ -440,6 +440,19 @@ pub struct CacheSettingsResponse {
     pub site_id: Uuid,
     /// Disk budget, in MiB, the agents may use for this site's cache.
     pub quota_mb: i32,
+    /// Site-level single-file cache cap in MiB; `None` follows the global
+    /// ceiling (`global_max_file_size_mb`).
+    pub max_file_size_mb: Option<i32>,
+    /// Per-content-type single-file caps in MiB, keyed by
+    /// `html/css/js/image/font/media/other`; a missing key follows
+    /// `max_file_size_mb`.
+    pub type_limits: Option<HashMap<String, i32>>,
+    /// The global single-file ceiling every site-level value is clamped
+    /// against — shown so the UI can state the effective limit.
+    pub global_max_file_size_mb: i32,
+    /// Resolved single-file cap this site actually enforces:
+    /// `min(global, max_file_size_mb?)`.
+    pub effective_max_file_size_mb: i32,
     /// Whether any cache rule of the site is enabled.
     pub cache_enabled: bool,
     pub rule_count: usize,
@@ -450,6 +463,52 @@ pub struct CacheSettingsResponse {
 pub struct UpdateCacheSettingsRequest {
     #[serde(default)]
     pub quota_mb: Option<i32>,
+    /// Site-level single-file cap. Absent = unchanged; explicit `null` =
+    /// follow the global ceiling again.
+    #[serde(default)]
+    pub max_file_size_mb: Option<Option<i32>>,
+    /// Per-content-type single-file caps. Absent = unchanged; an empty map
+    /// clears every override.
+    #[serde(default)]
+    pub type_limits: Option<Option<HashMap<String, i32>>>,
+}
+
+/// The content-type families a site may pin a per-type single-file cap for.
+pub const CACHE_TYPE_KEYS: [&str; 7] =
+    ["html", "css", "js", "image", "font", "media", "other"];
+
+/// Validates a site-level single-file cap (1 MiB..=global) and a
+/// per-type map (every key in [`CACHE_TYPE_KEYS`], every value
+/// 1 MiB..=cap). `site_cap` is the cap the values are measured against —
+/// the new site value when both change in one request.
+fn validate_site_cache_limits(
+    max_file_size_mb: i32,
+    type_limits: Option<&HashMap<String, i32>>,
+    global_max_file_size_mb: i32,
+) -> Result<(), ApiError> {
+    if !(1..=global_max_file_size_mb).contains(&max_file_size_mb) {
+        return Err(ApiError::BadRequest(format!(
+            "cache_max_file_size_mb must be between 1 and \
+             {global_max_file_size_mb} (global single-file limit)"
+        )));
+    }
+    if let Some(limits) = type_limits {
+        for (key, value) in limits {
+            if !CACHE_TYPE_KEYS.contains(&key.as_str()) {
+                return Err(ApiError::BadRequest(format!(
+                    "cache type limit key {key} is invalid, expected one of {}",
+                    CACHE_TYPE_KEYS.join(", ")
+                )));
+            }
+            if !(1..=max_file_size_mb).contains(value) {
+                return Err(ApiError::BadRequest(format!(
+                    "cache type limit for {key} must be between 1 and \
+                     {max_file_size_mb}"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn settings_view(
@@ -460,9 +519,20 @@ async fn settings_view(
         .filter(cache_rules::Column::SiteId.eq(model.id))
         .all(&state.db)
         .await?;
+    let global = crate::api::cache_settings::load(&state.db).await?;
+    let type_limits: Option<HashMap<String, i32>> = model
+        .cache_type_limits_mb
+        .as_ref()
+        .and_then(|value| serde_json::from_value(value.clone()).ok());
     Ok(CacheSettingsResponse {
         site_id: model.id,
         quota_mb: model.cache_quota_mb,
+        max_file_size_mb: model.cache_max_file_size_mb,
+        effective_max_file_size_mb: model
+            .cache_max_file_size_mb
+            .unwrap_or(global.max_file_size_mb),
+        type_limits,
+        global_max_file_size_mb: global.max_file_size_mb,
         cache_enabled: rules.iter().any(|rule| rule.enabled),
         rule_count: rules.len(),
         enabled_rule_count: rules.iter().filter(|rule| rule.enabled).count(),
@@ -489,6 +559,7 @@ async fn update_settings(
 ) -> Result<Json<CacheSettingsResponse>, ApiError> {
     let id = parse_uuid(&site_id, "site id")?;
     let model = load_site_write(&state.db, id, &current).await?;
+    let global = crate::api::cache_settings::load(&state.db).await?;
 
     if let Some(quota) = payload.quota_mb {
         if !(0..=MAX_DISK_QUOTA_MB).contains(&quota) {
@@ -496,11 +567,62 @@ async fn update_settings(
                 "quota_mb must be between 0 and {MAX_DISK_QUOTA_MB}"
             )));
         }
+    }
+
+    // Resolve the cap per-type values are measured against: the site value
+    // submitted in this very request wins, then the stored one, then the
+    // global ceiling.
+    let requested_site_cap = payload
+        .max_file_size_mb
+        .unwrap_or(model.cache_max_file_size_mb);
+    let cap_for_types = requested_site_cap.unwrap_or(global.max_file_size_mb);
+    if let Some(limits) = payload.type_limits.as_ref().and_then(Option::as_ref)
+    {
+        validate_site_cache_limits(
+            cap_for_types,
+            Some(limits),
+            global.max_file_size_mb,
+        )?;
+    }
+    if let Some(site_cap) = payload.max_file_size_mb.flatten() {
+        validate_site_cache_limits(site_cap, None, global.max_file_size_mb)?;
+    }
+
+    let mut changed = false;
+    if let Some(quota) = payload.quota_mb {
         let mut active: site::ActiveModel = model.clone().into();
         active.cache_quota_mb = Set(quota);
         active.update(&state.db).await?;
-
         tracing::info!(site_id = %id, quota_mb = quota, "cache quota updated");
+        changed = true;
+    }
+    if let Some(site_cap) = payload.max_file_size_mb {
+        let mut active: site::ActiveModel = model.clone().into();
+        active.cache_max_file_size_mb = Set(site_cap);
+        active.update(&state.db).await?;
+        tracing::info!(
+            site_id = %id,
+            max_file_size_mb = ?site_cap,
+            "site cache file-size limit updated"
+        );
+        changed = true;
+    }
+    if let Some(type_limits) = payload.type_limits {
+        let stored = type_limits.clone().map(|limits| {
+            serde_json::to_value(limits).unwrap_or(serde_json::Value::Null)
+        });
+        let mut active: site::ActiveModel = model.clone().into();
+        active.cache_type_limits_mb = Set(stored);
+        active.update(&state.db).await?;
+        tracing::info!(
+            site_id = %id,
+            type_limits = ?type_limits,
+            "site cache type limits updated"
+        );
+        changed = true;
+    }
+
+    if changed {
         touch_site(&state, id).await?;
         notify_config_changed(&state, id, Some(&current.email)).await;
     }
@@ -838,6 +960,45 @@ mod tests {
         assert_eq!(default_browser_ttl(), 300);
         assert_eq!(default_disk_quota(), 1024);
         assert!(default_true());
+    }
+
+    fn limits(pairs: &[(&str, i32)]) -> HashMap<String, i32> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
+    #[test]
+    fn site_file_cap_rejects_zero_and_global_exceedance() {
+        let global = 16;
+        assert!(validate_site_cache_limits(1, None, global).is_ok());
+        assert!(validate_site_cache_limits(global, None, global).is_ok());
+        assert!(validate_site_cache_limits(0, None, global).is_err());
+        assert!(validate_site_cache_limits(global + 1, None, global).is_err());
+    }
+
+    #[test]
+    fn type_limits_reject_unknown_keys_and_out_of_range_values() {
+        let good = limits(&[("html", 4), ("image", 8)]);
+        assert!(validate_site_cache_limits(8, Some(&good), 16).is_ok());
+
+        let unknown = limits(&[("video", 4)]);
+        let err = validate_site_cache_limits(8, Some(&unknown), 16)
+            .expect_err("unknown key must be rejected");
+        assert!(err.to_string().contains("invalid"), "{err}");
+
+        let too_big = limits(&[("js", 9)]);
+        let err = validate_site_cache_limits(8, Some(&too_big), 16)
+            .expect_err("value above the site cap must be rejected");
+        assert!(err.to_string().contains("between 1 and 8"), "{err}");
+
+        let zero = limits(&[("css", 0)]);
+        assert!(validate_site_cache_limits(8, Some(&zero), 16).is_err());
+    }
+
+    #[test]
+    fn empty_type_map_clears_every_override() {
+        assert!(
+            validate_site_cache_limits(8, Some(&HashMap::new()), 16).is_ok()
+        );
     }
 
     /// Axum panics while *building* a router whose paths overlap, so merely

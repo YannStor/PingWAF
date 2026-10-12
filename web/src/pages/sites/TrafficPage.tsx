@@ -27,6 +27,8 @@ import {
   ShieldSlash,
   Timer,
   UploadSimple,
+  Gauge,
+  Lightning,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
@@ -311,6 +313,20 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
               icon={<Timer weight="duotone" className="h-4 w-4" />}
               label={t('pages.traffic.avgLatency')}
               value={formatLatency(summary?.avg_latency_ms ?? 0)}
+            />
+            <SummaryCard
+              icon={<Gauge weight="duotone" className="h-4 w-4" />}
+              label={t('pages.traffic.cacheHitRate')}
+              value={formatPercent(summary?.cache_hit_rate ?? 0)}
+              tone="success"
+              hint={t('pages.traffic.cacheHitRateHint')}
+            />
+            <SummaryCard
+              icon={<Lightning weight="duotone" className="h-4 w-4" />}
+              label={t('pages.traffic.cacheSavedBytes')}
+              value={formatSize(summary?.cache_saved_bytes ?? 0)}
+              tone="success"
+              hint={t('pages.traffic.cacheSavedHint')}
             />
           </>
         )}
@@ -626,17 +642,23 @@ function SummaryCard({
   label,
   value,
   tone = 'brand',
+  hint,
 }: {
   icon: ReactNode
   label: string
   value: string
-  tone?: 'brand' | 'danger'
+  tone?: 'brand' | 'danger' | 'success'
+  hint?: string
 }) {
   const toneClass =
-    tone === 'danger' ? 'bg-danger/12 text-fg-danger' : 'bg-brand-soft text-brand'
+    tone === 'danger'
+      ? 'bg-danger/12 text-fg-danger'
+      : tone === 'success'
+        ? 'bg-success/12 text-fg-success'
+        : 'bg-brand-soft text-brand'
   return (
     <Card padded>
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex items-center justify-between gap-3" title={hint}>
         <div className="min-w-0">
           <p className="text-xs font-medium uppercase tracking-wide text-fg-subtle">{label}</p>
           <p className="mt-1.5 text-2xl font-semibold tabular-nums text-fg-strong">{value}</p>

@@ -16,6 +16,7 @@ pub mod agents;
 pub mod ai;
 pub mod api_protection;
 pub mod bot_protection;
+pub mod cache_settings;
 pub mod certificate_events;
 pub mod certificates;
 pub mod challenge_settings;

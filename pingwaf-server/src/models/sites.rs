@@ -56,6 +56,15 @@ pub mod sites {
         pub plan: String,
         /// Disk budget, in MiB, the agents may use for this site's cache.
         pub cache_quota_mb: i32,
+        /// Site-level single-file cache cap, in MiB; `None` follows the
+        /// global `cache_settings.max_file_size_mb`. Validated against the
+        /// global ceiling at write time and clamped in the data plane.
+        pub cache_max_file_size_mb: Option<i32>,
+        /// Per-content-type single-file caps, in MiB, keyed by
+        /// `html/css/js/image/font/media/other`; a missing key follows
+        /// `cache_max_file_size_mb` (then the global ceiling). `None` when
+        /// the site does not override any type.
+        pub cache_type_limits_mb: Option<Json>,
         /// The site sits behind a CDN / reverse proxy: security features key
         /// on the forwarded-header client IP, not the direct TCP peer.
         pub trust_proxy_headers: bool,
