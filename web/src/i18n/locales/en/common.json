@@ -67,7 +67,8 @@
     "priority": "Priority",
     "lastUpdated": "Last updated",
     "show": "Show",
-    "hide": "Hide"
+    "hide": "Hide",
+    "copy": "Copy"
   },
   "status": {
     "active": "Active",
@@ -1122,7 +1123,47 @@
       "controlNoSite": "Control plane requests are not scoped to a site.",
       "userEmail": "User",
       "userId": "User ID",
-      "reason": "Reason"
+      "reason": "Reason",
+      "searchFieldsLabel": "Fields: ",
+      "searchSyntax": "Separate conditions with spaces (all must match); comma-separated values on one field match any; * wildcard and \"quoted values\" are supported; and / or / not operators are not supported.",
+      "fieldHints": {
+        "clientIp": "Client IP; * wildcard and comma multi-value supported",
+        "path": "Request path; free text also matches paths",
+        "host": "Hostname",
+        "site": "Site ID; site:none for unassigned traffic",
+        "rule": "Matched rule ID",
+        "type": "Event type (managed, bot, rate_limit…), comma multi-value",
+        "action": "Action (block, challenge, log…), comma multi-value",
+        "country": "Country/region code (CN, US…)",
+        "status": "Status code or class (404, 4xx)",
+        "method": "HTTP method (GET, POST…), comma multi-value",
+        "cache": "Cache status (hit, miss)",
+        "latency": "Minimum latency in ms, e.g. >500",
+        "requestId": "Request ID, exact match"
+      },
+      "quickActions": "Quick actions:",
+      "searchThisIp": "Search this IP",
+      "searchThisPath": "Search this path",
+      "blockIp": "Block IP",
+      "blockIpConfirm": "Block {{ip}}? It will immediately lose access to this site.",
+      "blockDuration": "Duration",
+      "blockDurationPermanent": "Permanent (until manually unblocked)",
+      "blockDuration1h": "1 hour",
+      "blockDuration24h": "24 hours",
+      "ipBlocked": "IP blocked",
+      "blockFailed": "Failed to block IP",
+      "addToIpGroup": "Add to IP group",
+      "ipGroupAdded": "Added to IP group",
+      "ipGroupAddFailed": "Failed to add to IP group",
+      "unassignedBlockHint": "Unassigned traffic has no site context and cannot be blocked; filter by site first.",
+      "ipGroupPicker": {
+        "title": "Add to IP group",
+        "description": "Append {{ip}} to the selected IP group.",
+        "group": "IP group",
+        "choose": "Choose a group…",
+        "confirm": "Add",
+        "empty": "No IP groups yet — create one on the IP Groups page first."
+      }
     },
     "agents": {
       "title": "Agents",

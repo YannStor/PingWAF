@@ -8,6 +8,36 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.25.8] — 2026-10-12
+
+The logs page usability batch — search autocomplete, one-click actions on
+client IPs, and a unified, denser log list.
+
+### ✨ Features
+
+- **Search autocomplete.** Typing a field name in the logs search box pops
+  an inline suggestion panel (filtered by the active tab), with `↑`/`↓`
+  navigation, `Tab`/`Enter` to accept, `Esc` to dismiss. The suggestions,
+  the clickable field chips under the box, and the parser all read the same
+  field metadata (`logQuery.ts`), so they can never drift apart.
+- **Clickable field hints + syntax docs.** The static hint line is replaced
+  by per-field chips — clicking one appends `field:` to the draft and
+  focuses the box. A new syntax line documents the grammar: space = AND,
+  comma = OR on one field, `*` wildcard, quoted values; `and` / `or` /
+  `not` keywords are not supported.
+- **Security event dialog actions.** The method/URL subtitle under the
+  dialog title is gone. The client IP is now a link that fills the search
+  box and re-runs the query, and two quick actions follow the detail grid:
+  **拉黑 IP** (manual block via `POST /blocked-ips/block`, permanent or
+  1 h/24 h; disabled for unassigned traffic, which has no site context)
+  and **加入 IP 组** (a picker dialog that appends the IP to the chosen
+  group's ranges and PUTs the update).
+- **Unified log list styling.** All three tabs share one look now:
+  timestamps drop the year (`MM-DD HH:mm`), the country marker on client
+  IPs is a flag emoji instead of a second text line, the path column is
+  fixed-width with truncation plus a full-value tooltip, and IP/path cells
+  have a right-click menu — "search this value" and "copy".
+
 ## [PingWAF 0.25.7] — 2026-10-12
 
 The console polish batch — cache coverage for large static bundles, the

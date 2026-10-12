@@ -95,6 +95,17 @@ export function formatDateTime(value: string | number | Date | null | undefined)
   return date ? formatters().absolute.format(date) : '—'
 }
 
+/**
+ * Compact log-table timestamp — month/day plus hour:minute, no year and no
+ * seconds. Log windows span at most 90 days, so the year is noise.
+ */
+export function formatLogTime(value: string | number | Date | null | undefined): string {
+  const date = toDate(value)
+  if (!date) return '—'
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
 /** Time only — for a chart axis bucketed within one day. */
 export function formatTime(value: string | number | Date | null | undefined): string {
   const date = toDate(value)

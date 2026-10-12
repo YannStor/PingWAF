@@ -195,3 +195,115 @@ function tokenize(input: string): string[] {
   flush()
   return tokens
 }
+
+/* ────────────────────────────────────────────────────────────────
+   Field metadata — the single source for the search autocomplete
+   and the clickable field-hint chips under the input. Kept in sync
+   with the parser above by construction (same file).
+   ──────────────────────────────────────────────────────────────── */
+
+export interface LogQueryField {
+  /** Canonical name inserted by autocomplete / hint chips. */
+  name: string
+  /** Alternative spellings the parser also accepts. */
+  aliases?: string[]
+  /** Tabs the field filters on (elsewhere it lands in `unknown`). */
+  tabs: LogTab[]
+  /** Key under `pages.logs.fieldHints` describing the field. */
+  descKey: string
+  /** Example value rendered next to the field name. */
+  example: string
+}
+
+export const LOG_QUERY_FIELDS: LogQueryField[] = [
+  {
+    name: 'client_ip',
+    aliases: ['ip'],
+    tabs: ['security', 'access'],
+    descKey: 'clientIp',
+    example: '203.0.113.44',
+  },
+  {
+    name: 'path',
+    tabs: ['security', 'access'],
+    descKey: 'path',
+    example: '/api/v1/users',
+  },
+  {
+    name: 'host',
+    tabs: ['security', 'access'],
+    descKey: 'host',
+    example: 'example.com',
+  },
+  {
+    name: 'site',
+    aliases: ['site_id'],
+    tabs: ['security', 'access'],
+    descKey: 'site',
+    example: '<site-id>|none',
+  },
+  {
+    name: 'rule',
+    aliases: ['rule_id'],
+    tabs: ['security'],
+    descKey: 'rule',
+    example: 'xss-001',
+  },
+  {
+    name: 'type',
+    aliases: ['event_type'],
+    tabs: ['security'],
+    descKey: 'type',
+    example: 'managed,bot',
+  },
+  {
+    name: 'action',
+    tabs: ['security', 'control'],
+    descKey: 'action',
+    example: 'block,challenge',
+  },
+  {
+    name: 'country',
+    aliases: ['country_code'],
+    tabs: ['security', 'access'],
+    descKey: 'country',
+    example: 'CN',
+  },
+  {
+    name: 'status',
+    tabs: ['security', 'access', 'control'],
+    descKey: 'status',
+    example: '404|4xx',
+  },
+  {
+    name: 'method',
+    tabs: ['access', 'control'],
+    descKey: 'method',
+    example: 'POST,PUT',
+  },
+  {
+    name: 'cache',
+    aliases: ['cache_status'],
+    tabs: ['access'],
+    descKey: 'cache',
+    example: 'hit',
+  },
+  {
+    name: 'latency',
+    aliases: ['min_latency_ms'],
+    tabs: ['access'],
+    descKey: 'latency',
+    example: '>500',
+  },
+  {
+    name: 'request_id',
+    tabs: ['security', 'access', 'control'],
+    descKey: 'requestId',
+    example: 'e7a1…',
+  },
+]
+
+/** Fields valid for `tab`, sorted for the hint chips. */
+export function logQueryFieldsFor(tab: LogTab): LogQueryField[] {
+  return LOG_QUERY_FIELDS.filter((f) => f.tabs.includes(tab))
+}

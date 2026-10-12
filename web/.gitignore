@@ -1,5 +1,5 @@
-# Logs
-logs
+# Logs (root-relative so src/components/logs/ stays tracked)
+/logs
 *.log
 npm-debug.log*
 yarn-debug.log*

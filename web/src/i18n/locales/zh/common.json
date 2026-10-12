@@ -67,7 +67,8 @@
     "priority": "优先级",
     "lastUpdated": "最近更新",
     "show": "显示",
-    "hide": "收起"
+    "hide": "收起",
+    "copy": "复制"
   },
   "status": {
     "active": "运行中",
@@ -1122,7 +1123,47 @@
       "controlNoSite": "控制面请求不区分站点。",
       "userEmail": "用户",
       "userId": "用户 ID",
-      "reason": "原因"
+      "reason": "原因",
+      "searchFieldsLabel": "可用字段：",
+      "searchSyntax": "多条件用空格分隔（同时满足）；同一字段用逗号分隔多个值（任一匹配）；支持 * 通配与 \"引号\" 包裹含空格的值；暂不支持 and / or / not 逻辑关键字。",
+      "fieldHints": {
+        "clientIp": "客户端 IP，支持 * 通配与逗号多值",
+        "path": "请求路径，自由文本也会匹配路径",
+        "host": "主机名",
+        "site": "站点 ID；site:none 筛选未归属流量",
+        "rule": "命中的规则 ID",
+        "type": "事件类型（managed、bot、rate_limit 等），逗号分隔多值",
+        "action": "处置动作（block、challenge、log 等），逗号分隔多值",
+        "country": "国家/地区代码（如 CN、US）",
+        "status": "状态码或状态码类（404、4xx）",
+        "method": "HTTP 方法（GET、POST 等），逗号分隔多值",
+        "cache": "缓存状态（hit、miss）",
+        "latency": "最小延迟毫秒数，如 >500",
+        "requestId": "请求 ID，精确匹配"
+      },
+      "quickActions": "快捷操作：",
+      "searchThisIp": "搜索此 IP",
+      "searchThisPath": "搜索此路径",
+      "blockIp": "拉黑 IP",
+      "blockIpConfirm": "确认拉黑 {{ip}}？该 IP 将立即无法访问此站点。",
+      "blockDuration": "拉黑时长",
+      "blockDurationPermanent": "永久（手动解封前一直生效）",
+      "blockDuration1h": "1 小时",
+      "blockDuration24h": "24 小时",
+      "ipBlocked": "IP 已拉黑",
+      "blockFailed": "拉黑失败",
+      "addToIpGroup": "加入 IP 组",
+      "ipGroupAdded": "已加入 IP 组",
+      "ipGroupAddFailed": "加入 IP 组失败",
+      "unassignedBlockHint": "未归属流量没有站点上下文，无法拉黑；请先在站点筛选中指定站点。",
+      "ipGroupPicker": {
+        "title": "加入 IP 组",
+        "description": "将 {{ip}} 追加到所选 IP 组的 IP 列表。",
+        "group": "IP 组",
+        "choose": "选择 IP 组…",
+        "confirm": "加入",
+        "empty": "暂无 IP 组，请先在「IP 组」页面创建。"
+      }
     },
     "agents": {
       "title": "节点",

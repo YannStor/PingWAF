@@ -67,7 +67,8 @@
     "priority": "優先度",
     "lastUpdated": "最終更新",
     "show": "表示",
-    "hide": "非表示"
+    "hide": "非表示",
+    "copy": "コピー"
   },
   "status": {
     "active": "アクティブ",
@@ -1122,7 +1123,47 @@
       "controlNoSite": "コントロールプレーンのリクエストはサイト単位ではありません。",
       "userEmail": "ユーザー",
       "userId": "ユーザー ID",
-      "reason": "理由"
+      "reason": "理由",
+      "searchFieldsLabel": "利用可能なフィールド：",
+      "searchSyntax": "複数条件は空白で区切って指定（AND）。同一フィールドはカンマで複数値（OR）。* ワイルドカードと \"引用値\" に対応。and / or / not キーワードには未対応です。",
+      "fieldHints": {
+        "clientIp": "クライアント IP（* ワイルドカード・カンマ複数値対応）",
+        "path": "リクエストパス。自由テキストもパスに一致",
+        "host": "ホスト名",
+        "site": "サイト ID。site:none で未割り当てトラフィック",
+        "rule": "一致したルール ID",
+        "type": "イベント種別（managed、bot、rate_limit など）、カンマ複数値",
+        "action": "処理（block、challenge、log など）、カンマ複数値",
+        "country": "国/地域コード（CN、US など）",
+        "status": "ステータスコードまたはクラス（404、4xx）",
+        "method": "HTTP メソッド（GET、POST など）、カンマ複数値",
+        "cache": "キャッシュ状態（hit、miss）",
+        "latency": "最小遅延ミリ秒（例: >500）",
+        "requestId": "リクエスト ID（完全一致）"
+      },
+      "quickActions": "クイック操作：",
+      "searchThisIp": "この IP を検索",
+      "searchThisPath": "このパスを検索",
+      "blockIp": "IP をブロック",
+      "blockIpConfirm": "{{ip}} をブロックしますか？直ちにこのサイトへのアクセスが拒否されます。",
+      "blockDuration": "ブロック期間",
+      "blockDurationPermanent": "無期限（手動解除まで）",
+      "blockDuration1h": "1 時間",
+      "blockDuration24h": "24 時間",
+      "ipBlocked": "IP をブロックしました",
+      "blockFailed": "ブロックに失敗しました",
+      "addToIpGroup": "IP グループに追加",
+      "ipGroupAdded": "IP グループに追加しました",
+      "ipGroupAddFailed": "IP グループへの追加に失敗しました",
+      "unassignedBlockHint": "未割り当てトラフィックはサイトを持たないためブロックできません。先にサイトで絞り込んでください。",
+      "ipGroupPicker": {
+        "title": "IP グループに追加",
+        "description": "{{ip}} を選択した IP グループに追加します。",
+        "group": "IP グループ",
+        "choose": "グループを選択…",
+        "confirm": "追加",
+        "empty": "IP グループがありません。先に「IP グループ」ページで作成してください。"
+      }
     },
     "agents": {
       "title": "エージェント",
