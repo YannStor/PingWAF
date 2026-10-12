@@ -734,13 +734,24 @@ export function GlobalSslPage() {
                 ...sites.map((s) => ({ value: s.id, label: `${s.domain} · ${s.name}` })),
               ]}
               value={form.siteId}
-              onChange={(e) => setForm((f) => ({ ...f, siteId: e.target.value }))}
+              onChange={(e) => {
+                const siteId = e.target.value
+                // Autofill the domains from the site's own configuration so
+                // the operator does not re-type them (and never misses an
+                // alternate domain, which would leave it unprotected).
+                const domain = sites
+                  .filter((s) => s.id === siteId)
+                  .flatMap((s) => [s.domain, ...s.alternate_domains])
+                  .join(',')
+                setForm((f) => ({ ...f, siteId, domain: domain || f.domain }))
+              }}
             />
             <Input
               label={t('pages.ssl.domain')}
               placeholder="example.com"
               containerClassName="pw-mono"
               value={form.domain}
+              hint={t('pages.ssl.domainAutofillHint')}
               onChange={(e) => setForm((f) => ({ ...f, domain: e.target.value }))}
             />
           </div>

@@ -1931,7 +1931,10 @@ impl RuleCache {
             write_timeout_ms: u.write_timeout_ms,
             pool_id: u.pool_id.clone(),
             sni: u.sni.clone(),
-            verify_cert: u.verify_cert,
+            // Verification is opt-in: an unset flag means lenient (do not
+            // verify the origin certificate), matching the control plane's
+            // default. Explicit true keeps strict validation.
+            verify_cert: Some(u.verify_cert.unwrap_or(false)),
             is_default: u.is_default,
         }
     }

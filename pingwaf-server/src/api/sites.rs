@@ -903,7 +903,7 @@ async fn create(
             .upstream_tls
             .filter(|tls| *tls)
             .map(|_| origin_host(&upstream_address).to_string())),
-        verify_cert: Set(None),
+        verify_cert: Set(Some(false)),
         health_check_enabled: Set(defaults.enabled),
         health_check_path: Set(defaults.path.clone()),
         health_check_interval_seconds: Set(defaults.interval_seconds),
@@ -934,6 +934,40 @@ async fn create(
     if let Err(err) = crate::defaults::seed_site_defaults(&state.db, id).await {
         tracing::error!(%id, error = %err, "failed to seed built-in rules");
     }
+
+    // Every new site gets an SSL row with https enabled: without it the data
+    // plane's `ssl.enabled` gate stays closed and a later ACME request would
+    // sit pending forever - the user would have to know to flip a hidden
+    // switch before certificate issuance can even start.
+    site_ssl::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        site_id: Set(id),
+        cert_pem: Set(None),
+        key_pem: Set(None),
+        issuer: Set(None),
+        domain: Set(domain.clone()),
+        expires_at: Set(None),
+        auto_renew: Set(true),
+        acme_email: Set(None),
+        acme_challenge_type: Set(None),
+        acme_dns_provider: Set(None),
+        acme_dns_config: Set(None),
+        https_enabled: Set(true),
+        min_tls_version: Set(tls_version::TLS_12.to_string()),
+        max_tls_version: Set(None),
+        self_signed: Set(false),
+        certificate_id: Set(None),
+        mtls_enabled: Set(false),
+        mtls_client_ca: Set(None),
+        mtls_organization: Set(None),
+        mtls_require_client_cert: Set(false),
+        hsts_enabled: Set(false),
+        hsts_max_age: Set(0),
+        always_use_https: Set(false),
+        created_at: Set(timestamp),
+    }
+    .insert(&state.db)
+    .await?;
 
     tracing::info!(%id, %domain, upstream = %upstream_address, owner = %current.id, "site created");
     notify_config_changed(&state, id, Some(&current.email)).await;
@@ -1323,7 +1357,10 @@ async fn create_pool(
         name: Set(name),
         lb_algorithm: Set(lb_algorithm),
         sni: Set(sni),
-        verify_cert: Set(payload.verify_cert),
+        // Origin certificate verification is opt-in: self-signed origins are
+        // the common case, so a pool starts lenient and the operator flips
+        // "must trust origin certificate" for strict validation.
+        verify_cert: Set(payload.verify_cert.or(Some(false))),
         health_check_enabled: Set(health_check.enabled),
         health_check_path: Set(health_check.path),
         health_check_interval_seconds: Set(health_check.interval_seconds),
