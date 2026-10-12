@@ -7,9 +7,13 @@ extend-ignore-re = [
 # (web/src/api/geo.ts country table), not a typo for BY/BE.
 # 'COSE' is CBOR Object Signing and Encryption (RFC 9052), the key format
 # WebAuthn authenticators report (pingwaf-server/src/models/passkeys.rs).
+# 'FO' (Faroe Islands) and 'PN' (Pitcairn Islands) are ISO 3166-1 alpha-2
+# codes in web/src/components/charts/isoNumeric.ts.
 [default.extend-words]
 BA = "BA"
 COSE = "COSE"
+FO = "FO"
+PN = "PN"
 
 [files]
 extend-exclude = ["*.md", "*.toml"]

@@ -370,10 +370,6 @@ export function LogsPage() {
       .slice(0, 8)
   }, [suggest, tab])
 
-  useEffect(() => {
-    setSuggestIndex(-1)
-  }, [suggest])
-
   /** Replaces the in-flight token with `field:` and keeps caret + focus. */
   const applySuggestion = (field: LogQueryField) => {
     if (!suggest) return
@@ -442,6 +438,7 @@ export function LogsPage() {
     const match = value.slice(0, caret).match(/([A-Za-z_]+)$/)
     if (match) {
       setSuggest({ start: caret - match[1].length, end: caret, query: match[1] })
+      setSuggestIndex(-1)
     } else {
       setSuggest(null)
     }
