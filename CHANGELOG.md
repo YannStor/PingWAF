@@ -8,6 +8,51 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.25.3] — 2026-10-12
+
+The certificate issuance unblocking batch — fixes the two defects that left
+live domains stuck on "issuing" with `ERR_SSL_VERSION_OR_CIPHER_MISMATCH` —
+plus default-lenient origin certificate verification and three issuance
+workflow improvements.
+
+### 🐛 Bug Fixes
+
+- *(acme)* **Ready orders are accepted.** Let's Encrypt answers `Ready`
+  directly for a new order when every authorization is still valid
+  (< 30 days old). The issuance loop only accepted `Pending`, so renewal
+  wedged forever with `order is not pending, status: Ready`. Ready orders
+  now skip the challenge loop and go straight to `poll_ready` →
+  `finalize`; `Processing` / `Valid` / `Invalid` still fail loudly.
+- *(reload)* **An issuance completing mid-reload is no longer clobbered.**
+  The hot-reload path fetched the config snapshot without the write lock,
+  so a PEM written between the fetch and the reload's save vanished from
+  storage (and then from the SNI table on the next provider rebuild),
+  rejecting all TLS handshakes. Reload now fetches, merges and persists
+  atomically under the new `ConfigManager::update_raw`.
+- *(certificates)* **Entries without a PEM keep serving the previous
+  certificate.** The certificate provider is replaced wholesale on every
+  update, so a configuration entry whose PEM had not (yet) been persisted
+  used to take its domains out of the SNI table. Such entries now carry
+  the previously served certificates over by domain; a fresh upload or a
+  completed issuance still wins.
+
+### ✨ Features
+
+- **Origin certificate verification is opt-in.** New origin pools start
+  with `verify_cert=false`: self-signed origins are the common case, and
+  an unset flag stays lenient end to end (pool API → agent config
+  conversion → pingora options). The dashboard switch is relabeled
+  "require trusted origin certificate" for operators who want strict
+  validation. This also removes the `InvalidCert` 502s against origins
+  behind self-signed certificates.
+- **New sites start with SSL enabled.** Every site is created with an SSL
+  row (`https_enabled=true`): without it the data plane's `ssl.enabled`
+  gate stayed closed and a later ACME request sat pending forever.
+- **The SSL issuance dialog autofills domains.** Selecting a site fills
+  the domain field with the site's primary and alternate domains (the
+  backend already accepts the comma-separated list) instead of making the
+  operator retype them.
+
 ## [PingWAF 0.25.2] — 2026-10-12
 
 The SSL issuance observability batch — an ACME order can no longer hang
