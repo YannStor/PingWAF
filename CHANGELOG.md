@@ -8,6 +8,33 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.25.5] — 2026-10-12
+
+The identity split: global configuration stays in the sidebar's account
+page, personal settings move to a dedicated page reached from the
+top-right user menu.
+
+### ✨ Features
+
+- **/profile — personal account settings.** Profile, login-name and
+  password changes plus passkey binding/renaming/removal live on a new
+  page reached from the top-right "account settings" menu item; it is
+  deliberately absent from the sidebar. The sidebar /account page now
+  hosts only global configuration: API keys and user administration.
+- **API key creator attribution.** The key list shows the owning
+  account's email; keys the system mints on its own (all-in-one
+  bootstrap, agent enrollment) show a "system" badge instead. Deleting a
+  system key requires typing the key's full name in a second, red-titled
+  confirmation — a mistaken revocation strands agent (re-)registration.
+- **Passkey master switch.** Settings keeps a single deployment-wide
+  toggle (persisted in `instance_settings`, admin-only, no restart
+  needed): with it off, the login form hides the passkey option and new
+  registrations are refused; existing credentials are kept.
+- **Last login in user administration.** The admin user list shows each
+  account's most recent successful sign-in (time + IP), resolved from
+  the existing login history — no schema change, and historical data
+  appears immediately.
+
 ## [PingWAF 0.25.4] — 2026-10-12
 
 ### 🐛 Bug Fixes
