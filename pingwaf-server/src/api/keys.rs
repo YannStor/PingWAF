@@ -33,6 +33,19 @@ pub const KEY_PREFIX_LENGTH: usize = 8;
 /// registration, so this is deliberately lower than the interactive default.
 const KEY_HASH_COST: u32 = 10;
 
+/// Name of the all-in-one bootstrap key seeded at startup (`lib.rs`).
+pub const BOOTSTRAP_KEY_NAME: &str = "_all-in-one-bootstrap";
+/// Name prefix of the enrollment keys minted by `POST /agents/enroll`.
+pub const AGENT_ENROLLMENT_PREFIX: &str = "agent-enrollment-";
+
+/// True for keys the system mints on its own (bootstrap, agent enrollment).
+/// The UI shows these as "system" instead of a creator account, and guards
+/// their deletion: revoking them strands agent (re-)registration until a new
+/// key is minted.
+pub fn is_system_key(name: &str) -> bool {
+    name == BOOTSTRAP_KEY_NAME || name.starts_with(AGENT_ENROLLMENT_PREFIX)
+}
+
 /// Key metadata; the hash itself is skipped by serde at the model level.
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiKeyResponse {
@@ -44,6 +57,11 @@ pub struct ApiKeyResponse {
     pub expires_at: Option<DateTime<Utc>>,
     pub last_used_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    /// Owning account's email; `None` for system-minted keys.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub creator: Option<String>,
+    /// True when the key was minted by the system (bootstrap, enrollment).
+    pub is_system: bool,
     /// Only populated by `POST /keys`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
@@ -60,6 +78,8 @@ impl From<api_key::Model> for ApiKeyResponse {
             expires_at: model.expires_at,
             last_used_at: model.last_used_at,
             created_at: model.created_at,
+            creator: None,
+            is_system: false,
             key: None,
         }
     }
@@ -112,11 +132,45 @@ async fn list(
     let total = paginator.num_items().await?;
     let rows = paginator.fetch_page(pagination.index()).await?;
 
-    Ok(Json(Page::new(
-        rows.into_iter().map(ApiKeyResponse::from).collect(),
-        total,
-        pagination,
-    )))
+    // Batch-resolve owners for the creator column. System-minted keys keep
+    // `creator: None`: the attribution row is incidental (bootstrap lands on
+    // the first admin), and the UI labels them "system" instead.
+    let owner_ids: Vec<Uuid> = {
+        let mut ids: Vec<Uuid> = rows.iter().map(|k| k.user_id).collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    };
+    let owners: std::collections::HashMap<Uuid, String> =
+        if owner_ids.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            user::Entity::find()
+                .filter(user::Column::Id.is_in(owner_ids))
+                .all(&state.db)
+                .await?
+                .into_iter()
+                .map(|u| (u.id, u.email))
+                .collect()
+        };
+
+    let items: Vec<ApiKeyResponse> = rows
+        .into_iter()
+        .map(|model| {
+            let is_system = is_system_key(&model.name);
+            let creator = if is_system {
+                None
+            } else {
+                owners.get(&model.user_id).cloned()
+            };
+            let mut body = ApiKeyResponse::from(model);
+            body.creator = creator;
+            body.is_system = is_system;
+            body
+        })
+        .collect();
+
+    Ok(Json(Page::new(items, total, pagination)))
 }
 
 /// `POST /api/v1/keys`
@@ -169,6 +223,12 @@ async fn create(
         mint_key(&state, current.id, name, permissions, expires_at).await?;
 
     let mut body = ApiKeyResponse::from(model);
+    // A user-minted key may borrow a system-looking name; surface what the
+    // name implies so the strong-delete guard matches what the list shows.
+    body.is_system = is_system_key(&body.name);
+    if !body.is_system {
+        body.creator = Some(current.email.clone());
+    }
     body.key = Some(plaintext);
     Ok((StatusCode::CREATED, Json(body)).into_response())
 }
@@ -336,6 +396,18 @@ mod tests {
         assert_eq!(key.len(), 4 + 64);
         assert_eq!(key[..KEY_PREFIX_LENGTH].len(), KEY_PREFIX_LENGTH);
         assert_ne!(generate_key(), key);
+    }
+
+    #[test]
+    fn system_keys_are_recognised_by_name_convention() {
+        assert!(is_system_key("_all-in-one-bootstrap"));
+        assert!(is_system_key("agent-enrollment-20261012-091500"));
+        // Ordinary operator-chosen names are not system keys, even when they
+        // flirt with the conventions.
+        assert!(!is_system_key("agent-enrollment"));
+        assert!(!is_system_key("bootstrap"));
+        assert!(!is_system_key("ci-deploy"));
+        assert!(!is_system_key(""));
     }
 
     #[test]

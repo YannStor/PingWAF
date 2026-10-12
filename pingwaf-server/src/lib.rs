@@ -620,7 +620,7 @@ pub async fn embedded_agent_ca_pem(
     }
 }
 
-const BOOTSTRAP_KEY_NAME: &str = "_all-in-one-bootstrap";
+use crate::api::keys::BOOTSTRAP_KEY_NAME;
 const BOOTSTRAP_KEY_FILE: &str = "/var/lib/pingwaf/bootstrap_api_key";
 
 /// Seeds a bootstrap API key for all-in-one mode.

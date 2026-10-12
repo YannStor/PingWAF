@@ -38,6 +38,9 @@ export interface User {
   disabled: boolean
   created_at: string
   updated_at: string
+  /** Most recent successful login (admin list only); absent when never. */
+  last_login_at?: string
+  last_login_ip?: string
 }
 
 export interface LoginRequest {
@@ -1212,6 +1215,10 @@ export interface ApiKey {
   expires_at: string | null
   last_used_at: string | null
   created_at: string
+  /** Owning account's email; absent for system-minted keys. */
+  creator?: string
+  /** True when the key was minted by the system (bootstrap, enrollment). */
+  is_system: boolean
   key?: string
 }
 

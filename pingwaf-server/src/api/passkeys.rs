@@ -43,7 +43,9 @@ use crate::api::common::host_without_port;
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::auth::middleware::AuthUser;
-use crate::models::{passkey_credential, passkey_state, user};
+use crate::models::{
+    instance_setting, passkey_credential, passkey_state, user,
+};
 
 /// How long a ceremony's challenge stays valid, in seconds.
 const STATE_TTL_SECONDS: i64 = 300;
@@ -51,6 +53,72 @@ const STATE_TTL_SECONDS: i64 = 300;
 const MAX_NAME_LENGTH: usize = 100;
 /// Ceremonies one replica will start per minute, across all callers.
 const CHALLENGES_PER_MINUTE: u32 = 120;
+
+/// `instance_settings` key holding the runtime passkey master switch.
+const PASSKEY_ENABLED_KEY: &str = "passkey_enabled";
+
+/// Resolves the master switch from the stored KV row: an explicit `true` /
+/// `false` wins; a missing row (or a legacy value) falls back to the boot
+/// configuration.
+fn enabled_from_stored(stored: Option<&str>, boot_default: bool) -> bool {
+    match stored.map(str::trim) {
+        Some("true") => true,
+        Some("false") => false,
+        _ => boot_default,
+    }
+}
+
+/// Effective passkey master switch: the runtime KV overrides the static boot
+/// config, so an operator can disable passkey logins without a restart.
+pub async fn passkey_enabled(
+    db: &sea_orm::DatabaseConnection,
+    boot_default: bool,
+) -> Result<bool, sea_orm::DbErr> {
+    let row = instance_setting::Entity::find_by_id(PASSKEY_ENABLED_KEY)
+        .one(db)
+        .await?;
+    Ok(enabled_from_stored(
+        row.map(|row| row.value).as_deref(),
+        boot_default,
+    ))
+}
+
+/// Persists the runtime master switch.
+async fn set_passkey_enabled(
+    db: &sea_orm::DatabaseConnection,
+    enabled: bool,
+) -> Result<(), sea_orm::DbErr> {
+    let existing = instance_setting::Entity::find_by_id(PASSKEY_ENABLED_KEY)
+        .one(db)
+        .await?;
+    if let Some(row) = existing {
+        let mut active: instance_setting::ActiveModel = row.into();
+        active.value = Set(enabled.to_string());
+        active.updated_at = Set(Utc::now());
+        active.update(db).await?;
+    } else {
+        instance_setting::ActiveModel {
+            key: Set(PASSKEY_ENABLED_KEY.to_string()),
+            value: Set(enabled.to_string()),
+            updated_at: Set(Utc::now()),
+        }
+        .insert(db)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Handler-side gate: every ceremony entry point refuses to run while the
+/// master switch is off. `relying_party` keeps the static boot-config check
+/// for tests and scheme resolution; this adds the runtime toggle on top.
+async fn ensure_passkey_enabled(state: &AppState) -> Result<(), ApiError> {
+    if !passkey_enabled(&state.db, state.config.passkey_enabled).await? {
+        return Err(ApiError::NotImplemented(
+            "passkeys are disabled on this deployment".to_string(),
+        ));
+    }
+    Ok(())
+}
 
 /// Routes contributed to `/api/v1`.
 pub fn routes() -> Router<AppState> {
@@ -62,6 +130,74 @@ pub fn routes() -> Router<AppState> {
         .route("/auth/passkey/register/finish", post(register_finish))
         .route("/auth/passkey/login/begin", post(login_begin))
         .route("/auth/passkey/login/finish", post(login_finish))
+        .route(
+            "/settings/passkeys",
+            get(show_passkey_settings).put(update_passkey_settings),
+        )
+}
+
+/// `GET /api/v1/settings/passkeys` — the effective master switch.
+async fn show_passkey_settings(
+    State(state): State<AppState>,
+    current: AuthUser,
+) -> Result<Json<PasskeySettingsView>, ApiError> {
+    current.require_admin().map_err(ApiError::from)?;
+    Ok(Json(PasskeySettingsView {
+        enabled: passkey_enabled(&state.db, state.config.passkey_enabled)
+            .await?,
+    }))
+}
+
+/// `PUT /api/v1/settings/passkeys` — persists the runtime master switch.
+///
+/// Takes effect immediately: the next ceremony entry point re-reads the
+/// switch, so disabling locks out new registrations and passkey logins
+/// without a restart (already-bound credentials are kept for re-enabling).
+async fn update_passkey_settings(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Json(payload): Json<PasskeySettingsUpdate>,
+) -> Result<Json<PasskeySettingsView>, ApiError> {
+    current.require_admin().map_err(ApiError::from)?;
+    set_passkey_enabled(&state.db, payload.enabled).await?;
+    tracing::info!(
+        actor = %current.id,
+        enabled = payload.enabled,
+        "passkey master switch updated"
+    );
+    Ok(Json(PasskeySettingsView {
+        enabled: payload.enabled,
+    }))
+}
+
+/// The passkey settings view for the dashboard.
+#[derive(Debug, Serialize)]
+pub struct PasskeySettingsView {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PasskeySettingsUpdate {
+    pub enabled: bool,
+}
+
+#[cfg(test)]
+mod switch_tests {
+    use super::enabled_from_stored;
+
+    #[test]
+    fn the_stored_switch_overrides_the_boot_config() {
+        assert!(enabled_from_stored(Some("true"), false));
+        assert!(!enabled_from_stored(Some("false"), true));
+
+        // Missing row or a legacy/unknown value falls back to the boot config.
+        assert!(enabled_from_stored(None, true));
+        assert!(!enabled_from_stored(None, false));
+        assert!(enabled_from_stored(Some(" true "), true));
+        assert!(!enabled_from_stored(Some("bogus"), false));
+        // An empty value is not a decision either way: fall back too.
+        assert!(enabled_from_stored(Some(""), true));
+    }
 }
 
 /// A passkey as the dashboard sees it. The credential id and public key stay
@@ -149,6 +285,7 @@ async fn register_begin(
     current: AuthUser,
     headers: HeaderMap,
 ) -> Result<Json<PublicKeyCredentialCreationOptions>, ApiError> {
+    ensure_passkey_enabled(&state).await?;
     let config = relying_party(&state, &headers)?;
     challenge_budget().consume()?;
 
@@ -194,6 +331,7 @@ async fn register_finish(
     headers: HeaderMap,
     Json(payload): Json<RegistrationResponse>,
 ) -> Result<Response, ApiError> {
+    ensure_passkey_enabled(&state).await?;
     let config = relying_party(&state, &headers)?;
     let cred_id = payload.id.clone();
 
@@ -234,6 +372,7 @@ async fn login_begin(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<PublicKeyCredentialRequestOptions>, ApiError> {
+    ensure_passkey_enabled(&state).await?;
     let config = relying_party(&state, &headers)?;
     challenge_budget().consume()?;
 
@@ -252,6 +391,7 @@ async fn login_finish(
     headers: HeaderMap,
     Json(response): Json<LoginResponse>,
 ) -> Result<Response, ApiError> {
+    ensure_passkey_enabled(&state).await?;
     let config = relying_party(&state, &headers)?;
 
     let user_id =

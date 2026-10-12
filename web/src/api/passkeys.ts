@@ -51,11 +51,18 @@ export const passkeysApi = {
       { skipAuth: true },
     )
   },
+
+  /** Master switch (admin): whether passkey login/registration is offered. */
+  getSettings: () => apiClient.get<{ enabled: boolean }>('/settings/passkeys'),
+
+  updateSettings: (enabled: boolean) =>
+    apiClient.put<{ enabled: boolean }>('/settings/passkeys', { enabled }),
 }
 
 export const passkeyKeys = {
   all: ['passkeys'] as const,
   list: () => [...passkeyKeys.all, 'list'] as const,
+  settings: () => [...passkeyKeys.all, 'settings'] as const,
 }
 
 export default passkeysApi

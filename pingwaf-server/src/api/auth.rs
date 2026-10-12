@@ -41,6 +41,12 @@ pub struct UserResponse {
     pub disabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Most recent successful login (any method), resolved from the login
+    /// history; `None` when the account has never signed in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_login_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_login_ip: Option<String>,
 }
 
 impl From<user::Model> for UserResponse {
@@ -54,6 +60,10 @@ impl From<user::Model> for UserResponse {
             disabled: model.disabled,
             created_at: model.created_at,
             updated_at: model.updated_at,
+            // Resolved per query by the admin list endpoint (it joins the
+            // login history); everywhere else the fields stay absent.
+            last_login_at: None,
+            last_login_ip: None,
         }
     }
 }
@@ -136,7 +146,14 @@ async fn status(
     Ok(Json(AuthStatus {
         needs_setup: count == 0,
         registration_open: state.config.allow_registration || count == 0,
-        passkey_enabled: state.config.passkey_enabled,
+        // The runtime master switch (instance_settings KV) overrides the
+        // static boot config, so the login form hides the passkey option as
+        // soon as an operator turns it off - no restart needed.
+        passkey_enabled: crate::api::passkeys::passkey_enabled(
+            &state.db,
+            state.config.passkey_enabled,
+        )
+        .await?,
     }))
 }
 

@@ -24,7 +24,7 @@ use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::auth::middleware::AdminUser;
 use crate::auth::password::validate_password;
-use crate::models::{role, user};
+use crate::models::{login_history, role, user};
 
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
@@ -76,11 +76,40 @@ async fn list(
         .order_by_asc(user::Column::CreatedAt)
         .paginate(&state.db, pagination.limit());
     let total = paginator.num_items().await?;
-    let items = paginator
-        .fetch_page(pagination.page - 1)
-        .await?
+    let rows = paginator.fetch_page(pagination.page - 1).await?;
+
+    // Most recent successful login per account, resolved from the login
+    // history (both password and passkey logins are recorded there), so the
+    // admin list can show "last seen" without denormalizing onto the user
+    // row. Newest-first iteration keeps the first hit per user the latest.
+    let ids: Vec<Uuid> = rows.iter().map(|u| u.id).collect();
+    let mut latest: std::collections::HashMap<
+        Uuid,
+        (chrono::DateTime<chrono::Utc>, String),
+    > = std::collections::HashMap::new();
+    if !ids.is_empty() {
+        let histories = login_history::Entity::find()
+            .filter(login_history::Column::UserId.is_in(ids))
+            .order_by_desc(login_history::Column::CreatedAt)
+            .all(&state.db)
+            .await?;
+        for entry in histories {
+            latest
+                .entry(entry.user_id)
+                .or_insert((entry.created_at, entry.ip));
+        }
+    }
+
+    let items = rows
         .into_iter()
-        .map(UserResponse::from)
+        .map(|account| {
+            let mut body = UserResponse::from(account);
+            if let Some((at, ip)) = latest.get(&body.id) {
+                body.last_login_at = Some(*at);
+                body.last_login_ip = Some(ip.clone());
+            }
+            body
+        })
         .collect();
     Ok(Json(Page::new(items, total, pagination)))
 }
