@@ -20,14 +20,63 @@ pub use registry::{AgentRegistry, ConnectedAgent, COMMAND_CHANNEL_CAPACITY};
 use pingwaf_proto::control_plane::{
     server_command::Payload, ServerCommand, SiteConfig, UpdateSiteCommand,
 };
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter,
+};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::api::agents::command_type;
 use crate::api::state::AppState;
 use crate::config_history::{self, VersionScope};
 use crate::grpc::config::{build_site_config, now_timestamp};
-use crate::models::{agent, config_version};
+use crate::models::{agent, api_key, config_version, site};
+
+/// The sites an agent serves: its binding when it has one, otherwise every
+/// site owned by its API key's user. Mirrors the gRPC `visible_sites`, and is
+/// what an `UpdateSite` payload must carry — the agent applies the payload
+/// authoritatively, dropping any cached site the payload does not list.
+async fn agent_visible_site_ids(
+    db: &DatabaseConnection,
+    agent_row: &agent::Model,
+) -> Result<Vec<Uuid>, DbErr> {
+    if let Some(site_id) = agent_row.site_id {
+        return Ok(vec![site_id]);
+    }
+    let Some(key_id) = agent_row.api_key_id else {
+        return Ok(Vec::new());
+    };
+    let Some(key) = api_key::Entity::find_by_id(key_id).one(db).await? else {
+        return Ok(Vec::new());
+    };
+    let sites = site::Entity::find()
+        .filter(site::Column::UserId.eq(key.user_id))
+        .all(db)
+        .await?;
+    Ok(sites.iter().map(|row| row.id).collect())
+}
+
+/// Builds the `UpdateSite` payload one agent should receive for a change on
+/// `site_id`: its bound site's bundle, or the full visible bundle for an
+/// unbound agent. `None` when the agent does not serve the site.
+async fn update_payload_for_agent(
+    db: &DatabaseConnection,
+    changed_site_config: &SiteConfig,
+    agent_row: &agent::Model,
+    site_id: Uuid,
+) -> Result<Option<SiteConfig>, DbErr> {
+    let visible = agent_visible_site_ids(db, agent_row).await?;
+    if !visible.contains(&site_id) {
+        return Ok(None);
+    }
+    if agent_row.site_id.is_some() {
+        return Ok(Some(changed_site_config.clone()));
+    }
+    // An unbound agent runs every site its owner has: the payload must list
+    // them all or the agent would drop the sites it does not carry.
+    let config = build_site_config(db, Some(&visible)).await?;
+    Ok(Some(config))
+}
 
 /// Notifies every connected agent that the configuration for `site_id` changed.
 ///
@@ -77,12 +126,9 @@ pub async fn notify_config_changed(
         }
     });
 
-    // Find every agent whose site_id matches, then attempt delivery.
-    let agents = match agent::Entity::find()
-        .filter(agent::Column::SiteId.eq(site_id))
-        .all(&state.db)
-        .await
-    {
+    // Deliver to every agent that serves this site: agents bound to it, and
+    // unbound agents of the owning user (they run all of the owner's sites).
+    let agents = match agent::Entity::find().all(&state.db).await {
         Ok(rows) => rows,
         Err(err) => {
             tracing::warn!(%site_id, error = %err, "failed to list agents for config push");
@@ -90,19 +136,36 @@ pub async fn notify_config_changed(
         },
     };
 
-    if agents.is_empty() {
-        tracing::debug!(%site_id, "no agents bound to this site, skipping push");
-        return;
-    }
-
     let mut delivered = 0usize;
     for row in &agents {
+        let payload = match update_payload_for_agent(
+            &state.db,
+            &site_config,
+            row,
+            site_id,
+        )
+        .await
+        {
+            Ok(payload) => payload,
+            Err(err) => {
+                tracing::warn!(
+                    agent_id = %row.id,
+                    %site_id,
+                    error = %err,
+                    "failed to build the config payload for an agent"
+                );
+                continue;
+            },
+        };
+        let Some(site_config_for_agent) = payload else {
+            continue;
+        };
         let command = ServerCommand {
             command_id: Uuid::new_v4().to_string(),
             r#type: command_type::UPDATE_SITE,
             issued_at: now_timestamp(),
             payload: Some(Payload::UpdateSite(UpdateSiteCommand {
-                site_config: Some(site_config.clone()),
+                site_config: Some(site_config_for_agent),
             })),
         };
         if state.agents.send_command(&row.id, command).await {
@@ -110,12 +173,27 @@ pub async fn notify_config_changed(
         }
     }
 
-    tracing::info!(
-        %site_id,
-        total = agents.len(),
-        delivered,
-        "config change pushed to agents"
-    );
+    if delivered == 0 {
+        // A skipped push leaves the edge running stale configuration — an
+        // agent-side task (like ACME issuance) that depends on this config
+        // then never fires and the dashboard shows a wedged state. Surface
+        // it loudly instead of at debug: this exact silence used to hide
+        // agents auto-bound to a single site never learning about later
+        // ones.
+        tracing::warn!(
+            %site_id,
+            total = agents.len(),
+            "no agent served this site, config change was not pushed — it \
+             stays in the database until an agent syncs it"
+        );
+    } else {
+        tracing::info!(
+            %site_id,
+            total = agents.len(),
+            delivered,
+            "config change pushed to agents"
+        );
+    }
 }
 
 /// Notifies every registered agent that a deployment-wide setting changed.
@@ -135,12 +213,27 @@ pub async fn notify_all_config_changed(state: &AppState, actor: Option<&str>) {
             return;
         },
     };
-    let site_ids: Vec<Uuid> = agents
-        .iter()
-        .filter_map(|row| row.site_id)
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
+
+    // The union of every agent's visible sites feeds the version snapshot.
+    let mut visible_per_agent: HashMap<String, Vec<Uuid>> = HashMap::new();
+    let mut all_site_ids: std::collections::HashSet<Uuid> =
+        std::collections::HashSet::new();
+    for row in &agents {
+        match agent_visible_site_ids(&state.db, row).await {
+            Ok(ids) => {
+                all_site_ids.extend(ids.iter().copied());
+                visible_per_agent.insert(row.id.to_string(), ids);
+            },
+            Err(err) => {
+                tracing::warn!(
+                    agent_id = %row.id,
+                    error = %err,
+                    "failed to resolve the sites of an agent"
+                );
+            },
+        };
+    }
+    let site_ids: Vec<Uuid> = all_site_ids.into_iter().collect();
     let config = match build_site_config(&state.db, Some(&site_ids)).await {
         Ok(config) => config,
         Err(err) => {
@@ -176,35 +269,47 @@ pub async fn notify_all_config_changed(state: &AppState, actor: Option<&str>) {
         return;
     }
 
+    // One bundle per distinct visibility set: unbound agents of one owner all
+    // share the same payload, so it is built once.
+    let mut bundle_cache: HashMap<Vec<Uuid>, SiteConfig> = HashMap::new();
     let mut delivered = 0usize;
     for row in &agents {
-        // An agent without a site has no bundle to receive.
-        let Some(site_id) = row.site_id else {
+        let Some(visible) = visible_per_agent.get(&row.id.to_string()) else {
             continue;
         };
-        let Some(site) = config
-            .sites
-            .iter()
-            .find(|site| site.id == site_id.to_string())
-        else {
-            tracing::warn!(
-                agent_id = %row.id,
-                site_id = %site_id,
-                "site missing from the built config, skipping agent"
-            );
+        if visible.is_empty() {
+            // An agent with no sites has no bundle to receive.
             continue;
-        };
-        let site_config = SiteConfig {
-            sites: vec![site.clone()],
-            updated_at: config.updated_at,
-            config_hash: config.config_hash.clone(),
+        }
+        let payload = match bundle_cache.get(visible) {
+            Some(config) => config.clone(),
+            None => {
+                let agent_config = match build_site_config(
+                    &state.db,
+                    Some(visible),
+                )
+                .await
+                {
+                    Ok(config) => config,
+                    Err(err) => {
+                        tracing::warn!(
+                            agent_id = %row.id,
+                            error = %err,
+                            "failed to build the config payload for an agent"
+                        );
+                        continue;
+                    },
+                };
+                bundle_cache.insert(visible.clone(), agent_config.clone());
+                agent_config
+            },
         };
         let command = ServerCommand {
             command_id: Uuid::new_v4().to_string(),
             r#type: command_type::UPDATE_SITE,
             issued_at: now_timestamp(),
             payload: Some(Payload::UpdateSite(UpdateSiteCommand {
-                site_config: Some(site_config),
+                site_config: Some(payload),
             })),
         };
         if state.agents.send_command(&row.id, command).await {

@@ -218,7 +218,7 @@ impl ControlPlaneTrait for ControlPlaneService {
 
         // The API key is only ever presented here; everything afterwards uses the
         // agent token minted below.
-        let (key, owner) = authenticate_api_key(&self.db, &payload.api_key)
+        let (key, _owner) = authenticate_api_key(&self.db, &payload.api_key)
             .await
             .map_err(|err| {
                 tracing::warn!(error = %err, hostname = %payload.hostname, "agent registration rejected");
@@ -244,10 +244,14 @@ impl ControlPlaneTrait for ControlPlaneService {
 
         let now = Utc::now();
         let status = agent_status::ONLINE.to_string();
-        let site_id = match existing.as_ref().and_then(|row| row.site_id) {
-            Some(id) => Some(id),
-            None => resolve_default_site(&self.db, owner.id).await?,
-        };
+        // Agents are never auto-bound to a site: a binding narrows
+        // `visible_sites` to that single site, so an agent registered while its
+        // owner had one site silently stopped receiving every later site — the
+        // new site's config push found no bound agent and was skipped, leaving
+        // certificates pending with nothing on the edge to issue them. An
+        // unbound agent serves all of the owner's sites; a future manual
+        // binding API can narrow the scope explicitly.
+        let site_id = None;
 
         let row = match existing {
             Some(row) => {
@@ -1830,24 +1834,6 @@ fn positive_u32(value: u32) -> Option<u32> {
         Some(value)
     } else {
         None
-    }
-}
-
-/// Binds a site to a newly registered agent when the API key owner has exactly
-/// one site; otherwise the agent stays unbound and can serve all of them.
-async fn resolve_default_site(
-    db: &DatabaseConnection,
-    user_id: Uuid,
-) -> Result<Option<Uuid>, Status> {
-    let owned = site::Entity::find()
-        .filter(site::Column::UserId.eq(user_id))
-        .all(db)
-        .await
-        .map_err(db_status)?;
-    if owned.len() == 1 {
-        Ok(Some(owned[0].id))
-    } else {
-        Ok(None)
     }
 }
 

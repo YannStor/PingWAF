@@ -8,8 +8,8 @@ use axum::Json;
 use axum::Router;
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, PaginatorTrait,
-    QueryFilter, QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, EntityTrait,
+    PaginatorTrait, QueryFilter, QueryOrder, Set,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -592,14 +592,22 @@ impl TlsPosture {
             next.hsts_max_age = age;
         }
 
-        let (Some(min), Some(max)) = (
-            tls_version::rank(&next.min_tls_version),
-            next.max_tls_version.as_deref().and_then(tls_version::rank),
-        ) else {
+        let Some(min) = tls_version::rank(&next.min_tls_version) else {
             return Err(ApiError::BadRequest(format!(
                 "unsupported TLS version (supported: {})",
                 tls_version::ALL.join(", ")
             )));
+        };
+        // An absent upper bound is the "no ceiling" default a fresh site_ssl
+        // row carries: every version up to the newest one is acceptable.
+        let max = match next.max_tls_version.as_deref() {
+            None => tls_version::ALL.len() - 1,
+            Some(raw) => tls_version::rank(raw).ok_or_else(|| {
+                ApiError::BadRequest(format!(
+                    "unsupported TLS version (supported: {})",
+                    tls_version::ALL.join(", ")
+                ))
+            })?,
         };
         if min > max {
             return Err(ApiError::BadRequest(format!(
@@ -644,20 +652,23 @@ impl TlsPosture {
 
 /// Applies a TLS posture request to the site's `site_ssl` row, creating the row
 /// when the site has none. Returns the stored posture.
-pub(crate) async fn save_tls_posture(
-    state: &AppState,
+///
+/// Takes the connection explicitly so callers can run it inside a transaction
+/// (a certificate created with `activate` must not survive a failed posture).
+pub(crate) async fn save_tls_posture<C: ConnectionTrait>(
+    db: &C,
     site: &site::Model,
     req: &TlsPostureRequest,
 ) -> Result<TlsPosture, ApiError> {
     let existing = site_ssl::Entity::find()
         .filter(site_ssl::Column::SiteId.eq(site.id))
-        .one(&state.db)
+        .one(db)
         .await?;
 
     if let Some(cert_id) = req.certificate_id {
         let owned = site_certificates::Entity::find_by_id(cert_id)
             .filter(site_certificates::Column::SiteId.eq(site.id))
-            .one(&state.db)
+            .one(db)
             .await?
             .is_some();
         if !owned {
@@ -677,7 +688,7 @@ pub(crate) async fn save_tls_posture(
         Some(row) => {
             let mut active: site_ssl::ActiveModel = row.into();
             next.apply_to(&mut active);
-            active.update(&state.db).await?;
+            active.update(db).await?;
         },
         None => {
             let mut active = site_ssl::ActiveModel {
@@ -708,7 +719,7 @@ pub(crate) async fn save_tls_posture(
                 created_at: Set(Utc::now()),
             };
             next.apply_to(&mut active);
-            active.insert(&state.db).await?;
+            active.insert(db).await?;
         },
     }
 
@@ -1715,7 +1726,7 @@ async fn upsert_ssl(
     {
         tls.https_enabled = Some(true);
     }
-    let posture = save_tls_posture(&state, &site, &tls).await?;
+    let posture = save_tls_posture(&state.db, &site, &tls).await?;
 
     let existing = site_ssl::Entity::find()
         .filter(site_ssl::Column::SiteId.eq(id))
@@ -2387,5 +2398,44 @@ mod tests {
             healthy_threshold: 10,
         };
         hc.validate().expect("upper bounds must validate");
+    }
+
+    #[test]
+    fn merged_treats_missing_max_tls_version_as_unbounded() {
+        let base = TlsPosture::unset();
+        // A fresh site_ssl row carries no max_tls_version: that is the "no
+        // ceiling" default and must not be rejected as unsupported.
+        let merged = base
+            .merged(&TlsPostureRequest {
+                https_enabled: Some(true),
+                ..Default::default()
+            })
+            .expect("an absent max_tls_version must validate");
+        assert!(merged.https_enabled);
+        assert_eq!(merged.max_tls_version, None);
+
+        // The newest version as the floor with no ceiling is valid too.
+        base.merged(&TlsPostureRequest {
+            min_tls_version: Some("1.3".to_string()),
+            ..Default::default()
+        })
+        .expect("min 1.3 with no ceiling must validate");
+
+        // An explicit ceiling that is not a known version stays rejected.
+        let err = base
+            .merged(&TlsPostureRequest {
+                max_tls_version: Some("9.9".to_string()),
+                ..Default::default()
+            })
+            .expect_err("an unknown max_tls_version must be rejected");
+        assert!(err.to_string().contains("unsupported TLS version"));
+
+        // An explicit ceiling below the floor stays rejected.
+        assert!(base
+            .merged(&TlsPostureRequest {
+                max_tls_version: Some("1.0".to_string()),
+                ..Default::default()
+            })
+            .is_err());
     }
 }

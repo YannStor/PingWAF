@@ -10,8 +10,8 @@ use axum::Json;
 use axum::Router;
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, PaginatorTrait,
-    QueryFilter, QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, EntityTrait,
+    PaginatorTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -290,21 +290,26 @@ async fn create_certificate(
     let id = parse_uuid(&site_id, "site id")?;
     let site = load_site_write(&state.db, id, &current).await?;
 
-    let model =
-        insert_certificate(&state, &site, payload, Some(&current.email))
-            .await?;
+    let model = insert_certificate(&state.db, &site, payload).await?;
+    announce_certificate_created(&state, &model, Some(&current.email)).await;
     Ok(
         (StatusCode::CREATED, Json(CertificateResponse::from(model)))
             .into_response(),
     )
 }
 
-/// Validates and stores one certificate row, then tells the site's agents.
-async fn insert_certificate(
-    state: &AppState,
+/// Validates and stores one certificate row.
+///
+/// Takes the connection explicitly so callers can run it inside a transaction:
+/// `create_global_certificate` must not leave a certificate behind when the
+/// attached TLS posture fails to validate. Side effects that assume the row is
+/// committed — the audit event, the site touch and the agent push — belong to
+/// [`announce_certificate_created`], run after the surrounding transaction
+/// commits.
+async fn insert_certificate<C: ConnectionTrait>(
+    db: &C,
     site: &site::Model,
     payload: CreateCertificateRequest,
-    actor: Option<&str>,
 ) -> Result<site_certificates::Model, ApiError> {
     let site_id = site.id;
     let domain = payload.domain.trim().to_lowercase();
@@ -357,14 +362,26 @@ async fn insert_certificate(
         created_at: Set(timestamp),
         updated_at: Set(timestamp),
     }
-    .insert(&state.db)
+    .insert(db)
     .await?;
 
     tracing::info!(site_id = %site_id, cert_id = %model.id, "certificate created");
+    Ok(model)
+}
+
+/// Records the audit event for a committed certificate and pushes the change
+/// to the site's agents. The event is best-effort (like every certificate
+/// event); the touch failure is logged, not propagated — the row already
+/// exists, so an error response would misrepresent the outcome.
+async fn announce_certificate_created(
+    state: &AppState,
+    model: &site_certificates::Model,
+    actor: Option<&str>,
+) {
     write_cert_event(
         &state.db,
         model.id,
-        site_id,
+        model.site_id,
         "created",
         format!(
             "Certificate for {} created (status: {})",
@@ -373,10 +390,14 @@ async fn insert_certificate(
         None,
     )
     .await;
-    touch_site(state, site_id).await?;
-    notify_config_changed(state, site_id, actor).await;
-
-    Ok(model)
+    if let Err(err) = touch_site(state, model.site_id).await {
+        tracing::warn!(
+            cert_id = %model.id,
+            error = %err,
+            "could not touch the site after certificate creation"
+        );
+    }
+    notify_config_changed(state, model.site_id, actor).await;
 }
 
 /// `GET /api/v1/sites/{site_id}/certificates/{cert_id}`
@@ -511,15 +532,21 @@ async fn delete_certificate(
         .await?;
 
     tracing::info!(site_id = %id, cert_id = %target, "certificate deleted");
-    write_cert_event(
-        &state.db,
-        target,
-        id,
-        "deleted",
-        "Certificate deleted".to_string(),
-        None,
-    )
-    .await;
+    // Deleting the certificate cascades to its events, so the deletion's own
+    // audit trail must not point at the deleted row — referencing it violates
+    // `fk_certificate_events_certificate_id` and the event is silently lost.
+    let event = certificate_events::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        certificate_id: Set(None),
+        site_id: Set(Some(id)),
+        event_type: Set("deleted".to_string()),
+        message: Set(format!("Certificate {target} deleted")),
+        details: Set(None),
+        created_at: Set(Utc::now()),
+    };
+    if let Err(err) = event.insert(&state.db).await {
+        tracing::warn!(%err, "failed to write certificate event");
+    }
     touch_site(&state, id).await?;
     notify_config_changed(&state, id, Some(&current.email)).await;
 
@@ -603,7 +630,7 @@ async fn update_ssl_settings(
     let id = parse_uuid(&site_id, "site id")?;
     let site = load_site_write(&state.db, id, &current).await?;
 
-    let posture = save_tls_posture(&state, &site, &payload).await?;
+    let posture = save_tls_posture(&state.db, &site, &payload).await?;
     tracing::info!(site_id = %id, "SSL settings updated");
     touch_site(&state, id).await?;
     notify_config_changed(&state, id, Some(&current.email)).await;
@@ -752,20 +779,25 @@ async fn create_global_certificate(
     let site = load_site_write(&state.db, site_id, &current).await?;
     let activate = payload.activate;
 
-    let model =
-        insert_certificate(&state, &site, payload, Some(&current.email))
-            .await?;
-
+    // The row and the activated posture commit together: a posture failure
+    // (bad TLS bounds, a certificate id from another site) must not leave a
+    // pending certificate behind, which is how the dashboard used to show an
+    // errored request with the task already in the list.
+    let txn = state.db.begin().await?;
+    let model = insert_certificate(&txn, &site, payload).await?;
     if activate {
         let posture = TlsPostureRequest {
             https_enabled: Some(true),
             certificate_id: Some(model.id),
             ..Default::default()
         };
-        save_tls_posture(&state, &site, &posture).await?;
+        save_tls_posture(&txn, &site, &posture).await?;
+    }
+    txn.commit().await?;
+
+    announce_certificate_created(&state, &model, Some(&current.email)).await;
+    if activate {
         tracing::info!(site_id = %site_id, cert_id = %model.id, "certificate activated");
-        touch_site(&state, site_id).await?;
-        notify_config_changed(&state, site_id, Some(&current.email)).await;
     }
 
     Ok(
