@@ -18,6 +18,18 @@ export const geoApi = {
   /** Requests per country over the trailing window, for the bar chart. */
   stats: (siteId: string) =>
     apiClient.get<GeoCountryStat[]>(`/sites/${siteId}/geo/stats`),
+
+  /**
+   * Requests per country aggregated across every visible site (admin: all,
+   * tenant: owned) — drives the world map on the traffic pages.
+   */
+  globalStats: (params?: { hours?: number; limit?: number }) => {
+    const qs = new URLSearchParams()
+    if (params?.hours) qs.set('hours', String(params.hours))
+    if (params?.limit) qs.set('limit', String(params.limit))
+    const suffix = qs.size > 0 ? `?${qs.toString()}` : ''
+    return apiClient.get<GeoCountryStat[]>(`/geo/global-stats${suffix}`)
+  },
 }
 
 /** Defaults matching the server-side `GeoConfig::default()`. */
@@ -208,6 +220,7 @@ export const geoKeys = {
   all: (siteId: string) => ['sites', siteId, 'geo'] as const,
   config: (siteId: string) => ['sites', siteId, 'geo', 'config'] as const,
   stats: (siteId: string) => ['sites', siteId, 'geo', 'stats'] as const,
+  globalStats: (hours: number) => ['geo', 'global-stats', hours] as const,
 }
 
 export default geoApi

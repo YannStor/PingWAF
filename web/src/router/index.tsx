@@ -88,6 +88,10 @@ export const router = createBrowserRouter([
         children: [
           { index: true, element: <Navigate to="basic" replace /> },
           { path: 'basic', element: <BasicPage /> },
+          // `security` and `rules` are path prefixes, not pages — breadcrumbs
+          // render them as clickable segments, so landing on the prefix must
+          // redirect to the section's first real page instead of 404-ing.
+          { path: 'security', element: <Navigate to="security/protection" replace /> },
           { path: 'security/protection', element: <ProtectionPage /> },
           { path: 'security/rate-limiting', element: <RateLimitingPage /> },
           { path: 'security/bot', element: <BotProtectionPage /> },
@@ -115,6 +119,7 @@ export const router = createBrowserRouter([
           { path: 'caching', element: <CachingPage /> },
           { path: 'ssl', element: <SslPage /> },
           { path: 'traffic', element: <TrafficPage /> },
+          { path: 'rules', element: <Navigate to="rules/rewrite" replace /> },
           { path: 'rules/rewrite', element: <RewritePage /> },
           { path: 'settings', element: <SiteSettingsPage /> },
         ],

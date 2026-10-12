@@ -328,7 +328,8 @@
       "title": "Site",
       "overview": "Overview",
       "upstreams": "Upstreams",
-      "pausedNote": "This site is paused — the edge answers every request with a 503 maintenance page."
+      "pausedNote": "This site is paused — the edge answers every request with a 503 maintenance page.",
+      "visitSite": "Visit site"
     },
     "waf": {
       "title": "Web Application Firewall",
@@ -620,8 +621,8 @@
         "groupProtocol": "Protocol & anomalies"
       },
       "stacks": {
-        "cardTitle": "Backend stack downgrades",
-        "cardHint": "Language-scoped downgrades, collapsed by default."
+        "cardTitle": "Backend language stacks · log-only downgrade",
+        "cardHint": "Select the stacks your site actually runs. Language-specific rules of the selected stacks still detect and log, but never block (monitor-only); language-agnostic checks are unaffected and keep blocking. Use this to quiet false positives from a specific stack."
       },
       "rateLimitingEntry": {
         "title": "Rate limiting",
@@ -967,7 +968,12 @@
       "globalTitle": "Traffic",
       "globalDescription": "Fleet-wide traffic across every site. Pick a site to narrow the charts down.",
       "allSites": "All sites",
-      "globalHint": "Showing the aggregate across all sites the account can see."
+      "globalHint": "Showing the aggregate across all sites the account can see.",
+      "geoMap": {
+        "title": "Geographic distribution",
+        "hint": "Requests per country over the selected range as a heat map.",
+        "hintSite": "Requests per country over the last 24 hours as a heat map."
+      }
     },
     "rewrite": {
       "title": "Rewrite Rules",
@@ -1160,7 +1166,7 @@
       "removeTitle": "Remove agent",
       "removeDescription": "This will deregister the agent. It can re-register with a valid API key.",
       "removeSiteNote": "Serving: {{domain}}",
-      "removeUnassignedNote": "This agent is not assigned to any site.",
+      "removeUnassignedNote": "This agent is not bound to a single site and serves every site of its owner.",
       "removed": "Agent removed",
       "commandConfirmDescription": "Send this command to the agent. It will be executed on next heartbeat.",
       "commandDelivered": "Command delivered",
@@ -1202,7 +1208,8 @@
         "networkHint": "Receive and transmit rates derived from the counters.",
         "rx": "Receive",
         "tx": "Transmit"
-      }
+      },
+      "allSitesHint": "Not bound to a single site; automatically serves every site of its owner"
     },
     "notifications": {
       "title": "Notifications",

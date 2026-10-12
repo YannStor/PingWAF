@@ -411,6 +411,17 @@ fn cached_rules_to_pingap_config(
             "directory".to_string(),
             toml::Value::String(cache_dir.to_string_lossy().to_string()),
         );
+        // pingora's default 1MB ceiling silently refuses to cache anything
+        // larger (the response header stage rejects it before the body ever
+        // fills). Magento-style merged JS/CSS bundles run several MB and are
+        // exactly the assets caching exists for, so the ceiling is raised
+        // here. `ByteSize` parses decimal units — this is 16_000_000 bytes,
+        // comfortably above a ~10MB bundle. Actual disk usage stays bounded
+        // by each site's `disk_quota_mb` and the LRU eviction manager.
+        cache_conf.insert(
+            "max_file_size".to_string(),
+            toml::Value::String("16mb".to_string()),
+        );
         plugins.insert(CACHE_PLUGIN_NAME.to_string(), cache_conf);
     }
     let mut location_plugins: Vec<String> = vec![

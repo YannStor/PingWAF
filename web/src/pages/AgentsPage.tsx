@@ -215,7 +215,14 @@ export function AgentsPage() {
         a.site_domain ? (
           <span className="pw-mono truncate text-[13px] text-fg">{a.site_domain}</span>
         ) : (
-          <span className="text-[13px] text-fg-subtle">{t('pages.agents.unassigned')}</span>
+          // Unbound agents serve every site of their owner (config-push
+          // visibility) — "all sites", not "unassigned".
+          <span
+            className="text-[13px] text-fg-subtle"
+            title={t('pages.agents.allSitesHint')}
+          >
+            {t('pages.agents.allSites')}
+          </span>
         ),
     },
     {
@@ -600,7 +607,7 @@ export function AgentsPage() {
             </div>
 
             <dl className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2">
-              <DetailRow label={t('pages.agents.site')} value={detail.site_domain ?? t('pages.agents.unassigned')} />
+              <DetailRow label={t('pages.agents.site')} value={detail.site_domain ?? t('pages.agents.allSites')} />
               <DetailRow label={t('pages.agents.publicIp')} value={detail.public_ip} mono />
               <DetailRow label={t('pages.agents.privateIp')} value={detail.private_ip} mono />
               <DetailRow label={t('pages.agents.ipAddress')} value={detail.ip_address} />

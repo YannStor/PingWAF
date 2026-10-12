@@ -17,6 +17,7 @@ import {
   IdentificationCard,
   Network,
   Warning,
+  ArrowSquareOut,
 } from '@phosphor-icons/react'
 import { Link } from 'react-router-dom'
 import { cn } from '@/lib/utils'
@@ -135,6 +136,18 @@ export function SiteDetailPage() {
                 <Badge tone={STATUS_TONE[site.status as SiteStatus] ?? 'neutral'} dot>
                   {t(`status.${site.status}`, site.status)}
                 </Badge>
+              )}
+              {site && (
+                <a
+                  href={`https://${site.domain}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={t('pages.siteDetail.visitSite')}
+                  className="inline-flex items-center gap-1 rounded-md border border-line px-1.5 py-0.5 text-[11px] text-fg-subtle transition-colors hover:border-focus hover:text-link"
+                >
+                  <ArrowSquareOut weight="duotone" className="h-3.5 w-3.5" />
+                  {t('pages.siteDetail.visitSite')}
+                </a>
               )}
             </div>
             <p className="truncate text-[13px] text-fg-subtle">

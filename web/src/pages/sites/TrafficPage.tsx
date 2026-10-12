@@ -37,7 +37,8 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { SkeletonStat } from '@/components/ui/Skeleton'
 import { ErrorState } from '@/components/ErrorState'
 import { trafficApi, trafficKeys, RANGE_HOURS, TRAFFIC_STEP, groupStatusCodes } from '@/api/traffic'
-import { countryFlag } from '@/api/geo'
+import { countryFlag, geoApi, geoKeys } from '@/api/geo'
+import { WorldMapChart } from '@/components/charts/WorldMapChart'
 import { cn } from '@/lib/utils'
 import {
   formatBitrate,
@@ -99,6 +100,21 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
 
   const data = overviewQuery.data
   const spanMs = RANGE_HOURS[range] * 3600_000
+
+  // Per-country requests for the world map. The site-scoped endpoint keeps a
+  // fixed 24h window; the aggregate endpoint follows the selected range.
+  const geoStatsQuery = useQuery({
+    queryKey: scoped
+      ? geoKeys.stats(siteId as string)
+      : geoKeys.globalStats(RANGE_HOURS[range]),
+    queryFn: () =>
+      scoped
+        ? geoApi.stats(siteId as string)
+        : geoApi.globalStats({ hours: RANGE_HOURS[range], limit: 250 }),
+    enabled: scoped ? Boolean(siteId) : true,
+    refetchInterval: 60_000,
+  })
+  const geoStats = geoStatsQuery.data ?? []
 
   const seriesData = useMemo(
     () =>
@@ -434,6 +450,38 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
                     </ResponsiveContainer>
                   </div>
                 </>
+              )}
+            </CardBody>
+          </Card>
+
+          {/* Geographic distribution */}
+          <Card>
+            <CardHeader
+              title={t('pages.traffic.geoMap.title')}
+              description={
+                scoped
+                  ? t('pages.traffic.geoMap.hintSite')
+                  : t('pages.traffic.geoMap.hint')
+              }
+              action={<Globe weight="duotone" className="h-4 w-4 text-fg-subtle" />}
+            />
+            <CardBody>
+              {geoStatsQuery.isPending && !geoStatsQuery.data ? (
+                <div className="h-64 animate-pulse rounded-lg bg-recessed" />
+              ) : geoStatsQuery.isError ? (
+                <ErrorState
+                  error={geoStatsQuery.error}
+                  onRetry={() => geoStatsQuery.refetch()}
+                  retrying={geoStatsQuery.isFetching}
+                />
+              ) : geoStats.length === 0 ? (
+                <EmptyState
+                  className="border-0 py-10"
+                  icon={<Globe weight="duotone" className="h-8 w-8" />}
+                  title={t('common.noData')}
+                />
+              ) : (
+                <WorldMapChart data={geoStats} />
               )}
             </CardBody>
           </Card>

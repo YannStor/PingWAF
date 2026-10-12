@@ -55,6 +55,11 @@ const crumbKeys: Record<string, string> = {
   lifecycle: 'pages.lifecycle.title',
 }
 
+// Sections that are pure path prefixes under a site (they redirect to their
+// first child page) — the breadcrumb shows them as plain text, since they are
+// groupings rather than destinations of their own.
+const crumbSections = new Set(['security', 'rules'])
+
 export function AppLayout() {
   const { t, i18n } = useTranslation()
   const location = useLocation()
@@ -114,7 +119,10 @@ export function AppLayout() {
       // Skip the raw site id segment; label it as the site name context.
       const key = crumbKeys[seg]
       if (key) {
-        items.push({ label: t(key), to: path })
+        items.push({
+          label: t(key),
+          to: crumbSections.has(seg) ? undefined : path,
+        })
       } else if (/^[a-zA-Z0-9_-]{8,}$/.test(seg)) {
         items.push({ label: seg.slice(0, 8), to: path })
       }

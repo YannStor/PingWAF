@@ -328,7 +328,8 @@
       "title": "站点",
       "overview": "概览",
       "upstreams": "上游服务",
-      "pausedNote": "站点已暂停 — 边缘对所有请求返回 503 维护页。"
+      "pausedNote": "站点已暂停 — 边缘对所有请求返回 503 维护页。",
+      "visitSite": "访问站点"
     },
     "waf": {
       "title": "Web 应用防火墙",
@@ -620,8 +621,8 @@
         "groupProtocol": "协议与异常"
       },
       "stacks": {
-        "cardTitle": "后端栈降级",
-        "cardHint": "按后端语言栈降级，默认收起。"
+        "cardTitle": "后端语言栈 · 仅记录降级",
+        "cardHint": "勾选站点实际使用的后端语言。被勾选语言的专属规则仍会检测并记录，但不再拦截（仅记录模式）；与语言无关的通用规则不受影响、照常拦截。适用于特定语言栈误拦截时降低影响。"
       },
       "rateLimitingEntry": {
         "title": "限流规则",
@@ -967,7 +968,12 @@
       "globalTitle": "全局流量",
       "globalDescription": "全部站点的流量概览。选择站点可只看该站点的数据。",
       "allSites": "全部站点",
-      "globalHint": "当前展示当前账号可见的全部站点汇总数据。"
+      "globalHint": "当前展示当前账号可见的全部站点汇总数据。",
+      "geoMap": {
+        "title": "地域分布",
+        "hint": "过去所选时间窗内各国家/地区的请求量热力图。",
+        "hintSite": "过去 24 小时各国家/地区的请求量热力图。"
+      }
     },
     "rewrite": {
       "title": "重写规则",
@@ -1160,7 +1166,7 @@
       "removeTitle": "移除节点",
       "removeDescription": "这将取消节点注册。节点可使用有效的 API 密钥重新注册。",
       "removeSiteNote": "服务于：{{domain}}",
-      "removeUnassignedNote": "此节点未分配给任何站点。",
+      "removeUnassignedNote": "此节点未单独绑定站点，服务于属主账号的全部站点。",
       "removed": "节点已移除",
       "commandConfirmDescription": "向节点发送此命令，将在下次心跳时执行。",
       "commandDelivered": "命令已送达",
@@ -1202,7 +1208,8 @@
         "networkHint": "由累计计数器换算出的收发速率。",
         "rx": "接收",
         "tx": "发送"
-      }
+      },
+      "allSitesHint": "未单独绑定站点，自动同步属主账号全部站点的配置"
     },
     "notifications": {
       "title": "通知",

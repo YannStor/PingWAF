@@ -8,6 +8,55 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.25.7] — 2026-10-12
+
+The console polish batch — cache coverage for large static bundles, the
+world map, and a round of semantics fixes surfaced by the pursearea.cn
+deployment.
+
+### 🐛 Fixes
+
+- **Large static assets are cached now.** The edge cache plugin's
+  `max_file_size` stayed at pingora's 1 MB default, and pingora rejects a
+  response at the header stage when its Content-Length exceeds the ceiling —
+  a ~10 MB Magento merged `.min.js` bundle therefore never filled the cache
+  (no `x-cache-status`, permanent MISS) while smaller `.png` files hit. The
+  generated cache plugin config now sets `max_file_size = "16mb"`; disk
+  usage remains bounded by the per-site quota and LRU eviction.
+- **Breadcrumb 404s on site detail.** `security` and `rules` are path
+  prefixes, not pages — the breadcrumb rendered them as links that fell
+  through to the 404 route. Both prefixes now redirect to their first
+  child page (`security/protection`, `rules/rewrite`), and the breadcrumb
+  shows them as plain text instead of a link.
+- **Nodes no longer show "未分配".** Since auto-binding was removed, an
+  unbound agent serves *every* site of its owner — the nodes list and
+  detail pages now say "全部站点" with a hint instead of the stale
+  "unassigned" label, and tenant accounts can see their unbound agents
+  again (visibility now mirrors the config-push rules, which it
+  contradicted before).
+
+### ✨ Features
+
+- **World map of traffic.** The traffic page and the per-site traffic tab
+  gain a "地域分布" choropleth: an equirectangular SVG world map
+  (d3-geo + bundled 110m topology) with a brand-coloured heat ladder,
+  hover tooltips and a top-8 country list. Backed by a new
+  `GET /api/v1/geo/global-stats` aggregate (admins: all sites, tenants:
+  owned sites) next to the existing per-site `geo/stats`.
+
+### 📝 Docs
+
+- **"后端栈降级" explained.** The card title and hint now state what the
+  engine actually does: selected language stacks keep detecting and
+  logging, but never block (monitor-only); language-agnostic checks are
+  untouched. The old hint ("按后端语言栈降级") read as either "only
+  check these" or "skip these".
+
+### 🎨 UI
+
+- **Visit-site shortcut.** The site detail header shows a one-click link
+  to `https://<domain>` next to the domain title.
+
 ## [PingWAF 0.25.6] — 2026-10-12
 
 The diagnosis and presentation batch — fixes the four defects that stalled

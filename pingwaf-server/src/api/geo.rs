@@ -1,6 +1,6 @@
 //! Geo restriction management: per-site geographic blocking/allowing.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::Json;
 use axum::Router;
@@ -16,7 +16,7 @@ use crate::api::sites::touch_site;
 use crate::api::state::AppState;
 use crate::auth::AuthUser;
 use crate::grpc::notify_config_changed;
-use crate::models::{action, geo_rules};
+use crate::models::{action, geo_rules, site};
 
 /// Valid geo modes.
 mod geo_mode {
@@ -61,6 +61,17 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/sites/{site_id}/geo", get(get_geo).put(update_geo))
         .route("/sites/{site_id}/geo/stats", get(geo_stats))
+        .route("/geo/global-stats", get(geo_global_stats))
+}
+
+/// Query parameters for the cross-site country statistics.
+#[derive(Debug, Deserialize)]
+pub struct GeoStatsQuery {
+    /// Look-back window in hours (default 24, capped at 31 days).
+    pub hours: Option<i64>,
+    /// Maximum number of countries returned (the world map wants far more
+    /// granularity than the per-site top-20 bar chart).
+    pub limit: Option<i64>,
 }
 
 /// `GET /api/v1/sites/{site_id}/geo/stats`
@@ -87,6 +98,72 @@ async fn geo_stats(
         vec![id.into(), since.into(), STATS_LIMIT.into()],
     )
     .await?;
+
+    Ok(Json(
+        rows.iter()
+            .map(|row| CountryStat {
+                country_code: row
+                    .try_get::<String>("", "country_code")
+                    .unwrap_or_default(),
+                requests: row
+                    .try_get::<i64>("", "requests")
+                    .unwrap_or_default(),
+            })
+            .collect(),
+    ))
+}
+
+/// `GET /api/v1/geo/global-stats`
+///
+/// Requests per country over the trailing window, aggregated across every
+/// site the caller may see (administrators: all sites; tenants: the sites
+/// they own). Drives the world map on the global traffic page.
+async fn geo_global_stats(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Query(params): Query<GeoStatsQuery>,
+) -> Result<Json<Vec<CountryStat>>, ApiError> {
+    const MAX_HOURS: i64 = 31 * 24;
+    const MAX_COUNTRIES: i64 = 250;
+
+    let hours = params
+        .hours
+        .unwrap_or(STATS_WINDOW_HOURS)
+        .clamp(1, MAX_HOURS);
+    let limit = params.limit.unwrap_or(100).clamp(1, MAX_COUNTRIES);
+    let since = chrono::Utc::now() - chrono::Duration::hours(hours);
+
+    // Same visibility rule the config-push path uses: administrators see
+    // everything, tenants see the sites they own.
+    let mut sql = String::from(
+        "SELECT country_code, COUNT(*) AS requests \
+         FROM access_logs \
+         WHERE timestamp >= $1 \
+           AND country_code IS NOT NULL AND country_code <> ''",
+    );
+    let mut values: Vec<sea_orm::Value> = vec![since.into()];
+    if !current.is_admin() {
+        let owned: Vec<site::Model> = site::Entity::find()
+            .filter(site::Column::UserId.eq(current.id))
+            .all(&state.db)
+            .await?;
+        if owned.is_empty() {
+            return Ok(Json(Vec::new()));
+        }
+        let placeholders: Vec<String> =
+            (2..=owned.len() + 1).map(|n| format!("${n}")).collect();
+        sql.push_str(&format!(" AND site_id IN ({})", placeholders.join(",")));
+        for s in &owned {
+            values.push(s.id.into());
+        }
+    }
+    sql.push_str(&format!(
+        " GROUP BY country_code ORDER BY requests DESC LIMIT ${}",
+        values.len() + 1
+    ));
+    values.push(limit.into());
+
+    let rows = query_all(&state.db, &sql, values).await?;
 
     Ok(Json(
         rows.iter()
