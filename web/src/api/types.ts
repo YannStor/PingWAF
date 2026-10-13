@@ -160,6 +160,10 @@ export interface UpstreamPool {
   lb_algorithm: string
   /** Non-empty SNI enables HTTPS origin; `null` means plain HTTP. */
   sni: string | null
+  /**
+   * `null` means the pool has no opinion and follows the deployment-wide
+   * `origin_settings.verify_cert`; `true`/`false` pin it.
+   */
   verify_cert: boolean | null
   /** Active HTTP health check; off keeps the agent's default TCP probe. */
   health_check_enabled: boolean
@@ -292,6 +296,7 @@ export interface CreatePoolRequest extends PoolHealthCheckFields {
   name: string
   lb_algorithm?: string
   sni?: string | null
+  /** Omitted = follow `origin_settings.verify_cert`. */
   verify_cert?: boolean | null
 }
 
@@ -300,6 +305,11 @@ export interface UpdatePoolRequest extends PoolHealthCheckFields {
   lb_algorithm?: string
   /** Empty string clears SNI (disables HTTPS origin). */
   sni?: string | null
+  /**
+   * Tri-state on purpose: omitting the key leaves the stored value alone,
+   * `null` clears it so the pool follows `origin_settings.verify_cert`, and a
+   * boolean pins it.
+   */
   verify_cert?: boolean | null
 }
 
@@ -1573,6 +1583,25 @@ export interface UpdateGlobalCacheSettingsRequest {
   max_space_mb?: number
   master_enabled?: boolean
   default_edge_ttl_seconds?: number
+}
+
+/**
+ * `models::origin_settings::Model` — the deployment-wide origin TLS default.
+ *
+ * `verify_cert` decides whether an origin that is reached over HTTPS must
+ * present a certificate the trust store validates. It applies to every origin
+ * pool that does not pin a `verify_cert` of its own, reaches the data plane as
+ * `basic.origin_verify_cert`, and rides inside every rule bundle — so a save
+ * takes effect on the configuration push the API triggers immediately.
+ */
+export interface OriginSettings {
+  id: number
+  verify_cert: boolean
+  updated_at: string
+}
+
+export interface UpdateOriginSettingsRequest {
+  verify_cert: boolean
 }
 
 /**

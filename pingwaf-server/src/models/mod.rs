@@ -34,6 +34,7 @@ pub mod log_retention;
 pub mod login_histories;
 pub mod mtls;
 pub mod notifications;
+pub mod origin_settings;
 pub mod passkeys;
 pub mod rate_limit_stats;
 pub mod rewrite_rules;

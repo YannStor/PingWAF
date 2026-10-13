@@ -132,24 +132,47 @@ enum SelectionLb {
     Transparent,
 }
 
+/// A `Duration` as a whole number of milliseconds, saturating at `u64::MAX`.
+///
+/// Used for the health-check/update frequencies so a sub-second interval is
+/// not rounded away. `Duration::as_secs` turned `500ms` into `0`, and a zero
+/// frequency is a zero divisor in the scheduling arithmetic below.
+fn frequency_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// `(update_frequency, health_check_frequency)` in milliseconds; `0` means
+/// the upstream did not ask for that periodic job.
+fn milli_frequencies(
+    update_frequency: Option<Duration>,
+    health_check_frequency: Option<Duration>,
+) -> (u64, u64) {
+    (
+        frequency_millis(update_frequency.unwrap_or_default()),
+        frequency_millis(health_check_frequency.unwrap_or_default()),
+    )
+}
+
 impl SelectionLb {
+    /// `(update_frequency, health_check_frequency)` in **milliseconds**;
+    /// `0` means the upstream did not ask for that periodic job.
     fn get_health_frequency(&self) -> (u64, u64) {
         match self {
-            SelectionLb::RoundRobin(lb) => (
-                lb.update_frequency.unwrap_or_default().as_secs(),
-                lb.health_check_frequency.unwrap_or_default().as_secs(),
+            SelectionLb::RoundRobin(lb) => milli_frequencies(
+                lb.update_frequency,
+                lb.health_check_frequency,
             ),
-            SelectionLb::LeastConnections { lb, .. } => (
-                lb.update_frequency.unwrap_or_default().as_secs(),
-                lb.health_check_frequency.unwrap_or_default().as_secs(),
+            SelectionLb::LeastConnections { lb, .. } => milli_frequencies(
+                lb.update_frequency,
+                lb.health_check_frequency,
             ),
-            SelectionLb::Random(lb) => (
-                lb.update_frequency.unwrap_or_default().as_secs(),
-                lb.health_check_frequency.unwrap_or_default().as_secs(),
+            SelectionLb::Random(lb) => milli_frequencies(
+                lb.update_frequency,
+                lb.health_check_frequency,
             ),
-            SelectionLb::Consistent { lb, .. } => (
-                lb.update_frequency.unwrap_or_default().as_secs(),
-                lb.health_check_frequency.unwrap_or_default().as_secs(),
+            SelectionLb::Consistent { lb, .. } => milli_frequencies(
+                lb.update_frequency,
+                lb.health_check_frequency,
             ),
             SelectionLb::Transparent => (0, 0),
         }
@@ -1158,14 +1181,32 @@ pub struct UpstreamHealthyStatus {
     pub unhealthy_backends: Vec<String>,
 }
 
+/// Build (or reuse) every configured upstream.
+///
+/// `default_verify_cert` is the deployment-wide origin certificate check
+/// (`BasicConf::origin_verify_cert`); it is applied to the upstreams that do
+/// not carry a `verify_cert` of their own, and `None` leaves such an upstream
+/// exactly as pingora would treat it (verification on). A per-upstream value
+/// always wins, so a single self-signed origin can opt out without weakening
+/// the rest of the deployment.
+///
+/// The default is folded in *before* the change key is computed: `hash_key`
+/// covers the whole `UpstreamConf`, so a change to the global switch would
+/// otherwise leave every key untouched and the running upstream would be
+/// reused with the previous setting.
 pub fn new_ahash_upstreams(
     upstream_configs: &HashMap<String, UpstreamConf>,
     upstream_provider: Arc<dyn UpstreamProvider>,
     sender: Option<Arc<NotificationSender>>,
+    default_verify_cert: Option<bool>,
 ) -> Result<(Upstreams, Vec<String>)> {
     let mut upstreams = AHashMap::new();
     let mut updated_upstreams = vec![];
     for (name, conf) in upstream_configs.iter() {
+        let mut conf = conf.clone();
+        if conf.verify_cert.is_none() {
+            conf.verify_cert = default_verify_cert;
+        }
         let key = conf.hash_key();
         if let Some(found) = upstream_provider.get(name) {
             // not modified
@@ -1174,7 +1215,7 @@ pub fn new_ahash_upstreams(
                 continue;
             }
         }
-        let up = Arc::new(Upstream::new(name, conf, sender.clone())?);
+        let up = Arc::new(Upstream::new(name, &conf, sender.clone())?);
         upstreams.insert(name.to_string(), up);
         updated_upstreams.push(name.to_string());
     }
@@ -1187,17 +1228,29 @@ impl BackgroundTask for HealthCheckTask {
         // get upstream names
         let mut upstreams = self.upstream_provider.list();
         upstreams.retain(|(_, up)| !up.is_transparent());
-        let interval = self.interval.as_secs();
+        let interval = frequency_millis(self.interval);
         // run health check for each upstream
         let jobs = upstreams.into_iter().map(|(name, up)| {
             let runtime = pingora_runtime::current_handle();
             runtime.spawn(async move {
+                // Frequencies are milliseconds so a sub-second
+                // `check_frequency` survives; `Duration::as_secs` rounded
+                // `500ms` down to `0`, which made `count` zero and
+                // `is_multiple_of(0)` panic. The panic happened inside this
+                // spawned task, whose `JoinError` the `join_all` below
+                // discards, so the symptom was not a crash but an upstream
+                // whose active health checking never ran again: a backend
+                // that went down kept receiving traffic.
+                //
+                // `0` is "the upstream asked for no such periodic job", not a
+                // divisor — the same reading the update branch applies by
+                // requiring `update_frequency > 0`.
                 let check_frequency_matched = |frequency: u64| -> bool {
-                    let mut count = (frequency / interval) as u32;
-                    if !frequency.is_multiple_of(interval) {
-                        count += 1;
+                    if interval == 0 || frequency == 0 {
+                        return false;
                     }
-                    check_count.is_multiple_of(count)
+                    let count = frequency.div_ceil(interval);
+                    u64::from(check_count).is_multiple_of(count)
                 };
 
                 // get update frequency(update service)
@@ -1332,6 +1385,7 @@ mod tests {
         resolve_host, split_host_port,
     };
     use crate::new_ahash_upstreams;
+    use crate::upstream::{frequency_millis, milli_frequencies};
     use bytesize::ByteSize;
     use http::StatusCode;
     use pingap_core::UpstreamInstance;
@@ -2015,6 +2069,7 @@ mod tests {
             &upstream_configs,
             upstream_provider.clone(),
             None,
+            None,
         )
         .unwrap();
         assert_eq!(0, updated_upstreams.len());
@@ -2034,6 +2089,7 @@ mod tests {
             &upstream_configs,
             upstream_provider.clone(),
             None,
+            None,
         )
         .unwrap();
         assert_eq!(1, updated_upstreams.len());
@@ -2049,14 +2105,96 @@ mod tests {
                 ..Default::default()
             },
         );
-        let (upstreams, updated_upstreams) =
-            new_ahash_upstreams(&upstream_configs, upstream_provider, None)
-                .unwrap();
+        let (upstreams, updated_upstreams) = new_ahash_upstreams(
+            &upstream_configs,
+            upstream_provider,
+            None,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(1, updated_upstreams.len());
         assert_eq!(1, upstreams.len());
         assert_eq!(false, upstreams.contains_key("test"));
         assert_eq!(true, upstreams.contains_key("test1"));
+    }
+
+    /// The deployment-wide `origin_verify_cert` fills in the upstreams that
+    /// carry no value of their own, never overrides one that does, and — the
+    /// subtle part — reaches the change key, so flipping it rebuilds the
+    /// running upstream instead of silently leaving the old setting in place.
+    #[test]
+    fn test_new_ahash_upstreams_applies_origin_verify_cert_default() {
+        let provider = Arc::new(TmpProvider {
+            upstream: Arc::new(
+                Upstream::new(
+                    "test",
+                    &UpstreamConf {
+                        addrs: vec!["127.0.0.1:5001".to_string()],
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .unwrap(),
+            ),
+        });
+
+        let mut configs = HashMap::new();
+        configs.insert(
+            "test".to_string(),
+            UpstreamConf {
+                addrs: vec!["127.0.0.1:5001".to_string()],
+                ..Default::default()
+            },
+        );
+
+        // Same conf, new global default: the upstream must be rebuilt.
+        let (upstreams, updated) =
+            new_ahash_upstreams(&configs, provider, None, Some(true)).unwrap();
+        assert_eq!(vec!["test".to_string()], updated);
+        assert_eq!(Some(true), upstreams.get("test").unwrap().verify_cert);
+
+        // An upstream that states its own value keeps it.
+        let mut configs = HashMap::new();
+        configs.insert(
+            "test".to_string(),
+            UpstreamConf {
+                addrs: vec!["127.0.0.1:5001".to_string()],
+                verify_cert: Some(false),
+                ..Default::default()
+            },
+        );
+        let provider = Arc::new(TmpProvider {
+            upstream: Arc::new(
+                Upstream::new("test", configs.get("test").unwrap(), None)
+                    .unwrap(),
+            ),
+        });
+        let (upstreams, updated) =
+            new_ahash_upstreams(&configs, provider, None, Some(true)).unwrap();
+        assert!(updated.is_empty(), "unchanged conf must be reused");
+        assert_eq!(Some(false), upstreams.get("test").unwrap().verify_cert);
+
+        // No global default: an upstream without its own value stays
+        // untouched, i.e. pingora decides (strict), which is what a plain
+        // conf-file deployment has always had.
+        let mut configs = HashMap::new();
+        configs.insert(
+            "test".to_string(),
+            UpstreamConf {
+                addrs: vec!["127.0.0.1:5001".to_string()],
+                ..Default::default()
+            },
+        );
+        let provider = Arc::new(TmpProvider {
+            upstream: Arc::new(
+                Upstream::new("test", configs.get("test").unwrap(), None)
+                    .unwrap(),
+            ),
+        });
+        let (upstreams, _) =
+            new_ahash_upstreams(&configs, provider, None, None).unwrap();
+        assert_eq!(None, upstreams.get("test").unwrap().verify_cert);
     }
 
     #[test]
@@ -2077,8 +2215,8 @@ mod tests {
         .unwrap();
         let (update_frequency, health_check_frequency) =
             round_robin.get_health_frequency();
-        assert_eq!(5, update_frequency);
-        assert_eq!(3, health_check_frequency);
+        assert_eq!(5000, update_frequency);
+        assert_eq!(3000, health_check_frequency);
 
         let consistent = new_load_balancer(
             "test",
@@ -2097,7 +2235,28 @@ mod tests {
         .unwrap();
         let (update_frequency, health_check_frequency) =
             consistent.get_health_frequency();
-        assert_eq!(10, update_frequency);
-        assert_eq!(2, health_check_frequency);
+        assert_eq!(10000, update_frequency);
+        assert_eq!(2000, health_check_frequency);
+    }
+
+    #[test]
+    fn test_health_frequency_keeps_sub_second_precision() {
+        // `Duration::as_secs()` reported `500ms` as `0`, which is what made
+        // the scheduler divide by zero — and the panic, swallowed by
+        // `join_all`, stopped the upstream's health checking for good.
+        assert_eq!(0, frequency_millis(Duration::ZERO));
+        assert_eq!(500, frequency_millis(Duration::from_millis(500)));
+        assert_eq!(1500, frequency_millis(Duration::from_millis(1500)));
+        assert_eq!(60_000, frequency_millis(Duration::from_secs(60)));
+
+        let (update, health) = milli_frequencies(
+            Some(Duration::from_millis(250)),
+            Some(Duration::from_millis(500)),
+        );
+        assert_eq!(250, update);
+        assert_eq!(500, health);
+
+        // Unset is `0` — "no such periodic job", not a zero divisor.
+        assert_eq!((0, 0), milli_frequencies(None, None));
     }
 }

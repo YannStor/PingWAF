@@ -1232,6 +1232,22 @@ pub struct BasicConf {
     pub graceful_shutdown_timeout: Option<Duration>,
     /// Maximum number of idle connections to keep in upstream connection pool
     pub upstream_keepalive_pool_size: Option<usize>,
+    /// Deployment-wide default for verifying the TLS certificate of an
+    /// origin reached over HTTPS. `UpstreamConf::verify_cert` on a single
+    /// upstream always wins; this only fills in the upstreams that do not
+    /// set their own.
+    ///
+    /// Three states, deliberately:
+    /// * `Some(true)` - require a chain that validates against the system
+    ///   trust store (or the upstream's private `ca`).
+    /// * `Some(false)` - accept any origin certificate. This is what
+    ///   self-signed and internal-PKI origins need, and what the managed
+    ///   control plane writes.
+    /// * `None` (unset) - say nothing and let pingora decide, which means
+    ///   verification stays on. Left unset by default so a plain
+    ///   `conf/basic.toml` deployment keeps strict verification; set it to
+    ///   `false` explicitly to opt the whole process out.
+    pub origin_verify_cert: Option<bool>,
     /// Trusted downstream proxy IPs/CIDRs. When set, `X-Forwarded-For` /
     /// `X-Real-IP` are only honoured for connections coming directly from one
     /// of these addresses; otherwise the direct peer address is used as the

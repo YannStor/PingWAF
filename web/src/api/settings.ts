@@ -5,8 +5,10 @@ import type {
   EsTestResult,
   GlobalCacheSettings,
   LogRetentionSettings,
+  OriginSettings,
   UpdateGlobalCacheSettingsRequest,
   UpdateLogRetentionRequest,
+  UpdateOriginSettingsRequest,
 } from './types'
 
 /** The placeholder the server substitutes for `password` / `api_key`. */
@@ -59,6 +61,19 @@ export const settingsApi = {
 
   saveCache: (payload: UpdateGlobalCacheSettingsRequest) =>
     apiClient.put<GlobalCacheSettings>('/settings/cache', payload),
+
+  /**
+   * Origin TLS default — `/api/v1/settings/origin` (administrators only).
+   *
+   * Whether an origin reached over HTTPS must present a certificate the trust
+   * store can validate. It applies to every origin pool that does not pin a
+   * `verify_cert` of its own; the value reaches the data plane as
+   * `basic.origin_verify_cert` on the configuration push the API triggers.
+   */
+  getOrigin: () => apiClient.get<OriginSettings>('/settings/origin'),
+
+  saveOrigin: (payload: UpdateOriginSettingsRequest) =>
+    apiClient.put<OriginSettings>('/settings/origin', payload),
 }
 
 /** Drops `***` placeholders so a save never overwrites a real secret with a mask. */
@@ -94,6 +109,7 @@ export const settingsKeys = {
   elasticsearch: () => [...settingsKeys.all, 'elasticsearch'] as const,
   logRetention: () => [...settingsKeys.all, 'log-retention'] as const,
   cache: () => [...settingsKeys.all, 'cache'] as const,
+  origin: () => [...settingsKeys.all, 'origin'] as const,
 }
 
 export default settingsApi

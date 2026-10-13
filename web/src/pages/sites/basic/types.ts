@@ -35,6 +35,36 @@ export const LB_OPTION_KEYS = [
   { value: 'hash:query', labelKey: 'pages.basic.lb.hashQuery' },
 ]
 
+/* ── Origin certificate verification ──────────────────────────────── */
+
+/**
+ * How a pool treats the origin's TLS certificate.
+ *
+ * `inherit` is the default and maps to a `null` in the API: the pool follows
+ * the deployment-wide switch on the settings page, so turning verification on
+ * there covers every pool that never expressed an opinion. `verify`/`skip`
+ * pin the pool and survive the global switch either way.
+ */
+export type VerifyCertMode = 'inherit' | 'verify' | 'skip'
+
+export const VERIFY_CERT_OPTIONS = [
+  { value: 'inherit' as const, labelKey: 'pages.basic.verifyCertMode.inherit' },
+  { value: 'verify' as const, labelKey: 'pages.basic.verifyCertMode.verify' },
+  { value: 'skip' as const, labelKey: 'pages.basic.verifyCertMode.skip' },
+]
+
+/** The stored tri-state as a form value. */
+export function verifyCertMode(value: boolean | null): VerifyCertMode {
+  if (value === null) return 'inherit'
+  return value ? 'verify' : 'skip'
+}
+
+/** The form value as the API's tri-state: `inherit` is an explicit `null`. */
+export function verifyCertPayload(mode: VerifyCertMode): boolean | null {
+  if (mode === 'inherit') return null
+  return mode === 'verify'
+}
+
 /* ── Form state ───────────────────────────────────────────────────── */
 
 export interface PoolFormState {
@@ -43,7 +73,7 @@ export interface PoolFormState {
   hashKey: string
   httpsOrigin: boolean
   sni: string
-  verifyCert: boolean
+  verifyCert: VerifyCertMode
   healthCheckEnabled: boolean
   /** Kept as strings: raw input, validated on submit. */
   healthCheckPath: string
@@ -59,7 +89,7 @@ export const emptyPoolForm = (): PoolFormState => ({
   hashKey: '',
   httpsOrigin: false,
   sni: '',
-  verifyCert: false,
+  verifyCert: 'inherit',
   healthCheckEnabled: false,
   healthCheckPath: '/healthz',
   healthCheckInterval: '10',
@@ -76,7 +106,7 @@ export function poolFormFromPool(pool: UpstreamPool): PoolFormState {
     hashKey,
     httpsOrigin: Boolean(pool.sni),
     sni: pool.sni ?? '',
-    verifyCert: pool.verify_cert ?? false,
+    verifyCert: verifyCertMode(pool.verify_cert),
     healthCheckEnabled: pool.health_check_enabled,
     healthCheckPath: pool.health_check_path || '/healthz',
     healthCheckInterval: String(pool.health_check_interval_seconds),

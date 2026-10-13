@@ -286,6 +286,16 @@ message RuleBundle {
   // Site-level cache limits (single-file cap + per-content-type caps).
   // Absent = no site-level override.
   optional SiteCacheSettings cache_settings = 27;
+
+  // Deployment-wide default for verifying the TLS certificate of an origin
+  // reached over HTTPS. Fills in the pools that carry no `verify_cert` of
+  // their own (i.e. those that follow the default); a pool that states its
+  // own value always wins. Explicit presence (`optional`): an old server
+  // leaves it unset, which the agent must distinguish from an explicit
+  // `false` — it then keeps its historical lenient behaviour, because
+  // falling through to strict validation would 502 every HTTPS origin with
+  // a self-signed certificate. See `BasicConf::origin_verify_cert`.
+  optional bool origin_verify_cert = 28;
 }
 
 // Deployment-wide cache limits, mirrored from the `cache_settings` table.

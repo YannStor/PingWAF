@@ -31,6 +31,7 @@ pub mod logs;
 pub mod mcp;
 pub mod mtls;
 pub mod notifications;
+pub mod origin_settings;
 pub mod passkeys;
 pub mod rate_limit;
 pub mod rate_limiting;
@@ -106,6 +107,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(system_tls::routes())
         .merge(defense::routes())
         .merge(cache_settings::routes())
+        .merge(origin_settings::routes())
         .merge(api_protection::routes())
         .merge(ai::routes())
         .merge(mcp::routes())

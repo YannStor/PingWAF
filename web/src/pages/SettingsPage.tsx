@@ -106,6 +106,7 @@ const SETTINGS_NAV = [
   { id: 'observation-mode', labelKey: 'pages.settings.observationMode' },
   { id: 'api-protection', labelKey: 'pages.settings.apiProtection' },
   { id: 'cache', labelKey: 'pages.settings.cache' },
+  { id: 'origin-tls', labelKey: 'pages.settings.originTls' },
   { id: 'ai-assistant', labelKey: 'pages.settings.aiAssistant' },
   { id: 'mcp', labelKey: 'pages.settings.mcp' },
   { id: 'elasticsearch', labelKey: 'pages.settings.elasticsearch' },
@@ -170,6 +171,13 @@ export function SettingsPage() {
               <CacheSettingsCard canWrite={canWrite} />
             ) : (
               <AdminOnlyCard title={t('pages.settings.cache')} />
+            )}
+          </section>
+          <section id="origin-tls" className="scroll-mt-6">
+            {isAdmin ? (
+              <OriginTlsCard canWrite={canWrite} />
+            ) : (
+              <AdminOnlyCard title={t('pages.settings.originTls')} />
             )}
           </section>
           <section id="ai-assistant" className="scroll-mt-6">
@@ -1769,6 +1777,77 @@ function CacheSettingsCard({ canWrite }: { canWrite: boolean }) {
             <p className="flex items-start gap-2 text-xs leading-relaxed text-fg-subtle">
               <Database weight="duotone" className="mt-0.5 h-4 w-4 shrink-0" />
               {t('pages.settings.cacheScopeHint')}
+            </p>
+          </>
+        )}
+      </CardBody>
+    </Card>
+  )
+}
+
+/* ── Origin TLS (how the data plane validates an origin certificate) ── */
+
+function OriginTlsCard({ canWrite }: { canWrite: boolean }) {
+  const { t } = useTranslation()
+  const toast = useToast()
+  const queryClient = useQueryClient()
+
+  const settings = useQuery({
+    queryKey: settingsKeys.origin(),
+    queryFn: () => settingsApi.getOrigin(),
+  })
+
+  const save = useMutation({
+    mutationFn: (verify_cert: boolean) => settingsApi.saveOrigin({ verify_cert }),
+    onSuccess: (row) => {
+      queryClient.setQueryData(settingsKeys.origin(), row)
+      toast.success(t('pages.settings.originSaved'))
+    },
+    onError: (error) => toast.error(errorMessage(error)),
+  })
+
+  const data = settings.data
+
+  return (
+    <Card>
+      <CardHeader
+        title={t('pages.settings.originTls')}
+        description={t('pages.settings.originTlsDescription')}
+        action={
+          data && (
+            <Badge tone={data.verify_cert ? 'success' : 'warning'} dot>
+              {data.verify_cert
+                ? t('pages.settings.originVerifyOn')
+                : t('pages.settings.originVerifyOff')}
+            </Badge>
+          )
+        }
+      />
+      <CardBody className="flex flex-col gap-4">
+        {settings.isError && !data ? (
+          <ErrorState
+            variant="inline"
+            error={settings.error}
+            onRetry={() => settings.refetch()}
+            retrying={settings.isFetching}
+          />
+        ) : !data ? (
+          <SkeletonRows rows={1} columns={1} />
+        ) : (
+          <>
+            <Switch
+              checked={data.verify_cert}
+              disabled={!canWrite || save.isPending}
+              onCheckedChange={(next) => save.mutate(next)}
+              label={t('pages.settings.originVerifyToggle')}
+              description={t('pages.settings.originVerifyToggleHint')}
+            />
+            <p className="flex items-start gap-2 text-xs leading-relaxed text-fg-subtle">
+              <ShieldCheck
+                weight="duotone"
+                className="mt-0.5 h-4 w-4 shrink-0"
+              />
+              {t('pages.settings.originScopeHint')}
             </p>
           </>
         )}

@@ -66,17 +66,21 @@ pub fn new_upstream_provider() -> Arc<dyn UpstreamProvider> {
 ///
 /// # Arguments
 /// * `upstream_configs` - The upstream configurations
+/// * `default_verify_cert` - `BasicConf::origin_verify_cert`, used for every
+///   upstream that does not set its own `verify_cert`
 /// * `sender` - The notification sender
 ///
 /// # Returns
 pub fn try_init_upstreams(
     upstream_configs: &HashMap<String, UpstreamConf>,
+    default_verify_cert: Option<bool>,
     sender: Option<Arc<NotificationSender>>,
 ) -> Result<()> {
     let (upstreams, _) = new_ahash_upstreams(
         upstream_configs,
         UPSTREAM_PROVIDER.clone(),
         sender,
+        default_verify_cert,
     )
     .map_err(|e| Error::Invalid {
         message: e.to_string(),
@@ -88,12 +92,14 @@ pub fn try_init_upstreams(
 
 pub async fn try_update_upstreams(
     upstream_configs: &HashMap<String, UpstreamConf>,
+    default_verify_cert: Option<bool>,
     sender: Option<Arc<NotificationSender>>,
 ) -> Result<Vec<String>> {
     let (upstreams, updated_upstreams) = new_ahash_upstreams(
         upstream_configs,
         UPSTREAM_PROVIDER.clone(),
         sender,
+        default_verify_cert,
     )
     .map_err(|e| Error::Invalid {
         message: e.to_string(),

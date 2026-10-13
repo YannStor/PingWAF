@@ -77,6 +77,22 @@
 # Keepalive pool size for client connections to upstream. Default `128`
 # upstream_keepalive_pool_size = 128
 
+# Whether to verify the TLS certificate of an origin reached over HTTPS.
+# Per-upstream `verify_cert` always wins; this only fills in the upstreams
+# that do not set their own.
+# - true: require a certificate that validates against the system trust
+#   store, or against the upstream's own `ca`.
+# - false: accept any certificate. This is what self-signed and
+#   internal-PKI origins need, but it also accepts a forged one, so it is
+#   not recommended unless those origins cannot be reissued.
+# - unset (default): leave the decision to pingora, which verifies. A plain
+#   `conf/basic.toml` deployment therefore verifies; the managed control
+#   plane writes `false` so that reusing an existing self-signed origin does
+#   not break on upgrade, and you can flip it to `true` per site once the
+#   origin presents a trusted certificate.
+# Default `none`
+# origin_verify_cert = false
+
 # HTTP webhook URL for notifications, default `none`
 # webhook = "https://example.com/webhook"
 

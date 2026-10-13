@@ -279,7 +279,9 @@ pub struct CreatePoolRequest {
     /// Non-empty enables TLS to the origin; empty means plain HTTP.
     #[serde(default)]
     pub sni: Option<String>,
-    /// `None` keeps the proxy default (certificate verification on).
+    /// Origin certificate check for this pool. Omitted — the recommended
+    /// value — leaves the pool following the deployment-wide
+    /// `origin_settings.verify_cert`; `true`/`false` pin it.
     #[serde(default)]
     pub verify_cert: Option<bool>,
     /// Enable an active HTTP health check for this pool's nodes. Off keeps
@@ -310,6 +312,24 @@ fn default_lb_algorithm() -> String {
     "round_robin".to_string()
 }
 
+/// Deserializes a present-but-nullable field into `Option<Option<T>>`.
+///
+/// serde only calls this when the key is present, so the outer `Option`
+/// separates "absent" (`None`) from a JSON `null` (`Some(None)`) — the
+/// difference between "leave the column alone" and "clear it so the
+/// deployment-wide default applies". A plain `Option<bool>` collapses both
+/// into `None`, which would make the global switch impossible to opt into
+/// through an update.
+fn deserialize_present_nullable<'de, D, T>(
+    deserializer: D,
+) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub struct UpdatePoolRequest {
     #[serde(default)]
@@ -319,8 +339,13 @@ pub struct UpdatePoolRequest {
     /// `Some("")` clears the SNI (disables origin TLS); `None` leaves it.
     #[serde(default)]
     pub sni: Option<String>,
-    #[serde(default)]
-    pub verify_cert: Option<bool>,
+    /// Tri-state, because "leave it alone" and "follow the deployment
+    /// default" are different intentions:
+    /// * absent — leave the stored value untouched;
+    /// * `null` — clear it, i.e. follow `origin_settings.verify_cert`;
+    /// * `true`/`false` — pin this pool.
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    pub verify_cert: Option<Option<bool>>,
     #[serde(default)]
     pub health_check_enabled: Option<bool>,
     /// `Some("")` resets the probe path to `/`.
@@ -929,7 +954,10 @@ async fn create(
             .upstream_tls
             .filter(|tls| *tls)
             .map(|_| origin_host(&upstream_address).to_string())),
-        verify_cert: Set(Some(false)),
+        // No opinion: the pool follows the deployment-wide origin
+        // certificate check (`origin_settings.verify_cert`) until an
+        // operator pins a value on it.
+        verify_cert: Set(None),
         health_check_enabled: Set(defaults.enabled),
         health_check_path: Set(defaults.path.clone()),
         health_check_interval_seconds: Set(defaults.interval_seconds),
@@ -1383,10 +1411,11 @@ async fn create_pool(
         name: Set(name),
         lb_algorithm: Set(lb_algorithm),
         sni: Set(sni),
-        // Origin certificate verification is opt-in: self-signed origins are
-        // the common case, so a pool starts lenient and the operator flips
-        // "must trust origin certificate" for strict validation.
-        verify_cert: Set(payload.verify_cert.or(Some(false))),
+        // Omitted means "follow the deployment default", not "pin false":
+        // the pool then tracks `origin_settings.verify_cert`, so an operator
+        // who later turns verification on does not have to revisit every
+        // pool that was created while it was off.
+        verify_cert: Set(payload.verify_cert),
         health_check_enabled: Set(health_check.enabled),
         health_check_path: Set(health_check.path),
         health_check_interval_seconds: Set(health_check.interval_seconds),
@@ -1451,7 +1480,9 @@ async fn update_pool(
         active.sni = Set(non_empty(&Some(sni.to_string())));
     }
     if let Some(verify_cert) = payload.verify_cert {
-        active.verify_cert = Set(Some(verify_cert));
+        // `None` clears the column: the pool goes back to following the
+        // deployment default.
+        active.verify_cert = Set(verify_cert);
     }
     active.health_check_enabled = Set(health_check.enabled);
     active.health_check_path = Set(health_check.path);

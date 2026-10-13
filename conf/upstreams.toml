@@ -37,8 +37,14 @@ addrs = ["127.0.0.1:5000", "127.0.0.1:5001 10"]
 # It should be set if the upstream server is https. Default `none`
 # sni = ""
 
-# Whether to check if upstream' server cert is valid and validated
-# Default `true`
+# Whether to check if upstream's server cert is valid and validated.
+# Three states:
+# - true: require a chain that validates against the system trust store or
+#   this upstream's `ca`.
+# - false: accept any certificate, including a self-signed or forged one.
+#   Use only for origins that cannot present a trusted certificate.
+# - unset (default): defer to `basic.origin_verify_cert`.
+# Default `none`
 # verify_cert = true
 
 # Upstream http health check, if not set, tcp health check will be used.

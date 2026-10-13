@@ -144,7 +144,9 @@ pub mod site_upstream_pools {
         pub lb_algorithm: String,
         /// Non-empty enables TLS to the origin and sets the SNI.
         pub sni: Option<String>,
-        /// `None` keeps the proxy default (verification on).
+        /// Origin certificate check for this pool: `Some` pins it, `None`
+        /// means the pool follows the deployment-wide
+        /// `origin_settings.verify_cert`.
         pub verify_cert: Option<bool>,
         /// Active HTTP health check for this pool's nodes; `false` leaves the
         /// agent's data plane on its default bare TCP probe.

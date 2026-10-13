@@ -227,9 +227,22 @@ async fn apply_config(
             format!("{name}({}) is modified", list.join(","))
         };
 
+        // The global origin certificate check only reaches the data plane
+        // through the upstreams it defaults into, so a change to it has to
+        // trigger the same rebuild an upstream edit would. The category list
+        // alone cannot see this: `basic` is not `upstreams`.
+        if hot_reload_config.basic.origin_verify_cert
+            != new_config.basic.origin_verify_cert
+        {
+            hot_reload_config.basic.origin_verify_cert =
+                new_config.basic.origin_verify_cert;
+            should_reload_upstream = true;
+        }
+
         if should_reload_upstream {
             match try_update_upstreams(
                 &new_config.upstreams,
+                new_config.basic.origin_verify_cert,
                 get_webhook_sender(),
             )
             .await

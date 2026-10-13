@@ -799,7 +799,11 @@ fn run() -> Result<(), Box<dyn Error>> {
         process::set_restart_process_command(cmd);
     }
 
-    try_init_upstreams(&config.upstreams, webhook::get_webhook_sender())?;
+    try_init_upstreams(
+        &config.upstreams,
+        config.basic.origin_verify_cert,
+        webhook::get_webhook_sender(),
+    )?;
     // Wire upstreams into Prometheus scrapes for per-backend gauges.
     #[cfg(feature = "tracing")]
     set_metrics_upstream_provider(new_upstream_provider());

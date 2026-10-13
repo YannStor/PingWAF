@@ -1152,6 +1152,14 @@ pub async fn build_rule_bundle(
             ),
         });
     let site_cache_settings = site_cache_settings_to_proto(site_row);
+    // Deployment-wide origin certificate check. A read failure leaves the
+    // field unset, which the agent reads as "keep the historical lenient
+    // behaviour" — never as "verify strictly", because that would 502 every
+    // HTTPS origin with a certificate outside the system trust store.
+    let origin_verify_cert = crate::api::origin_settings::load(db)
+        .await
+        .ok()
+        .map(|row| row.verify_cert);
 
     let custom_rules: Vec<WafRule> =
         rules_rows.iter().map(rule_to_proto).collect();
@@ -1195,6 +1203,7 @@ pub async fn build_rule_bundle(
         default_fail_open: Some(default_fail_open),
         global_cache,
         cache_settings: site_cache_settings,
+        origin_verify_cert,
     };
 
     bundle.config_hash = fingerprint(&bundle);

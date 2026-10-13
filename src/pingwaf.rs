@@ -512,13 +512,14 @@ fn cached_rules_to_pingap_config(
                 } else {
                     Some(up.sni.clone())
                 },
-                // Verification is opt-in. Normalize here as well as in the
-                // agent's gRPC conversion: a rule cache restored from the
-                // persisted snapshot (sites.json) carries `verify_cert: null`
-                // and never passes through that conversion, and a `None` left
-                // intact means pingora's default - strict verification - so
-                // self-signed origins would 502 with InvalidCert.
-                verify_cert: Some(up.verify_cert.unwrap_or(false)),
+                // Passed through untouched on purpose: `null` means "follow
+                // the deployment default", which `basic.origin_verify_cert`
+                // below always states (the managed control plane's default is
+                // "do not verify"). Resolving it here would erase the
+                // distinction between "this pool opted out" and "this pool
+                // never said", and the global switch could no longer reach a
+                // pool that was created before it existed.
+                verify_cert: up.verify_cert,
                 connection_timeout: if up.connection_timeout_ms > 0 {
                     Some(Duration::from_millis(up.connection_timeout_ms as u64))
                 } else {
@@ -747,7 +748,20 @@ fn cached_rules_to_pingap_config(
     );
 
     Some(PingapConfig {
-        basic: BasicConf::default(),
+        basic: BasicConf {
+            // Always a concrete value, never `None`: the pools that do not
+            // state their own `verify_cert` (anything created before the
+            // global switch existed, and anything that explicitly opted into
+            // "follow the default") resolve against it, and a `None` here
+            // would fall through to pingora's strict default and 502 every
+            // self-signed origin. An agent that has not synced yet keeps the
+            // historical lenient behaviour, which is also the control
+            // plane's default.
+            origin_verify_cert: Some(
+                cached.origin_verify_cert.unwrap_or(false),
+            ),
+            ..Default::default()
+        },
         upstreams,
         locations,
         servers,
@@ -1041,8 +1055,12 @@ pub async fn start_data_plane(
     config_manager.set_current_config(config.clone());
 
     // Initialize providers from the (merged) config
-    try_init_upstreams(&config.upstreams, None)
-        .map_err(|e| anyhow::anyhow!("failed to init upstreams: {}", e))?;
+    try_init_upstreams(
+        &config.upstreams,
+        config.basic.origin_verify_cert,
+        None,
+    )
+    .map_err(|e| anyhow::anyhow!("failed to init upstreams: {}", e))?;
     try_init_locations(&config.locations)
         .map_err(|e| anyhow::anyhow!("failed to init locations: {}", e))?;
     try_init_server_locations(&config.servers, &config.locations).map_err(
@@ -1315,7 +1333,11 @@ pub async fn start_data_plane(
                 },
             };
             watcher_config_manager.set_current_config(config.clone());
-            if let Err(e) = try_init_upstreams(&config.upstreams, None) {
+            if let Err(e) = try_init_upstreams(
+                &config.upstreams,
+                config.basic.origin_verify_cert,
+                None,
+            ) {
                 error!(error = %e, "data plane: reload upstreams failed");
             }
             if let Err(e) = try_init_locations(&config.locations) {
@@ -2124,15 +2146,51 @@ mod tests {
             "legacy enum debug names collapse to the round_robin default"
         );
 
+        // A pool with no opinion of its own passes `null` through and is
+        // resolved against the deployment default, which the generator
+        // states explicitly; `None` here would mean "let pingora decide",
+        // i.e. strict, and every self-signed origin would 502.
         assert_eq!(
             config.upstreams.get("pool-c").unwrap().verify_cert,
+            None,
+            "snapshot null follows the deployment default"
+        );
+        assert_eq!(
+            config.basic.origin_verify_cert,
             Some(false),
-            "snapshot null becomes the lenient default"
+            "the deployment default is always stated and defaults to lenient"
         );
         assert_eq!(
             config.upstreams.get("pool-d").unwrap().verify_cert,
             Some(true),
             "explicit opt-in keeps strict verification"
+        );
+    }
+
+    /// The control plane's global switch reaches the generated config, so a
+    /// pool that follows the default is verified without touching the pool.
+    #[test]
+    fn origin_verify_cert_flows_into_the_basic_conf() {
+        let mut site = site_rules("site1", "a.example.com");
+        let mut pool_a = pool("pool-a", vec![peer("https://10.0.0.1:8443")]);
+        pool_a.sni = "origin.example.com".to_string();
+        pool_a.verify_cert = None;
+        site.upstreams = vec![pool_a];
+
+        let mut cached = one_site_cache(site);
+        cached.origin_verify_cert = Some(true);
+
+        let config = cached_rules_to_pingap_config(
+            &cached,
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+
+        assert_eq!(config.basic.origin_verify_cert, Some(true));
+        assert_eq!(
+            config.upstreams.get("pool-a").unwrap().verify_cert,
+            None,
+            "the pool keeps following the default"
         );
     }
 

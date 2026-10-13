@@ -18,7 +18,10 @@ import {
   poolFormFromPool,
   poolHealthCheckPayload,
   validatePoolHealthCheck,
+  verifyCertPayload,
+  VERIFY_CERT_OPTIONS,
   type PoolFormState,
+  type VerifyCertMode,
 } from './types'
 
 export type PoolDialogRequest = { mode: 'create' } | { mode: 'edit'; pool: UpstreamPool }
@@ -118,7 +121,7 @@ export function PoolDialog({
           name,
           lb_algorithm: lbAlgorithm,
           sni: sni ?? '',
-          verify_cert: sni ? form.verifyCert : null,
+          verify_cert: sni ? verifyCertPayload(form.verifyCert) : null,
           ...healthCheck,
         },
       })
@@ -130,7 +133,7 @@ export function PoolDialog({
         name,
         lb_algorithm: lbAlgorithm,
         sni,
-        verify_cert: sni ? form.verifyCert : null,
+        verify_cert: sni ? verifyCertPayload(form.verifyCert) : null,
         ...healthCheck,
       },
     })
@@ -198,11 +201,20 @@ export function PoolDialog({
               onChange={(e) => setForm((f) => ({ ...f, sni: e.target.value }))}
               required
             />
-            <Switch
-              checked={form.verifyCert}
-              onCheckedChange={(verifyCert) => setForm((f) => ({ ...f, verifyCert }))}
+            <Select
               label={t('pages.basic.verifyCert')}
-              description={t('pages.basic.verifyCertHint')}
+              value={form.verifyCert}
+              hint={t('pages.basic.verifyCertHint')}
+              options={VERIFY_CERT_OPTIONS.map((o) => ({
+                value: o.value,
+                label: t(o.labelKey),
+              }))}
+              onChange={(e) =>
+                setForm((f) => ({
+                  ...f,
+                  verifyCert: e.target.value as VerifyCertMode,
+                }))
+              }
             />
           </>
         )}

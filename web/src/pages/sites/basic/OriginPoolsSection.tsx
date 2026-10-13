@@ -240,9 +240,11 @@ export function OriginPoolsSection({
                           <Lock weight="duotone" className="h-3.5 w-3.5" />
                           <span className="pw-mono">{pool.sni}</span>
                           <span className="text-fg-subtle/70">
-                            {pool.verify_cert === false
-                              ? t('pages.basic.certNotVerified')
-                              : t('pages.basic.certVerified')}
+                            {pool.verify_cert === null
+                              ? t('pages.basic.certInherit')
+                              : pool.verify_cert
+                                ? t('pages.basic.certVerified')
+                                : t('pages.basic.certNotVerified')}
                           </span>
                         </span>
                       ) : (
