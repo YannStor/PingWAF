@@ -41,7 +41,7 @@ use pingora::http::ResponseHeader;
 use pingora::proxy::Session;
 use pingwaf_agent::PingWafAgent;
 use pingwaf_agent::cache::{
-    CacheRule as AgentCacheRule, SiteRules as AgentSiteRules,
+    CacheRule as AgentCacheRule, CacheTypeCategory, SiteRules as AgentSiteRules,
 };
 use pingwaf_waf::rules::{
     EvalContext, Expression, FieldKind, evaluate, parse_expression,
@@ -242,6 +242,26 @@ fn build_site_cache_rules(site: &AgentSiteRules) -> SiteCacheRules {
             ),
         }
     }
+    // Extension-based type policy, compiled after the custom rules so a
+    // custom rule keeps winning by first match (an `/api/` exclusion, for
+    // instance, must beat the policy's own .json-style families).
+    if let Some(policy) = site
+        .cache_settings
+        .as_ref()
+        .and_then(|settings| settings.type_policy.as_ref())
+    {
+        for category in policy.iter() {
+            if !category.enabled || category.extensions.is_empty() {
+                continue;
+            }
+            let Some(compiled) = compile_policy_category(category) else {
+                continue;
+            };
+            requirements = requirements
+                .union(expression_requirements(&compiled.expression));
+            rules.push(compiled);
+        }
+    }
     SiteCacheRules {
         namespace: site.domain.clone(),
         requirements,
@@ -263,6 +283,65 @@ fn build_site_cache_rules(site: &AgentSiteRules) -> SiteCacheRules {
             })
             .unwrap_or_default(),
     }
+}
+
+/// Compiles one policy family into a cache rule matching any of its
+/// extensions. Extensions are validated to be plain alphanumerics at write
+/// time; anything else is skipped defensively here so a hand-edited store
+/// cannot inject regex metacharacters.
+fn compile_policy_category(
+    category: &CacheTypeCategory,
+) -> Option<CompiledCacheRule> {
+    let extensions: Vec<&str> = category
+        .extensions
+        .iter()
+        .map(|extension| extension.as_str())
+        .filter(|extension| {
+            !extension.is_empty()
+                && extension.len() <= 16
+                && extension.chars().all(|c| c.is_ascii_alphanumeric())
+        })
+        .collect();
+    if extensions.is_empty() {
+        error!(
+            extensions = ?category.extensions,
+            "cache type policy family has no valid extensions, ignored"
+        );
+        return None;
+    }
+    let expression = parse_expression(&format!(
+        r#"http.request.uri.path matches "(?i)\.(?:{})$""#,
+        extensions.join("|")
+    ));
+    let Some(expression) = expression.ok() else {
+        error!(
+            extensions = ?extensions,
+            "cache type policy expression failed to compile, family ignored"
+        );
+        return None;
+    };
+    Some(CompiledCacheRule {
+        expression,
+        max_ttl: if category.edge_ttl_seconds > 0 {
+            Some(Duration::from_secs(u64::from(category.edge_ttl_seconds)))
+        } else {
+            None
+        },
+        browser_ttl: if category.browser_ttl_seconds > 0 {
+            Some(category.browser_ttl_seconds)
+        } else {
+            None
+        },
+        cache_eligible: true,
+        // Origin-silent responses (nginx default static files send no
+        // Cache-Control at all) must still follow the admin-configured TTL:
+        // the response filter floors their freshness at `max_ttl`. Explicit
+        // origin directives still win — no-store/private/no-cache reject the
+        // entry and an over-long max-age is capped — this flag only governs
+        // whether silence counts as "cacheable".
+        respect_origin: false,
+        key_headers: Vec::new(),
+    })
 }
 
 /// Maps a response `Content-Type` onto one of the control-plane's cache
@@ -618,17 +697,16 @@ impl TryFrom<&PluginConf> for Cache {
 impl Cache {
     /// Resolve compiled cache rules for `host` from the agent's rule cache,
     /// keeping them per host and rebuilding when the agent's config
-    /// fingerprint changes. `None` (no agent, unknown host, or no rules)
-    /// leaves the plugin's static behaviour in charge.
+    /// fingerprint changes. `None` (no agent or unknown host) leaves the
+    /// plugin's static behaviour in charge. A known site with no rules of
+    /// its own still resolves — an empty rule set then disables caching
+    /// instead of silently falling back to the static config.
     fn resolve_site_rules(&self, host: &str) -> Option<Arc<SiteCacheRules>> {
         let agent = PingWafAgent::instance()?;
         if host.is_empty() {
             return None;
         }
         let site_rules = agent.get_rules_for_domain(host)?;
-        if site_rules.cache_rules.is_empty() {
-            return None;
-        }
         let fingerprint = agent.config_hash();
         if let Some(cached) = self.site_cache_rules.get(host)
             && cached.fingerprint == fingerprint
@@ -906,6 +984,17 @@ impl Plugin for Cache {
             );
         }
 
+        // A request that matches no rule on a site that HAS cache rules is
+        // not cacheable: the static config below only exists to serve
+        // static-file deployments without an agent, and falling back to it
+        // here would cache arbitrary traffic (console API calls, dynamic
+        // pages) under pingora's 1-second default freshness — the classic
+        // "everything is expired" symptom. An unknown host (no site entry)
+        // keeps the static behaviour for standalone deployments.
+        if site_rules.is_some() && matched.is_none() {
+            return Ok(RequestPluginResult::Skipped);
+        }
+
         // Configure cache settings for this request. A matched control-plane
         // rule wins over the static options; its zero TTLs mean "leave the
         // static value alone".
@@ -1003,11 +1092,162 @@ register_plugin!("cache", Cache);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::waf::tests::install_test_agent;
     use pingap_config::PluginConf;
     use pingap_core::{Ctx, PluginStep};
     use pingora::proxy::Session;
+    use pingwaf_proto::control_plane as proto;
     use pretty_assertions::assert_eq;
     use tokio_test::io::Builder;
+
+    /// A site whose cache rules don't match the request must NOT fall back
+    /// to the static config and cache the traffic anyway: the plugin is
+    /// attached to every site once any site has rules, and unconditional
+    /// caching under pingora's 1-second default freshness is exactly the
+    /// "everything reports expired" failure mode.
+    #[tokio::test]
+    async fn test_unmatched_rule_disables_caching_for_known_site() {
+        let (_guard, agent, _dir) = install_test_agent().await;
+        agent
+            .rule_cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![proto::Site {
+                    id: "site-1".to_string(),
+                    name: "example".to_string(),
+                    domain: "example.com".to_string(),
+                    rules: Some(proto::RuleBundle {
+                        site_id: "site-1".to_string(),
+                        config_hash: "h1".to_string(),
+                        cache_rules: vec![proto::CacheRule {
+                            id: "cr1".to_string(),
+                            match_expression:
+                                r#"http.request.uri.path contains "/static/""#
+                                    .to_string(),
+                            edge_ttl_seconds: 300,
+                            browser_ttl_seconds: 60,
+                            cache_eligible: true,
+                            enabled: true,
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                config_hash: "h1".to_string(),
+                updated_at: None,
+            })
+            .unwrap();
+        let cache = Cache::try_from(
+            &toml::from_str::<PluginConf>(
+                r###"
+namespace = "known-site"
+purge_ip_list = ["127.0.0.1"]
+"###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        async fn run(cache: &Cache, path: &str) -> (RequestPluginResult, bool) {
+            let input =
+                format!("GET {path} HTTP/1.1\r\nHost: example.com\r\n\r\n");
+            let mock_io = Builder::new().read(input.as_bytes()).build();
+            let mut session = Session::new_h1(Box::new(mock_io));
+            session.read_request().await.unwrap();
+            let mut ctx = Ctx::default();
+            let result = cache
+                .handle_request(PluginStep::Request, &mut session, &mut ctx)
+                .await
+                .unwrap();
+            (result, session.cache.enabled())
+        }
+
+        // Matching path: cache engages under the rule.
+        let (result, enabled) = run(&cache, "/static/a.css").await;
+        assert_eq!(RequestPluginResult::Continue, result);
+        assert!(enabled);
+
+        // Non-matching path on the same site: caching must stay off.
+        let (result, enabled) = run(&cache, "/other").await;
+        assert_eq!(RequestPluginResult::Skipped, result);
+        assert!(!enabled);
+    }
+
+    /// A site that carries no custom cache rules but does configure the
+    /// extension-based type policy must still resolve: the policy families
+    /// compile into matchable rules, and everything else on the site stays
+    /// out of the cache (the known-site-no-match semantics).
+    #[tokio::test]
+    async fn test_policy_only_site_compiles_without_custom_rules() {
+        let (_guard, agent, _dir) = install_test_agent().await;
+        agent
+            .rule_cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![proto::Site {
+                    id: "site-1".to_string(),
+                    name: "example".to_string(),
+                    domain: "example.com".to_string(),
+                    rules: Some(proto::RuleBundle {
+                        site_id: "site-1".to_string(),
+                        config_hash: "h1".to_string(),
+                        cache_settings: Some(proto::SiteCacheSettings {
+                            type_policy: Some(proto::CacheTypePolicy {
+                                web_assets: Some(proto::CacheTypeCategory {
+                                    enabled: Some(true),
+                                    edge_ttl_seconds: Some(604_800),
+                                    browser_ttl_seconds: Some(3_600),
+                                    extensions: vec![
+                                        "css".to_string(),
+                                        "js".to_string(),
+                                    ],
+                                }),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                config_hash: "h1".to_string(),
+                updated_at: None,
+            })
+            .unwrap();
+        let cache = Cache::try_from(
+            &toml::from_str::<PluginConf>(
+                r###"
+namespace = "policy-site"
+purge_ip_list = ["127.0.0.1"]
+"###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        async fn run(cache: &Cache, path: &str) -> (RequestPluginResult, bool) {
+            let input =
+                format!("GET {path} HTTP/1.1\r\nHost: example.com\r\n\r\n");
+            let mock_io = Builder::new().read(input.as_bytes()).build();
+            let mut session = Session::new_h1(Box::new(mock_io));
+            session.read_request().await.unwrap();
+            let mut ctx = Ctx::default();
+            let result = cache
+                .handle_request(PluginStep::Request, &mut session, &mut ctx)
+                .await
+                .unwrap();
+            (result, session.cache.enabled())
+        }
+
+        // A policy extension matches: caching engages under the family.
+        let (result, enabled) = run(&cache, "/app.css").await;
+        assert_eq!(RequestPluginResult::Continue, result);
+        assert!(enabled);
+
+        // Anything else on this policy-only site stays out of the cache.
+        let (result, enabled) = run(&cache, "/api/v1/stats").await;
+        assert_eq!(RequestPluginResult::Skipped, result);
+        assert!(!enabled);
+    }
 
     #[test]
     fn test_cache_params() {
@@ -1369,6 +1609,7 @@ purge_ip_list = ["192.168.1.1"]
             ]
             .into_iter()
             .collect(),
+            type_policy: None,
         });
         let compiled = build_site_cache_rules(&site);
         assert_eq!(Some(8 * 1024 * 1024), compiled.max_file_size);
@@ -1378,6 +1619,54 @@ purge_ip_list = ["192.168.1.1"]
         );
         assert_eq!(Some(&(2 * 1024 * 1024)), compiled.type_limits.get("js"));
         assert!(!compiled.type_limits.contains_key("html"));
+    }
+
+    #[test]
+    fn test_policy_category_compilation() {
+        use pingwaf_agent::cache::{CacheTypeCategory, CacheTypePolicy};
+
+        let policy = CacheTypePolicy {
+            web_assets: Some(CacheTypeCategory {
+                enabled: true,
+                edge_ttl_seconds: 604_800,
+                browser_ttl_seconds: 3_600,
+                extensions: vec![
+                    "CSS".to_string(),
+                    "js".to_string(),
+                    "w1000000000000000000".to_string(),
+                    String::new(),
+                ],
+            }),
+            image: Some(CacheTypeCategory {
+                enabled: false,
+                edge_ttl_seconds: 100,
+                browser_ttl_seconds: 0,
+                extensions: vec!["png".to_string()],
+            }),
+            ..Default::default()
+        };
+        let site = agent_site_rules(Vec::new());
+        let mut site = site;
+        site.cache_settings = Some(pingwaf_agent::cache::SiteCacheSettings {
+            max_file_size_mb: None,
+            type_max_file_size_mb: HashMap::new(),
+            type_policy: Some(policy),
+        });
+        let compiled = build_site_cache_rules(&site);
+
+        // Disabled families compile to nothing; the enabled one survives.
+        assert_eq!(1, compiled.rules.len());
+        let rule = &compiled.rules[0];
+        // The invalid extensions (over 16 chars, empty) are dropped; the
+        // valid ones survive in the case-insensitive alternation.
+        assert!(evaluate(&rule.expression, &eval_ctx("/app.CSS", &[], &[])));
+        assert!(!evaluate(&rule.expression, &eval_ctx("/app.png", &[], &[])));
+        assert_eq!(Some(Duration::from_secs(604_800)), rule.max_ttl);
+        assert_eq!(Some(3_600), rule.browser_ttl);
+        assert!(rule.cache_eligible);
+        // Origin-silence counts as cacheable: the admin TTL floors the
+        // response instead of requiring an origin Cache-Control.
+        assert!(!rule.respect_origin);
     }
 
     #[test]

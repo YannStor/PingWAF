@@ -1520,6 +1520,8 @@ export interface CacheSettings {
   max_file_size_mb: number | null
   /** Per-content-type single-file caps in MiB (html/css/js/image/font/media/other). */
   type_limits: Record<string, number> | null
+  /** Extension-based cache policy (five families); null when unconfigured. */
+  cache_type_policy: CacheTypePolicy | null
   /** The global single-file ceiling every site value is clamped against. */
   global_max_file_size_mb: number
   /** Resolved cap: min(global, max_file_size_mb?). */
@@ -1530,12 +1532,28 @@ export interface CacheSettings {
   enabled_rule_count: number
 }
 
+/** One content family of the extension-based cache type policy. */
+export interface CacheTypeCategory {
+  enabled: boolean
+  edge_ttl_seconds: number
+  browser_ttl_seconds: number
+  extensions: string[]
+}
+
+/** Five fixed families, keyed web_assets/image/media/other/html. */
+export type CacheTypePolicy = Record<
+  'web_assets' | 'image' | 'media' | 'other' | 'html',
+  CacheTypeCategory
+>
+
 export interface UpdateCacheSettingsRequest {
   quota_mb?: number
   /** Absent = unchanged; null = follow the global ceiling again. */
   max_file_size_mb?: number | null
   /** Absent = unchanged; empty object clears every override. */
   type_limits?: Record<string, number> | null
+  /** Absent = unchanged; null removes the policy. */
+  cache_type_policy?: CacheTypePolicy | null
 }
 
 /**

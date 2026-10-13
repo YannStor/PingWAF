@@ -560,6 +560,53 @@ pub struct SiteCacheSettings {
     pub max_file_size_mb: Option<u32>,
     #[serde(default)]
     pub type_max_file_size_mb: HashMap<String, u32>,
+    #[serde(default)]
+    pub type_policy: Option<CacheTypePolicy>,
+}
+
+/// One content family of a site's extension-based cache policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct CacheTypeCategory {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub edge_ttl_seconds: u32,
+    #[serde(default)]
+    pub browser_ttl_seconds: u32,
+    #[serde(default)]
+    pub extensions: Vec<String>,
+}
+
+/// Extension-based cache policy: five fixed content families an
+/// administrator tunes per site. Compiled into cache rules behind the
+/// site's custom rules in the data plane.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct CacheTypePolicy {
+    #[serde(default)]
+    pub web_assets: Option<CacheTypeCategory>,
+    #[serde(default)]
+    pub image: Option<CacheTypeCategory>,
+    #[serde(default)]
+    pub media: Option<CacheTypeCategory>,
+    #[serde(default)]
+    pub other: Option<CacheTypeCategory>,
+    #[serde(default)]
+    pub html: Option<CacheTypeCategory>,
+}
+
+impl CacheTypePolicy {
+    /// Iterates the present categories in evaluation order.
+    pub fn iter(&self) -> impl Iterator<Item = &CacheTypeCategory> {
+        [
+            self.web_assets.as_ref(),
+            self.image.as_ref(),
+            self.media.as_ref(),
+            self.other.as_ref(),
+            self.html.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+    }
 }
 
 // ─── Challenge ──────────────────────────────────────────────
@@ -1771,6 +1818,23 @@ impl RuleCache {
         SiteCacheSettings {
             max_file_size_mb: s.max_file_size_mb,
             type_max_file_size_mb: s.type_max_file_size_mb.clone(),
+            type_policy: s.type_policy.as_ref().map(Self::convert_type_policy),
+        }
+    }
+
+    fn convert_type_policy(p: &proto::CacheTypePolicy) -> CacheTypePolicy {
+        let category = |c: &proto::CacheTypeCategory| CacheTypeCategory {
+            enabled: c.enabled.unwrap_or(false),
+            edge_ttl_seconds: c.edge_ttl_seconds.unwrap_or(0),
+            browser_ttl_seconds: c.browser_ttl_seconds.unwrap_or(0),
+            extensions: c.extensions.clone(),
+        };
+        CacheTypePolicy {
+            web_assets: p.web_assets.as_ref().map(category),
+            image: p.image.as_ref().map(category),
+            media: p.media.as_ref().map(category),
+            other: p.other.as_ref().map(category),
+            html: p.html.as_ref().map(category),
         }
     }
 

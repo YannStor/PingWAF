@@ -802,12 +802,40 @@
       "maxFileSizeHint": "Empty = follow the global ceiling. Effective cap now: {{effective}} MiB (global {{global}} MiB).",
       "typeLimitsLabel": "Per-type caps (MiB)",
       "typeFollow": "Follow site",
+      "type": {
+        "html": "HTML pages",
+        "css": "CSS",
+        "js": "JavaScript",
+        "image": "Images",
+        "font": "Fonts",
+        "media": "Media",
+        "other": "Other"
+      },
       "limitsEffectiveHint": "Effective cap = min(global, site, type): currently {{effective}} MiB.",
       "limitsSaved": "Cache limits saved",
       "maxFileSizeInvalid": "Enter a whole number of MiB between 1 and {{max}} (the global single-file limit).",
       "typeLimitInvalid": "{{type}} cap must be a whole number of MiB between 1 and {{max}}.",
       "notEligible": "Not eligible",
-      "purgeResult": "{{delivered}} edges notified now · {{queued}} queued for the next heartbeat"
+      "purgeResult": "{{delivered}} edges notified now · {{queued}} queued for the next heartbeat",
+      "policyTitle": "Cache type policy",
+      "policyHint": "Five extension-based families with a per-family toggle, TTLs and extension list. Custom rules take precedence over the policy.",
+      "policyEdgeTtl": "Edge TTL (s)",
+      "policyBrowserTtl": "Browser TTL (s)",
+      "policyExtensions": "File extensions (comma-separated)",
+      "policyExtensionsPlaceholder": "e.g. css, js, woff2",
+      "policyOrderHint": "Custom rules match before the policy; an origin Cache-Control wins (capped at the rule TTL), origin silence falls back to the rule TTL, and prohibitive directives (no-store etc.) always apply.",
+      "policySaved": "Cache type policy saved",
+      "policyTtlInvalid": "{{category}} TTL must be an integer between 0 and {{max}} seconds.",
+      "policyNeedsTtl": "{{category}} is enabled: the edge TTL must be above 0.",
+      "policyExtensionInvalid": "Extension {{extension}} ({{category}}) is invalid: 1-16 letters or digits only.",
+      "policyExtensionDuplicate": "Extension .{{extension}} appears in both {{first}} and {{second}}; keep it in one family.",
+      "policyCat": {
+        "web_assets": "CSS / JS / Icons / Fonts",
+        "image": "Images",
+        "media": "Media",
+        "other": "Other types",
+        "html": "HTML pages"
+      }
     },
     "ssl": {
       "title": "SSL/TLS",

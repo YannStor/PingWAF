@@ -904,6 +904,7 @@ async fn create(
         cache_quota_mb: Set(crate::defaults::DEFAULT_CACHE_QUOTA_MB),
         cache_max_file_size_mb: Set(None),
         cache_type_limits_mb: Set(None),
+        cache_type_policy: Set(None),
         trust_proxy_headers: Set(false),
         trusted_header: Set(crate::models::trusted_header::DEFAULT.to_string()),
         trust_last_hop: Set(true),

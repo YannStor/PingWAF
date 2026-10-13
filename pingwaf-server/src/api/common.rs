@@ -592,6 +592,7 @@ mod tests {
             cache_quota_mb: 1024,
             cache_max_file_size_mb: None,
             cache_type_limits_mb: None,
+            cache_type_policy: None,
             trust_proxy_headers: false,
             trusted_header: crate::models::trusted_header::DEFAULT.to_string(),
             trust_last_hop: true,

@@ -55,6 +55,7 @@ pub mod m20240101_000047_waf_settings_mode_and_paranoia;
 pub mod m20240101_000048_pool_health_check;
 pub mod m20240101_000049_certificate_failure_reason;
 pub mod m20240101_000050_cache_settings;
+pub mod m20240101_000051_cache_type_policy;
 
 use sea_orm_migration::prelude::*;
 
@@ -121,6 +122,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000048_pool_health_check::Migration),
             Box::new(m20240101_000049_certificate_failure_reason::Migration),
             Box::new(m20240101_000050_cache_settings::Migration),
+            Box::new(m20240101_000051_cache_type_policy::Migration),
         ]
     }
 }
@@ -132,7 +134,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 50);
+        assert_eq!(migrations.len(), 51);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

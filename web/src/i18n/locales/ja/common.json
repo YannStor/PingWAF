@@ -802,12 +802,40 @@
       "maxFileSizeHint": "空欄でグローバル上限に従います。現在の実効上限：{{effective}} MiB（グローバル {{global}} MiB）。",
       "typeLimitsLabel": "タイプ別上限（MiB）",
       "typeFollow": "サイトに従う",
+      "type": {
+        "html": "HTML ページ",
+        "css": "CSS",
+        "js": "JavaScript",
+        "image": "画像",
+        "font": "フォント",
+        "media": "メディア",
+        "other": "その他"
+      },
       "limitsEffectiveHint": "実効上限 = min(グローバル, サイト, タイプ)、現在 {{effective}} MiB。",
       "limitsSaved": "キャッシュ制限を保存しました",
       "maxFileSizeInvalid": "1〜{{max}} MiB の整数を入力してください（グローバルの単一ファイル上限）。",
       "typeLimitInvalid": "{{type}} の上限は 1〜{{max}} MiB の整数でなければなりません。",
       "notEligible": "キャッシュ対象外",
-      "purgeResult": "{{delivered}} 台のエッジに送信済み · {{queued}} 台は次回ハートビートで送信"
+      "purgeResult": "{{delivered}} 台のエッジに送信済み · {{queued}} 台は次回ハートビートで送信",
+      "policyTitle": "キャッシュタイプポリシー",
+      "policyHint": "拡張子ベースの 5 ファミリーをカテゴリごとに（有効 / TTL / 拡張子）設定します。カスタムルールがポリシーより優先されます。",
+      "policyEdgeTtl": "エッジ TTL（秒）",
+      "policyBrowserTtl": "ブラウザ TTL（秒）",
+      "policyExtensions": "拡張子（カンマ区切り）",
+      "policyExtensionsPlaceholder": "例: css, js, woff2",
+      "policyOrderHint": "カスタムルールが先に一致します。オリジンの Cache-Control が優先（ルール TTL が上限）、未宣言時はルール TTL でフォールバック、no-store などの禁止ディレクティブは常に有効です。",
+      "policySaved": "キャッシュタイプポリシーを保存しました",
+      "policyTtlInvalid": "{{category}} の TTL は 0〜{{max}} 秒の整数で指定してください。",
+      "policyNeedsTtl": "{{category}} は有効です: エッジ TTL は 0 より大きい必要があります。",
+      "policyExtensionInvalid": "拡張子 {{extension}}（{{category}}）は無効です: 半角英数字 1〜16 文字のみ。",
+      "policyExtensionDuplicate": "拡張子 .{{extension}} が {{first}} と {{second}} の両方にあります。1 つにまとめてください。",
+      "policyCat": {
+        "web_assets": "CSS / JS / アイコン / フォント",
+        "image": "画像",
+        "media": "メディア",
+        "other": "その他",
+        "html": "HTML ページ"
+      }
     },
     "ssl": {
       "title": "SSL/TLS",

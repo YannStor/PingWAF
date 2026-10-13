@@ -33,6 +33,8 @@ import { formatDateTime, formatNumber, formatPercent, formatSize } from '@/lib/f
 import type {
   CacheRule,
   CacheSettings,
+  CacheTypeCategory,
+  CacheTypePolicy,
   CreateCacheRuleRequest,
   UpdateCacheSettingsRequest,
 } from '@/api/types'
@@ -50,6 +52,73 @@ const CACHE_TYPE_KEYS = [
   'media',
   'other',
 ] as const
+
+/** `CACHE_TYPE_POLICY_CATEGORIES` on the server, in evaluation order. */
+const POLICY_CATEGORIES = [
+  'web_assets',
+  'image',
+  'media',
+  'other',
+  'html',
+] as const
+
+type PolicyCategoryKey = (typeof POLICY_CATEGORIES)[number]
+
+/** `MAX_TTL_SECONDS` on the server — 30 days. */
+const MAX_POLICY_TTL_SECONDS = 30 * 86400
+
+/**
+ * The policy a fresh site starts from when none was configured yet —
+ * mirrors the server defaults documented on the settings API.
+ */
+const DEFAULT_CACHE_TYPE_POLICY: CacheTypePolicy = {
+  web_assets: {
+    enabled: true,
+    edge_ttl_seconds: 7 * 86400,
+    browser_ttl_seconds: 3600,
+    extensions: [
+      'css', 'js', 'mjs', 'map', 'ico', 'cur',
+      'woff', 'woff2', 'ttf', 'otf', 'eot',
+    ],
+  },
+  image: {
+    enabled: true,
+    edge_ttl_seconds: 30 * 86400,
+    browser_ttl_seconds: 86400,
+    extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'svg', 'bmp'],
+  },
+  media: {
+    enabled: true,
+    edge_ttl_seconds: 30 * 86400,
+    browser_ttl_seconds: 86400,
+    extensions: [
+      'mp4', 'webm', 'ogv', 'mov', 'm3u8', 'ts',
+      'mp3', 'm4a', 'aac', 'ogg', 'wav', 'flac',
+    ],
+  },
+  other: { enabled: false, edge_ttl_seconds: 0, browser_ttl_seconds: 0, extensions: [] },
+  html: {
+    enabled: true,
+    edge_ttl_seconds: 600,
+    browser_ttl_seconds: 60,
+    extensions: ['html', 'htm', 'xhtml'],
+  },
+}
+
+/** Editable form view of one policy family. */
+interface PolicyRowState {
+  enabled: boolean
+  edge: string
+  browser: string
+  extensions: string
+}
+
+const policyRow = (category: CacheTypeCategory): PolicyRowState => ({
+  enabled: category.enabled,
+  edge: String(category.edge_ttl_seconds),
+  browser: String(category.browser_ttl_seconds),
+  extensions: category.extensions.join(', '),
+})
 
 interface FormState {
   name: string
@@ -120,6 +189,17 @@ export function CachingPage() {
     Record<string, string>
   >({})
   const [typeLimitsError, setTypeLimitsError] = useState<string | null>(null)
+  const [policyInput, setPolicyInput] = useState<
+    Record<PolicyCategoryKey, PolicyRowState>
+  >(() =>
+    Object.fromEntries(
+      POLICY_CATEGORIES.map((key) => [
+        key,
+        policyRow(DEFAULT_CACHE_TYPE_POLICY[key]),
+      ]),
+    ) as Record<PolicyCategoryKey, PolicyRowState>,
+  )
+  const [policyError, setPolicyError] = useState<string | null>(null)
 
   /* ── Site-wide cache state (activation + disk budget) ─────────────── */
   const settingsQuery = useQuery({
@@ -210,6 +290,26 @@ export function CachingPage() {
           String(value),
         ]),
       ),
+    )
+  }
+
+  /* ── Extension-based cache type policy ─────────────────────────────── */
+  const policySeed = settings
+    ? JSON.stringify(settings.cache_type_policy ?? {})
+    : ''
+  const [lastPolicySeed, setLastPolicySeed] = useState<string | null>(null)
+  if (settings && policySeed !== lastPolicySeed) {
+    setLastPolicySeed(policySeed)
+    const stored = settings.cache_type_policy
+    setPolicyInput(
+      Object.fromEntries(
+        POLICY_CATEGORIES.map((key) => [
+          key,
+          policyRow(
+            stored?.[key] ?? DEFAULT_CACHE_TYPE_POLICY[key],
+          ),
+        ]),
+      ) as Record<PolicyCategoryKey, PolicyRowState>,
     )
   }
 
@@ -327,6 +427,18 @@ export function CachingPage() {
     onError: (e) => setTypeLimitsError(errorText(e)),
   })
 
+  const savePolicy = useMutation({
+    mutationFn: (payload: UpdateCacheSettingsRequest) =>
+      cachingApi.updateSettings(siteId, payload),
+    onSuccess: (next) => {
+      queryClient.setQueryData<CacheSettings>(cacheKeys.settings(siteId), next)
+      setPolicyError(null)
+      toast.success(t('pages.caching.policySaved'))
+      invalidate()
+    },
+    onError: (e) => setPolicyError(errorText(e)),
+  })
+
   /* ── Rules ────────────────────────────────────────────────────────── */
 
   const save = useMutation({
@@ -428,6 +540,91 @@ export function CachingPage() {
   )
   const limitsDirty = fileSizeDirty || typeLimitsDirty
 
+  /** Serialises the edited rows back into the wire format. */
+  const policyFromInput = (): CacheTypePolicy =>
+    Object.fromEntries(
+      POLICY_CATEGORIES.map((key) => {
+        const row = policyInput[key]
+        return [
+          key,
+          {
+            enabled: row.enabled,
+            edge_ttl_seconds: Number(row.edge),
+            browser_ttl_seconds: Number(row.browser),
+            extensions: row.extensions
+              .split(',')
+              .map((extension) => extension.trim().toLowerCase())
+              .filter(Boolean),
+          },
+        ]
+      }),
+    ) as CacheTypePolicy
+
+  const policyDirty =
+    settings != null &&
+    JSON.stringify(policyFromInput()) !==
+      JSON.stringify(settings.cache_type_policy ?? DEFAULT_CACHE_TYPE_POLICY)
+
+  const submitPolicy = () => {
+    setPolicyError(null)
+    const seen = new Map<string, string>()
+    for (const key of POLICY_CATEGORIES) {
+      const row = policyInput[key]
+      const edge = Number(row.edge)
+      const browser = Number(row.browser)
+      if (
+        !Number.isInteger(edge) ||
+        edge < 0 ||
+        edge > MAX_POLICY_TTL_SECONDS ||
+        !Number.isInteger(browser) ||
+        browser < 0 ||
+        browser > MAX_POLICY_TTL_SECONDS
+      ) {
+        setPolicyError(
+          t('pages.caching.policyTtlInvalid', {
+            category: t(`pages.caching.policyCat.${key}`),
+            max: formatNumber(MAX_POLICY_TTL_SECONDS),
+          }),
+        )
+        return
+      }
+      if (row.enabled && edge === 0) {
+        setPolicyError(
+          t('pages.caching.policyNeedsTtl', {
+            category: t(`pages.caching.policyCat.${key}`),
+          }),
+        )
+        return
+      }
+      for (const raw of row.extensions.split(',')) {
+        const extension = raw.trim().toLowerCase()
+        if (!extension) continue
+        if (!/^[a-z0-9]{1,16}$/.test(extension)) {
+          setPolicyError(
+            t('pages.caching.policyExtensionInvalid', {
+              extension: raw.trim(),
+              category: t(`pages.caching.policyCat.${key}`),
+            }),
+          )
+          return
+        }
+        const previous = seen.get(extension)
+        if (previous != null && previous !== key) {
+          setPolicyError(
+            t('pages.caching.policyExtensionDuplicate', {
+              extension,
+              first: t(`pages.caching.policyCat.${previous}`),
+              second: t(`pages.caching.policyCat.${key}`),
+            }),
+          )
+          return
+        }
+        if (previous == null) seen.set(extension, key)
+      }
+    }
+    savePolicy.mutate({ cache_type_policy: policyFromInput() })
+  }
+
   const submitLimits = () => {
     setFileSizeError(null)
     setTypeLimitsError(null)
@@ -456,7 +653,10 @@ export function CachingPage() {
       const value = Number(raw)
       if (!Number.isInteger(value) || value < 1 || value > cap) {
         setTypeLimitsError(
-          t('pages.caching.typeLimitInvalid', { type: key, max: cap }),
+          t('pages.caching.typeLimitInvalid', {
+            type: t(`pages.caching.type.${key}`),
+            max: cap,
+          }),
         )
         return
       }
@@ -955,6 +1155,115 @@ export function CachingPage() {
                       }
                       loading={saveLimits.isPending}
                       onClick={submitLimits}
+                    >
+                      {t('common.save')}
+                    </Button>
+                  </div>
+                </>
+              )}
+            </CardBody>
+          </Card>
+
+          {/* ── Cache type policy ───────────────────────────────────── */}
+          <Card className="mb-4">
+            <CardHeader
+              title={t('pages.caching.policyTitle')}
+              description={t('pages.caching.policyHint', {
+                max: formatNumber(MAX_POLICY_TTL_SECONDS),
+              })}
+            />
+            <CardBody className="flex flex-col gap-3">
+              {settingsQuery.isPending && !settings ? (
+                <Skeleton className="h-20 w-full" />
+              ) : (
+                <>
+                  <div className="flex flex-col gap-3">
+                    {POLICY_CATEGORIES.map((key) => {
+                      const row = policyInput[key]
+                      const update = (patch: Partial<PolicyRowState>) => {
+                        setPolicyError(null)
+                        setPolicyInput((prev) => ({
+                          ...prev,
+                          [key]: { ...prev[key], ...patch },
+                        }))
+                      }
+                      return (
+                        <div
+                          key={key}
+                          className="grid grid-cols-1 gap-3 rounded-lg border border-border-subtle p-3 sm:grid-cols-2 lg:grid-cols-[180px_140px_140px_1fr]"
+                        >
+                          <div className="flex items-center gap-3">
+                            <Switch
+                              size="sm"
+                              checked={row.enabled}
+                              disabled={!canWrite || savePolicy.isPending}
+                              aria-label={t(
+                                `pages.caching.policyCat.${key}`,
+                              )}
+                              onCheckedChange={(enabled) => update({ enabled })}
+                            />
+                            <span className="text-sm font-medium">
+                              {t(`pages.caching.policyCat.${key}`)}
+                            </span>
+                          </div>
+                          <Input
+                            type="number"
+                            min={0}
+                            max={MAX_POLICY_TTL_SECONDS}
+                            className="tabular-nums"
+                            label={t('pages.caching.policyEdgeTtl')}
+                            value={row.edge}
+                            disabled={
+                              !canWrite || !row.enabled || savePolicy.isPending
+                            }
+                            onChange={(e) => update({ edge: e.target.value })}
+                          />
+                          <Input
+                            type="number"
+                            min={0}
+                            max={MAX_POLICY_TTL_SECONDS}
+                            className="tabular-nums"
+                            label={t('pages.caching.policyBrowserTtl')}
+                            value={row.browser}
+                            disabled={
+                              !canWrite || !row.enabled || savePolicy.isPending
+                            }
+                            onChange={(e) =>
+                              update({ browser: e.target.value })
+                            }
+                          />
+                          <Input
+                            label={t('pages.caching.policyExtensions')}
+                            placeholder={t(
+                              'pages.caching.policyExtensionsPlaceholder',
+                            )}
+                            value={row.extensions}
+                            disabled={
+                              !canWrite || !row.enabled || savePolicy.isPending
+                            }
+                            onChange={(e) =>
+                              update({ extensions: e.target.value })
+                            }
+                          />
+                        </div>
+                      )
+                    })}
+                  </div>
+                  {policyError && (
+                    <p className="text-xs text-fg-danger">{policyError}</p>
+                  )}
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <span className="text-xs text-fg-subtle">
+                      {t('pages.caching.policyOrderHint')}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={
+                        !canWrite || !policyDirty || savePolicy.isPending
+                      }
+                      loading={savePolicy.isPending}
+                      onClick={submitPolicy}
                     >
                       {t('common.save')}
                     </Button>

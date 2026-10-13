@@ -447,6 +447,10 @@ pub struct CacheSettingsResponse {
     /// `html/css/js/image/font/media/other`; a missing key follows
     /// `max_file_size_mb`.
     pub type_limits: Option<HashMap<String, i32>>,
+    /// Extension-based cache policy (five content families with a toggle,
+    /// TTLs and extension lists). `None` when unconfigured — the site then
+    /// relies solely on its cache rules.
+    pub cache_type_policy: Option<CacheTypePolicy>,
     /// The global single-file ceiling every site-level value is clamped
     /// against — shown so the UI can state the effective limit.
     pub global_max_file_size_mb: i32,
@@ -471,6 +475,108 @@ pub struct UpdateCacheSettingsRequest {
     /// clears every override.
     #[serde(default)]
     pub type_limits: Option<Option<HashMap<String, i32>>>,
+    /// Extension-based cache policy. Absent = unchanged; explicit `null`
+    /// removes the policy.
+    #[serde(default)]
+    pub cache_type_policy: Option<Option<CacheTypePolicy>>,
+}
+
+/// The content families of the extension-based cache type policy, in
+/// evaluation order.
+pub const CACHE_TYPE_POLICY_CATEGORIES: [&str; 5] =
+    ["web_assets", "image", "media", "other", "html"];
+
+/// One content family of the extension-based cache type policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CacheTypeCategory {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub edge_ttl_seconds: u32,
+    #[serde(default)]
+    pub browser_ttl_seconds: u32,
+    #[serde(default)]
+    pub extensions: Vec<String>,
+}
+
+/// Extension-based cache policy: five fixed content families an
+/// administrator tunes per site — a cache toggle, edge/browser TTLs and
+/// the file extensions each family covers. The data plane compiles the
+/// policy into cache rules behind the site's custom rules.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CacheTypePolicy {
+    pub web_assets: CacheTypeCategory,
+    pub image: CacheTypeCategory,
+    pub media: CacheTypeCategory,
+    pub other: CacheTypeCategory,
+    pub html: CacheTypeCategory,
+}
+
+impl CacheTypePolicy {
+    /// Iterates the categories in evaluation order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &CacheTypeCategory)> {
+        [
+            ("web_assets", &self.web_assets),
+            ("image", &self.image),
+            ("media", &self.media),
+            ("other", &self.other),
+            ("html", &self.html),
+        ]
+        .into_iter()
+    }
+}
+
+/// Validates an extension-based cache policy: extension tokens are short
+/// lowercase alphanumeric (regex-safe by construction), no extension may
+/// appear in two families, TTLs stay inside the global rule bounds, and an
+/// enabled family must carry an edge TTL (a zero TTL would silently fall
+/// back to pingora's 1-second default freshness).
+fn validate_cache_type_policy(
+    policy: &CacheTypePolicy,
+) -> Result<(), ApiError> {
+    let mut seen: HashMap<String, &str> = HashMap::new();
+    for (name, category) in policy.iter() {
+        if !CACHE_TYPE_POLICY_CATEGORIES.contains(&name) {
+            return Err(ApiError::BadRequest(format!(
+                "unknown cache type policy category {name}"
+            )));
+        }
+        let max_ttl = MAX_TTL_SECONDS as u32;
+        if category.edge_ttl_seconds > max_ttl
+            || category.browser_ttl_seconds > max_ttl
+        {
+            return Err(ApiError::BadRequest(format!(
+                "cache type policy {name}: TTL must be between 0 and \
+                 {max_ttl}"
+            )));
+        }
+        if category.enabled && category.edge_ttl_seconds == 0 {
+            return Err(ApiError::BadRequest(format!(
+                "cache type policy {name}: an enabled family needs an \
+                 edge TTL above 0"
+            )));
+        }
+        for extension in &category.extensions {
+            let lowered = extension.to_lowercase();
+            if lowered.is_empty()
+                || lowered.len() > 16
+                || !lowered.chars().all(|c| c.is_ascii_alphanumeric())
+            {
+                return Err(ApiError::BadRequest(format!(
+                    "cache type policy {name}: extension {extension:?} is \
+                     invalid, expected 1-16 letters or digits"
+                )));
+            }
+            if let Some(previous) = seen.get(&lowered) {
+                return Err(ApiError::BadRequest(format!(
+                    "cache type policy: extension .{lowered} appears in \
+                     both {previous} and {name}"
+                )));
+            }
+            seen.insert(lowered, name);
+        }
+    }
+    Ok(())
 }
 
 /// The content-type families a site may pin a per-type single-file cap for.
@@ -524,6 +630,10 @@ async fn settings_view(
         .cache_type_limits_mb
         .as_ref()
         .and_then(|value| serde_json::from_value(value.clone()).ok());
+    let cache_type_policy: Option<CacheTypePolicy> = model
+        .cache_type_policy
+        .as_ref()
+        .and_then(|value| serde_json::from_value(value.clone()).ok());
     Ok(CacheSettingsResponse {
         site_id: model.id,
         quota_mb: model.cache_quota_mb,
@@ -532,6 +642,7 @@ async fn settings_view(
             .cache_max_file_size_mb
             .unwrap_or(global.max_file_size_mb),
         type_limits,
+        cache_type_policy,
         global_max_file_size_mb: global.max_file_size_mb,
         cache_enabled: rules.iter().any(|rule| rule.enabled),
         rule_count: rules.len(),
@@ -587,6 +698,11 @@ async fn update_settings(
     if let Some(site_cap) = payload.max_file_size_mb.flatten() {
         validate_site_cache_limits(site_cap, None, global.max_file_size_mb)?;
     }
+    if let Some(policy) =
+        payload.cache_type_policy.as_ref().and_then(Option::as_ref)
+    {
+        validate_cache_type_policy(policy)?;
+    }
 
     let mut changed = false;
     if let Some(quota) = payload.quota_mb {
@@ -618,6 +734,20 @@ async fn update_settings(
             site_id = %id,
             type_limits = ?type_limits,
             "site cache type limits updated"
+        );
+        changed = true;
+    }
+    if let Some(policy) = payload.cache_type_policy {
+        let stored = policy.clone().map(|policy| {
+            serde_json::to_value(policy).unwrap_or(serde_json::Value::Null)
+        });
+        let mut active: site::ActiveModel = model.clone().into();
+        active.cache_type_policy = Set(stored);
+        active.update(&state.db).await?;
+        tracing::info!(
+            site_id = %id,
+            policy = ?policy,
+            "site cache type policy updated"
         );
         changed = true;
     }

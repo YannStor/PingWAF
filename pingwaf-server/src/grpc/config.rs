@@ -12,11 +12,11 @@ use base64::Engine;
 use chrono::{DateTime, TimeZone, Utc};
 use pingwaf_proto::control_plane::{
     BasicAuthConfig, BasicAuthCredential, BotProtectionConfig, CacheRule,
-    ChallengeConfig, CustomErrorPage, FailoverMode, GeoConfig,
-    GlobalCacheSettings, HealthCheckConfig, IpAccessRule, RateLimitRule,
-    RewriteOperation, RewriteRule, RouteConfig, RuleBundle, Site,
-    SiteCacheSettings, SiteConfig, SitePolicy, SslConfig, UpstreamConfig,
-    UpstreamPeer, WafConfig, WafRule,
+    CacheTypeCategory, CacheTypePolicy, ChallengeConfig, CustomErrorPage,
+    FailoverMode, GeoConfig, GlobalCacheSettings, HealthCheckConfig,
+    IpAccessRule, RateLimitRule, RewriteOperation, RewriteRule, RouteConfig,
+    RuleBundle, Site, SiteCacheSettings, SiteConfig, SitePolicy, SslConfig,
+    UpstreamConfig, UpstreamPeer, WafConfig, WafRule,
 };
 use prost::Message;
 use prost_types::Timestamp;
@@ -457,7 +457,15 @@ fn site_cache_settings_to_proto(
                 .map(|(key, value)| (key, value.max(0) as u32))
                 .collect()
         });
-    if site.cache_max_file_size_mb.is_none() && type_limits.is_none() {
+    let type_policy: Option<CacheTypePolicy> = site
+        .cache_type_policy
+        .as_ref()
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .map(cache_type_policy_to_proto);
+    if site.cache_max_file_size_mb.is_none()
+        && type_limits.is_none()
+        && type_policy.is_none()
+    {
         return None;
     }
     Some(SiteCacheSettings {
@@ -465,7 +473,34 @@ fn site_cache_settings_to_proto(
             .cache_max_file_size_mb
             .map(|value| value.max(0) as u32),
         type_max_file_size_mb: type_limits.unwrap_or_default(),
+        type_policy,
     })
+}
+
+/// Converts the stored policy JSON into its proto form. `None` categories
+/// (a partial policy written by an older writer) are skipped — the data
+/// plane then leaves that family unmanaged.
+fn cache_type_policy_to_proto(
+    policy: crate::api::cache::CacheTypePolicy,
+) -> CacheTypePolicy {
+    let category =
+        |c: crate::api::cache::CacheTypeCategory| CacheTypeCategory {
+            enabled: Some(c.enabled),
+            edge_ttl_seconds: Some(c.edge_ttl_seconds),
+            browser_ttl_seconds: Some(c.browser_ttl_seconds),
+            extensions: c
+                .extensions
+                .into_iter()
+                .map(|extension| extension.to_lowercase())
+                .collect(),
+        };
+    CacheTypePolicy {
+        web_assets: Some(category(policy.web_assets)),
+        image: Some(category(policy.image)),
+        media: Some(category(policy.media)),
+        other: Some(category(policy.other)),
+        html: Some(category(policy.html)),
+    }
 }
 
 fn ssl_to_proto(

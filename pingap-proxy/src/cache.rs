@@ -19,7 +19,8 @@
 use pingap_core::Ctx;
 use pingora::cache::NoCacheReason;
 use pingora::cache::cache_control::{
-    CacheControl, DirectiveKey, DirectiveValue, InterpretCacheControl,
+    CacheControl, DirectiveKey, DirectiveMap, DirectiveValue,
+    InterpretCacheControl,
 };
 use pingora::http::ResponseHeader;
 use pingora::proxy::Session;
@@ -28,11 +29,18 @@ use std::time::Duration;
 #[cfg(feature = "tracing")]
 use crate::tracing::update_otel_cache_attrs;
 
-/// Applies the cache-control policy to `c`, capping the freshness at `max_ttl`
-/// and rejecting responses that must not be cached.
+/// Applies the cache-control policy to `c`, flooring the freshness at
+/// `max_ttl` when the origin announces none, capping it when the origin
+/// asks for more, and rejecting responses that must not be cached.
+///
+/// `has_expires` reports whether the response carries an `Expires` header
+/// (valid or not): pingora's freshness calculation falls back to it after
+/// the directives, so a response with one must not be floored — the header
+/// decides, even when it says "in the past".
 pub(crate) fn process_cache_control(
     c: &mut CacheControl,
     max_ttl: Option<Duration>,
+    has_expires: bool,
 ) -> Result<(), NoCacheReason> {
     // no-cache, no-store, private
     if c.no_cache() || c.no_store() || c.private() {
@@ -40,24 +48,58 @@ pub(crate) fn process_cache_control(
     }
 
     // max-age=0
-    if c.max_age().ok().flatten().unwrap_or_default() == 0 {
+    if c.max_age().ok().flatten() == Some(0) {
         return Err(NoCacheReason::OriginNotCache);
+    }
+
+    // The origin announces no usable freshness (no max-age / s-maxage —
+    // a bare `public`, `must-revalidate`, a malformed directive…) and no
+    // Expires to fall back on. Without a ceiling configured this keeps the
+    // historical behaviour of refusing to cache; with one, it floors the
+    // freshness at the ceiling instead of pingora's 1-second default — a
+    // "cache for N seconds" rule must not silently degrade to 1s just
+    // because the origin stays silent.
+    if c.fresh_duration().is_none() && !has_expires {
+        let Some(d) = max_ttl else {
+            return Err(NoCacheReason::OriginNotCache);
+        };
+        set_s_maxage(c, d);
+        return Ok(());
     }
 
     // set cache max ttl
     if let Some(d) = max_ttl
         && c.fresh_duration().unwrap_or_default() > d
     {
-        // 更新 s-maxage 的值
-        let s_maxage_value =
-            itoa::Buffer::new().format(d.as_secs()).as_bytes().to_vec();
-        c.directives.insert(
-            DirectiveKey::SMaxAge,
-            Some(DirectiveValue(s_maxage_value)),
-        );
+        set_s_maxage(c, d);
     }
 
     Ok(())
+}
+
+/// Overwrites the `s-maxage` directive with `d`.
+fn set_s_maxage(c: &mut CacheControl, d: Duration) {
+    let s_maxage_value =
+        itoa::Buffer::new().format(d.as_secs()).as_bytes().to_vec();
+    c.directives
+        .insert(DirectiveKey::SMaxAge, Some(DirectiveValue(s_maxage_value)));
+}
+
+/// Builds the cache-control used when the origin sends none at all: the
+/// configured ceiling becomes the freshness directly (see
+/// [`process_cache_control`] for the with-header counterpart).
+pub(crate) fn floor_cache_control(max_ttl: Duration) -> CacheControl {
+    let mut c = CacheControl {
+        directives: DirectiveMap::new(),
+        allow_float_seconds: false,
+    };
+    set_s_maxage(&mut c, max_ttl);
+    c
+}
+
+/// Whether the response carries any `Expires` header (valid or not).
+pub(crate) fn has_expires_header(resp: &ResponseHeader) -> bool {
+    resp.headers.get("expires").is_some()
 }
 
 /// Adds the `x-cache-status` / `x-cache-lookup` / `x-cache-lock` headers (and,
@@ -145,4 +187,76 @@ pub(crate) fn process_cache_timing(
         return humantime::Duration::from(d).to_string();
     }
     String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cc_from(value: &str) -> CacheControl {
+        let mut resp = ResponseHeader::build(200, None).unwrap();
+        resp.insert_header("Cache-Control", value).unwrap();
+        CacheControl::from_resp_headers(&resp).unwrap()
+    }
+
+    #[test]
+    fn test_process_cache_control_floor() {
+        // Freshness announced: origin wins while under the ceiling.
+        let mut c = cc_from("public, max-age=10");
+        process_cache_control(&mut c, Some(Duration::from_secs(600)), false)
+            .unwrap();
+        assert_eq!(Some(Duration::from_secs(10)), c.fresh_duration());
+
+        // Over the ceiling: capped.
+        let mut c = cc_from("public, max-age=31536000");
+        process_cache_control(
+            &mut c,
+            Some(Duration::from_secs(7 * 86400)),
+            false,
+        )
+        .unwrap();
+        assert_eq!(Some(Duration::from_secs(7 * 86400)), c.fresh_duration());
+
+        // No freshness directive, no Expires: floored at the ceiling.
+        let mut c = cc_from("public");
+        process_cache_control(&mut c, Some(Duration::from_secs(600)), false)
+            .unwrap();
+        assert_eq!(Some(Duration::from_secs(600)), c.fresh_duration());
+
+        // No freshness directive but an Expires header: left alone — the
+        // header decides, even when it says "in the past".
+        let mut c = cc_from("public");
+        process_cache_control(&mut c, Some(Duration::from_secs(600)), true)
+            .unwrap();
+        assert_eq!(None, c.fresh_duration());
+
+        // No freshness directive and no ceiling configured: historical
+        // behaviour (refuse) is kept for static deployments.
+        let mut c = cc_from("public");
+        assert!(process_cache_control(&mut c, None, false).is_err());
+
+        // Hard rejections are unchanged.
+        assert!(
+            process_cache_control(
+                &mut cc_from("no-store"),
+                Some(Duration::from_secs(600)),
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            process_cache_control(
+                &mut cc_from("max-age=0"),
+                Some(Duration::from_secs(600)),
+                false
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_floor_cache_control() {
+        let c = floor_cache_control(Duration::from_secs(600));
+        assert_eq!(Some(Duration::from_secs(600)), c.fresh_duration());
+    }
 }

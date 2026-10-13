@@ -802,12 +802,40 @@
       "maxFileSizeHint": "留空表示跟随全局上限。当前生效上限：{{effective}} MiB（全局 {{global}} MiB）。",
       "typeLimitsLabel": "按类型上限（MiB）",
       "typeFollow": "跟随站点",
+      "type": {
+        "html": "HTML 页面",
+        "css": "CSS",
+        "js": "JavaScript",
+        "image": "图片",
+        "font": "字体",
+        "media": "音视频",
+        "other": "其他"
+      },
       "limitsEffectiveHint": "生效上限 = min(全局, 站点, 类型)，当前为 {{effective}} MiB。",
       "limitsSaved": "缓存大小限制已保存",
       "maxFileSizeInvalid": "请输入 1 到 {{max}} 之间的整数 MiB（全局单文件上限）。",
       "typeLimitInvalid": "{{type}} 上限必须是 1 到 {{max}} 之间的整数 MiB。",
       "notEligible": "不参与缓存",
-      "purgeResult": "已实时通知 {{delivered}} 个边缘节点 · {{queued}} 个待下次心跳下发"
+      "purgeResult": "已实时通知 {{delivered}} 个边缘节点 · {{queued}} 个待下次心跳下发",
+      "policyTitle": "分类缓存策略",
+      "policyHint": "按文件扩展名分五类配置缓存（自定义每类的开关、时长与扩展名）。自定义规则优先于分类策略。",
+      "policyEdgeTtl": "边缘 TTL（秒）",
+      "policyBrowserTtl": "浏览器 TTL（秒）",
+      "policyExtensions": "文件扩展名（逗号分隔）",
+      "policyExtensionsPlaceholder": "如 css, js, woff2",
+      "policyOrderHint": "自定义规则先于分类策略匹配；源站自带 Cache-Control 时以源站为准（超长封顶），源站未声明时按规则 TTL 缓存（托底），禁止性指令（no-store 等）始终生效。",
+      "policySaved": "分类缓存策略已保存",
+      "policyTtlInvalid": "{{category}} 的 TTL 必须是 0 到 {{max}} 之间的整数秒。",
+      "policyNeedsTtl": "{{category}} 已启用，边缘 TTL 必须大于 0。",
+      "policyExtensionInvalid": "扩展名 {{extension}} 无效（{{category}}）：仅允许 1-16 位字母或数字。",
+      "policyExtensionDuplicate": "扩展名 .{{extension}} 同时出现在 {{first}} 与 {{second}} 中，请只保留一处。",
+      "policyCat": {
+        "web_assets": "CSS / JS / 图标 / 字体",
+        "image": "图片",
+        "media": "音视频",
+        "other": "其他类型",
+        "html": "HTML 页面"
+      }
     },
     "ssl": {
       "title": "SSL/TLS",

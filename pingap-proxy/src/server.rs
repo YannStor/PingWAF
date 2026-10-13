@@ -1637,10 +1637,12 @@ impl ProxyHttp for Server {
         );
 
         let mut cc = CacheControl::from_resp_headers(resp);
+        let has_expires = crate::cache::has_expires_header(resp);
 
         if let Some(c) = &mut cc {
             // delegate all complex validation and modification logic to the helper function
-            if let Err(reason) = crate::cache::process_cache_control(c, max_ttl)
+            if let Err(reason) =
+                crate::cache::process_cache_control(c, max_ttl, has_expires)
             {
                 return Ok(RespCacheable::Uncacheable(reason));
             }
@@ -1648,6 +1650,16 @@ impl ProxyHttp for Server {
             // if Cache-Control header is required but it doesn't exist or parsing fails
             return Ok(RespCacheable::Uncacheable(
                 NoCacheReason::OriginNotCache,
+            ));
+        } else if !has_expires && let Some(d) = max_ttl {
+            // No Cache-Control and no Expires: floor the freshness with the
+            // configured ceiling rather than pingora's 1-second default.
+            let cc = crate::cache::floor_cache_control(d);
+            return Ok(resp_cacheable(
+                Some(&cc),
+                resp.clone(),
+                false,
+                &META_DEFAULTS,
             ));
         }
 

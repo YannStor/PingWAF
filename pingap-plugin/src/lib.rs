@@ -248,7 +248,7 @@ macro_rules! register_plugin {
 mod accept_encoding;
 mod basic_auth;
 mod bot_dns;
-mod cache;
+pub(crate) mod cache;
 mod challenge;
 mod combined_auth;
 mod compression;
@@ -273,7 +273,7 @@ mod rewrite;
 mod sub_filter;
 mod traffic_splitting;
 mod ua_restriction;
-mod waf;
+pub(crate) mod waf;
 
 mod plugin;
 

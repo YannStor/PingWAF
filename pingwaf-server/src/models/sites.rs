@@ -65,6 +65,9 @@ pub mod sites {
         /// `cache_max_file_size_mb` (then the global ceiling). `None` when
         /// the site does not override any type.
         pub cache_type_limits_mb: Option<Json>,
+        /// Extension-based cache type policy (five content families with
+        /// toggle, TTLs and extension lists). `None` when unconfigured.
+        pub cache_type_policy: Option<Json>,
         /// The site sits behind a CDN / reverse proxy: security features key
         /// on the forwarded-header client IP, not the direct TCP peer.
         pub trust_proxy_headers: bool,

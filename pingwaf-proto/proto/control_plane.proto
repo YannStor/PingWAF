@@ -303,6 +303,29 @@ message GlobalCacheSettings {
   optional uint32 default_edge_ttl_seconds = 4;
 }
 
+// One content family of a site's extension-based cache type policy.
+message CacheTypeCategory {
+  // Whether this family's cache rule is active.
+  optional bool enabled = 1;
+  // Edge freshness seconds; an enabled family always carries a value > 0
+  // (validated at write time).
+  optional uint32 edge_ttl_seconds = 2;
+  // Browser-facing Cache-Control max-age override; 0 = leave origin.
+  optional uint32 browser_ttl_seconds = 3;
+  // File extensions (lowercase, no dot) this family covers.
+  repeated string extensions = 4;
+}
+
+// Extension-based cache policy: five fixed content families an
+// administrator tunes per site.
+message CacheTypePolicy {
+  optional CacheTypeCategory web_assets = 1;
+  optional CacheTypeCategory image = 2;
+  optional CacheTypeCategory media = 3;
+  optional CacheTypeCategory other = 4;
+  optional CacheTypeCategory html = 5;
+}
+
 // One site's cache limits. Values the site did not set are absent and the
 // consumer falls back: type limit → site cap → global cap.
 message SiteCacheSettings {
@@ -312,6 +335,8 @@ message SiteCacheSettings {
   // Per-content-type single-file caps keyed by
   // html/css/js/image/font/media/other.
   map<string, uint32> type_max_file_size_mb = 2;
+  // Extension-based cache policy; absent when unconfigured.
+  optional CacheTypePolicy type_policy = 3;
 }
 
 // How one site behaves while the control plane is unreachable and the host
