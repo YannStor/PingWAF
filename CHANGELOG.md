@@ -8,6 +8,37 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.25.10] — 2026-10-13
+
+Fixes for the cache analytics shipped in 0.25.9: saved bytes always read
+zero, and the hit rate was diluted toward zero by traffic that never
+consulted the cache.
+
+### 🐛 Fixes
+
+- **Real response byte counts in access logs.** The access entry was
+  completed at the response-header phase whenever the body was not worth
+  capturing, recording the `content-length` announced by the origin —
+  which chunked responses don't send. Every such response logged a size
+  of zero, so the "bytes saved by cache" card stayed at zero even on
+  hits. Entries are now held until the body phase has counted the bytes
+  actually streamed; the announced length only fills in when nothing
+  streams (HEAD, 204/304, entries swept mid-exchange). Body *content*
+  is still only stored when the header phase deemed it capturable —
+  counting is unconditional, storage is not.
+- **Cache hit rate over cache-participating requests.** The hit rate was
+  `hits / all requests`, so scanner noise and traffic from sites without
+  cache rules pushed it toward zero. It is now `hits / requests that
+  consulted the cache` (miss/hit/expired/stale/revalidated), the
+  Cloudflare-style measure of how well the cache actually serves. The
+  hit-count and bytes-saved metrics are unchanged.
+
+### 📝 Notes
+
+- Upgrade hint: hit-rate and bytes-saved cards reflect traffic logged
+  after this version is deployed; the 0.25.9 window had zero-byte
+  response sizes by construction.
+
 ## [PingWAF 0.25.9] — 2026-10-13
 
 The cache management batch — global cache settings, cache analytics, and
