@@ -10,8 +10,8 @@
 //!   agents receive in a `RuleBundle` (rules, groups, rate limits, caching,
 //!   upstreams, routes, TLS, certificates, IP rules, WAF/challenge/bot/geo
 //!   settings, basic auth, rewrites, mTLS).
-//! - **Global scope** (`site_id IS NULL`) — `defense_settings` and the
-//!   global `error_pages`.
+//! - **Global scope** (`site_id IS NULL`) — `defense_settings`,
+//!   `origin_settings` and the global `error_pages`.
 //!
 //! Restoring a snapshot replaces the rows of that scope inside one
 //! transaction and bumps `sites.updated_at`, so the agents pick the restored
@@ -33,9 +33,9 @@ use uuid::Uuid;
 use crate::models::{
     bot_protection, cache_rules, challenge_settings, config_version,
     defense_settings, error_pages, geo_rules, ip_access_rules, ip_group_sites,
-    mtls_ca, mtls_client_certificate, rate_limit_rules, rewrite_rules, rule,
-    rule_groups, site, site_basic_auth, site_certificates, site_routes,
-    site_ssl, site_upstream_pools, site_upstreams, waf_settings,
+    mtls_ca, mtls_client_certificate, origin_settings, rate_limit_rules,
+    rewrite_rules, rule, rule_groups, site, site_basic_auth, site_certificates,
+    site_routes, site_ssl, site_upstream_pools, site_upstreams, waf_settings,
 };
 
 /// Schema marker inside the snapshot document; bumped when the layout changes.
@@ -229,6 +229,7 @@ pub async fn capture_global_snapshot(
     db: &DatabaseConnection,
 ) -> Result<Value, DbErr> {
     let defense = defense_settings::Entity::find_by_id(1).one(db).await?;
+    let origin = origin_settings::Entity::find_by_id(1).one(db).await?;
     let pages = error_pages::Entity::find()
         .order_by_asc(error_pages::Column::StatusCode)
         .all(db)
@@ -238,6 +239,11 @@ pub async fn capture_global_snapshot(
     tables.insert(
         "defense_settings".to_string(),
         serde_json::to_value(&defense)
+            .map_err(|err| DbErr::Custom(err.to_string()))?,
+    );
+    tables.insert(
+        "origin_settings".to_string(),
+        serde_json::to_value(&origin)
             .map_err(|err| DbErr::Custom(err.to_string()))?,
     );
     tables.insert(
@@ -662,6 +668,33 @@ async fn restore_global_rows(
             active.id = Set(1);
             active.updated_at = Set(Utc::now());
             if defense_settings::Entity::find_by_id(1)
+                .one(txn)
+                .await?
+                .is_some()
+            {
+                active.update(txn).await?;
+            } else {
+                active.insert(txn).await?;
+            }
+        }
+    }
+
+    // A snapshot taken before the origin TLS switch existed simply has no
+    // entry here; the live row is then left alone rather than reset.
+    if let Some(rows) = tables.get("origin_settings").and_then(Value::as_array)
+    {
+        if let Some(row) = rows.first() {
+            let model: origin_settings::Model =
+                serde_json::from_value(row.clone()).map_err(|err| {
+                    DbErr::Custom(format!(
+                        "cannot decode the origin settings snapshot: {err}"
+                    ))
+                })?;
+            let mut active = origin_settings::ActiveModel::from(model);
+            // The settings always live in row 1, whatever the snapshot says.
+            active.id = Set(1);
+            active.updated_at = Set(Utc::now());
+            if origin_settings::Entity::find_by_id(1)
                 .one(txn)
                 .await?
                 .is_some()

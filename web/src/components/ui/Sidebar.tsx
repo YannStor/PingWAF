@@ -13,6 +13,7 @@ import {
   UserCircle,
   FlowArrow,
   Bell,
+  ClockCounterClockwise,
   type Icon,
 } from '@phosphor-icons/react'
 import { cn } from '@/lib/utils'
@@ -49,6 +50,11 @@ export function Sidebar({ collapsed, onNavigate }: SidebarProps) {
     { to: '/agents', labelKey: 'nav.agents', icon: Desktop },
     { to: '/notifications', labelKey: 'nav.notifications', icon: Bell },
     { to: '/lifecycle', labelKey: 'nav.lifecycle', icon: FlowArrow },
+    {
+      to: '/config-versions',
+      labelKey: 'nav.configVersions',
+      icon: ClockCounterClockwise,
+    },
     { to: '/account', labelKey: 'nav.account', icon: UserCircle },
     { to: '/settings', labelKey: 'nav.settings', icon: Gear },
   ]

@@ -31,6 +31,7 @@ import {
 import { CachingPage } from '@/pages/sites/CachingPage'
 import { SslPage } from '@/pages/sites/SslPage'
 import { TrafficPage } from '@/pages/sites/TrafficPage'
+import { ConfigVersionsPage } from '@/pages/ConfigVersionsPage'
 import { GlobalSslPage } from '@/pages/GlobalSslPage'
 import { GlobalTrafficPage } from '@/pages/GlobalTrafficPage'
 import { IpGroupsPage } from '@/pages/IpGroupsPage'
@@ -130,6 +131,7 @@ export const router = createBrowserRouter([
       { path: 'ip-groups', element: <IpGroupsPage /> },
       { path: 'blocked-ips', element: <BlockedIpsPage /> },
       { path: 'lifecycle', element: <LifecyclePage /> },
+      { path: 'config-versions', element: <ConfigVersionsPage /> },
       // Global surfaces. The per-site counterparts live under `/sites/:siteId`.
       { path: 'ssl', element: <GlobalSslPage /> },
       { path: 'traffic', element: <GlobalTrafficPage /> },
