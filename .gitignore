@@ -104,3 +104,6 @@ docs-internal/
 
 # WorkBuddy local session memory & workspace data
 .workbuddy/
+
+# Session-local plan artifacts; agents/rules below are shared project config.
+.codebuddy/plans/

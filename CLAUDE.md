@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 PingWAF is a distributed, centrally-controlled Web Application Firewall built on `pingap`, a Cloudflare-Pingora-based reverse proxy. The `pingap` proxy engine plus all reusable logic lives in the `pingap-*` workspace crates; the WAF layer adds six `pingwaf-*` crates (`proto`, `server`, `agent`, `waf`, `challenge`, `pprof`). The binary lives in `src/`; the top-level `src/pingwaf.rs` translates the DB-backed control-plane model into a `pingap` config. MSRV is `1.96.0` (Rust edition 2024). Pingora is `0.9.0` from crates.io; only the `lb`/`cache` features are enabled there, and the TLS backend feature (pingora's `openssl` or `rustls`) is added by pingap's own top-level `openssl` / `tls-rustls` features. The three `pingora*` entries in `[workspace.dependencies]` must always name the same version, or cargo resolves two copies of `pingora-core`.
 
+The workspace is a **hard fork** of upstream `pingap`: inherited crates are maintained here, synced from upstream manually per fix. Ownership, sync procedure and test ownership are documented in [UPSTREAM.md](./UPSTREAM.md).
+
 **Build the pingora `Server` with `Server::new_with_opt_and_conf`, never `Server::new` followed by assigning `my_server.configuration`.** Since 0.8.1 the constructor snapshots the configuration into a private `Bootstrap`, and that snapshot — not `Server::configuration` — is what the receiving half of a hot upgrade reads `upgrade_sock` from. A later assignment silently leaves the two halves on different sockets.
 
 ### Versioning
@@ -97,6 +99,9 @@ util -> core -> {discovery, config, logger, location, cache, certificate, upstre
 ### Hot reload vs auto-restart
 
 `src/main.rs` branches on `pingap_config::ConfigManager::support_observer()`. **etcd** returns `true` and pushes changes via a `WatchStream` (`pingap-config/src/etcd_storage.rs`) wired through `new_observer_service`. **File** storage returns `false` and is polled by `new_auto_restart_service` (`src/process/auto_restart.rs`) on a fixed interval. Both feed the same `reload_handle` — the difference is only the delivery mechanism. `--autoreload` keeps the process and swaps config in place; `--autorestart` performs a zero-downtime graceful restart for changes that need a fresh listener.
+
+**Agent rule-cache persistence (`pingwaf-agent/src/cache/`) is crash-safe — keep it that way.** Every file goes through `persist::write_atomic` (same-directory temp + fsync + rename) under `persist_lock`; `persist_to_disk` rolls a validated `sites.json` to `sites.json.bak` before overwriting, and `load_from_disk` validates format version + CRC32/length (stamped in `metadata.json`) with the fallback chain primary → backup → empty-rules-plus-warning. Cache health rides the heartbeat as `cache_persist_healthy` / `cache_status_reason`. A new cache file must join the lock, write atomically, and extend the validation — a plain `fs::write` here reintroduces the torn-snapshot bug. The strategy is deliberately fail-open: the control plane re-pushes the full bundle right after connect, so the snapshot only bridges disconnects.
+
 
 The restart hand-over (`src/process/common.rs::restart_now`) is readiness-driven, not timer-driven, and the channel is pingap's own. `restart_now` binds a unix socket at `<upgrade_sock>.ready`, spawns the replacement with `-d -u` and `PINGAP_READY_SOCK` in its environment, and waits: the new process runs `ReadyNotifyService` (added in `main.rs`, and made a dependency of the bootstrap service) which connects to that socket right before bootstrap asks the old process for the listening sockets. Only then does the old process send itself SIGQUIT; if the spawned process exits non-zero, the daemon it forked disappears (watched through the shared pid file), or `basic.restart_ready_timeout` passes, the restart is abandoned and the old process keeps serving. This cannot deadlock because the report precedes `load_fds`. It relies on `Server::bootstrap_as_a_service()`: every listening service is added with `.add_dependency(&bootstrap_handle)` so it builds its sockets from the inherited fds instead of binding fresh ones.
 
@@ -234,6 +239,7 @@ Linking rules:
 | CLI flag / env var / quick start | `README.md`, `README_zh.md`, `docs/quick-start.md`, `docs/deployment.md` |
 | Architecture / ACME flow / examples | `docs/modules.md`, `docs/acme_chart.md`, `examples/README.md` and their `docs/zh/guide/*` counterparts |
 | WAF control plane / agent / dashboard | `docs/user-guide.md`, `docs/api.md`, `README.md` and `README_zh.md` |
+| Agent roles / collaboration protocol / prompt regression checklist | `.codebuddy/agents/*.md`, `.codebuddy/agents/PROMPT_REGRESSION.md`, `.codebuddy/rules/pingwaf-multi-agent/RULE.mdc`, `CODEBUDDY.md` — gate with `make check-docs` |
 
 The Chinese tree is a **maintained translation**, not a generated one: adding an English page without its `docs/zh/` counterpart leaves a gap in the Chinese site. `docs/zh/README.md` is the Chinese home page and must stay a PingWAF page — it must never fall back to upstream pingap content.
 

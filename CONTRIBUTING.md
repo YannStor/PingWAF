@@ -87,7 +87,7 @@ disclosure process in [`SECURITY.md`](./SECURITY.md).
 | pkg-config, OpenSSL dev headers | — | The default `openssl` TLS backend |
 | nasm | — | Assembling optimised TLS/crypto code |
 | PostgreSQL | **14+** (16 recommended) | Running the control plane |
-| typos-cli, cargo-machete, cargo-msrv | latest | CI lint gates |
+| typos-cli, cargo-machete, cargo-msrv | latest | Lint gates (typos runs in CI; the other two are local checks) |
 
 ```bash
 # macOS
@@ -247,8 +247,14 @@ make cov             # cargo llvm-cov --workspace --html --open
 cargo test -p pingwaf-server        # a single crate
 ```
 
-- CI runs the suite on Rust **1.96.0**, **1.97.0** and **stable**, plus a
-  `cargo check` of the rustls feature set on the MSRV toolchain.
+- CI runs the suite on Rust **1.96.0**, **1.97.0** and **stable** (one matrix
+  job per toolchain). The rustls TLS backend gets its own CI job: the clippy
+  gate plus the **full test suite** on
+  `--no-default-features --features=tls-rustls,full` — the CI equivalents of
+  `make lint-rustls` / `make test-rustls`.
+- The workspace is a hard fork of upstream `pingap`. Before porting changes
+  across the fork boundary, read [UPSTREAM.md](./UPSTREAM.md) — it documents
+  which crates are inherited, the manual sync procedure, and test ownership.
 - Add tests for new logic. Integration tests that need PostgreSQL should be
   gated so they skip cleanly when no database is configured.
 - `cargo msrv list` (`make msrv`) verifies the declared MSRV still holds.
@@ -341,8 +347,10 @@ Mark breaking changes with `!` after the scope or a `BREAKING CHANGE:` footer.
 5. **Push** and open a PR against `main`. Fill in the
    [PR template](./.github/PULL_REQUEST_TEMPLATE.md): description, type of
    change, and the developer checklist (fmt, clippy, builds, CLA).
-6. **CI** must pass: fmt, clippy (`--deny warnings`), typos, cargo-machete,
-   tests on three toolchains, rustls gate, MSRV check.
+6. **CI** must pass: fmt, clippy (`--deny warnings`), typos, the test suite
+   on three toolchains (1.96.0 / 1.97.0 / stable), and the rustls gate
+   (clippy + full tests). `cargo-machete` and `make msrv` are local hygiene
+   checks, not CI gates.
 7. **Review**: at least one maintainer approval. Address comments with new
    commits; squash on merge if asked.
 8. **After merge**, delete the topic branch.
