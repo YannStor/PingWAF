@@ -239,7 +239,7 @@ Linking rules:
 | CLI flag / env var / quick start | `README.md`, `README_zh.md`, `docs/quick-start.md`, `docs/deployment.md` |
 | Architecture / ACME flow / examples | `docs/modules.md`, `docs/acme_chart.md`, `examples/README.md` and their `docs/zh/guide/*` counterparts |
 | WAF control plane / agent / dashboard | `docs/user-guide.md`, `docs/api.md`, `README.md` and `README_zh.md` |
-| Agent roles / collaboration protocol / prompt regression checklist | `.codebuddy/agents/*.md`, `.codebuddy/agents/PROMPT_REGRESSION.md`, `.codebuddy/rules/pingwaf-multi-agent/RULE.mdc`, `CODEBUDDY.md` — gate with `make check-docs` |
+| Agent roles / collaboration protocol / prompt regression checklist | `.codebuddy/agents/*.md`, `.codebuddy/agents/PROMPT_REGRESSION.md`, `.codebuddy/rules/pingwaf-multi-agent/RULE.mdc`, `CODEBUDDY.md` — gate with `make check-docs` (**note:** `.codebuddy/` is local-only IDE tooling, gitignored and not shipped with the repo; only `CODEBUDDY.md` is committed) |
 
 The Chinese tree is a **maintained translation**, not a generated one: adding an English page without its `docs/zh/` counterpart leaves a gap in the Chinese site. `docs/zh/README.md` is the Chinese home page and must stay a PingWAF page — it must never fall back to upstream pingap content.
 
