@@ -8,6 +8,57 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.25.11] — 2026-10-13
+
+The root cause behind "every response reports `x-cache-status: expired`",
+plus a Cloudflare-style per-file-type cache policy.
+
+### 🐛 Fixes
+
+- **No static fallback when a site's cache rules don't match.** The cache
+  plugin is attached to every site once any site has rules, and the
+  request handler fell back to the plugin's static config — unconditional
+  caching — whenever no rule matched. Traffic the administrator never
+  opted in (console API polling, dynamic pages) was cached under
+  pingora's 1-second default freshness, so every repeat request reported
+  `expired` and the origin was hammered anyway. A known site whose rules
+  don't match is now skipped from caching entirely; unknown hosts keep
+  the static behaviour for standalone deployments. This is the root
+  cause of the fleet-wide `expired` reports.
+- **Freshness floor for origin-silent responses.** Origins that send no
+  usable freshness — nginx static files with no `Cache-Control` at all,
+  or bare `public` / `must-revalidate` directives — silently collapsed
+  to pingora's 1-second default even when a rule (or the new policy)
+  configured a much longer TTL. The configured TTL now floors those
+  responses instead. Explicit origin directives still win: `no-store`,
+  `private`, `no-cache` and `max-age=0` reject the entry, and a
+  longer-than-configured `max-age` is capped at the configured TTL.
+  `Expires`-only origins keep their header-based freshness.
+- **Localized cache-type labels.** The size-limits table rendered raw
+  i18n keys (`pages.caching.type.html`) instead of the family names.
+
+### ✨ Features
+
+- **Per-site cache type policy.** Five fixed content families —
+  web assets (css/js/ico/fonts…), images, media, other, html — each
+  with its own toggle, edge TTL, browser TTL and editable extension
+  list. The families compile into cache rules behind the site's custom
+  rules (custom rules win by first match, so an `/api/` exclusion beats
+  the policy's own `.json` entry). Origin silence caches at the
+  configured TTL per the freshness floor above; origin prohibitions
+  always apply. Served through the agent bundle with full backwards
+  compatibility (sites without a policy ship nothing new).
+- New `sites.cache_type_policy` column (migration 51).
+
+### 📝 Notes
+
+- After upgrading, sites that rely on the old catch-all static caching
+  must enable it explicitly (a catch-all cache rule or a type policy) —
+  the silent fallback is gone by design.
+- Upgrade hint: `x-cache-status: expired` on console/API paths
+  disappears with the first fix; those paths are no longer cached at
+  all.
+
 ## [PingWAF 0.25.10] — 2026-10-13
 
 Fixes for the cache analytics shipped in 0.25.9: saved bytes always read
