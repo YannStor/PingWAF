@@ -2,15 +2,19 @@ name: CI
 
 # Continuous integration for the PingWAF workspace.
 #
-#   - push to `main`  -> full gate (rust + web + docker build verification)
-#   - pull_request    -> rust + web gate (docker is skipped, it only runs on main)
+#   - push to `main`  -> full gate (rust matrix + rustls + web + docker)
+#   - pull_request    -> rust matrix + rustls + web (docker only runs on main)
 #
-# The rust job builds the `pingwaf` binary with the default OpenSSL backend and
-# the `full` feature set (the same configuration the release pipeline and the
-# Dockerfile use). `--all-features` is deliberately NOT used: `openssl` and
+# The `rust` job runs the test suite on three toolchains - the MSRV (1.96.0),
+# 1.97.0 and stable - against the default OpenSSL backend and the `full`
+# feature set (the configuration the release pipeline and the Dockerfile use).
+# Formatting, clippy (whose MSRV is enforced via clippy.toml), the release
+# build and typos run once, on stable. The `rustls` job exercises the
+# alternative TLS backend with the same clippy gate and the full test suite -
+# the CI equivalents of `make lint-rustls` / `make test-rustls`.
+# `--all-features` is deliberately NOT used anywhere: `openssl` and
 # `tls-rustls` are mutually exclusive TLS backends and enabling both fails to
-# link. The rustls backend is exercised by the dedicated lint-rustls/test-rustls
-# gates elsewhere; this workflow keeps to the shipped default.
+# link, which is why the backends live in separate jobs with separate caches.
 
 on:
   push:
@@ -22,9 +26,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege: only the docker job needs to push to GHCR.
 permissions:
   contents: read
-  packages: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -32,8 +36,12 @@ env:
 
 jobs:
   rust:
-    name: Rust (fmt / clippy / build / test)
+    name: Rust ${{ matrix.toolchain }} (test)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["1.96.0", "1.97.0", stable]
     env:
       # pingwaf-proto/build.rs honours PROTOC; point it at the apt-installed
       # protoc so the tonic/prost gRPC stubs are generated instead of the empty
@@ -57,12 +65,20 @@ jobs:
             nasm
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@${{ matrix.toolchain }}
         with:
+          # Lint components are only *used* on the stable leg (fmt/clippy run
+          # there); installing them on the pinned legs is harmless, whereas a
+          # conditional here would make those legs fall back to the runner's
+          # default toolchain and silently void the MSRV matrix.
           components: rustfmt, clippy
 
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
+        with:
+          # One cache per toolchain: a shared one would thrash between the
+          # three matrix legs' differing metadata.
+          key: ${{ matrix.toolchain }}
 
       # pingwaf-server embeds ../web/dist/ at compile time via rust-embed. The
       # folder has to exist for the crate to build; the `web` job below verifies
@@ -71,24 +87,67 @@ jobs:
         run: mkdir -p web/dist
 
       - name: Check formatting
+        if: matrix.toolchain == 'stable'
         run: cargo fmt --all -- --check
 
       - name: Clippy
+        if: matrix.toolchain == 'stable'
         run: cargo clippy --all-targets --features full -- -D warnings
 
       - name: Build (release, pingwaf, full)
+        if: matrix.toolchain == 'stable'
         run: cargo build --release --bin pingwaf --features full
 
       - name: Test (workspace)
         run: cargo test --workspace --features full --no-fail-fast
 
-      - name: Check rustls backend compiles
-        if: always()
-        run: cargo check --workspace --no-default-features --features tls-rustls,full
-
       - name: Typos
-        if: always()
+        if: matrix.toolchain == 'stable' && always()
         uses: crate-ci/typos@v1.50.3
+
+  # The alternative TLS backend gets the same clippy gate and the full test
+  # suite, in its own job: `openssl` and `tls-rustls` are mutually exclusive
+  # features, so sharing a cache with the openssl matrix would thrash.
+  rustls:
+    name: Rust rustls backend (clippy / test)
+    runs-on: ubuntu-latest
+    env:
+      PROTOC: /usr/bin/protoc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          # SYNC: keep this list in lockstep with Dockerfile / release.yml
+          sudo apt-get install -y --no-install-recommends \
+            protobuf-compiler \
+            libprotobuf-dev \
+            cmake \
+            libclang-dev \
+            pkg-config \
+            libssl-dev \
+            nasm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: rustls
+
+      - name: Ensure embedded frontend directory exists
+        run: mkdir -p web/dist
+
+      - name: Clippy (rustls backend)
+        run: cargo clippy --no-default-features --features=tls-rustls,full --all-targets --all -- --deny=warnings
+
+      - name: Test (workspace, rustls backend)
+        run: cargo test --workspace --no-default-features --features=tls-rustls,full --no-fail-fast
 
   web:
     name: Web (lint / build)
@@ -119,6 +178,19 @@ jobs:
       - name: Build
         run: npm run build
 
+  # Static consistency checks for docs and agent prompts (frontmatter, model
+  # names, cross references, relative links). Pure bash, no toolchain, so it
+  # adds seconds, not minutes, to a PR run.
+  docs:
+    name: Docs & agent prompts (static checks)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Check docs & agent prompts
+        run: ./scripts/check-docs-prompts.sh
+
   # Verifies the multi-stage Dockerfile still builds and pushes the amd64
   # :main snapshot to GHCR. Only on main: a PR run would burn a lot of minutes
   # for little signal. The :latest tag belongs to the release pipeline, which
@@ -128,6 +200,9 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7

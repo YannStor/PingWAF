@@ -36,4 +36,16 @@ ignore = [
     # never parses untrusted input. Remove once pprof allows inferno 0.12+.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+
+    # unsafe-libyaml 0.2.11 (RUSTSEC-2024-0449, unmaintained — the repo was
+    # archived in March 2024, not a vulnerability). It is a non-optional
+    # dependency of pingora-core 0.9 (via the deprecated serde_yaml 0.9, used
+    # only for ServerConf YAML load/dump); upstream pingora master still
+    # depends on serde_yaml 0.9, so there is nothing to upgrade to. The safe
+    # forks (serde_norway et al.) rename the package, so they cannot be
+    # substituted through [patch], which requires the same package name.
+    # Exposure is limited: PingWAF's own configuration surface is
+    # TOML/HCL/KDL, and the YAML path parses the operator's local config, not
+    # network input. Remove when pingora drops serde_yaml.
+    "RUSTSEC-2024-0449",
 ]

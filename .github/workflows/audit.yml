@@ -18,17 +18,20 @@ permissions:
 jobs:
   security-audit:
     permissions:
-      checks: write # for rustsec/audit-check to create check
       contents: read # for actions/checkout to fetch code
-      issues: write # for rustsec/audit-check to create issues
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
-      - name: Audit Check
-        # https://github.com/rustsec/audit-check/issues/2
-        uses: rustsec/audit-check@v2.0.0
+      # cargo-audit (not rustsec/audit-check): the CLI honours the advisory
+      # ignore list in .cargo/audit.toml, where every accepted finding carries
+      # a justification and an unblock condition. audit-check reads no config,
+      # so it re-opened the same unmaintained-dependency issue every day even
+      # after the finding was accepted here.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
         with:
-          # The built-in token, which cannot expire. The job permissions above
-          # already grant the checks/issues write access the action needs.
-          token: ${{ secrets.GITHUB_TOKEN }}
+          tool: cargo-audit
+
+      - name: Run cargo audit
+        run: cargo audit
