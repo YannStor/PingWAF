@@ -965,7 +965,7 @@
       "blockRate": "拦截率",
       "avgLatency": "平均延迟",
       "cacheHitRate": "缓存命中率",
-      "cacheHitRateHint": "所选时间窗内由边缘缓存直接应答的请求占比（cache_status = 'hit'）。功能上线前的历史日志无命中状态，按未命中计。",
+      "cacheHitRateHint": "命中次数 ÷ 参与缓存的请求（miss/hit/expired/stale/revalidated），未走缓存的流量不计入分母。功能上线前的历史日志无缓存状态，同样不计入。",
       "cacheSavedBytes": "缓存节省流量",
       "cacheSavedHint": "时间窗内由边缘缓存直接返回客户端的出站字节数，即源站无需产生的流量。",
       "requestsOverTime": "请求趋势",

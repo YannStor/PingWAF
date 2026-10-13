@@ -334,6 +334,9 @@ async fn summary(
         "SELECT COUNT(*) AS requests, \
                 COUNT(DISTINCT client_ip) AS unique_ips, \
                 COUNT(*) FILTER (WHERE cache_status = 'hit') AS cache_hits, \
+                COUNT(*) FILTER (WHERE cache_status IN \
+                    ('hit', 'miss', 'expired', 'stale', 'stale-updating', \
+                     'revalidated', 'revalidated-nocache')) AS cache_participating, \
                 COALESCE(SUM(response_size) FILTER (WHERE cache_status = 'hit'), 0)::BIGINT AS cache_saved_bytes, \
                 COALESCE(AVG(total_latency_ms), 0)::BIGINT AS avg_latency_ms, \
                 COALESCE(MAX(total_latency_ms), 0)::BIGINT AS max_latency_ms, \
@@ -361,8 +364,12 @@ async fn summary(
 
     let requests: i64 = read(&access, "requests");
     let cache_hits: i64 = read(&access, "cache_hits");
-    let cache_hit_rate = if requests > 0 {
-        cache_hits as f64 / requests as f64
+    // Hit rate over cache-participating requests only: traffic that never
+    // consulted the cache (other sites, scanner noise, plugin answers,
+    // cache disabled) would otherwise dilute the ratio toward zero.
+    let cache_participating: i64 = read(&access, "cache_participating");
+    let cache_hit_rate = if cache_participating > 0 {
+        cache_hits as f64 / cache_participating as f64
     } else {
         0.0
     };

@@ -965,7 +965,7 @@
       "blockRate": "Block rate",
       "avgLatency": "Avg latency",
       "cacheHitRate": "Cache hit rate",
-      "cacheHitRateHint": "Share of requests in the selected window answered by the edge cache (cache_status = 'hit'). Logs from before the status was recorded count as misses.",
+      "cacheHitRateHint": "Hits ÷ cache-participating requests (miss/hit/expired/stale/revalidated); traffic that never consulted the cache is excluded from the denominator. Logs from before the status was recorded are excluded too.",
       "cacheSavedBytes": "Cache offload",
       "cacheSavedHint": "Outbound bytes served straight from the edge cache in the window — traffic the origin did not have to produce.",
       "requestsOverTime": "Requests over time",

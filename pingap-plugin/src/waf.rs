@@ -1378,6 +1378,14 @@ struct ResponseFacts {
     /// Body bytes seen while streaming, or the announced content length when
     /// capture was skipped.
     body_size: u64,
+    /// Content length announced by the response headers. Fallback for
+    /// `body_size` when the body streamed no bytes (HEAD, 204/304, entries
+    /// swept before the body filter ran).
+    announced: u64,
+    /// Whether the body prefix is worth keeping for the log, resolved once
+    /// at the header phase. Byte counting is unconditional; this only gates
+    /// storing body content.
+    capture_body: bool,
     /// The stream never finished; whatever arrived is all there was to log.
     abandoned: bool,
     /// pingora cache phase for this response (`hit`/`miss`/…); empty when
@@ -1396,6 +1404,8 @@ impl ResponseFacts {
             headers: Vec::new(),
             body: None,
             body_size: 0,
+            announced: 0,
+            capture_body: false,
             abandoned: false,
             // A plugin-generated answer never consulted the cache.
             cache_status: String::new(),
@@ -1694,6 +1704,13 @@ fn emit_access(
 ) {
     let total_latency_ms = pending.start.elapsed().as_millis() as u64;
     let response_body_truncated = response.truncated();
+    // Streaming counts the real bytes; the announced content length only
+    // fills in when nothing streamed (HEAD, 204/304, swept entries).
+    let response_size = if response.body_size > 0 {
+        response.body_size
+    } else {
+        response.announced
+    };
     agent.log_access(AccessLogEntry {
         site_id: pending.site_id,
         request_id: request_id.to_string(),
@@ -1705,7 +1722,7 @@ fn emit_access(
         query_string: pending.query,
         protocol: pending.protocol,
         status_code: response.status_code,
-        response_size: response.body_size,
+        response_size,
         upstream_addr: response.upstream_addr,
         upstream_latency_ms: response.upstream_latency_ms,
         total_latency_ms,
@@ -1720,7 +1737,7 @@ fn emit_access(
         request_body_truncated: pending.request_body_truncated,
         response_headers: response.headers,
         response_body: response.body,
-        response_body_size: response.body_size,
+        response_body_size: response_size,
         response_body_truncated,
     });
 }
@@ -3351,19 +3368,43 @@ impl Plugin for WafPlugin {
             },
         ));
 
-        // Hold the entry back for body capture when the payload is worth
-        // keeping; otherwise the entry is complete now.
-        {
+        // Body-less responses (204/304, HEAD) never stream: finish them here
+        // with the announced content length. Everything else is held until
+        // the body phase so the log records the bytes actually sent —
+        // chunked responses announce no length at all.
+        enum HeaderOutcome {
+            /// Entry finished at the header phase; ship these facts now.
+            Immediate(ResponseFacts),
+            /// Entry held for the body phase to count streamed bytes.
+            Held,
+        }
+        let outcome = {
             let Some(mut entry) = PENDING_ACCESS.get_mut(&request_id) else {
                 return Ok(ResponsePluginResult::Unchanged);
             };
-            if entry.body_limit > 0
+            let capture_body = entry.body_limit > 0
                 && should_capture_response_body(
                     &entry.method,
                     status,
                     upstream_response,
-                )
-            {
+                );
+            let body_less = status == 204
+                || status == 304
+                || entry.method.eq_ignore_ascii_case("HEAD");
+            if body_less {
+                HeaderOutcome::Immediate(ResponseFacts {
+                    status_code: status as u32,
+                    upstream_addr: ctx.upstream.address.clone(),
+                    upstream_latency_ms,
+                    headers,
+                    body: None,
+                    body_size: announced_body_size(upstream_response),
+                    announced: 0,
+                    capture_body: false,
+                    abandoned: false,
+                    cache_status,
+                })
+            } else {
                 entry.response = Some(ResponseFacts {
                     status_code: status as u32,
                     upstream_addr: ctx.upstream.address.clone(),
@@ -3371,30 +3412,20 @@ impl Plugin for WafPlugin {
                     headers,
                     body: None,
                     body_size: 0,
+                    announced: announced_body_size(upstream_response),
+                    capture_body,
                     abandoned: false,
                     cache_status,
                 });
-                return Ok(ResponsePluginResult::Unchanged);
+                HeaderOutcome::Held
             }
-        }
-        let Some((_, pending)) = PENDING_ACCESS.remove(&request_id) else {
-            return Ok(ResponsePluginResult::Unchanged);
         };
-        emit_access(
-            &agent,
-            &request_id,
-            pending,
-            ResponseFacts {
-                status_code: status as u32,
-                upstream_addr: ctx.upstream.address.clone(),
-                upstream_latency_ms,
-                headers,
-                body: None,
-                body_size: announced_body_size(upstream_response),
-                abandoned: false,
-                cache_status,
-            },
-        );
+        if let HeaderOutcome::Immediate(facts) = outcome {
+            let Some((_, pending)) = PENDING_ACCESS.remove(&request_id) else {
+                return Ok(ResponsePluginResult::Unchanged);
+            };
+            emit_access(&agent, &request_id, pending, facts);
+        }
         Ok(ResponsePluginResult::Unchanged)
     }
 
@@ -3420,7 +3451,13 @@ impl Plugin for WafPlugin {
             let Some(mut facts) = pending.response.take() else {
                 return Ok(ResponseBodyPluginResult::Unchanged);
             };
-            let limit = pending.body_limit;
+            // Body content is only kept when the header phase deemed it
+            // worth capturing; byte counting happens regardless.
+            let limit = if facts.capture_body {
+                pending.body_limit
+            } else {
+                0
+            };
             if let Some(chunk) = body.as_ref() {
                 facts.absorb(chunk, limit);
             }
@@ -3430,10 +3467,11 @@ impl Plugin for WafPlugin {
         let Some(mut entry) = PENDING_ACCESS.get_mut(&request_id) else {
             return Ok(ResponseBodyPluginResult::Unchanged);
         };
-        let limit = entry.body_limit;
+        let entry_limit = entry.body_limit;
         let Some(facts) = entry.response.as_mut() else {
             return Ok(ResponseBodyPluginResult::Unchanged);
         };
+        let limit = if facts.capture_body { entry_limit } else { 0 };
         if let Some(chunk) = body.as_ref() {
             facts.absorb(chunk, limit);
         }
@@ -4529,6 +4567,140 @@ advanced_mode = true
         );
         assert_eq!(entry.response_body_size, body.len() as u64);
         assert!(!entry.response_body_truncated);
+    }
+
+    /// Drives a clean request through `handle_request` and hands the
+    /// session/ctx back for the response phases.
+    async fn run_clean_request(
+        plugin: &WafPlugin,
+        input_header: &str,
+    ) -> (Session, Ctx) {
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let mut ctx = Ctx::default();
+        ctx.conn.client_ip = Some("10.1.1.1".to_string());
+        assert!(
+            plugin
+                .handle_request(
+                    PluginStep::EarlyRequest,
+                    &mut session,
+                    &mut ctx
+                )
+                .await
+                .unwrap()
+                == RequestPluginResult::Continue
+        );
+        (session, ctx)
+    }
+
+    /// A chunked upstream response (no content-length) still lands its real
+    /// byte count in the access log: the entry is held until the body phase
+    /// has counted every chunk. Body content stays out of the log when the
+    /// payload is not capturable, even with a generous body limit.
+    #[tokio::test]
+    async fn test_chunked_response_size_is_counted_without_body_capture() {
+        let (_guard, agent, _dir) = install_test_agent().await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+        let (mut session, mut ctx) = run_clean_request(
+            &plugin,
+            "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n",
+        )
+        .await;
+
+        let mut response = ResponseHeader::build(200, None).unwrap();
+        response
+            .insert_header("content-type", "application/octet-stream")
+            .unwrap();
+        plugin
+            .handle_response(&mut session, &mut ctx, &mut response)
+            .await
+            .unwrap();
+
+        let mut body = Some(bytes::Bytes::from_static(b"hello "));
+        plugin
+            .handle_response_body(&mut session, &mut ctx, &mut body, false)
+            .unwrap();
+        let mut body = Some(bytes::Bytes::from_static(b"chunked world"));
+        plugin
+            .handle_response_body(&mut session, &mut ctx, &mut body, true)
+            .unwrap();
+
+        let entry = agent.client.pop_log().await.unwrap();
+        assert_eq!(200, entry.response_status);
+        assert_eq!(19, entry.response_body_size);
+        assert!(entry.response_body.is_none());
+        assert!(!entry.response_body_truncated);
+        assert!(agent.client.pop_log().await.is_none());
+    }
+
+    /// HEAD (and 204/304) never stream a body: the entry completes at the
+    /// header phase with the announced content length.
+    #[tokio::test]
+    async fn test_head_response_completes_with_announced_size() {
+        let (_guard, agent, _dir) = install_test_agent().await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+        let (mut session, mut ctx) = run_clean_request(
+            &plugin,
+            "HEAD / HTTP/1.1\r\nHost: example.com\r\n\r\n",
+        )
+        .await;
+
+        let mut response = ResponseHeader::build(200, None).unwrap();
+        response.insert_header("content-type", "text/html").unwrap();
+        response.insert_header("content-length", "512").unwrap();
+        plugin
+            .handle_response(&mut session, &mut ctx, &mut response)
+            .await
+            .unwrap();
+
+        let entry = agent.client.pop_log().await.unwrap();
+        assert_eq!(200, entry.response_status);
+        assert_eq!(512, entry.response_body_size);
+        assert!(entry.response_body.is_none());
+        assert!(agent.client.pop_log().await.is_none());
+    }
+
+    /// The announced content length fills in when the body streamed nothing
+    /// at all — entries swept mid-exchange after the headers, for instance.
+    #[tokio::test]
+    async fn test_announced_size_fills_in_when_nothing_streamed() {
+        let (_guard, agent, _dir) = install_test_agent().await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+        let (mut session, mut ctx) = run_clean_request(
+            &plugin,
+            "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n",
+        )
+        .await;
+
+        let mut response = ResponseHeader::build(200, None).unwrap();
+        response.insert_header("content-type", "text/html").unwrap();
+        response.insert_header("content-length", "7777").unwrap();
+        plugin
+            .handle_response(&mut session, &mut ctx, &mut response)
+            .await
+            .unwrap();
+
+        // Simulate the sweep taking the entry before any body arrived.
+        let request_id = ctx.state.request_id.clone().unwrap();
+        let (_, mut pending) = PENDING_ACCESS.remove(&request_id).unwrap();
+        let mut facts = pending.response.take().unwrap();
+        facts.abandoned = true;
+        emit_access(&agent, &request_id, pending, facts);
+
+        let entry = agent.client.pop_log().await.unwrap();
+        assert_eq!(200, entry.response_status);
+        assert_eq!(7777, entry.response_body_size);
+        assert!(entry.response_body.is_none());
     }
 
     /// Installs an agent whose only site enforces mTLS, revoking `revoked`

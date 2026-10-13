@@ -965,7 +965,7 @@
       "blockRate": "ブロック率",
       "avgLatency": "平均レイテンシ",
       "cacheHitRate": "キャッシュヒット率",
-      "cacheHitRateHint": "選択した期間内でエッジキャッシュが直接応答したリクエストの割合（cache_status = 'hit'）。記録開始前のログはミスとして数えられます。",
+      "cacheHitRateHint": "ヒット数 ÷ キャッシュに関与したリクエスト数（miss/hit/expired/stale/revalidated）。キャッシュを経由しないトラフィックは分母に含まれません。記録開始前のログも除外されます。",
       "cacheSavedBytes": "キャッシュオフロード",
       "cacheSavedHint": "期間内にエッジキャッシュから直接返した送信バイト数。オリジンが生成しなくて済んだトラフィックです。",
       "requestsOverTime": "リクエスト推移",
