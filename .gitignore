@@ -105,5 +105,7 @@ docs-internal/
 # WorkBuddy local session memory & workspace data
 .workbuddy/
 
-# Session-local plan artifacts; agents/rules below are shared project config.
-.codebuddy/plans/
+# CodeBuddy IDE local workspace: session plans, agent prompts and rules.
+# Local-only by design — never commit (see scripts/hooks/pre-commit and the
+# CI guard in .github/workflows/ci.yml).
+.codebuddy/

@@ -191,6 +191,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # .codebuddy/ holds IDE-session data (plans, agent prompts, rules) and is
+      # local-only by design — see .gitignore and scripts/hooks/pre-commit.
+      # Fail loudly if it ever sneaks back into the index.
+      - name: Guard — .codebuddy must not be tracked
+        run: |
+          if [ -n "$(git ls-files .codebuddy)" ]; then
+            echo "::error::.codebuddy/ is local-only and must never be committed:"
+            git ls-files .codebuddy
+            exit 1
+          fi
+
       - name: Check docs & agent prompts
         run: ./scripts/check-docs-prompts.sh
 

@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Pre-commit guard: keep local-only and secret-looking content out of Git.
+#
+# Install (one-time, from the repo root):
+#   mkdir -p .git/hooks && cp scripts/hooks/pre-commit .git/hooks/pre-commit
+#   # or: ln -s ../../scripts/hooks/pre-commit .git/hooks/pre-commit
+#   chmod +x .git/hooks/pre-commit
+#
+# Checks:
+#   1. Nothing under .codebuddy/ may be staged — that directory holds
+#     IDE-session data (plans, agent prompts, rules) and is local-only.
+#   2. Cheap high-signal secret scan on added/changed lines (private keys,
+#      cloud provider keys, GitHub/GitLab/Slack tokens). Heuristic only —
+#      not a substitute for review or a full secret scanner in CI.
+set -uo pipefail
+
+errors=0
+fail() { echo "pre-commit: $*" >&2; errors=$((errors + 1)); }
+
+# 1 ─ .codebuddy/ must never be staged ---------------------------------------
+staged_codebuddy=$(git diff --cached --name-only -- .codebuddy)
+if [ -n "$staged_codebuddy" ]; then
+  fail ".codebuddy/ is local-only and must not be committed. Unstage with:"
+  echo "  git restore --staged .codebuddy" >&2
+  printf '  staged: %s\n' "$staged_codebuddy" >&2
+fi
+
+# 2 ─ High-signal secret patterns in staged additions ------------------------
+# Only added/modified lines (starting with '+', excluding the diff header).
+secret_re='(-----BEGIN [A-Z ]*PRIVATE KEY|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{15,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9]{32,})'
+if git diff --cached --unified=0 --no-color \
+  | grep -InE "$secret_re" > /tmp/pingwaf-precommit-secrets.$$ 2>/dev/null \
+  && [ -s /tmp/pingwaf-precommit-secrets.$$ ]; then
+  fail "possible secret(s) in staged changes:"
+  sed 's/^/  /' /tmp/pingwaf-precommit-secrets.$$ >&2
+  echo "  If the match is a false positive, commit with --no-verify." >&2
+fi
+rm -f /tmp/pingwaf-precommit-secrets.$$
+
+[ "$errors" -eq 0 ]
