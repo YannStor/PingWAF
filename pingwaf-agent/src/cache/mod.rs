@@ -47,6 +47,12 @@ pub struct CachedRules {
     /// their built-in defaults.
     #[serde(default)]
     pub global_cache: Option<GlobalCacheSettings>,
+    /// Deployment-wide default for verifying an origin's TLS certificate.
+    /// `None` when the server never sent it (old control plane); the
+    /// configuration generator then keeps its historical lenient default
+    /// rather than switching every HTTPS origin to strict validation.
+    #[serde(default)]
+    pub origin_verify_cert: Option<bool>,
     /// When the cache was last updated from the server
     pub updated_at: DateTime<Utc>,
     /// Hash of the configuration (for delta sync). An `Arc` so the hot path
@@ -62,6 +68,7 @@ impl Default for CachedRules {
             failover_registry: HashMap::new(),
             global_fail_open: None,
             global_cache: None,
+            origin_verify_cert: None,
             updated_at: Utc::now(),
             config_hash: Arc::from(""),
         }
@@ -818,7 +825,9 @@ pub struct UpstreamConfig {
     /// Non-empty enables TLS to the origin and sets the SNI.
     #[serde(default)]
     pub sni: String,
-    /// `None` keeps the proxy default (verification on).
+    /// `None` means the pool has no opinion: the deployment-wide
+    /// `origin_verify_cert` default applies. `Some(true)`/`Some(false)`
+    /// pin this pool regardless of that switch.
     #[serde(default)]
     pub verify_cert: Option<bool>,
     #[serde(default)]
@@ -1217,6 +1226,9 @@ impl RuleCache {
                 updated.global_cache =
                     Some(Self::convert_global_cache(global_cache));
             }
+            if let Some(origin_verify_cert) = bundle.origin_verify_cert {
+                updated.origin_verify_cert = Some(origin_verify_cert);
+            }
             updated.config_hash = bundle.config_hash.as_str().into();
             updated.updated_at = Utc::now();
             Arc::new(updated)
@@ -1289,6 +1301,10 @@ impl RuleCache {
                     if let Some(global_cache) = &bundle.global_cache {
                         updated.global_cache =
                             Some(Self::convert_global_cache(global_cache));
+                    }
+                    if let Some(origin_verify_cert) = bundle.origin_verify_cert
+                    {
+                        updated.origin_verify_cert = Some(origin_verify_cert);
                     }
                     break;
                 }
@@ -2100,10 +2116,13 @@ impl RuleCache {
             write_timeout_ms: u.write_timeout_ms,
             pool_id: u.pool_id.clone(),
             sni: u.sni.clone(),
-            // Verification is opt-in: an unset flag means lenient (do not
-            // verify the origin certificate), matching the control plane's
-            // default. Explicit true keeps strict validation.
-            verify_cert: Some(u.verify_cert.unwrap_or(false)),
+            // Kept tri-state: `null` reaches the control plane when a pool
+            // has no opinion of its own, and the deployment-wide default is
+            // applied once, in the configuration generator, against
+            // `basic.origin_verify_cert`. Collapsing it to `Some(false)`
+            // here would pin every pool to lenient and make the global
+            // switch unreachable.
+            verify_cert: u.verify_cert,
             is_default: u.is_default,
         }
     }
@@ -2431,6 +2450,7 @@ mod tests {
             )]),
             global_fail_open: Some(true),
             global_cache: None,
+            origin_verify_cert: Some(false),
             updated_at: Utc::now(),
             config_hash: "abc".into(),
         };
@@ -2442,6 +2462,7 @@ mod tests {
             Some(&FailoverMode::Closed)
         );
         assert_eq!(back.global_fail_open, Some(true));
+        assert_eq!(back.origin_verify_cert, Some(false));
         let site = back.sites.get("site-1").expect("site present");
         assert_eq!(site.routes.len(), 1);
         assert_eq!(site.routes[0].path, "/api");
@@ -2574,6 +2595,7 @@ mod tests {
                         ..Default::default()
                     }
                 }),
+                origin_verify_cert: None,
                 updated_at: Utc::now(),
                 config_hash: Arc::from(""),
             }));

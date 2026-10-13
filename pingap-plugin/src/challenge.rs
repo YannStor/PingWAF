@@ -960,18 +960,26 @@ impl Plugin for ChallengePlugin {
                 .unwrap_or_default()
                 .to_string();
 
-        // A valid clearance cookie short-circuits everything. Per-site engines
-        // share this engine's secret, so it can validate any site's cookie.
-        if let Some(cookie) =
-            get_cookie_value(session.req_header(), &self.cookie_name)
-            && self.engine.validate_clearance(cookie).is_some()
-        {
-            return Ok(RequestPluginResult::Continue);
-        }
-
         let Some(engine) = self.decision_engine(&host) else {
             return Ok(RequestPluginResult::Continue);
         };
+
+        // A clearance cookie issued for *this* host short-circuits
+        // everything. Per-site engines share this engine's secret, so a valid
+        // signature only says that some site in this deployment issued the
+        // cookie — the site id inside it is what says which. Without the
+        // comparison, solving the challenge on one site exempted every site
+        // the deployment serves (the WAF's clearance path has always bound
+        // the two; see `waf::clearance_valid`). The level is checked too, so
+        // a JS clearance cannot stand in for an interactive one.
+        if let Some(cookie) =
+            get_cookie_value(session.req_header(), &self.cookie_name)
+            && let Some(payload) = self.engine.validate_clearance(cookie)
+            && payload.site_id == host
+            && engine.clearance_level_sufficient(&payload)
+        {
+            return Ok(RequestPluginResult::Continue);
+        }
 
         // Rate windows are per site so one domain's burst never charges
         // another's budget.
@@ -989,6 +997,11 @@ impl Plugin for ChallengePlugin {
             cookies: Vec::new(),
             has_js_support: None,
             request_rate,
+            // The host is this deployment's site id, on the issuing side and
+            // the checking side alike: the challenge page is built with it
+            // (see `build_challenge_response` below) and the cookie it issues
+            // is bound to it.
+            site_id: host,
         };
 
         let decision = engine.should_challenge(&challenge_request);
@@ -1014,9 +1027,9 @@ impl Plugin for ChallengePlugin {
             Some(q) => format!("{}?{}", uri.path(), q),
             None => uri.path().to_string(),
         };
-        let site_id = get_host(session.req_header())
-            .unwrap_or_default()
-            .to_string();
+        // The same value the request was evaluated against, so the cookie
+        // issued here is bound to exactly the site it was checked for.
+        let site_id = challenge_request.site_id;
         let request_id = ctx
             .state
             .request_id
@@ -1339,8 +1352,18 @@ cookie_secret = "test-secret"
         host: &str,
         path: &str,
     ) -> RequestPluginResult {
-        let input_header =
-            format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n");
+        run_challenge_request_with_cookie(plugin, host, path, "").await
+    }
+
+    async fn run_challenge_request_with_cookie(
+        plugin: &ChallengePlugin,
+        host: &str,
+        path: &str,
+        cookie: &str,
+    ) -> RequestPluginResult {
+        let input_header = format!(
+            "GET {path} HTTP/1.1\r\nHost: {host}\r\nCookie: {cookie}\r\n\r\n"
+        );
         let mock_io = Builder::new().read(input_header.as_bytes()).build();
         let mut session = TestSession::new_h1(Box::new(mock_io));
         session.read_request().await.unwrap();
@@ -1396,6 +1419,76 @@ cookie_secret = "test-secret"
                 .await
                 == RequestPluginResult::Continue
         );
+    }
+
+    /// A clearance solved on one site must not exempt another. Per-site
+    /// engines share the signing secret, so a valid signature only proves
+    /// that some site in this deployment issued the cookie; the site id
+    /// inside it says which one, and the plugin has to compare that with the
+    /// host it is serving. Without the comparison one solved challenge
+    /// exempted every site — the cookie is portable because it is signed by a
+    /// secret all of them share.
+    #[tokio::test]
+    async fn test_clearance_is_bound_to_the_site_that_issued_it() {
+        let (_guard, _agent, _dir) =
+            install_challenge_agent(Some(proto::ChallengeConfig {
+                enabled: true,
+                under_attack_mode: true,
+                default_level: proto::ChallengeLevel::ChallengeNonInteractive
+                    as i32,
+                clearance_duration_seconds: 1800,
+                exempt_paths: Vec::new(),
+                request_threshold: 0,
+                browser_integrity_check: false,
+                tls_fingerprint_check: false,
+            }))
+            .await;
+        let plugin = ChallengePlugin::new(
+            &toml::from_str::<PluginConf>(
+                r###"cookie_secret = "test-secret""###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        // Same secret the plugin signs with, so both cookies below verify.
+        let manager =
+            pingwaf_challenge::CookieManager::new(b"test-secret", 1800);
+
+        let mine = manager.issue_clearance(
+            ClearanceLevel::NonInteractive,
+            "example.com",
+            "fingerprint",
+        );
+        assert!(
+            run_challenge_request_with_cookie(
+                &plugin,
+                "example.com",
+                "/dashboard",
+                &format!("{}={mine}", plugin.cookie_name),
+            )
+            .await
+                == RequestPluginResult::Continue
+        );
+
+        let foreign = manager.issue_clearance(
+            ClearanceLevel::NonInteractive,
+            "bare.example.com",
+            "fingerprint",
+        );
+        let RequestPluginResult::Respond(resp) =
+            run_challenge_request_with_cookie(
+                &plugin,
+                "example.com",
+                "/dashboard",
+                &format!("{}={foreign}", plugin.cookie_name),
+            )
+            .await
+        else {
+            panic!(
+                "a clearance issued for another site must not exempt this one"
+            );
+        };
+        assert_eq!(StatusCode::SERVICE_UNAVAILABLE, resp.status);
     }
 
     /// A site without challenge config is never challenged, and the verify

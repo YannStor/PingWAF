@@ -2715,14 +2715,26 @@ impl Plugin for WafPlugin {
         // body at all (the filter would only ever see the end-of-stream
         // call with no bytes behind it).
         let wants_body = (agent.is_some() && body_limit > 0) || should_inspect;
+        // HTTP/2 and HTTP/3 forbid `Transfer-Encoding` and may legally omit
+        // `Content-Length` — there the body is delimited by END_STREAM — so a
+        // header-only test missed the body of every modern client's POST and
+        // took the payload out of inspection. Any method that can carry a
+        // body is registered instead, and `stage_chunk` stops at the cap on
+        // its own; a request that ends up sending no bytes reaches the
+        // end-of-stream branch with an empty buffer, which is harmless.
         let has_body = {
-            let headers = &session.req_header().headers;
-            headers.contains_key(http::header::TRANSFER_ENCODING.as_str())
-                || headers
-                    .get(http::header::CONTENT_LENGTH)
-                    .and_then(|value| value.to_str().ok())
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .is_some_and(|len| len > 0)
+            let method = session.req_header().method.as_str();
+            if !matches!(method, "GET" | "HEAD") {
+                true
+            } else {
+                let headers = &session.req_header().headers;
+                headers.contains_key(http::header::TRANSFER_ENCODING.as_str())
+                    || headers
+                        .get(http::header::CONTENT_LENGTH)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .is_some_and(|len| len > 0)
+            }
         };
 
         // Track the request for access logging until the response phase —
@@ -3832,6 +3844,85 @@ advanced_mode = true
             .await
             .unwrap();
         assert!(result == RequestPluginResult::Continue);
+    }
+
+    #[tokio::test]
+    async fn test_blocks_body_without_content_length() {
+        let _agent_lock = lock_agent().await;
+        PingWafAgent::set_agent_instance(None);
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(
+                r###"mode = "block"
+inspect_body = true"###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        // The header shape an HTTP/2 or HTTP/3 client sends: no
+        // `Content-Length` (legal — END_STREAM delimits the body) and no
+        // `Transfer-Encoding` (forbidden by both protocols). The old
+        // header-only `has_body` test found no body here, so the body stage
+        // was never registered and `handle_request_body` had nothing to
+        // inspect: the payload below reached the upstream unread.
+        let input_header = "POST /api/search HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n";
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let mut ctx = Ctx::default();
+
+        let result = plugin
+            .handle_request(PluginStep::EarlyRequest, &mut session, &mut ctx)
+            .await
+            .unwrap();
+        assert!(result == RequestPluginResult::Continue);
+        let request_id = ctx
+            .state
+            .request_id
+            .clone()
+            .expect("the plugin mints a request id");
+        assert!(
+            DEFERRED_BODY.contains_key(&request_id),
+            "the body stage must be registered for a bodyless-header POST"
+        );
+
+        // The staged bytes are inspected at end of stream.
+        let mut body = Some(bytes::Bytes::from_static(b"q=1' OR 1=1--"));
+        let response = plugin
+            .handle_request_body(&mut session, &mut ctx, &mut body, true)
+            .unwrap();
+        let response = response.expect("the payload should be blocked");
+        assert_eq!(http::StatusCode::FORBIDDEN, response.status);
+    }
+
+    #[tokio::test]
+    async fn test_body_stage_not_registered_for_a_bodyless_get() {
+        let _agent_lock = lock_agent().await;
+        PingWafAgent::set_agent_instance(None);
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(
+                r###"mode = "block"
+inspect_body = true"###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        // The other side of the balance: a GET really cannot carry a body,
+        // so registering the stage for it would only cost a map insert and
+        // an empty-buffer inspection per request.
+        let input_header =
+            "GET /api/users HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let mut ctx = Ctx::default();
+        plugin
+            .handle_request(PluginStep::EarlyRequest, &mut session, &mut ctx)
+            .await
+            .unwrap();
+        let request_id = ctx.state.request_id.clone().unwrap();
+        assert!(!DEFERRED_BODY.contains_key(&request_id));
     }
 
     #[tokio::test]

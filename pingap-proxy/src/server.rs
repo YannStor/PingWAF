@@ -37,7 +37,8 @@ use pingap_core::PluginProvider;
 use pingap_core::new_internal_error;
 use pingap_core::{
     CompressionStat, Ctx, PluginStep, RequestPluginResult,
-    ResponseBodyPluginResult, ResponsePluginResult, get_cache_key,
+    ResponseBodyPluginResult, ResponsePluginResult, ensure_client_ip,
+    get_cache_key,
 };
 use pingap_core::{HTTP_HEADER_NAME_X_REQUEST_ID, get_digest_detail};
 use pingap_location::LocationProvider;
@@ -52,6 +53,7 @@ use pingap_performance::{accept_request, end_request};
 use pingap_upstream::{Upstream, UpstreamProvider};
 use pingora::apps::HttpServerOptions;
 use pingora::cache::cache_control::CacheControl;
+use pingora::cache::cache_control::DirectiveKey;
 use pingora::cache::filters::resp_cacheable;
 use pingora::cache::key::{CacheHashKey, HashBinary};
 use pingora::cache::{
@@ -78,6 +80,7 @@ use pingora::upstreams::peer::{HttpPeer, Peer};
 use scopeguard::defer;
 use snafu::Snafu;
 use std::any::Any;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
@@ -250,6 +253,44 @@ fn has_vary_star(headers: &http::HeaderMap) -> bool {
         .any(|name| name.trim() == "*")
 }
 
+/// Whether the origin explicitly asked for a `Set-Cookie` response to be
+/// shared with later visitors.
+///
+/// `public` and `s-maxage` are the two directives by which an origin can say
+/// "this response is not per-user, and shared caches may store it". They are
+/// also exactly the pair RFC 9111 §3.5 names as the way to opt a response to
+/// an `Authorization`-bearing request into the shared cache, which is why
+/// pingora applies the same test in `allow_caching_authorized_req`. An origin
+/// that sets a cookie *and* marks the response `public` is stating the cookie
+/// is not user-specific — a locale, a consent flag, an A/B bucket — so that
+/// case is honoured, and the way to keep such a response out of the cache is
+/// to leave `public` / `s-maxage` off, which is what an ordinary origin
+/// already does.
+///
+/// `max-age` alone is deliberately not enough: `Cache-Control: max-age=600`
+/// next to `Set-Cookie: session=…` is the exact shape of the page that leaked
+/// one visitor's session to the next.
+fn set_cookie_is_shareable(cc: Option<&CacheControl>) -> bool {
+    cc.is_some_and(|cc| cc.public() || cc.has_directive(&DirectiveKey::SMaxAge))
+}
+
+/// Whether the origin itself opted a response into shared caching for a
+/// request that carried `Authorization`.
+///
+/// Deliberately mirrors pingora's `allow_caching_authorized_req`. What matters
+/// is *when* it is consulted: before any directive of ours is added to the
+/// parsed `Cache-Control`, so the `s-maxage` that `max_ttl` floors a silent
+/// origin with cannot be mistaken for the origin saying "go ahead". The
+/// `max_ttl` ceiling belongs to the proxy, and a response to an authenticated
+/// request must not become storable because of a setting the origin never saw.
+fn origin_allows_authorized_caching(cc: Option<&CacheControl>) -> bool {
+    cc.is_some_and(|cc| {
+        cc.public()
+            || cc.has_directive(&DirectiveKey::SMaxAge)
+            || cc.must_revalidate()
+    })
+}
+
 /// The header names an origin response lists in `Vary`, trimmed and
 /// lowercased.
 fn vary_header_names(
@@ -268,6 +309,12 @@ fn vary_header_names(
 /// header: one entry per named request header (an absent header counts as
 /// empty), restricted to `allowed` when the cache plugin configured a list.
 /// `None` when nothing varies, which keeps the single-slot behaviour.
+///
+/// The allow list is enforced where it can be enforced safely — in
+/// [`Server::response_cache_filter`], which refuses to store a response whose
+/// `Vary` names anything outside it. The narrowing kept here is for the
+/// lookup side: it runs against a stored meta, so a meta written before the
+/// allow list was configured cannot widen this request's key.
 fn cache_variance(
     headers: &http::HeaderMap,
     req: &RequestHeader,
@@ -728,12 +775,19 @@ impl Server {
             return Ok(());
         };
 
-        // Read once: every candidate shares the same peer address, and IP
-        // gating needs it in parsed form.
-        let client_ip = session
-            .client_addr()
-            .and_then(|addr| addr.as_inet())
-            .map(|addr| addr.ip());
+        // Resolve the caller once: every candidate is gated on the same
+        // address, and the parsed form is what `match_conditions` needs.
+        //
+        // It goes through `ensure_client_ip` rather than the socket peer so a
+        // route's `ip_ranges` and the `ip_restriction` plugin mean the same
+        // thing. Reading `session.client_addr()` here treated the direct TCP
+        // peer as the client unconditionally, so behind a load balancer an
+        // `ip_ranges = ["10.0.0.0/8"]` allow-list matched *every* request
+        // (the peer was the balancer) and the access control was silently
+        // bypassed. `ensure_client_ip` honours `X-Forwarded-For` /
+        // `X-Real-IP` only when the peer is a configured trusted proxy, and
+        // caches the answer on the context so plugins see the same value.
+        let client_ip = ensure_client_ip(session, ctx).parse::<IpAddr>().ok();
 
         // Host-bucket index shrinks candidates; weight order is preserved so
         // the first full match equals a linear scan of `route.ordered`.
@@ -1424,8 +1478,18 @@ impl ProxyHttp for Server {
             features.upstream_span = Some(span);
         }
         // Count processing only on the first attempt: pingora re-calls
-        // upstream_peer on every retry, and completed() runs once.
-        let first_attempt = ctx.upstream.retries == 0;
+        // `upstream_peer` on every retry, and `logging` runs once.
+        //
+        // The guard is the counter itself rather than `retries`, because
+        // `retries` only counts the connection-stage retries this file
+        // initiates in `fail_to_connect`. pingora's `error_while_proxy`
+        // retries a reused connection on its own and re-enters here without
+        // ever passing through that callback, so `retries` stayed `0` and the
+        // second attempt counted as a first one — `processing` crept up by
+        // one per such retry, and the least-connections inflight counter was
+        // held twice while being released once, tilting the balance further
+        // with every occurrence.
+        let first_attempt = !ctx.upstream.processing_counted;
         // Async: a transparent upstream resolves the request's host here.
         let Some(peer) = upstream
             .new_http_peer(session, &mut ctx.conn.client_ip, first_attempt)
@@ -1616,7 +1680,7 @@ impl ProxyHttp for Server {
     /// - Custom cache control directives
     fn response_cache_filter(
         &self,
-        _session: &Session,
+        session: &Session,
         resp: &ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> pingora::Result<RespCacheable> {
@@ -1631,6 +1695,24 @@ impl ProxyHttp for Server {
             )));
         }
 
+        // `vary_headers` is an allow list — the request headers this cache is
+        // willing to build variants for, a way to stop `Vary: User-Agent`
+        // from shattering the cache. When the origin varies on something
+        // outside it, the dimension cannot simply be dropped: the surviving
+        // key would be shared by requests that differ in exactly the way the
+        // origin said they might, which is how a `Vary: Cookie` page for one
+        // visitor reaches the next. No key can be built for such a response,
+        // so it is not cached.
+        if let Some(allowed) =
+            ctx.cache.as_ref().and_then(|c| c.vary_headers.as_deref())
+            && vary_header_names(&resp.headers)
+                .any(|name| !allowed.iter().any(|a| a == &name))
+        {
+            return Ok(RespCacheable::Uncacheable(NoCacheReason::Custom(
+                "vary not allowed",
+            )));
+        }
+
         let (check_cache_control, max_ttl) = ctx.cache.as_ref().map_or(
             (false, None), // ctx.cache is None
             |c| (c.check_cache_control, c.max_ttl),
@@ -1638,6 +1720,50 @@ impl ProxyHttp for Server {
 
         let mut cc = CacheControl::from_resp_headers(resp);
         let has_expires = crate::cache::has_expires_header(resp);
+
+        // A cached `Set-Cookie` is one visitor's session handed to every
+        // visitor who hits the entry afterwards: session fixation first,
+        // then authenticated-content disclosure. pingora never strips it —
+        // `strip_private_headers` removes only the field names a `private="…"`
+        // / `no-cache="…"` directive lists explicitly, and `Set-Cookie` is in
+        // no such list — so the decision has to be made here, before
+        // `resp_cacheable` stores the response.
+        //
+        // This runs ahead of the `Cache-Control` branches below on purpose:
+        // the `max_ttl` fallback floor would otherwise cache a
+        // cookie-bearing response that carried no `Cache-Control` at all,
+        // which is the same leak with one less header.
+        if resp.headers.contains_key(http::header::SET_COOKIE)
+            && !set_cookie_is_shareable(cc.as_ref())
+        {
+            return Ok(RespCacheable::Uncacheable(NoCacheReason::Custom(
+                "set-cookie",
+            )));
+        }
+
+        // Whether the *request* carried `Authorization`. pingora's
+        // `resp_cacheable` refuses to store such a response unless the origin
+        // opted in, but the flag has to come from the real request header —
+        // this call site used to pass a hard-coded `false`, which let a
+        // personalised response to an authenticated request be stored under
+        // the anonymous key and served to everyone else.
+        let authorization_present = session
+            .req_header()
+            .headers
+            .contains_key(http::header::AUTHORIZATION);
+
+        // RFC 9111 §3.5, decided here rather than left to pingora alone: the
+        // `Cache-Control` branches below may *add* an `s-maxage`, and an
+        // added `s-maxage` reads exactly like the origin opting in. The test
+        // is therefore run against the origin's directives as parsed, before
+        // any floor is applied.
+        if authorization_present
+            && !origin_allows_authorized_caching(cc.as_ref())
+        {
+            return Ok(RespCacheable::Uncacheable(NoCacheReason::Custom(
+                "authorization",
+            )));
+        }
 
         if let Some(c) = &mut cc {
             // delegate all complex validation and modification logic to the helper function
@@ -1658,7 +1784,7 @@ impl ProxyHttp for Server {
             return Ok(resp_cacheable(
                 Some(&cc),
                 resp.clone(),
-                false,
+                authorization_present,
                 &META_DEFAULTS,
             ));
         }
@@ -1666,7 +1792,7 @@ impl ProxyHttp for Server {
         Ok(resp_cacheable(
             cc.as_ref(),
             resp.clone(),
-            false,
+            authorization_present,
             &META_DEFAULTS,
         ))
     }
@@ -2356,6 +2482,44 @@ value = 'proxy_set_headers = ["name:value"]'
     }
 
     #[tokio::test]
+    async fn test_upstream_peer_counts_only_the_first_attempt() {
+        let server = new_server();
+        let mock_io = Builder::new()
+            .read(b"GET /vicanso/pingap HTTP/1.1\r\nHost: github.com\r\n\r\n")
+            .build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let mut ctx = Ctx::default();
+        server
+            .early_request_filter(&mut session, &mut ctx)
+            .await
+            .unwrap();
+
+        server.upstream_peer(&mut session, &mut ctx).await.unwrap();
+        assert!(ctx.upstream.processing_counted);
+        let first_address = ctx.upstream.inflight_address.clone();
+        assert!(first_address.is_some());
+        let upstream = server.upstream_provider.get("charts").unwrap();
+        assert_eq!(1, upstream.stats().processing);
+
+        // A retry that did not come through `fail_to_connect` — pingora's
+        // `error_while_proxy` retries a reused connection and re-enters
+        // `upstream_peer` directly — leaves `retries` at 0. Guarding on that
+        // counter made the retry look like a first attempt, so `processing`
+        // and the least-connections inflight count were both taken twice
+        // while `logging` released them once.
+        assert_eq!(0, ctx.upstream.retries);
+        server.upstream_peer(&mut session, &mut ctx).await.unwrap();
+        assert_eq!(
+            1,
+            upstream.stats().processing,
+            "a retry must not count processing again"
+        );
+        // The release target stays the address that was actually acquired.
+        assert_eq!(first_address, ctx.upstream.inflight_address);
+    }
+
+    #[tokio::test]
     async fn test_early_request_filter() {
         let server = new_server();
 
@@ -2745,6 +2909,250 @@ value = 'proxy_set_headers = ["name:value"]'
             )
             .unwrap();
         assert_eq!(false, result.is_cacheable());
+    }
+
+    /// Runs `response_cache_filter` for a request carrying `request_headers`
+    /// against a 200 response with `response_headers`, and reports whether
+    /// the response came back cacheable.
+    async fn cacheable(
+        request_headers: &[(&'static str, &'static str)],
+        response_headers: &[(&'static str, &'static str)],
+        cache: CacheInfo,
+    ) -> bool {
+        let server = new_server();
+        let mut raw = String::from("GET /vicanso/pingap HTTP/1.1\r\n");
+        for (name, value) in request_headers {
+            raw.push_str(&format!("{name}: {value}\r\n"));
+        }
+        raw.push_str("\r\n");
+        let mock_io = Builder::new().read(raw.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+
+        let mut upstream_response =
+            ResponseHeader::build_no_case(200, None).unwrap();
+        for (name, value) in response_headers {
+            upstream_response.append_header(*name, *value).unwrap();
+        }
+        server
+            .response_cache_filter(
+                &session,
+                &upstream_response,
+                &mut Ctx {
+                    cache: Some(Box::new(cache)),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .is_cacheable()
+    }
+
+    #[tokio::test]
+    async fn test_response_cache_filter_rejects_set_cookie() {
+        // The response had no Cache-Control at all, so the 1-second
+        // freshness in META_DEFAULTS used to make it cacheable — the whole
+        // `Set-Cookie` included. Every later visitor then received the
+        // session the first one was issued.
+        assert!(
+            !cacheable(
+                &[],
+                &[("Set-Cookie", "session=abc")],
+                CacheInfo::default()
+            )
+            .await
+        );
+        assert!(
+            !cacheable(
+                &[],
+                &[
+                    ("Set-Cookie", "session=abc"),
+                    ("Cache-Control", "max-age=600"),
+                ],
+                CacheInfo::default()
+            )
+            .await
+        );
+        // The `max_ttl` floor is a second entry point into the cache: a
+        // cookie-bearing response with no Cache-Control at all used to be
+        // cached for the whole configured ceiling rather than a second.
+        assert!(
+            !cacheable(
+                &[],
+                &[("Set-Cookie", "session=abc")],
+                CacheInfo {
+                    max_ttl: Some(Duration::from_secs(600)),
+                    ..Default::default()
+                }
+            )
+            .await
+        );
+
+        // An origin that marks a cookie-bearing response `public` is
+        // stating the cookie is not per-user; the opt-in is honoured, and
+        // it is the same pair RFC 9111 names for `Authorization`.
+        assert!(
+            cacheable(
+                &[],
+                &[
+                    ("Set-Cookie", "locale=en"),
+                    ("Cache-Control", "public, max-age=600"),
+                ],
+                CacheInfo::default()
+            )
+            .await
+        );
+        assert!(
+            cacheable(
+                &[],
+                &[
+                    ("Set-Cookie", "locale=en"),
+                    ("Cache-Control", "s-maxage=600"),
+                ],
+                CacheInfo::default()
+            )
+            .await
+        );
+
+        // A cookie-free response is unaffected.
+        assert!(
+            cacheable(
+                &[],
+                &[("Cache-Control", "public, max-age=600")],
+                CacheInfo::default()
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_response_cache_filter_honours_request_authorization() {
+        // RFC 9111 §3.5: a response to a request with `Authorization` is not
+        // storable unless the origin says `public` / `s-maxage` /
+        // `must-revalidate`. The flag used to be hard-coded `false` at the
+        // call site, so an authenticated response was stored under the
+        // anonymous key and served to everyone.
+        assert!(
+            !cacheable(
+                &[("Authorization", "Bearer token")],
+                &[("Cache-Control", "max-age=600")],
+                CacheInfo::default()
+            )
+            .await
+        );
+        // The `max_ttl` floor is a second entry point into the cache, and it
+        // needs the same guard for a stronger reason: it synthesises an
+        // `s-maxage`, which is itself one of the opt-in directives. An origin
+        // that sent no `Cache-Control` at all must not become "opted in" just
+        // because the operator configured a ceiling.
+        assert!(
+            !cacheable(
+                &[("Authorization", "Bearer token")],
+                &[],
+                CacheInfo {
+                    max_ttl: Some(Duration::from_secs(600)),
+                    ..Default::default()
+                }
+            )
+            .await
+        );
+
+        // Explicit opt-in from the origin: stored. `public` here is the
+        // origin's, not ours, so the floored freshness is allowed to ride
+        // on it.
+        assert!(
+            cacheable(
+                &[("Authorization", "Bearer token")],
+                &[("Cache-Control", "public")],
+                CacheInfo {
+                    max_ttl: Some(Duration::from_secs(600)),
+                    ..Default::default()
+                }
+            )
+            .await
+        );
+        for value in [
+            "public, max-age=600",
+            "s-maxage=600",
+            "must-revalidate, max-age=600",
+        ] {
+            assert!(
+                cacheable(
+                    &[("Authorization", "Bearer token")],
+                    &[("Cache-Control", value)],
+                    CacheInfo::default()
+                )
+                .await,
+                "{value} should opt the response in"
+            );
+        }
+
+        // The same response without Authorization is still cacheable.
+        assert!(
+            cacheable(
+                &[],
+                &[("Cache-Control", "max-age=600")],
+                CacheInfo::default()
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_response_cache_filter_rejects_disallowed_vary() {
+        // `CacheInfo` is not `Clone`, so build a fresh one per call.
+        fn allowing_accept_encoding() -> CacheInfo {
+            CacheInfo {
+                vary_headers: Some(Arc::new(vec![
+                    "accept-encoding".to_string(),
+                ])),
+                ..Default::default()
+            }
+        }
+
+        // Allowed name: cached.
+        assert!(
+            cacheable(
+                &[],
+                &[
+                    ("Cache-Control", "max-age=600"),
+                    ("Vary", "Accept-Encoding"),
+                ],
+                allowing_accept_encoding()
+            )
+            .await
+        );
+        // A name outside the allow list used to be dropped from the variance
+        // key, so a `Vary: Cookie` page was stored once and served to every
+        // visitor. It is now refused: no key can represent it.
+        assert!(
+            !cacheable(
+                &[],
+                &[("Cache-Control", "max-age=600"), ("Vary", "Cookie"),],
+                allowing_accept_encoding()
+            )
+            .await
+        );
+        // One allowed and one not is enough to refuse.
+        assert!(
+            !cacheable(
+                &[],
+                &[
+                    ("Cache-Control", "max-age=600"),
+                    ("Vary", "Accept-Encoding, Cookie"),
+                ],
+                allowing_accept_encoding()
+            )
+            .await
+        );
+        // No allow list configured: every name the origin lists is honoured.
+        assert!(
+            cacheable(
+                &[],
+                &[("Cache-Control", "max-age=600"), ("Vary", "Cookie"),],
+                CacheInfo::default()
+            )
+            .await
+        );
     }
 
     #[test]

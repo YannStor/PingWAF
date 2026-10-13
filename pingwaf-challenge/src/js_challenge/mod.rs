@@ -110,6 +110,16 @@ impl ChallengeEngine {
         if let Some(clearance) = self.extract_clearance(request) {
             match self.cookie_manager.validate_clearance(&clearance) {
                 Ok(payload) => {
+                    // A clearance earned on one site must not exempt another.
+                    // Every site's engine signs with the same secret, so a
+                    // valid signature says only that this deployment issued
+                    // the cookie; the embedded site id is what binds it. The
+                    // WAF's clearance path compares the same field
+                    // (`pingap_plugin::waf::clearance_valid`). A cookie for
+                    // somewhere else is treated as no cookie at all.
+                    if !self.cookie_bound_to_site(&payload, request) {
+                        return self.decide_challenge_level(request);
+                    }
                     if self
                         .cookie_manager
                         .level_sufficient(&payload, self.config.default_level)
@@ -366,6 +376,29 @@ impl ChallengeEngine {
             .map(|(_, value)| value.clone())
     }
 
+    /// Whether a validated clearance was issued for the site this request is
+    /// for. A caller that names no site keeps the previous behaviour: it has
+    /// no boundary to enforce, and inventing one would reject every cookie.
+    fn cookie_bound_to_site(
+        &self,
+        payload: &ClearancePayload,
+        request: &ChallengeRequest,
+    ) -> bool {
+        request.site_id.is_empty() || payload.site_id == request.site_id
+    }
+
+    /// Whether a validated clearance satisfies the level this engine
+    /// requires. Exposed so a caller that short-circuits before
+    /// [`should_challenge`](Self::should_challenge) can apply the same rule
+    /// instead of accepting any signed cookie.
+    pub fn clearance_level_sufficient(
+        &self,
+        payload: &ClearancePayload,
+    ) -> bool {
+        self.cookie_manager
+            .level_sufficient(payload, self.config.default_level)
+    }
+
     /// Decide the challenge level based on request context
     fn decide_challenge_level(
         &self,
@@ -403,6 +436,14 @@ pub struct ChallengeRequest {
     pub has_js_support: Option<bool>,
     /// Request rate per minute from this IP
     pub request_rate: u32,
+    /// Site this request is for. A clearance cookie carries the site it was
+    /// issued for, and per-site engines share one signing secret, so the
+    /// signature alone only proves that *some* site in this deployment issued
+    /// the cookie — without this the site id in the payload cannot be
+    /// compared to anything, and one solved challenge exempted every site.
+    /// Empty when the caller has no site notion, which keeps the previous
+    /// behaviour for callers that never had a boundary to enforce.
+    pub site_id: String,
 }
 
 /// Decision made by the challenge engine
@@ -489,6 +530,11 @@ mod tests {
         }
     }
 
+    /// The site `test_request()` names. A clearance cookie is only recognised
+    /// when it was issued for this site id, so the helper that mints one has
+    /// to use it too.
+    const TEST_SITE_ID: &str = "example.com";
+
     fn test_request() -> ChallengeRequest {
         ChallengeRequest {
             path: "/".to_string(),
@@ -500,6 +546,7 @@ mod tests {
             cookies: vec![],
             has_js_support: None,
             request_rate: 5,
+            site_id: TEST_SITE_ID.to_string(),
         }
     }
 
@@ -590,6 +637,48 @@ mod tests {
 
         let decision = engine.should_challenge(&request);
         assert_eq!(decision, ChallengeDecision::Pass);
+    }
+
+    #[test]
+    fn test_clearance_from_another_site_does_not_pass() {
+        let engine = ChallengeEngine::new(test_config());
+
+        // Signed with the same secret — every site's engine shares it — so
+        // nothing but the embedded site id tells the two apart. Without the
+        // binding, one solved challenge exempted every site in the
+        // deployment.
+        let cookie_value = engine.cookie_manager.issue_clearance(
+            ClearanceLevel::NonInteractive,
+            "other.example.com",
+            "test-fingerprint-hash",
+        );
+
+        let mut request = test_request();
+        request.cookies =
+            vec![("__pingwaf_clearance".to_string(), cookie_value)];
+        request.request_rate = 1000;
+
+        assert_ne!(
+            engine.should_challenge(&request),
+            ChallengeDecision::Pass,
+            "a clearance earned elsewhere must not exempt this site"
+        );
+    }
+
+    #[test]
+    fn test_clearance_without_a_named_site_keeps_the_previous_behaviour() {
+        // A caller with no site notion has no boundary to enforce; rejecting
+        // every cookie there would just break it.
+        let engine = ChallengeEngine::new(test_config());
+        let cookie_value = engine.cookie_manager_issue_clearance();
+
+        let mut request = test_request();
+        request.site_id = String::new();
+        request.cookies =
+            vec![("__pingwaf_clearance".to_string(), cookie_value)];
+        request.request_rate = 1000;
+
+        assert_eq!(engine.should_challenge(&request), ChallengeDecision::Pass);
     }
 
     #[test]
@@ -705,7 +794,7 @@ mod tests {
         fn cookie_manager_issue_clearance(&self) -> String {
             self.cookie_manager.issue_clearance(
                 ClearanceLevel::NonInteractive,
-                "test-site",
+                TEST_SITE_ID,
                 "test-fingerprint-hash",
             )
         }

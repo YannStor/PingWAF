@@ -206,28 +206,31 @@ impl Limiter {
     /// * For inflight limiting: Increments counter and stores RAII guard in context
     /// * For IP-based limiting: Stores client IP in context
     pub fn incr(&self, session: &Session, ctx: &mut Ctx) -> Result<()> {
-        // Extract the key value based on configured tag type.
-        // Borrow where possible — Rate/Inflight only need `Hash`, not an owned String.
-        let key: Cow<'_, str> = match self.tag {
-            LimitTag::Query => Cow::Borrowed(
-                get_query_value(session.req_header(), &self.key)
-                    .unwrap_or_default(),
-            ),
-            LimitTag::RequestHeader => Cow::Borrowed(
+        // The value the configured tag points at, when there is one. `None`
+        // for the `ip` tag, which has no header to look in, and for a
+        // configured key that the request simply does not carry.
+        let configured = match self.tag {
+            LimitTag::Query => get_query_value(session.req_header(), &self.key),
+            LimitTag::RequestHeader => {
                 get_req_header_value(session.req_header(), &self.key)
-                    .unwrap_or_default(),
-            ),
-            LimitTag::Cookie => Cow::Borrowed(
+            },
+            LimitTag::Cookie => {
                 get_cookie_value(session.req_header(), &self.key)
-                    .unwrap_or_default(),
-            ),
+            },
+            LimitTag::Ip => None,
+        };
+        // A missing value is not a reason to skip counting. With
+        // `tag = "cookie", key = "session"` the limiter used to look up the
+        // cookie, find nothing and return without incrementing anything —
+        // so omitting the cookie was a complete bypass of the limit, and
+        // omitting it is free for an attacker. An unidentifiable caller
+        // falls back to its address: not as precise, but a limit that
+        // degrades is worth more than one that can be switched off by a
+        // header the client controls.
+        let key: Cow<'_, str> = match configured {
+            Some(value) if !value.is_empty() => Cow::Borrowed(value),
             _ => Cow::Borrowed(ensure_client_ip(session, ctx)),
         };
-
-        // Skip limiting if no key found (e.g., missing header/cookie)
-        if key.is_empty() {
-            return Ok(());
-        }
 
         // Track request based on limiter type.
         // Pass `&Cow` (Sized) rather than `&str` — pingora-limits requires `T: Hash + Sized`.
@@ -455,6 +458,78 @@ max = 10
         limiter.incr(&session, &mut ctx).unwrap();
         assert_eq!(true, ctx.state.guard.is_some());
     }
+    #[tokio::test]
+    async fn test_missing_key_still_acquires_the_inflight_guard() {
+        // The configured cookie is absent, so the key lookup comes back
+        // empty. `incr` used to return right there, before acquiring
+        // anything: a client could opt out of the concurrency limit by not
+        // sending the cookie it controls.
+        let limiter = Limiter::new(
+            &toml::from_str::<PluginConf>(
+                r###"
+type = "inflight"
+tag = "cookie"
+key = "not-sent"
+max = 10
+    "###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut ctx = Ctx {
+            ..Default::default()
+        };
+        let session = new_session().await;
+
+        limiter.incr(&session, &mut ctx).unwrap();
+        assert_eq!(true, ctx.state.guard.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_missing_key_falls_back_to_the_client_ip() {
+        // Same bypass, seen from the rate side: the fallback key is the
+        // client address, so repeated requests from one client still trip
+        // the limit even though the configured field never arrives.
+        let limiter = Limiter::new(
+            &toml::from_str::<PluginConf>(
+                r###"
+type = "rate"
+tag = "header"
+key = "X-Not-Sent"
+max = 1
+interval = "1s"
+    "###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let headers = ["X-Forwarded-For: 1.1.1.1"].join("\r\n");
+        let input_header =
+            format!("GET /vicanso/pingap HTTP/1.1\r\n{headers}\r\n\r\n");
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+
+        let mut blocked = false;
+        for _ in 0..32 {
+            let result = limiter
+                .handle_request(
+                    PluginStep::Request,
+                    &mut session,
+                    &mut Ctx::default(),
+                )
+                .await
+                .unwrap();
+            if let RequestPluginResult::Respond(resp) = result {
+                assert_eq!(StatusCode::TOO_MANY_REQUESTS, resp.status);
+                blocked = true;
+                break;
+            }
+        }
+        assert!(blocked, "a missing header must not disable the limit");
+    }
+
     #[tokio::test]
     async fn test_new_ip_limiter() {
         let limiter = Limiter::new(

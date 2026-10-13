@@ -47,8 +47,15 @@ pub(crate) fn process_cache_control(
         return Err(NoCacheReason::OriginNotCache);
     }
 
-    // max-age=0
-    if c.max_age().ok().flatten() == Some(0) {
+    // A freshness of zero — `max-age=0`, `s-maxage=0`, or `no-cache` — tells
+    // every cache the response must not be reused. Testing `max-age` alone
+    // missed `s-maxage=0`: pingora's `fresh_duration` prefers `s-maxage` over
+    // `max-age`, so `Cache-Control: s-maxage=0, max-age=600` passed this
+    // gate with a zero freshness, and `freshness_ttl_to_time` turned that
+    // into `now - 1s`. The entry was stored anyway — immediately stale, but
+    // served to whoever arrived while it sat there, and piling up in the
+    // cache for `max_ttl` afterwards.
+    if c.fresh_duration() == Some(Duration::ZERO) {
         return Err(NoCacheReason::OriginNotCache);
     }
 
@@ -102,6 +109,38 @@ pub(crate) fn has_expires_header(resp: &ResponseHeader) -> bool {
     resp.headers.get("expires").is_some()
 }
 
+/// Whether the origin's own `Cache-Control` restricts how the response may be
+/// reused, as opposed to merely dating it.
+///
+/// The `browser_ttl` override replaces the whole header, so it is only safe
+/// when what it replaces is a freshness number. Every directive tested here
+/// says something about reuse itself — `no-store` forbids storing,
+/// `private` reserves the response for one user, `no-cache` demands
+/// revalidation first, `must-revalidate` / `proxy-revalidate` do the same for
+/// stale responses — in either the bare form or the `field="name"` list form,
+/// so presence is tested with `has_directive` rather than the whole-response
+/// accessors. A zero freshness is included because "fresh for no time" is a
+/// reuse restriction spelled as a number.
+///
+/// Checked with pingora's own parser so this and the edge's cacheability
+/// decision cannot drift apart.
+fn origin_restricts_reuse(resp: &ResponseHeader) -> bool {
+    let Some(cc) = CacheControl::from_resp_headers(resp) else {
+        // No Cache-Control at all: nothing for the override to contradict.
+        return false;
+    };
+    [
+        DirectiveKey::NoStore,
+        DirectiveKey::Private,
+        DirectiveKey::NoCache,
+        DirectiveKey::MustRevalidate,
+        DirectiveKey::ProxyRevalidate,
+    ]
+    .iter()
+    .any(|key| cc.has_directive(key))
+        || cc.fresh_duration() == Some(Duration::ZERO)
+}
+
 /// Adds the `x-cache-status` / `x-cache-lookup` / `x-cache-lock` headers (and,
 /// under `tracing`, the matching OpenTelemetry attributes).
 #[inline]
@@ -118,8 +157,16 @@ pub(crate) fn handle_cache_headers(
     // Cache-Control). pingora runs this filter on hits and misses alike, so
     // both get the browser-facing TTL. `Expires` is dropped with it, since a
     // stale `Expires` next to the override would send contradictory hints.
+    //
+    // Except when the origin's own directives restrict reuse: the override
+    // exists to re-pin *how long* a response may be held, not to overturn
+    // *whether* it may be. Rewriting `private, no-store` into
+    // `public, max-age=N` would hand the browser — and any shared cache
+    // downstream of it — a response the origin explicitly marked as one
+    // visitor's alone.
     if let Some(secs) = ctx.cache.as_ref().and_then(|cache| cache.browser_ttl)
         && secs > 0
+        && !origin_restricts_reuse(upstream_response)
     {
         let mut buffer = itoa::Buffer::new();
         let mut value_bytes = Vec::with_capacity(24);
@@ -258,5 +305,85 @@ mod tests {
     fn test_floor_cache_control() {
         let c = floor_cache_control(Duration::from_secs(600));
         assert_eq!(Some(Duration::from_secs(600)), c.fresh_duration());
+    }
+
+    #[test]
+    fn test_process_cache_control_rejects_zero_s_maxage() {
+        // `s-maxage` wins over `max-age` in pingora's freshness calculation,
+        // so a zero `s-maxage` is a zero freshness even with a healthy
+        // `max-age` beside it. Only checking `max-age` used to let these
+        // through into the cache as instantly-stale entries.
+        assert!(
+            process_cache_control(
+                &mut cc_from("s-maxage=0, max-age=600"),
+                Some(Duration::from_secs(600)),
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            process_cache_control(
+                &mut cc_from("s-maxage=0"),
+                Some(Duration::from_secs(600)),
+                false
+            )
+            .is_err()
+        );
+        // A positive `s-maxage` is still a normal freshness.
+        let mut c = cc_from("s-maxage=30, max-age=600");
+        process_cache_control(&mut c, Some(Duration::from_secs(600)), false)
+            .unwrap();
+        assert_eq!(Some(Duration::from_secs(30)), c.fresh_duration());
+    }
+
+    fn resp_with_cc(value: &str) -> ResponseHeader {
+        let mut resp = ResponseHeader::build(200, None).unwrap();
+        resp.insert_header("Cache-Control", value).unwrap();
+        resp
+    }
+
+    #[test]
+    fn test_origin_restricts_reuse() {
+        // Data dating only: the override may re-pin it.
+        assert!(!origin_restricts_reuse(&resp_with_cc("max-age=60")));
+        assert!(!origin_restricts_reuse(&resp_with_cc(
+            "public, max-age=60, s-maxage=600"
+        )));
+        // No Cache-Control at all: nothing to contradict.
+        assert!(!origin_restricts_reuse(
+            &ResponseHeader::build(200, None).unwrap()
+        ));
+
+        // Reuse restrictions, bare form.
+        for value in [
+            "private",
+            "no-store",
+            "no-cache",
+            "must-revalidate, max-age=60",
+            "proxy-revalidate, max-age=60",
+            "max-age=0",
+            "s-maxage=0, max-age=600",
+        ] {
+            assert!(
+                origin_restricts_reuse(&resp_with_cc(value)),
+                "{value} should block the browser_ttl override"
+            );
+        }
+
+        // Field-list forms restrict too — they name fields that must not be
+        // stored or served without revalidation, which a plain rewrite to
+        // `public, max-age=N` would drop.
+        assert!(origin_restricts_reuse(&resp_with_cc(
+            "private=\"set-cookie\""
+        )));
+        assert!(origin_restricts_reuse(&resp_with_cc(
+            "no-cache=\"set-cookie\""
+        )));
+
+        // Case and spacing are not significant.
+        assert!(origin_restricts_reuse(&resp_with_cc("PRIVATE")));
+        assert!(origin_restricts_reuse(&resp_with_cc(
+            "no-store , max-age=1"
+        )));
     }
 }
