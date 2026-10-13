@@ -48,4 +48,15 @@ ignore = [
     # TOML/HCL/KDL, and the YAML path parses the operator's local config, not
     # network input. Remove when pingora drops serde_yaml.
     "RUSTSEC-2024-0449",
+
+    # ruzstd 0.8.3 (RUSTSEC-2026-0344, decompression bomb: tiny input can
+    # exhaust memory). The fixed 0.9.1 line is only pulled by object 0.40,
+    # but pyroscope 2.1.1 — the latest release, and the sole path by which
+    # object reaches this tree (pingap-pyroscope profiling) — pins object
+    # ^0.39, which requires ruzstd ^0.8.1, so there is no semver-compatible
+    # upgrade. Exposure is limited: object uses ruzstd to decode compressed
+    # debug sections of local binaries while resolving profiling symbols —
+    # the input is the host's own executable, never attacker-controlled
+    # network data. Remove when pyroscope allows object 0.40+.
+    "RUSTSEC-2026-0344",
 ]

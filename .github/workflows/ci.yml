@@ -65,8 +65,11 @@ jobs:
             nasm
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@${{ matrix.toolchain }}
+        # Expressions are not allowed in a step-level `uses:` ref, so the
+        # action ref stays fixed and the toolchain arrives via the input.
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ matrix.toolchain }}
           # Lint components are only *used* on the stable leg (fmt/clippy run
           # there); installing them on the pinned legs is harmless, whereas a
           # conditional here would make those legs fall back to the runner's

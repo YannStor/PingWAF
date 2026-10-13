@@ -23,7 +23,10 @@ written down, and the repository named after the product it ships.
   RUSTSEC-2024-0449 (`unsafe-libyaml` unmaintained) was accepted there: it
   reaches the tree only as a non-optional dependency of pingora-core 0.9 via
   the deprecated `serde_yaml` — which upstream pingora still requires — and
-  never parses network input.
+  never parses network input. RUSTSEC-2026-0344 (`ruzstd` decompression
+  bomb) was accepted under the same policy: the fixed 0.9.1 line needs
+  object 0.40, but pyroscope — the only path to `object` — pins ^0.39, and
+  ruzstd only ever decodes the local binary's own debug sections.
 
 - **CI now does what the docs always claimed.** The `rust` job runs the
   test suite on a real toolchain matrix — 1.96.0 (MSRV), 1.97.0 and stable —
