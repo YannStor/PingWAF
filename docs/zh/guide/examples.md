@@ -1,10 +1,12 @@
 # 示例
 
-- [static-serve](https://github.com/vicanso/pingap/tree/main/examples/static-serve)
-- [api-gateway](https://github.com/vicanso/pingap/tree/main/examples/api-gateway)
-- [web-socket](https://github.com/vicanso/pingap/tree/main/examples/web-socket)
-- [grpc-web](https://github.com/vicanso/pingap/tree/main/examples/grpc-web)
-- [transparent-proxy](https://github.com/vicanso/pingap/tree/main/examples/transparent-proxy)
+本仓库 [`examples/`](../../../examples/) 目录下的可直接运行配置：
+
+- [static-serve](../../../examples/static-serve)
+- [api-gateway](../../../examples/api-gateway)
+- [web-socket](../../../examples/web-socket)
+- [grpc-web](../../../examples/grpc-web)
+- [transparent-proxy](../../../examples/transparent-proxy)
 
 ## Grpc-Web
 
@@ -19,7 +21,7 @@
 - `[locations.grpc-server]` 应启用 `grpc_web`
 
 ```bash
-cargo run -- -c=~/github/pingap/examples/grpc-web.toml --admin=127.0.0.1:3018
+cargo run -- -c=./examples/grpc-web.toml --admin=127.0.0.1:3018
 ```
 
 ## Transparent Proxy
@@ -29,7 +31,7 @@ cargo run -- -c=~/github/pingap/examples/grpc-web.toml --admin=127.0.0.1:3018
 - 证书应设为所有域名的默认证书
 
 ```bash
-sudo cargo run -- -c=~/github/pingap/examples/transparent-proxy.toml --admin=127.0.0.1:3018
+sudo cargo run -- -c=./examples/transparent-proxy.toml --admin=127.0.0.1:3018
 ```
 
 ```bash

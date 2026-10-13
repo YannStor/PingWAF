@@ -45,8 +45,9 @@ Pingap maps the pingora callbacks in `pingap-proxy/src/server.rs` onto five
 | `response` | When the response header is about to be sent downstream | Adding response headers, body substitution |
 
 Setting `step` to a value a plugin does not implement makes it a silent no-op.
-Only `directory`, `limit`, `request_id` and `stats` actually read `step`; every
-other plugin pins its own step (documented per plugin below).
+`directory`, `limit`, `request_id`, `stats`, `challenge`, `waf`, `rewrite`,
+`mock` and `key_auth` actually read `step`; every other plugin pins its own step
+(documented per plugin below).
 
 Each request-step plugin returns one of three results:
 

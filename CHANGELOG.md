@@ -8,6 +8,132 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [unreleased]
+
+The security-release batch: three P0 reverse-proxy defects, nine P1
+functional defects, an HTTPS origin-certificate verification switch, and
+the missing front end for config versioning.
+
+### 🔒 Security
+
+- **Cache could replay authenticated responses across users.** Two
+  independent holes in `response_cache_filter`. (a) `authorization_present`
+  was hard-coded to `false` when calling pingora's `resp_cacheable()`, so a
+  request carrying `Authorization` was treated as anonymous — and if the
+  origin also answered with a cacheable directive the entry was stored and
+  served to the next client. The real request header is now consulted, and
+  the RFC 9111 §3.5 opt-in (`public` / `s-maxage` / `must-revalidate`) is
+  evaluated against the origin's own `Cache-Control` *before* the proxy
+  synthesises `s-maxage` from `max_ttl` — otherwise the proxy's own floor
+  masqueraded as origin consent. (b) A response carrying `Set-Cookie` was
+  stored and replayed to every later visitor whenever the origin did not
+  explicitly opt in to shared caching; such responses are now uncacheable
+  unless `Cache-Control` says `public` or `s-maxage`. Together these are
+  the classic CDN session-fixation / cross-user disclosure pair.
+- **Route-level IP allow-lists read the TCP peer, not the client.** A
+  location's `ip_ranges` was matched against `session.client_addr()` — the
+  direct TCP peer. Behind a load balancer that is the balancer, so an
+  allow-list like `["10.0.0.0/8"]` matched *every* request and the access
+  control was silently bypassed; the mirror case (a public entry point)
+  rejected every legitimate client. Route matching now goes through
+  `ensure_client_ip`, the same `trusted_proxies`-aware resolver the
+  `ip_restriction` plugin already used, so a route condition and the plugin
+  finally mean the same thing.
+- **clearance cookies were not bound to the site that issued them.** The
+  challenge short-circuit accepted any validly-signed clearance cookie, and
+  the cookie secret is shared across sites in one process — solve a
+  challenge on site A and the same cookie satisfied site B. The cookie
+  payload's `site_id` is now compared with the request host before the
+  short-circuit, matching what the WAF's own clearance check already did.
+- **Rate-limit keys silently failed open.** `Limiter::incr` returned early
+  when the configured cookie/header/query field was absent, so omitting
+  `?session=…` (or the header, or the cookie) disabled the limit entirely.
+  A missing key now falls back to the client IP.
+
+### 🐛 Fixes
+
+- **Request bodies were invisible to the WAF when not valid UTF-8 or
+  compressed.** Body inspection bailed out on `from_utf8` failure, so a
+  single trailing `0xFF` byte — or any `Content-Encoding: gzip` body —
+  skipped every signature and libinjection rule. Bodies are now
+  decompressed per `Content-Encoding` (`gzip` / `x-gzip` / `deflate`,
+  layers peeled in reverse, capped at 1 MiB decompressed to bound a
+  zip-bomb) and then decoded tolerantly, so the bytes always reach the
+  scanner.
+- **HTTP/2 and HTTP/3 bodies skipped inspection.** `has_body` required
+  either `Transfer-Encoding` or a positive `Content-Length`; h2/h3 forbid
+  the former and may legally omit the latter, so modern clients bypassed
+  body scanning. Every non-GET/HEAD request is now registered for the
+  deferred body stage.
+- **Retries leaked `processing` and least-connections inflight counts.**
+  `first_attempt` was derived from `ctx.upstream.retries`, which only
+  `fail_to_connect` increments — pingora retries a reused connection on its
+  own and re-enters `upstream_peer` without touching that counter, so the
+  second attempt was counted again while only one release ever ran.
+  `processing` drifted upward forever and `least_connections` skewed
+  permanently toward the retried backend. The guard is now the
+  `processing_counted` flag, whose whole meaning is "already counted".
+- **Sub-second `check_frequency` panicked the health checker.** The
+  frequency comparison used whole seconds, so `check_frequency=500ms`
+  truncated to 0 and `check_count.is_multiple_of(0)` panicked inside a
+  detached task — every tick, so active health checking for that upstream
+  never ran and dead backends kept receiving traffic. Frequencies are now
+  carried in milliseconds end to end, with an explicit zero guard instead of
+  a divide.
+- **A `Vary` allow-list narrowed the cache key.** `vary_headers` was
+  applied as a filter, so an origin sending `Vary: Cookie` on a
+  personalised page had that dimension dropped and all users shared one
+  entry. The allow-list no longer prunes the origin's `Vary`; a response
+  naming a header outside the list is served uncached.
+- **Padded SQLi tautologies scored zero.** `1' OR '1'='1` prefixed with 29
+  filler bytes exceeded the 32-byte "search phrase" cut-off and was skipped
+  without scoring — filler was the only cost of evading the rule. The
+  decoy is now also required to look like prose (≥3 distinct words of 4+
+  letters, not glued to an identifier), so real payloads score and padding
+  no longer buys a bypass. `id=1 OR 1=1` repeated five times to reach the
+  same length is caught too.
+- **`browser_ttl` rewrote origin prohibitions into `public`.** Any response
+  went out as `Cache-Control: public, max-age=N`, including ones the origin
+  marked `private`, `no-store` or `no-cache`. The rewrite now only applies
+  when the origin has not restricted reuse.
+- **`s-maxage=0` was not treated as "do not reuse".** Only `max-age` was
+  checked, so `Cache-Control: s-maxage=0, max-age=600` was stored and
+  served stale for 1 second per `META_DEFAULTS`. Rejection now keys off
+  `fresh_duration() == ZERO`, which covers both directives.
+
+### ✨ Features
+
+- **HTTPS origin certificate verification switch.** `basic.origin_verify_cert`
+  controls whether connections to HTTPS origins validate the upstream
+  certificate. Unset keeps the previous behaviour (no verification, so
+  self-signed and internal-CA origins keep working) — the switch exists to
+  make the choice explicit, and verifying is the recommended setting for
+  origins with publicly trusted certificates. It is editable from the
+  console's system settings and reaches the data plane through the agent
+  bundle without a restart. Per-pool `verify_cert` still overrides it:
+  `true` forces verification, `false` forces acceptance, unset defers to
+  the global switch. The global default is folded into each upstream's hash
+  key *before* the key is computed, and the config diff compares the field
+  explicitly, so toggling it actually rebuilds the affected upstreams.
+- **Config version page.** The list / detail / rollback API for
+  configuration snapshots had no UI at all — it was reachable only by
+  calling the API by hand. A new "Config Versions" page lists snapshots
+  with scope and date filters and client-side paging, shows a version's
+  detail as a per-table diff against its predecessor, and rolls back behind
+  a confirmation dialog.
+
+### 📝 Notes
+
+- New `origin_settings` table (migration 52) holding the global
+  `origin_verify_cert`, alongside `defense_settings` / `cache_settings`.
+  The migration also clears `site_upstream_pools.verify_cert` values that
+  were stored as `false` — under the three-state semantics `false` now
+  means "force acceptance" rather than "unspecified", so leaving them would
+  have pinned those pools to the old default and made the new global switch
+  ineffective for them.
+- `verify_cert` is now tri-state: `true` verify, `false` accept anything,
+  unset defer to `basic.origin_verify_cert`.
+
 ## [PingWAF 0.25.11] — 2026-10-13
 
 The root cause behind "every response reports `x-cache-status: expired`",

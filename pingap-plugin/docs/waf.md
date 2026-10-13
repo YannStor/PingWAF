@@ -22,8 +22,8 @@ rules), and the resulting verdict is mapped onto the proxy pipeline.
 | `paranoia_level` | int | `2` | Detection sensitivity, clamped to `1`–`4`. Higher catches more but increases false positives. |
 | `anomaly_threshold` | int | `40` | Accumulated anomaly score at which a request is blocked/challenged. |
 | `detections` | string[] | `[]` | Enabled detection families, e.g. `["sqli", "xss", "rce", "lfi", "ssrf"]`. |
-| `ml_enabled` | bool | `false` | Enable the ML scoring pass. |
-| `ml_threshold` | float | `0.5` | ML confidence threshold (`0.0`–`1.0`). |
+| `ml_enabled` | bool | `false` | Reserved: enable the ML scoring pass. **Not wired up yet** — the engine ignores it at runtime. |
+| `ml_threshold` | float | `0.5` | Reserved: ML confidence threshold (`0.0`–`1.0`). **Not wired up yet** — ignored at runtime. |
 | `inspect_body` | bool | `false` | Read and inspect the request body. Off by default — reading the body on every request is expensive and interferes with streaming uploads. |
 | `max_body_size` | int | `65536` | Upper bound (bytes) of the body read when `inspect_body` is on. |
 | `pow_difficulty` | int | `20` | Proof-of-work difficulty used when a `Challenge` verdict delegates to the challenge subsystem. |
@@ -116,5 +116,12 @@ stacks = ["php"]
   and latency on big uploads — and treat the setting as a tuned trade-off,
   not a hard security boundary. Access logs record
   `request_body_truncated` whenever the limit cut a body short.
+- **Encoded and non-text bodies are decoded before scanning.** With
+  `inspect_body` on, a `Content-Encoding: gzip` / `x-gzip` / `deflate` body is
+  decompressed first (layers peeled in reverse, decompressed size capped at
+  1 MiB so a decompression bomb cannot exhaust memory), and a body that is not
+  valid UTF-8 is decoded leniently rather than skipped. An encoding the engine
+  does not recognise is scanned as-is. The scan therefore covers the bytes a
+  payload actually carries, not just the ones that happened to be readable.
 - The engine is held behind `Arc<RwLock<..>>` and per-domain engines are cached,
   so control-plane rule updates hot-reload without restarting pingap.

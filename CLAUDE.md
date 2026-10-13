@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Pingap is a Cloudflare-Pingora-based reverse proxy. The binary lives in `src/`; all reusable logic is split across `pingap-*` workspace crates. MSRV is `1.96.0` (Rust edition 2024). Pingora is `0.9.0` from crates.io; only the `lb`/`cache` features are enabled there, and the TLS backend feature (pingora's `openssl` or `rustls`) is added by pingap's own top-level `openssl` / `tls-rustls` features. The three `pingora*` entries in `[workspace.dependencies]` must always name the same version, or cargo resolves two copies of `pingora-core`.
+PingWAF is a distributed, centrally-controlled Web Application Firewall built on `pingap`, a Cloudflare-Pingora-based reverse proxy. The `pingap` proxy engine plus all reusable logic lives in the `pingap-*` workspace crates; the WAF layer adds six `pingwaf-*` crates (`proto`, `server`, `agent`, `waf`, `challenge`, `pprof`). The binary lives in `src/`; the top-level `src/pingwaf.rs` translates the DB-backed control-plane model into a `pingap` config. MSRV is `1.96.0` (Rust edition 2024). Pingora is `0.9.0` from crates.io; only the `lb`/`cache` features are enabled there, and the TLS backend feature (pingora's `openssl` or `rustls`) is added by pingap's own top-level `openssl` / `tls-rustls` features. The three `pingora*` entries in `[workspace.dependencies]` must always name the same version, or cargo resolves two copies of `pingora-core`.
 
 **Build the pingora `Server` with `Server::new_with_opt_and_conf`, never `Server::new` followed by assigning `my_server.configuration`.** Since 0.8.1 the constructor snapshots the configuration into a private `Bootstrap`, and that snapshot — not `Server::configuration` — is what the receiving half of a hot upgrade reads `upgrade_sock` from. A later assignment silently leaves the two halves on different sockets.
 
@@ -43,6 +43,14 @@ make release             # default features
 make release-full        # tracing + imageoptim
 make release-perf        # release-perf profile, includes pyroscope agent
 
+# Local builds — route through these, not bare `cargo`, so the disk guard runs
+make build               # cargo build
+make check               # cargo check --features=full --all-targets
+
+# Reclaim target/ on demand (the guard also does this on its own; see below)
+make sweep-dry           # report what would be removed
+make sweep               # drop incremental caches + stale intermediates
+
 # Web admin assets (rust-embed'd into the binary at build time)
 make build-web           # cd web && npm install && npm run build, then cp dist ../
 
@@ -51,6 +59,17 @@ make hooks               # cp hooks/* .git/hooks/
 ```
 
 Bacon shortcuts: `bacon` (check), `bacon clippy-all`, `bacon test`, `bacon test -- some::path`, `bacon nextest`, `bacon doc-open`.
+
+### Build footprint and binary size
+
+**Every binary that is actually shipped or run comes from the size-optimized profile.** `[profile.release]` is deliberately tuned for size, not speed — `opt-level = "z"`, `codegen-units = 1`, `lto = true`, `strip = true`, `panic = "abort"`. That is not a guess: a full 0.21.0 replay bench (33877 samples, four configs) showed byte-identical verdicts and conserved p95 latency at `opt-level = "z"` for a binary ~36% smaller than the previous `opt-level = 3`. Leave it alone; `release-perf` exists only for the profiler builds (`perf` / `pyro`) that need symbols. The dev profile is kept lean for the same reason — the debug binary is ~214 MB against ~31 MB for the release one, a 7x difference that shows up directly in `target/`:
+
+- `[profile.dev] debug = "line-tables-only"`, and `[profile.dev.package."*"] debug = false` — dependencies carry no DWARF (nobody steps through them), workspace members keep line tables so a panic still reports `file:line`.
+- `[profile.test]` repeats both and adds `incremental = false`: incremental caches are only ever written for workspace members and nothing collects them, so `cargo test --workspace` would otherwise pile up one per feature set and test binary.
+
+**Do not mix feature sets casually.** Cargo keys artifacts on `(crate, feature set, profile)`, so every extra combination — `--features=full`, `--no-default-features --features=tls-rustls,full`, `-p pingap-plugin --features=geo` — is another full copy of the dependency graph inside `target/`. Prefer `full` for local work and leave the rustls / geo variants to `make lint-rustls`, `make test-rustls` and CI.
+
+**Route local builds through `make build` / `make check`, not bare `cargo`.** Those run `check-target` first, which keeps `target/` under `TARGET_MAX_GB` (default 20 GB) by dropping the incremental caches and the intermediates older than `TARGET_SWEEP_DAYS` (default 3 days) via `scripts/sweep-target.sh`, falling back to `cargo clean` only if that is still not enough. `make sweep` / `make sweep-dry` run the same prune by hand — worth doing after a session that crossed feature sets. Bare `cargo build` / `cargo check` and bacon bypass the guard entirely, which is exactly how this repo reached 47 GB in October 2026: `deps/` held 2055 rlibs for only 583 distinct crates (`pingap_core` alone had 41 copies) plus 21000 object files, none of it incremental cache. An editor running `cargo check` in the background (`rust-analyzer`) writes to `target/` the same way and is likewise unguarded.
 
 ## Architecture
 
@@ -130,13 +149,13 @@ CLI flags worth knowing: `-c/--conf <url>`, `-d/--daemon`, `-u/--upgrade` (hot u
 
 ## CI gates
 
-`.github/workflows/test.yml` runs every gate listed below on pushes to `main`, on pull requests against `main`, and on manual dispatch (`gh workflow run test.yml --ref <branch>`); any one of them failing breaks the build. The same file also publishes the `vicanso/pingap:latest`/`:full`/`:rustls-full` Docker images from its `build`/`merge` jobs, which are guarded to pushes on `main` - a PR or dispatch run must never reach them. Reproduce locally with the corresponding command:
+`.github/workflows/ci.yml` runs every gate listed below on pushes to `main` and on pull requests; any one of them failing breaks the build. It has three jobs: `rust` (fmt / clippy `--features full -D warnings` / `cargo build --release --bin pingwaf --features full` / `cargo test --workspace --features full --no-fail-fast` / `cargo check --workspace --no-default-features --features tls-rustls,full` / `typos`), `web` (`npm ci` / `npm run lint` / `npm test` / `npm run build` in `web/`), and `docker`, which builds the amd64 image and pushes the `ghcr.io/shuaizend/pingwaf:main` **snapshot** tag — the `docker` job only runs on pushes to `main`, never on a PR. The versioned `:latest` / `:<major.minor>` / `:<version>` multi-arch manifests are published by `release.yml` (tag-triggered), which also builds the tarballs `install.sh` downloads. Reproduce locally with the corresponding command:
 
 | CI step | Local equivalent |
 |---|---|
 | `cargo fmt --all -- --check` | `make fmt` (auto-fixes) or run the check directly |
 | `make lint` (typos + clippy `--features=full -D warnings`) | `make lint` |
-| `cargo machete` | `cargo install cargo-machete@0.9.1 && cargo machete` — `Cargo.toml` whitelists `humantime-serde`, `include-flate`, `hcl-rs`, `kdl` in `[package.metadata.cargo-machete]` |
+| `cargo machete` | `cargo install cargo-machete@0.9.1 && cargo machete` — `Cargo.toml` whitelists `humantime-serde`, `hcl-rs`, `kdl` in `[package.metadata.cargo-machete]` |
 | `make test` (`cargo test --workspace --features=full`) | `make test` |
 | `make lint-rustls` + `make test-rustls` (rustls TLS backend; full suite on stable, `cargo check --features tls-rustls,full` on MSRV) | `make lint-rustls && make test-rustls` |
 | `cargo msrv list` | `cargo install cargo-msrv --version 0.18.4 && cargo msrv list` |
@@ -146,39 +165,77 @@ CLI flags worth knowing: `-c/--conf <url>`, `-d/--daemon`, `-u/--upgrade` (hot u
 
 ### Release toolchain vs MSRV
 
-The MSRV (`rust-version` in `Cargo.toml`, `msrv` in `clippy.toml`, first entry of the `test.yml` matrix) is a floor that `test.yml` proves. Release binaries are built with a **pinned recent stable**, deliberately newer: the two `toolchain:` pins in `.github/workflows/publish.yml` (macOS, linux-gnu) and `FROM rust:…` in the `Dockerfile` are one setting and move together. The musl jobs build inside the `messense/rust-musl-cross` image and use whatever toolchain it ships. Every Linux job (musl and gnu, x86_64 and aarch64) publishes three tarballs per arch: the default build, `-full`, and `-rustls-full` from `make release-rustls-full` (`tls-rustls,full`, no OpenSSL); `install.sh` selects the last one with `PINGAP_TLS=rustls`. macOS and Windows ship OpenSSL builds only. The Docker matrices in both workflows carry the same three variants; `rustls-full` is the one entry whose name is not a cargo feature, so the `Set build args` step maps it to `--no-default-features --features=tls-rustls,full`. Both toolchain jobs use `dtolnay/rust-toolchain`, which runs `rustup default`; the archived `actions-rs/toolchain` only installed the toolchain, so its pin never took effect on macOS. `.github/dependabot.yml` watches the workflow actions weekly; Cargo is intentionally not covered there (Dependabot ignores `rust-version` and cannot follow the pingora git pin).
+The MSRV (`rust-version` in `Cargo.toml`, `msrv` in `clippy.toml`) is a floor that CI proves on `stable`. Release binaries are built with a **pinned recent stable**, deliberately newer: the `dtolnay/rust-toolchain@1.98.1` pin in `.github/workflows/release.yml` and the `FROM rust:1.98.1-bookworm` line in the `Dockerfile` are one setting and move together.
+
+`release.yml` triggers on a `v*` tag and releases **Linux only** (`shuaiZend/PingWAF` does not ship macOS or Windows binaries). Two matrix legs (`linux/amd64`, `linux/arm64`) each build `--features tracing` with the default OpenSSL backend and publish **two tarballs per arch**: `pingwaf-linux-amd64.tar.gz` and `pingwaf-linux-arm64.tar.gz`, each with a `.sha256` sidecar. `install.sh` resolves exactly those names as `pingwaf-${OS}-${ARCH}.tar.gz` from the release URL — the names must not drift. There is no rustls tarball and no `PINGAP_TLS` selection in `install.sh`.
+
+The `docker` and `docker-manifest` jobs then build per-arch images from `Dockerfile.runtime` and merge them into `ghcr.io/shuaizend/pingwaf:{<version>,<major.minor>,latest}`.
 
 ## Web admin
 
-`web/` is a Vite/React app. After editing it, run `make build-web` so the compiled assets in `dist/` get embedded into the binary via `rust-embed` at compile time. `--admin user:pass@host:port[/prefix]` exposes the admin UI; in `make dev` it's on `127.0.0.1:3018`.
+`web/` is the React 19 + Vite + Tailwind dashboard. `pingwaf-server` embeds `../web/dist` via `rust-embed`, so after editing it run `make build-web` (which rebuilds `web/dist` and copies it to the repo root) before compiling. Two separate admin surfaces exist and must not be confused:
 
-**Every config field must have a form item in `web/`.** A field added to a `pingap-config` struct (`BasicConf`, `ServerConf`, `LocationConf`, `UpstreamConf`, `CertificateConf`, `StorageConf`) or to a plugin's config is not done until the admin can show and edit it. For a config struct, add the field to the matching interface in `web/src/states/config.ts` and an item to the page in `web/src/pages/` (`Basic.tsx`, `Servers.tsx`, `Locations.tsx`, `Upstreams.tsx`, `Certificates.tsx`, `Storages.tsx`); for a plugin field, add it to that plugin's builder in `web/src/plugin-fields.ts`. Each item needs its label/placeholder (and a `tips` line when the semantics are not obvious) in **both** `web/src/i18n/en.ts` and `web/src/i18n/zh.ts`, under the page's section. Pick the control by the Rust type: `Option<bool>` -> `RADIOS` + `newBooleanOptions()` with `defaultValue: conf.field` (never `|| null`, that turns an explicit `false` into Unset); enum-like `Option<String>` -> `RADIOS`/`SELECT` + `newStringOptions(..., withNone = true)` with `defaultValue: conf.field || ""` so an unset field stays unset instead of being saved as the first option; `Option<Vec<String>>` of free-form entries (`name` or `name:value`) -> `TEXTS`, and only use `KV_LIST` when every entry really is `key<sep>value` (its placeholder is `"key hint : value hint"`, split on `" : "`); numbers -> `NUMBER`; durations/sizes -> `TEXT` with the `newZodDuration()`/`newZodBytes()` schema entry.
+- **PingWAF console** (`web/`) — talks to the Axum REST API on `PINGWAF_ADMIN_ADDR` (default `0.0.0.0:9080`). This is the DB-driven console; pages live in `web/src/pages/` and API bindings in `web/src/api/`.
+- **pingap admin plugin** (`src/plugin/admin.rs`, plus the older `web/` pages under `src/plugin/`) — only mounted when the binary runs in pingap mode with `--admin user:pass@host:port[/prefix]`; `make dev` puts it on `127.0.0.1:3018`. It serves an embedded rust-embed asset bundle and the `{admin-path}/api/pprof/*` endpoints.
+
+**If you add a field to a `pingap-config` struct** (`BasicConf`, `ServerConf`, `LocationConf`, `UpstreamConf`, `CertificateConf`, `StorageConf`) **or to a plugin's config, and you are maintaining that pingap-mode admin**, the field is not done until the admin can show and edit it: add the field to the matching interface in `web/src/states/config.ts` and an item to the page in `web/src/pages/` (`Basic.tsx`, `Servers.tsx`, `Locations.tsx`, `Upstreams.tsx`, `Certificates.tsx`, `Storages.tsx`); for a plugin field, add it to that plugin's builder in `web/src/plugin-fields.ts`, with labels in both `web/src/i18n/en.ts` and `web/src/i18n/zh.ts`. Pick the control by the Rust type: `Option<bool>` -> `RADIOS` + `newBooleanOptions()` with `defaultValue: conf.field` (never `|| null`, that turns an explicit `false` into Unset); enum-like `Option<String>` -> `RADIOS`/`SELECT` + `newStringOptions(..., withNone = true)` with `defaultValue: conf.field || ""` so an unset field stays unset instead of being saved as the first option; `Option<Vec<String>>` of free-form entries (`name` or `name:value`) -> `TEXTS`, and only use `KV_LIST` when every entry really is `key<sep>value` (its placeholder is `"key hint : value hint"`, split on `" : "`); numbers -> `NUMBER`; durations/sizes -> `TEXT` with the `newZodDuration()`/`newZodBytes()` schema entry.
+
+**The PingWAF console (`web/`) is a separate, DB-backed surface**: it edits the `pingwaf-server` models (`pingwaf-server/src/models/*`, exposed through `pingwaf-server/src/api/*`), **not** the `pingap-config` structs. There, the rule is: every field a `pingwaf-server` API returns or accepts should have a control in `web/src/api/types.ts` + the matching page, with its label in `web/src/i18n/locales/{en,zh,ja}/common.json` (all three locales).
 
 The pages save an entry by merging the form values over the loaded entry (`{ ...loaded, ...value }`) because the server replaces the whole entry with what it receives; keep that merge when touching `onSave`, and keep it before `omitEmptyArrayString` so a field cleared in the form is still removed. Verify a new item end to end in the admin (`make dev`, or `make build-web` then run the binary with `--admin`): the value renders, an edit is saved, and clearing it removes the key from the config file.
 
+### Global settings rows
+
+A deployment-wide switch that the data plane must see belongs in a single-row
+settings table named `<topic>_settings` (`defense_settings`,
+`cache_settings`, `origin_settings`), each with `id = 1`, a `load()` that
+lazily inserts the default row on first read, a `GET`/`PUT /settings/<topic>`
+pair in `pingwaf-server/src/api/`, and a `notify_all_config_changed` call on
+update so the new value reaches the agents in the next rule bundle. Adding one
+meant touching, in order: a migration (`pingwaf-server/src/migration/`), the
+model, the API module and its entry in `api/mod.rs`, the `RuleBundle` field in
+`pingwaf-proto/proto/control_plane.proto`, the agent's cache struct, and the
+control-plane-to-`pingap-config` translation in `src/pingwaf.rs`. The value
+also has to be folded into the global config snapshot in
+`pingwaf-server/src/config_history.rs`, or the config-version page cannot see
+it change.
+
+**`BasicConf::origin_verify_cert` and `UpstreamConf::verify_cert` are
+tri-state, and the third state is the point**: `Some(true)` verifies,
+`Some(false)` accepts any certificate, `None` means "no opinion, defer". For a
+pool, `None` defers to the global switch; for the global switch, `None` leaves
+the decision to pingora (which verifies). Two consequences worth remembering:
+a `bool` default would destroy the distinction and silently pin the lenient
+behaviour, which is exactly why the migration for the field had to reset
+stored `false` values to `NULL`; and the global default must be folded into
+each upstream's `hash_key` input **before** the key is computed, with the
+change also compared explicitly in `src/process/auto_restart.rs`, or toggling
+it changes nothing for upstreams that are already running.
+
 ## Documentation site (`website/`)
 
-**Any behaviour change must be reflected in the docs the site is built from.** The site is not written separately — it is assembled from files in the repo, so a feature that changes a config key, a default, a CLI flag or a plugin's behaviour is only documented once those source files are updated.
+**Any behaviour change must be reflected in the docs the site is built from.** The site is not written separately — `scripts/build-website.sh` assembles it from files in the repo into a **VitePress** site (`website/package.json`, `website/BUILD.md`), so a feature that changes a config key, a default, a CLI flag or a plugin's behaviour is only documented once those source files are updated.
 
-Live at <https://pingap.io/> — English <https://pingap.io/en/#/>, 中文 <https://pingap.io/zh/#/>. It is docsify with hash routing, so deep links always carry `#/` (e.g. `https://pingap.io/en/#/plugins/jwt`). Do not link to `vicanso.github.io/...` or the legacy `pingap.io/pingap-en|zh/...` paths.
+There is **no `pages.yml` workflow**: the site is built and published by `scripts/build-website.sh` under whatever Pages pipeline the deployment uses; check `.github/workflows/` before assuming an automated deploy exists.
 
 Linking rules:
 
-- **Inside site content** (`docs/zh/**`, the home page block in `scripts/build-website.sh`) use root-relative paths with docsify's `':ignore'`, e.g. `[中文文档](/zh/#/ ':ignore')`. They work on the local preview too. Without `':ignore'` docsify compiles `/zh/#/` into an internal route (`#/zh/#/`) and the link breaks.
-- **Between pages of the same language** use plain relative markdown (`plugins/jwt.md`); docsify routes those itself.
-- **In repo files read on GitHub** (`README.md`, `README_zh.md`, `docs/README.md`) use the absolute `https://pingap.io/...` form, since a root-relative path would resolve against github.com.
+- **In repo files read on GitHub** (`README.md`, `README_zh.md`, `docs/README.md`) use plain relative paths (`./docs/quick-start.md`); they must resolve on github.com.
+- **Between pages of the same language** use plain relative markdown (`plugins/jwt.md`).
+- **`docs/zh/**` pages that need an English-only page** must climb out of the tree (`../user-guide.md`, `../api.md`) — those pages have no `docs/zh/` counterpart, and a bare `./user-guide.md` is a dead link.
 
 ### What to edit
 
 | Change | Update |
 | --- | --- |
-| Plugin config key / default / behaviour | `pingap-plugin/docs/<plugin>.md` **and** `docs/zh/plugins/<plugin>.md` |
+| Plugin config key / default / behaviour | `pingap-plugin/docs/<plugin>.md` **and** `docs/zh/plugins/<plugin>.md` (only for plugins that have a Chinese page) |
 | New plugin | both of the above, plus the index table in `pingap-plugin/README.md` and `docs/zh/plugins/README.md`, plus the sidebar lists in `scripts/build-website.sh` |
 | Crate-level feature | `pingap-<crate>/README.md` **and** `docs/zh/crates/<crate>.md` |
-| CLI flag / env var / quick start | `README.md`, `README_zh.md`, and the home page block in `scripts/build-website.sh` (English home is generated inline there; the Chinese home is `docs/zh/README.md`) |
+| CLI flag / env var / quick start | `README.md`, `README_zh.md`, `docs/quick-start.md`, `docs/deployment.md` |
 | Architecture / ACME flow / examples | `docs/modules.md`, `docs/acme_chart.md`, `examples/README.md` and their `docs/zh/guide/*` counterparts |
+| WAF control plane / agent / dashboard | `docs/user-guide.md`, `docs/api.md`, `README.md` and `README_zh.md` |
 
-The Chinese tree is a **maintained translation**, not a generated one: adding an English page without its `docs/zh/` counterpart leaves a gap in the Chinese site.
+The Chinese tree is a **maintained translation**, not a generated one: adding an English page without its `docs/zh/` counterpart leaves a gap in the Chinese site. `docs/zh/README.md` is the Chinese home page and must stay a PingWAF page — it must never fall back to upstream pingap content.
 
 ### Build and preview
 
@@ -187,6 +244,8 @@ The Chinese tree is a **maintained translation**, not a generated one: adding an
 python3 -m http.server -d website 8080   # /en/ and /zh/
 ```
 
-`website/{en,zh}/{README.md,_sidebar.md,_navbar.md,crates/,plugins/,guide/}` are **generated and gitignored** — never edit them directly. Hand-maintained files are `website/index.html` (language picker), `website/{en,zh}/index.html` (docsify shells), `website/assets/`, `website/.nojekyll` and `website/BUILD.md`.
+Generated (gitignored — never edit directly): `website/index.md`, `website/plugins/`, `website/crates/`, `website/guide/`, `website/zh/`, `website/en/`, `website/README.md`, `website/_sidebar.md`, `website/_navbar.md`, `website/assets/docsify-app.js`, `website/assets/style.css`.
 
-`.github/workflows/pages.yml` reruns the script and deploys on pushes that touch `website/**`, `scripts/build-website.sh`, `pingap-*/README.md`, `pingap-plugin/docs/**`, `docs/**`, `examples/README.md`, `README.md` or `README_zh.md`.
+Hand-maintained and tracked: `website/index.html`, `website/BUILD.md`, `website/package.json`, `website/.nojekyll`, `website/public/`, and the VitePress config `website/.vitepress/config.mts` plus `website/.vitepress/theme/`. Only `website/.vitepress/{dist,cache}/` and `website/node_modules/` are ignored.
+
+A Pages deploy would need to rerun the script and publish on pushes that touch `website/**`, `scripts/build-website.sh`, `pingap-*/README.md`, `pingap-plugin/docs/**`, `docs/**`, `examples/README.md`, `README.md` or `README_zh.md`. **No workflow does this today** — `website/BUILD.md` documents the manual steps and flags the missing `pages.yml`.

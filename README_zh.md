@@ -8,7 +8,7 @@
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.96%2B-orange.svg)](https://www.rust-lang.org/)
-[![Build](https://github.com/shuaiZend/PingWAF/actions/workflows/test.yml/badge.svg)](https://github.com/shuaiZend/PingWAF/actions/workflows/test.yml)
+[![Build](https://github.com/shuaiZend/PingWAF/actions/workflows/ci.yml/badge.svg)](https://github.com/shuaiZend/PingWAF/actions/workflows/ci.yml)
 [![Docker](https://img.shields.io/badge/docker-compose%20ready-2496ED?logo=docker&logoColor=white)](./docker-compose.yml)
 
 **[English](./README.md) | [简体中文](./README_zh.md) | [Español](./README_es.md) | [Français](./README_fr.md)**
@@ -112,10 +112,11 @@ graph TB
 
 ### 🔐 TLS 与证书
 - **ACME / Let's Encrypt 自动签发与续期**，直接在边缘完成（HTTP-01 与 DNS-01）。
-- **多 DNS 提供商**支持 DNS-01（Cloudflare、Route 53、DigitalOcean、阿里云、DNSPod、CloudXNS、手动）。
+- **多 DNS 提供商**支持 DNS-01（阿里云、Cloudflare、腾讯云 DNSPod、华为云、手动）。
 - **每站点证书状态**（`valid` / `即将过期` / `expired`）通过心跳上报控制面，并提供可检索的 ACME 事件日志。
 - **HSTS 与强制 HTTPS** 在边缘生效，`max-age` 默认半年（15552000 秒）。
 - **双向 TLS（mTLS）**——控制面内生成或导入 CA、签发客户端证书，吊销即时在边缘生效；证书被吊销或签发给其他站点时一律拒绝。
+- **HTTPS 回源证书校验是显式开关**——「系统设置 → 回源」提供全局默认值，单个回源池可覆盖。默认接受任意回源证书，自签名与内网 CA 环境升级后不受影响；源站持有受信任证书时应显式开启校验。
 
 ### 📊 可观测性
 - **全量请求日志写入 Elasticsearch**，支持响应体截断与 WAL 缓冲以保证可靠性。
@@ -128,6 +129,7 @@ graph TB
 - **Passkey 通行密钥登录**（WebAuthn）——在设置页绑定平台认证器或安全密钥后即可免密码登录。
 - **内嵌多语言控制台**（English / 简体中文 / 日本語），通过 `rust-embed` 编译进二进制。
 - **所有功能默认关闭**——按站点显式开启防护。
+- **配置版本管理**——控制台可筛选列出全部配置快照，将任一版本与其前一版本逐表对比，并在二次确认后回滚。
 
 ---
 
@@ -151,6 +153,7 @@ graph TB
 | [`pingwaf-agent`](./pingwaf-agent) | 数据面 Agent：连接控制面、规则缓存 + 磁盘持久化、回传日志/指标、接收命令 |
 | [`pingwaf-waf`](./pingwaf-waf) | 检测引擎：归一化 → 签名 → 表达式 → 异常评分 |
 | [`pingwaf-challenge`](./pingwaf-challenge) | 动态挑战子系统：JS 5 秒盾、交互式挑战、PoW、浏览器指纹、HMAC 签名 clearance cookie |
+| [`pingwaf-pprof`](./pingwaf-pprof) | 内置剖析：`go tool pprof` CPU 剖析、SVG 火焰图、内存快照（CPU 采样仅限 Linux） |
 
 ---
 
@@ -190,7 +193,7 @@ docker compose up -d
 
 | 工具 | 版本 | 说明 |
 | --- | --- | --- |
-| Rust | 1.96+（MSRV） | CI/Docker 使用 1.98.1 构建 |
+| Rust | 1.96+（MSRV） | CI 跟随 stable；Docker 镜像与发布二进制使用 1.98.1 构建 |
 | Node.js | 22 | 构建控制台所需 |
 | `protoc` | 任意较新版本 | **必需**——用于 gRPC 代码生成 |
 | `cmake` | 任意较新版本 | 构建 TLS 后端（OpenSSL）所需 |
@@ -276,8 +279,10 @@ PINGWAF_CONFIG=/etc/pingwaf/pingwaf.toml pingwaf all-in-one   # 等价写法
 | `PINGWAF_JWT_SECRET` | `change-me-in-production` | JWT 签名密钥（**≥ 16 字符**，生产必改） |
 | `PINGWAF_ADMIN_EMAIL` | `admin@pingwaf.local` | 初始管理员邮箱 |
 | `PINGWAF_ADMIN_PASSWORD` | `pingwaf123` | 初始管理员密码（**生产必改**） |
-| `PINGWAF_ALLOW_REGISTRATION` | `true` | `POST /api/v1/auth/register` 是否接受注册（`docker-compose.yml` 与 `install.sh` 已将其设为 `false`） |
-| `PINGWAF_HEARTBEAT_INTERVAL` | `15` | 下发给 Agent 的心跳间隔（秒） |
+| `PINGWAF_ALLOW_REGISTRATION` | `true` | `POST /api/v1/auth/register` 是否接受注册（`docker-compose.yml` 已将其设为 `false`） |
+| `PINGWAF_HEARTBEAT_INTERVAL` | `15` | 控制面在注册时下发给 Agent 的心跳间隔（秒）。Agent 侧的 `--heartbeat-interval-secs` 读取同一变量但回退值为 `30`，且仅在控制面未下发间隔时生效 |
+| `PINGWAF_TLS_ENABLED` | `true` | REST API 与控制台是否以 HTTPS 提供服务（替换前为自签名证书）；置于 TLS 终止代理之后时设为 `false` |
+| `PINGWAF_TLS_SANS` | 主机名、`localhost`、`127.0.0.1` | 生成的自签名证书所覆盖的 SAN 列表（逗号分隔） |
 | `PINGWAF_SERVER_URL` | `http://localhost:9090` | *（agent）* 控制面 gRPC 地址 |
 | `PINGWAF_API_KEY` | *（空）* | *（agent）* API Key；为空则通过本地回环自动注册 |
 | `PINGWAF_CACHE_DIR` | `./data/cache` | *（agent）* 本地规则缓存目录 |

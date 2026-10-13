@@ -8,7 +8,7 @@ Détection sémantique des attaques · Règles à la Cloudflare · Défense CC e
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.96%2B-orange.svg)](https://www.rust-lang.org/)
-[![Build](https://github.com/shuaiZend/PingWAF/actions/workflows/test.yml/badge.svg)](https://github.com/shuaiZend/PingWAF/actions/workflows/test.yml)
+[![Build](https://github.com/shuaiZend/PingWAF/actions/workflows/ci.yml/badge.svg)](https://github.com/shuaiZend/PingWAF/actions/workflows/ci.yml)
 
 **[English](./README.md) | [简体中文](./README_zh.md) | [Español](./README_es.md) | [Français](./README_fr.md)**
 
@@ -42,9 +42,9 @@ Un unique **plan de contrôle** définit les sites, les règles et les politique
 - **Pools d'origine et routes** — équilibrage de charge round-robin, moindres connexions, aléatoire ou par hachage cohérent, avec routage par préfixe, correspondance exacte ou regex.
 - **Cache en périphérie** — quotas disque par site, `stale-while-revalidate` et contrôle du TTL navigateur.
 - **Réécriture requêtes/réponses** et **pages d'erreur personnalisées** avec des modèles Tera.
-- **TLS automatique** — émission et renouvellement ACME / Let's Encrypt en périphérie (HTTP-01 et DNS-01 avec Cloudflare, Route 53, DigitalOcean, Aliyun, DNSPod, CloudXNS ou manuel), avec état du certificat par site remonté au plan de contrôle.
+- **TLS automatique** — émission et renouvellement ACME / Let's Encrypt en périphérie (HTTP-01 et DNS-01 avec Aliyun, Cloudflare, Tencent Cloud DNSPod, Huawei Cloud ou manuel), avec état du certificat par site remonté au plan de contrôle. La vérification du certificat de l'origine HTTPS est un interrupteur explicite (Paramètres → Origine), avec une valeur par défaut globale et une dérogation par pool.
 - **Observabilité** — journaux complets dans Elasticsearch (optionnel), aperçus des en-têtes et du corps en PostgreSQL, et analytiques du trafic et des attaques.
-- **Console intégrée multilingue** (English / 简体中文 / 日本語), authentification JWT + bcrypt et isolation multi-locataires.
+- **Console intégrée multilingue** (English / 简体中文 / 日本語), authentification JWT + bcrypt, isolation multi-locataires et **versionnage de la configuration** (lister, comparer table par table et revenir en arrière après confirmation).
 
 ---
 
@@ -68,15 +68,7 @@ Ouvrez la console :
 
 > ⚠️ **Changez le mot de passe administrateur et `PINGWAF_JWT_SECRET` avant toute utilisation en production.**
 
-### Option B — Script d'installation (Linux)
-
-Les binaires préconstruits pour **Linux (amd64 / arm64)** sont disponibles dans les [Releases](https://github.com/shuaiZend/PingWAF/releases) :
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | sudo bash -s -- --mode all-in-one
-```
-
-### Option C — Compiler depuis les sources
+### Option B — Compiler depuis les sources
 
 Sur macOS (ou si vous préférez compiler), il faut **Rust 1.96+**, **Node.js 22**, `protoc` et `cmake` :
 
@@ -89,13 +81,21 @@ cargo build --release --bin pingwaf --features full
   --db-url "postgres://pingwaf:pingwaf@localhost:5432/pingwaf"
 ```
 
+### Option C — Script d'installation (Linux)
+
+Les binaires préconstruits pour **Linux (amd64 / arm64)** sont disponibles dans les [Releases](https://github.com/shuaiZend/PingWAF/releases) :
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | sudo bash -s -- --mode all-in-one
+```
+
 ### Ports par défaut
 
 | Port | Rôle |
 | --- | --- |
 | `9080` | API REST + console intégrée en HTTPS (santé : `GET /healthz`, aussi en HTTP) |
 | `9090` | Plan de contrôle gRPC (les agents s'y connectent) |
-| `80` / `443` | Trafic proxifié (liés à la création du premier site) |
+| `80` / `443` | Trafic proxifié (liés à la création du premier site ; le `443` ne s'ouvre qu'après l'émission ou le téléversement d'un certificat — jusque-là seul le `80` sert du HTTP) |
 
 ---
 

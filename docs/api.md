@@ -543,6 +543,8 @@ Create an origin pool.
 
 `lb_algorithm` accepts `round_robin`, `random`, `least_connections` or `hash:<type>[:<key>]` with type in `ip`, `url`, `path` (no key) or `header`, `cookie`, `query` (key required). A non-empty `sni` enables TLS to the origin.
 
+`verify_cert` is tri-state: `true` requires the origin's certificate to validate against the system trust store or the pool's own CA, `false` accepts any certificate (not recommended), and `null` — the default — defers to [the global `/settings/origin` value](#get-settingsorigin). Only meaningful when `sni` is set.
+
 ### PUT /sites/{site_id}/upstream-pools/{pool_id}
 
 Update an origin pool (`sni: ""` disables origin TLS).
@@ -676,7 +678,7 @@ role.
 
 | Field | Behaviour at the edge |
 |-------|-----------------------|
-| `hsts_enabled` / `hsts_max_age` | Adds `Strict-Transport-Security: max-age=<n>` to HTTPS responses. `max-age` is 1-63072000 seconds (two years); `hsts_max_age: 0` is what browsers read as "stop pinning", so the console defaults to `15552000` (180 days) when HSTS is switched on. |
+| `hsts_enabled` / `hsts_max_age` | Adds `Strict-Transport-Security: max-age=<n>` to HTTPS responses. `max-age` is 0-63072000 seconds (two years); `hsts_max_age: 0` is what browsers read as "stop pinning", so the console defaults to `15552000` (180 days) when HSTS is switched on. |
 | `always_use_https` | Plain HTTP requests are answered `301` with the `https://` equivalent before any rule runs. The two listeners share one location, so this is safe to enable with traffic on both ports. **Browsers cache HSTS**: when testing, keep `hsts_max_age` low or use a throwaway domain, or a redirect will haunt the browser for months. |
 | `mtls_enabled` / `mtls_require_client_cert` / `mtls_organization` | Requires a client certificate; see [mTLS](#mtls). |
 | `min_tls_version` / `max_tls_version` | Accepted as `1.0`, `1.1`, `1.2` (default) or `1.3`. |
@@ -2380,6 +2382,53 @@ background watcher within about 15 seconds.
 
 **Response (200):** the updated row, same shape as `GET`.
 
+### GET /settings/origin
+
+The deployment-wide default for validating an HTTPS origin's certificate,
+stored as a single row. Administrators only. It applies to every origin pool
+that does not state a `verify_cert` of its own, so one self-signed origin can
+opt out without weakening the rest of the deployment.
+
+With `verify_cert` **off** (the value the console writes by default) the data
+plane accepts any origin certificate — including one it cannot chain to a
+trust store. That is what self-signed and internal-PKI origins need, and it
+keeps an existing deployment serving across an upgrade; it is not recommended
+for origins that present a publicly trusted certificate. Set it to `true` to
+require a chain that validates against the system trust store or the pool's
+own `ca`.
+
+**Response (200):**
+```json
+{
+  "id": 1,
+  "verify_cert": false,
+  "updated_at": "2026-10-13T00:00:00Z"
+}
+```
+
+The row is created with `verify_cert: false` on first read. A failed read
+degrades to that same lenient value rather than failing, because the check is
+a per-request data-plane decision and failing it closed would turn a
+transient database problem into a `502` for every HTTPS origin.
+
+### PUT /settings/origin
+
+Set the global origin certificate check. Administrators only. The value rides
+inside every rule bundle, so a change marks all site configurations as changed
+and pushes fresh bundles to the agents right away — no restart, no per-pool
+edit.
+
+**Request:**
+```json
+{
+  "verify_cert": true
+}
+```
+
+`verify_cert` is required; a body without it is rejected with `400`.
+
+**Response (200):** the updated row, same shape as `GET`.
+
 ### GET /settings/api-protection
 
 The 9080 listener's self-protection: its own access log, IP allowlist and
@@ -2467,6 +2516,69 @@ Add the address (or retry with `force: true`) to apply it anyway. The
 HTTP access is already gone.
 
 **Response (200):** the same view as `GET`.
+
+---
+
+## Configuration versions
+
+Every configuration push records a version of the rows it changed — per site,
+or deployment-wide for the global settings. The console's **Config versions**
+page is built on the three endpoints below; all of them are administrators
+only.
+
+### GET /config-versions
+
+List versions, newest first, without their snapshot payloads.
+
+| Query | Meaning |
+| --- | --- |
+| `site_id` | A site UUID, or `global` for deployment-wide versions. Omit for both. Anything else is a `400`. |
+| `limit` | Rows to return, default `50`, clamped to `1..=200`. |
+| `offset` | Rows to skip, default `0`. |
+
+**Response (200):**
+```json
+[
+  {
+    "id": 412,
+    "site_id": "3f5c…",
+    "site_domain": "example.com",
+    "config_hash": "…",
+    "source": "console",
+    "actor": "admin@example.com",
+    "summary": { "sites": 1, "site_rules": 12 },
+    "created_at": "2026-10-13T09:31:02Z"
+  }
+]
+```
+
+`site_id` is `null` for a global version, and `site_domain` is resolved for
+display. `summary` holds the per-table row counts captured with the version,
+which is what the console diffs against the previous version.
+
+### GET /config-versions/{version_id}
+
+The full snapshot, including the row payloads. Returns `404` when the version
+does not exist.
+
+### POST /config-versions/{version_id}/rollback
+
+Restore a snapshot. The rows are rewritten inside a transaction, then the
+restored configuration is pushed to the agents like any other change — a site
+version through its own bundle, a global version through all of them. The
+rollback is itself recorded as a new version attributed to the operator, so
+rolling back a rollback works and the history stays linear.
+
+**Response (200):**
+```json
+{
+  "restored_version": 412,
+  "new_version": 418,
+  "scope": "3f5c…"
+}
+```
+
+`scope` is `"global"` for a deployment-wide rollback, otherwise the site UUID.
 
 ---
 

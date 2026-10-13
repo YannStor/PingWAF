@@ -160,8 +160,8 @@ and therefore no file key:
 | Environment Variable | Default | Description |
 |----------------------|---------|-------------|
 | `PINGWAF_JWT_EXPIRATION_HOURS` | `12` | Access token lifetime |
-| `PINGWAF_ALLOW_REGISTRATION` | `true` (code); `docker-compose.yml` and `install.sh` set `false` | Allow new user signups |
-| `PINGWAF_HEARTBEAT_INTERVAL` | `15` | Heartbeat interval handed to agents at registration |
+| `PINGWAF_ALLOW_REGISTRATION` | `true` (code); `docker-compose.yml` sets `false` | Allow new user signups |
+| `PINGWAF_HEARTBEAT_INTERVAL` | `15` | Heartbeat interval handed to agents at registration. The agent-side `--heartbeat-interval-secs` flag reads the same variable and falls back to `30` |
 | `PINGWAF_DB_MAX_CONNECTIONS` | `20` | Connection pool maximum |
 | `PINGWAF_METRIC_RETENTION_DAYS` | `7` | Days of edge-metric samples kept in `agent_metrics` |
 | `PINGWAF_CORS_ORIGINS` | `[]` (all) | Allowed CORS origins, comma-separated |
@@ -178,10 +178,10 @@ server-side log batch size (`500`) are compiled-in constants with no override.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `server_url` | string | `http://localhost:9090` | Control plane gRPC URL |
+| `server_url` | string | `http://localhost:9090` (`--server-url`); the compiled-in struct default is `https://localhost:9090` and applies when the key is absent from the file | Control plane gRPC URL |
 | `server_ca_cert` | string | — | PEM file with the CA that signed the control plane's TLS certificate (required for private CAs; bundled roots are used otherwise) |
 | `api_key` | string | `""` | Agent authentication key (empty = auto-register over loopback in all-in-one) |
-| `cache_dir` | string | `./data/cache` | Local rule cache directory |
+| `cache_dir` | string | `./data/cache` (`--cache-dir`); the compiled-in struct default is `/var/lib/pingwaf/cache` and applies when the key is absent from the file | Local rule cache directory |
 | `fail_open` | bool | `true` | Local fallback while disconnected: `true` keeps serving with the last synced rules; `false` answers 503 for hosts without synced rules. The per-site failover policy (console → site → basic) and the control-plane-wide default (settings → defense) take precedence once synced |
 | `heartbeat_interval_secs` | int | `30` | Fallback heartbeat frequency, used only when the control plane hands no interval down at registration |
 | `log_batch_size` | int | `100` | Log entries before flush |
@@ -268,8 +268,9 @@ pingwaf agent --server-url "http://control-plane:9090" --api-key "your-agent-key
 Generate an agent API key from the dashboard: **Settings → API Keys → Create Key**.
 
 The log, certificate-event and metric shipping streams authenticate with the
-agent token sent as `x-agent-token` gRPC metadata. **Upgrade agents before
-the control plane** in distributed deployments: a new server rejects shipping
+agent token sent as `x-agent-token` gRPC metadata. **In distributed
+deployments, upgrade the control plane first, then the agents** (see
+[Rolling Upgrade](#rolling-upgrade-distributed)): a new server rejects shipping
 streams that carry no token, while an old server simply ignores the metadata.
 
 ## SSL/TLS Configuration
@@ -300,6 +301,26 @@ curl -k -X POST https://localhost:9080/api/v1/sites/{site_id}/certificates \
     "domains": ["example.com", "*.example.com"]
   }'
 ```
+
+### Origin Certificate Verification
+
+When a site's origin pool has an SNI hostname, traffic to the origin goes over
+HTTPS. Whether that origin's certificate is validated is a separate decision
+from the certificate the proxy serves to clients:
+
+- **Global default** — **Settings → Origin** in the dashboard, or
+  `PUT /api/v1/settings/origin`. The console writes `verify_cert: false` so
+  that self-signed and internal-PKI origins keep working; set it to `true`
+  when every origin presents a publicly trusted certificate. The value reaches
+  the agents through the next rule bundle, so no restart is needed.
+- **Per pool** — an origin pool's own `verify_cert` always wins. `true`
+  forces validation, `false` forces acceptance, and leaving it unset inherits
+  the global default.
+
+Accepting an unvalidated origin certificate means an attacker who can
+intercept the connection to the origin can impersonate it. Prefer issuing the
+origin a certificate from a CA the proxy trusts (a private CA works: upload it
+as the pool's `ca` file) and enabling verification, rather than disabling it.
 
 ### Control-Plane Certificate (dashboard)
 
@@ -439,6 +460,20 @@ A hardening pass before exposing the control plane beyond localhost:
   availability for guaranteeing the WAF sees every request. With a closed
   policy, remember the window between agent start and first sync refuses
   traffic for all hosts.
+- **Verify origin certificates where you can.** The console defaults
+  `Settings → Origin` to off, which accepts any certificate from an HTTPS
+  origin and therefore allows an on-path attacker to impersonate it. Turn it
+  on once origins present a certificate the proxy can chain — a private CA
+  works, uploaded as the pool's `ca` — and keep per-pool overrides for the
+  few origins that cannot.
+- **Treat cache rules as shared by default.** A response is only cached when
+  the origin allows it, but a cache rule toggled on with a long TTL will
+  serve one user's response to the next unless the origin marks it
+  personalised (`private`, `no-store`, `Cache-Control: no-cache`) or sends
+  `Vary` on the request dimensions. Responses carrying `Set-Cookie` and
+  requests carrying `Authorization` are excluded unless the origin opts in
+  explicitly, so origins that authenticate through a header other than
+  `Authorization` rely on you marking those responses correctly.
 - **Session revocation semantics.** Accounts carry a token version;
   changing a password, disabling an account, or changing its role bumps the
   version and immediately invalidates that account's access and refresh
@@ -491,6 +526,15 @@ sudo systemctl restart pingwaf
 ```
 
 Database migrations run automatically on startup.
+
+Upgrading to the release that adds the origin certificate switch (migration
+52) resets `verify_cert` on every origin pool that had it stored as `false` to
+"unset". Under the old two-state field, `false` meant "not configured"; it now
+means "accept any certificate", so leaving those rows would have pinned them
+to the lenient behaviour and ignored the new global switch. The pools fall
+back to the global default, which that migration seeds as `false` as well —
+behaviour is unchanged on upgrade. Review **Settings → Origin** afterwards and
+turn verification on where the origins can support it.
 
 ### Rolling Upgrade (Distributed)
 

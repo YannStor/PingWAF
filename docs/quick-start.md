@@ -86,7 +86,7 @@ Port summary:
 
 | Component | Minimum | Notes |
 | --- | --- | --- |
-| Rust | **1.96** (MSRV) | The project Docker image builds with 1.98.0 |
+| Rust | **1.96** (MSRV) | CI tracks stable; the Docker image and the release binaries build with 1.98.1 |
 | Node.js | **22** | Only needed to build the dashboard frontend |
 | PostgreSQL | **14+** | 16 recommended; Docker Compose ships `postgres:16-alpine` |
 | Docker Engine | 24+ | With Compose v2 (`docker compose`, not `docker-compose`) |
@@ -694,8 +694,8 @@ one:
 | `--admin-password` | `PINGWAF_ADMIN_PASSWORD` | `pingwaf123` | Seeded administrator password |
 | `--serve-frontend` | `PINGWAF_SERVE_FRONTEND` | `true` | Serve the embedded dashboard SPA |
 | — | `PINGWAF_JWT_EXPIRATION_HOURS` | `12` | Access-token lifetime |
-| — | `PINGWAF_ALLOW_REGISTRATION` | `true` (code); compose/install.sh set `false` | Allow new user signups |
-| — | `PINGWAF_HEARTBEAT_INTERVAL` | `15` | Heartbeat interval handed to agents |
+| — | `PINGWAF_ALLOW_REGISTRATION` | `true` (code); compose sets `false` | Allow new user signups |
+| — | `PINGWAF_HEARTBEAT_INTERVAL` | `15` | Heartbeat interval handed to agents (the agent-side `--heartbeat-interval-secs` flag reads the same variable and falls back to `30`) |
 | — | `PINGWAF_DB_MAX_CONNECTIONS` | `20` | Connection pool maximum |
 | — | `PINGWAF_METRIC_RETENTION_DAYS` | `7` | Days of edge-metric samples kept |
 | — | `PINGWAF_CORS_ORIGINS` | `[]` (all) | Allowed CORS origins, comma-separated |

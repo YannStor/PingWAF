@@ -22,14 +22,17 @@ Sampling is process-global: a second concurrent capture gets `409 Conflict`. Rep
 Control plane:
 
 ```bash
-go tool pprof -http=: http://localhost:8080/api/v1/debug/pprof/profile?seconds=30
+go tool pprof -http=: http://localhost:9080/api/v1/debug/pprof/profile?seconds=30
 ```
 
-Data plane (admin path below is `/admin`, adjust to your config; use `-H` or a browser session for the admin plugin's auth):
+Data plane (profiling is served by the binary's own admin plugin, which is only
+mounted when you pass `--admin`; replace `<admin-addr>` / `<admin-path>` with your
+values — e.g. `127.0.0.1:3018` and `/admin` in `make dev` — and use `-H` or a
+browser session for the plugin's auth):
 
 ```bash
 curl -u admin:password \
-  "http://localhost:3000/admin/api/pprof/profile?seconds=30" -o pingwaf-cpu.pb.gz
+  "http://<admin-addr>/<admin-path>/api/pprof/profile?seconds=30" -o pingwaf-cpu.pb.gz
 go tool pprof -http=: pingwaf-cpu.pb.gz
 ```
 
@@ -37,7 +40,7 @@ Flamegraph without Go tooling:
 
 ```bash
 curl -u admin:password \
-  "http://localhost:3000/admin/api/pprof/flamegraph?seconds=30" > flamegraph.svg
+  "http://<admin-addr>/<admin-path>/api/pprof/flamegraph?seconds=30" > flamegraph.svg
 open flamegraph.svg
 ```
 

@@ -17,7 +17,7 @@ cookie to visitors that solve it.
 | `clearance_duration_secs` | int | `1800` | Lifetime of the clearance cookie (seconds). |
 | `rate_threshold` | int | `100` | Requests per 60-second window above which a visitor is challenged. |
 | `pow_difficulty` | int | `20` | Proof-of-work difficulty (leading zero bits). Higher = harder for bots, slower for users. |
-| `cookie_secret` | string | `change-me` | HMAC key used to sign clearance cookies. **Change this in production.** |
+| `cookie_secret` | string | *(generated)* | HMAC key used to sign clearance cookies. Leave it unset (or set to the legacy `change-me`) and the process generates a random key instead — set it explicitly only if the secret must survive restarts. |
 | `cookie_name` | string | `__pingwaf_clearance` | Name of the clearance cookie. |
 | `exempt_paths` | string[] | `[]` | Paths that bypass the challenge (health checks, APIs). |
 | `exempt_user_agents` | string[] | `[]` | User-agent substrings that bypass the challenge. |
@@ -32,7 +32,11 @@ cookie to visitors that solve it.
    either sets the clearance cookie and returns a redirect to the original URL,
    or returns a `403` block page.
 2. **Clearance cookie** — if the request carries a valid, unexpired clearance
-   cookie the request passes immediately without further checks.
+   cookie issued for the same site and at a sufficient challenge level, the
+   request passes immediately without further checks. A cookie issued by
+   another site is ignored even when the signature verifies: the cookie
+   secret is per process, so without the site check one solved challenge
+   would clear every site served by that process.
 3. **Rate tracking** — the per-IP request count in the current 60-second window
    is recorded and fed to the challenge engine.
 4. **Engine decision:**
@@ -87,8 +91,10 @@ the challenge plugin.
 
 ## Usage notes
 
-- Set `cookie_secret` to a long random value in production. The default
-  (`change-me`) is trivially forgeable.
+- Set `cookie_secret` to a long random value if the clearance cookies must stay
+  valid across restarts. When it is unset (or left at the legacy `change-me`),
+  the process generates a random secret at startup and logs a warning, so
+  cookies are invalidated by a restart but are never signed with a public key.
 - `exempt_paths` is a prefix match: `/api` exempts `/api`, `/api/v1`, etc.
 - Per-IP rate counters are per-process. Behind a load balancer with N instances
   the effective threshold is N × `rate_threshold`.

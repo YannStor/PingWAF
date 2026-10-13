@@ -8,7 +8,7 @@ Semantic-grade attack detection · Cloudflare-style rules · CC & Bot defense ·
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.96%2B-orange.svg)](https://www.rust-lang.org/)
-[![Build](https://github.com/shuaiZend/PingWAF/actions/workflows/test.yml/badge.svg)](https://github.com/shuaiZend/PingWAF/actions/workflows/test.yml)
+[![Build](https://github.com/shuaiZend/PingWAF/actions/workflows/ci.yml/badge.svg)](https://github.com/shuaiZend/PingWAF/actions/workflows/ci.yml)
 [![Docker](https://img.shields.io/badge/docker-compose%20ready-2496ED?logo=docker&logoColor=white)](./docker-compose.yml)
 
 **[English](./README.md) | [简体中文](./README_zh.md) | [Español](./README_es.md) | [Français](./README_fr.md)**
@@ -112,10 +112,11 @@ The control plane and the data plane talk over the `ControlPlane` gRPC service (
 
 ### 🔐 TLS & Certificates
 - **Automatic ACME / Let's Encrypt** issuance and renewal on the edge (HTTP-01 and DNS-01).
-- **Multiple DNS providers** for DNS-01 (Cloudflare, Route 53, DigitalOcean, Aliyun, DNSPod, CloudXNS, manual).
+- **Multiple DNS providers** for DNS-01 (Aliyun, Cloudflare, Tencent Cloud DNSPod, Huawei Cloud, manual).
 - **Per-site certificate status** (`valid` / `expiring soon` / `expired`) reported to the control plane over heartbeats, with a searchable ACME event log.
 - **HSTS and forced HTTPS** applied at the edge, with a 180-day default `max-age`.
 - **Mutual TLS (mTLS)** — generate or import a CA, issue client certificates from the console, and revoke a single certificate with immediate effect at the edge; a certificate is refused when it is revoked or was issued for another site.
+- **HTTPS origin certificate verification is an explicit switch** — a deployment-wide default in **Settings → Origin**, overridable per origin pool. The default accepts any origin certificate so self-signed and internal-PKI origins keep working; turn it on where origins present a trusted certificate.
 
 ### 📊 Observability
 - **Full request logging to Elasticsearch** with body truncation and a WAL buffer for reliability.
@@ -128,6 +129,7 @@ The control plane and the data plane talk over the `ControlPlane` gRPC service (
 - **Passkey sign-in** (WebAuthn) alongside passwords — bind a platform authenticator or security key from Settings and sign in without a password.
 - **Embedded i18n dashboard** (English / 简体中文 / 日本語), compiled into the binary via `rust-embed`.
 - **Everything is off by default** — enable protections explicitly, per site.
+- **Configuration versioning** — the console lists every configuration snapshot with filters, diffs a version against its predecessor table by table, and rolls back behind a confirmation.
 
 ---
 
@@ -151,6 +153,7 @@ The control plane and the data plane talk over the `ControlPlane` gRPC service (
 | [`pingwaf-agent`](./pingwaf-agent) | Data-plane agent: connects to the control plane, caches rules with disk persistence, ships logs/metrics, receives commands |
 | [`pingwaf-waf`](./pingwaf-waf) | Detection engine: normalize → signatures → expression → anomaly score |
 | [`pingwaf-challenge`](./pingwaf-challenge) | Dynamic challenges: JS 5-second shield, interactive challenge, PoW, fingerprinting, HMAC clearance cookies |
+| [`pingwaf-pprof`](./pingwaf-pprof) | Built-in profiling: `go tool pprof` CPU profiles, SVG flame graphs, memory snapshots (CPU sampling is Linux-only) |
 
 ---
 
@@ -192,7 +195,7 @@ everything else redirects to `https://`).
 
 | Tool | Version | Notes |
 | --- | --- | --- |
-| Rust | 1.96+ (MSRV) | CI/Docker build with 1.98.1 |
+| Rust | 1.96+ (MSRV) | CI tracks stable; the Docker image and release binaries build with 1.98.1 |
 | Node.js | 22 | Required to build the dashboard |
 | `protoc` | any recent | **Required** — gRPC code generation |
 | `cmake` | any recent | Required to build the TLS backend (OpenSSL) |
@@ -279,8 +282,8 @@ PINGWAF_CONFIG=/etc/pingwaf/pingwaf.toml pingwaf all-in-one   # equivalent
 | `PINGWAF_JWT_SECRET` | `change-me-in-production` | JWT signing secret (**≥ 16 chars**, change in production) |
 | `PINGWAF_ADMIN_EMAIL` | `admin@pingwaf.local` | Seeded administrator email |
 | `PINGWAF_ADMIN_PASSWORD` | `pingwaf123` | Seeded administrator password (**change in production**) |
-| `PINGWAF_ALLOW_REGISTRATION` | `true` | Whether `POST /api/v1/auth/register` accepts signups (`docker-compose.yml` and `install.sh` set this to `false`) |
-| `PINGWAF_HEARTBEAT_INTERVAL` | `15` | Heartbeat interval handed to agents (seconds) |
+| `PINGWAF_ALLOW_REGISTRATION` | `true` | Whether `POST /api/v1/auth/register` accepts signups (`docker-compose.yml` sets this to `false`) |
+| `PINGWAF_HEARTBEAT_INTERVAL` | `15` | Heartbeat interval the control plane hands to agents at registration (seconds). The agent-side `--heartbeat-interval-secs` flag reads the same variable but falls back to `30`, and only applies when the control plane hands nothing down |
 | `PINGWAF_TLS_ENABLED` | `true` | Serve the REST API + dashboard over HTTPS (self-signed until replaced); `false` behind a TLS-terminating proxy |
 | `PINGWAF_TLS_SANS` | hostname, `localhost`, `127.0.0.1` | Comma-separated SANs of the generated self-signed certificate |
 | `PINGWAF_SERVER_URL` | `http://localhost:9090` | *(agent)* control-plane gRPC URL |

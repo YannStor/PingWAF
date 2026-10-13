@@ -67,7 +67,7 @@ it owns, how it is configured and where it sits in the dependency graph:
 | [pingap-core](../pingap-core/README.md) | `Ctx`, `HttpResponse`, the `Plugin` trait, background services, clock helpers |
 | [pingap-config](../pingap-config/README.md) | Configuration model, storage backends, TOML/HCL/KDL |
 | [pingap-discovery](../pingap-discovery/README.md) | Static / DNS / Docker / transparent backend discovery |
-| [pingap-health](../pingap-health/README.md) | TCP, HTTP(S) and gRPC health checks |
+| [pingap-health](../pingap-health/README.md) | TCP, HTTP(S), gRPC, WS and WSS health checks |
 | [pingap-upstream](../pingap-upstream/README.md) | Load balancing, circuit breaking, upstream connection options |
 | [pingap-location](../pingap-location/README.md) | Host/path matching, rewriting, per-location limits |
 | [pingap-certificate](../pingap-certificate/README.md) | SNI-based dynamic TLS certificate store |

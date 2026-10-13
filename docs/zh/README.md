@@ -1,188 +1,94 @@
-# Pingap
+# PingWAF 文档
 
-<p class="hero-logo"><img src="../../asset/pingap-logo.png" alt="Pingap" width="96" height="96" /></p>
+欢迎查阅 PingWAF 文档索引。PingWAF 是基于 [`pingap`](https://github.com/vicanso/pingap) 与 Cloudflare
+[`Pingora`](https://github.com/cloudflare/pingora) 构建的**分布式、集中控制的 Web 应用防火墙**。
 
-基于 [Cloudflare Pingora](https://github.com/cloudflare/pingora) 的高性能反向代理，支持配置热更新、Web 管理界面与 20+ 插件（认证、限流、缓存、可观测性等）。
+> 项目主页：[`README_zh.md`](../../README_zh.md) · [English](../README.md)
 
-| | |
+## 🚀 快速上手
+
+| 文档 | 内容 |
 | --- | --- |
-| **从这里开始** | [快速开始](#快速开始docker) · [插件](plugins/) · [组件](crates/) · [架构](guide/modules.md) · [示例](guide/examples.md) · [内置性能剖析](profiling.md) |
-| **链接** | [English](/) · [GitHub](https://github.com/vicanso/pingap) · [Releases](https://github.com/vicanso/pingap/releases) |
+| [quick-start.md](../quick-start.md) | 从零到第一个受保护站点：环境要求、安装、首次运行 |
+| [deployment.md](../deployment.md) | Docker Compose、二进制 + systemd、分布式（server + agent）拓扑 |
+| [user-guide.md](../user-guide.md) | 控制台使用：站点、规则、策略、IP 访问控制、限流 |
+| [http-lifecycle.md](./http-lifecycle.md) | 请求生命周期中各功能的作用阶段——WAF 检查顺序、缓存、错误页，以及如何据此排查问题 |
+| [api.md](../api.md) | REST API 参考（基址 `https://<host>:9080/api/v1`） |
+| [profiling.md](./profiling.md) | 内置剖析：`go tool pprof` 采集、SVG 火焰图、内存快照 |
 
-## 核心特性
+## 🧭 项目与社区
 
-- **高性能** — Rust + Pingora；HTTP/1.1、HTTP/2、gRPC-Web
-- **热更新** — 零停机配置变更（`--autoreload` / `--autorestart`）
-- **Web 管理** — 在 UI 中管理 server、location、upstream 与插件
-- **插件** — 认证、访问控制、限流、缓存、CORS、静态文件等
-- **服务发现** — 静态列表、DNS、Docker 标签、透明代理
-- **ACME** — Let's Encrypt HTTP-01 与 DNS-01（含通配符）
-- **可观测性** — Prometheus、OpenTelemetry、访问日志、Pyroscope、Sentry
-
-## 快速开始（Docker）
-
-```yaml
-# docker-compose.yml
-services:
-  pingap:
-    image: vicanso/pingap:latest
-    container_name: pingap-instance
-    restart: always
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./pingap_data:/opt/pingap
-    environment:
-      - PINGAP_CONF=/opt/pingap/conf
-      - PINGAP_ADMIN_ADDR=0.0.0.0:80/pingap
-      - PINGAP_ADMIN_USER=pingap
-      - PINGAP_ADMIN_PASSWORD=<YourSecurePassword>
-    command: ["pingap", "--autoreload"]
-```
-
-```bash
-mkdir pingap_data
-docker compose up -d
-# 管理后台: http://localhost/pingap
-```
-
-### 安装二进制
-
-```bash
-curl -sSL https://raw.githubusercontent.com/vicanso/pingap/main/install.sh | sh
-# 完整特性构建: PINGAP_FULL=1 sh
-# rustls TLS 后端（Linux，含全部特性）: PINGAP_TLS=rustls sh
-```
-
-### 一条命令启动 HTTPS 代理
-
-```bash
-# 证书向 Let's Encrypt 申请
-pingap --domain=pingap.io --upstream=192.168.1.1:3000
-
-# 或使用自己的证书
-pingap --domain=pingap.io --upstream=192.168.1.1:3000 --cert=/etc/ssl/pingap.io
-```
-
-不带 `--cert` 时，Pingap 通过 HTTP-01 质询向 Let's Encrypt 申请证书，因此 `pingap.io` 必须解析到本机，且 80 端口可从公网访问。签发的证书保存在 `~/.pingap/acme/<domains>.toml`，重启时复用——申请有速率限制，请勿删除。其余一切仍来自命令行：改动 `--upstream` 在下次启动时生效，不影响证书。
-
-`--cert` 接受证书文件本身或其所在目录——常见的 `fullchain.pem` / `privkey.pem`、`cert.pem` / `key.pem` 与 `tls.crt` / `tls.key` 布局会自动识别，其他命名用 `--key` 指定。有证书时监听默认为 `0.0.0.0:443`，既无证书也无域名时为 `0.0.0.0:80`，`--addr` 可覆盖。`--upstream` 为逗号分隔的后端列表，`--domain` 为逗号分隔的主机名（省略则以明文 http 服务所有主机），未列出的主机的请求返回 404。
-
-配置在每次启动时生成，因此不能通过管理界面修改：超出单个 server 的需求请使用 `--conf`，它不能与这些参数同时使用。
-
-## 架构（crates）
-
-```mermaid
-graph TD
-    acme --> certificate
-    acme --> config
-    acme --> core
-    cache --> core
-    certificate --> config
-    certificate --> core
-    certificate --> util
-    config --> core
-    config --> discovery
-    config --> util
-    discovery --> core
-    imageoptim --> config
-    imageoptim --> core
-    imageoptim --> plugin
-    location --> config
-    location --> core
-    logger --> core
-    logger --> util
-    performance --> cache
-    performance --> core
-    performance --> location
-    performance --> upstream
-    plugin --> cache
-    plugin --> config
-    plugin --> core
-    plugin --> util
-    proxy --> acme
-    proxy --> certificate
-    proxy --> config
-    proxy --> core
-    proxy --> location
-    proxy --> logger
-    proxy --> otel
-    proxy --> performance
-    proxy --> upstream
-    proxy --> util
-    upstream --> config
-    upstream --> core
-    upstream --> discovery
-    upstream --> health
-    webhook --> core
-```
-
-完整模块关系见 [架构](guide/modules.md)。
-
-## 插件分类
-
-| 分类 | 示例 |
+| 文档 | 内容 |
 | --- | --- |
-| 认证 | `basic_auth`, `key_auth`, `jwt`, `combined_auth`, `forward_auth`, `csrf` |
-| 访问控制 | `ip_restriction`, `referer_restriction`, `ua_restriction`, `geo_restriction` |
-| 流量控制 | `limit`, `traffic_splitting`, `cache` |
-| 内容 | `compression`, `directory`, `sub_filter`, `cors`, `redirect`, `image_optim` |
-| 运维 | `ping`, `mock`, `request_id`, `stats`, `admin` |
+| [CONTRIBUTING.md](../../CONTRIBUTING.md) | 如何参与贡献——环境准备、工作流、代码风格 |
+| [SECURITY.md](../../SECURITY.md) | 漏洞披露政策 |
+| [CODE_OF_CONDUCT.md](../../CODE_OF_CONDUCT.md) | 社区行为准则 |
+| [LICENSE](../../LICENSE) | Apache License 2.0 |
 
-完整索引与配置说明：**[插件](plugins/)**。
+## 🏗️ 架构一览
 
-## 配置示例
-
-```toml
-[servers.main]
-addr = "0.0.0.0:6188"
-locations = ["api"]
-
-[locations.api]
-upstream = "api"
-path = "/api"
-plugins = ["compression", "jwtAuth"]
-
-[upstreams.api]
-addrs = ["10.0.0.1:8080", "10.0.0.2:8080"]
-discovery = "dns"
-update_frequency = "30s"
-
-[plugins.jwtAuth]
-category = "jwt"
-header = "Authorization"
-secret = "change-me"
-algorithm = "HS256"
-
-[plugins.compression]
-category = "compression"
-gzip_level = 6
-br_level = 6
-zstd_level = 3
+```
+客户端 ──HTTP/HTTPS──► 数据面 Agent (:80/:443)
+                            │  gRPC 双向流（规则 / 日志 / 指标）
+                            ▼
+                     控制面 Server
+                     ├─ REST API + 控制台 (:9080, HTTPS)
+                     ├─ gRPC ControlPlane  (:9090)
+                     ├─ PostgreSQL（状态）
+                     └─ Elasticsearch（日志，可选）
 ```
 
-支持 **TOML**、**HCL** 与 **KDL**。详见 [pingap-config](crates/config.md)。
+用 `all-in-one` 在单进程内运行全部组件，或把控制面（`server`）与一个/多个边缘
+Agent（`agent`）拆开部署。
 
-## 请求生命周期
+## 📦 Crate 文档
 
-插件在代理流水线中的**某一个**步骤运行：
+PingWAF 在 `pingap` 代理基础之上新增了 **6 个 WAF 专属 crate**。
 
-| 步骤 | 时机 | 典型用途 |
-| --- | --- | --- |
-| `early_request` | 读完请求头、路由之前 | Accept-Encoding、压缩协商 |
-| `request` | 匹配到 location 之后 | 认证、限流、缓存、静态文件 |
-| `proxy_upstream` | 选择后端之前 | 不应在缓存命中时执行的检查 |
-| `upstream_response` | 上游响应头到达时 | 头改写、响应体变换 |
-| `response` | 发往客户端之前 | 响应头、sub_filter |
+**WAF crate：**
 
-详见 [pingap-proxy](crates/proxy.md) 与 [插件生命周期](plugins/#生命周期步骤)。
+| Crate | 职责 |
+| --- | --- |
+| [pingwaf-proto](../../pingwaf-proto) | 控制面 gRPC 协议定义（单一来源：`control_plane.proto`） |
+| [pingwaf-server](../../pingwaf-server) | 控制面：Axum REST + tonic gRPC + SeaORM/PostgreSQL + ES 日志 + 内嵌前端 + Agent 健康监控 |
+| [pingwaf-agent](../../pingwaf-agent) | 数据面 Agent：连接控制面、规则缓存 + 磁盘持久化、回传日志/指标、接收命令 |
+| [pingwaf-waf](../../pingwaf-waf) | 检测引擎：归一化 → 签名 → 表达式 → 异常评分 |
+| [pingwaf-challenge](../../pingwaf-challenge) | 动态挑战：JS 5 秒盾、交互式挑战、PoW、浏览器指纹、HMAC clearance cookie |
+| [pingwaf-pprof](../../pingwaf-pprof) | 内置剖析：`go tool pprof` CPU 剖析、SVG 火焰图、内存快照（CPU 采样仅限 Linux） |
 
-## 动态配置
+**代理基础（`pingap-*`）——每个 crate 都有自己的 README**，说明其职责边界、配置方式
+与在依赖图中的位置：
 
-- **热更新（`--autoreload`）**：多数变更（upstream、location、插件等）约 10 秒内就地生效，无需重启。容器环境推荐。
-- **平滑重启（`-a` / `--autorestart`）**：监听端口等基础变更时做零停机优雅重启。
+| Crate | 职责 |
+| --- | --- |
+| [pingap-util](../../pingap-util/README.md) | 加密、IP 规则、PEM/base64、路径与格式化工具 |
+| [pingap-core](../../pingap-core/README.md) | `Ctx`、`HttpResponse`、`Plugin` trait、后台服务、时钟辅助 |
+| [pingap-config](../../pingap-config/README.md) | 配置模型、存储后端、TOML/HCL/KDL |
+| [pingap-discovery](../../pingap-discovery/README.md) | 静态 / DNS / Docker / 透明代理后端发现 |
+| [pingap-health](../../pingap-health/README.md) | TCP、HTTP(S)、gRPC、WS 与 WSS 健康检查 |
+| [pingap-upstream](../../pingap-upstream/README.md) | 负载均衡、熔断、上游连接参数 |
+| [pingap-location](../../pingap-location/README.md) | Host/路径匹配、重写、按 location 的限额 |
+| [pingap-certificate](../../pingap-certificate/README.md) | 基于 SNI 的动态 TLS 证书存储 |
+| [pingap-acme](../../pingap-acme/README.md) | Let's Encrypt HTTP-01 与 DNS-01 自动化 |
+| [pingap-cache](../../pingap-cache/README.md) | 内存（TinyUFO）与文件缓存后端 |
+| [pingap-plugin](../../pingap-plugin/README.md) | 内置插件——见[插件索引](plugins/) |
+| [pingap-imageoptim](../../pingap-imageoptim/README.md) | PNG/JPEG → WebP/AVIF 转换 |
+| [pingap-logger](../../pingap-logger/README.md) | 访问日志、文件/syslog 输出、轮转与压缩 |
+| [pingap-performance](../../pingap-performance/README.md) | Prometheus 指标与进程自省 |
+| [pingap-otel](../../pingap-otel/README.md) | OpenTelemetry 分布式追踪 |
+| [pingap-sentry](../../pingap-sentry/README.md) | Sentry 错误上报 |
+| [pingap-pyroscope](../../pingap-pyroscope/README.md) | 持续 CPU 剖析 |
+| [pingap-webhook](../../pingap-webhook/README.md) | 运维通知（企业微信 / 钉钉 / HTTP） |
+| [pingap-proxy](../../pingap-proxy/README.md) | 代理引擎：生命周期、路由、服务端配置 |
 
-## 许可证
+## 🔌 插件文档
 
-Apache-2.0。见 [LICENSE](https://github.com/vicanso/pingap/blob/main/LICENSE)。
+每个插件都有独立页面，覆盖其配置键、可用示例以及部署前值得注意的边界条件：
+[插件索引](plugins/)。
+
+## 🌐 参考资料
+
+- [modules.md](./guide/modules.md) — 本仓库的模块关系图（`pingap-*` 与 `pingwaf-*`）。
+- [examples.md](./guide/examples.md) — 仓库内可直接运行的配置示例。
+- [acme_chart.md](../acme_chart.md) — ACME / Let's Encrypt 签发流程。
+- **英文文档** — [docs/README.md](../README.md)（home、plugins、crates、guide、[http-lifecycle](../http-lifecycle.md)）。

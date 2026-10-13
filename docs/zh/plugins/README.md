@@ -1,6 +1,6 @@
-# Pingap 插件
+# PingWAF 插件
 
-[Pingap](https://github.com/vicanso/pingap) 的内置插件。
+PingWAF 数据面（派生自 [Pingap](https://github.com/vicanso/pingap)）的内置插件。
 
 插件是自包含的请求/响应逻辑单元，在代理生命周期的明确阶段执行。插件声明一次后可挂到任意多个 location，使路由配置不必夹杂认证、限流、缓存或头改写等横切逻辑。
 
@@ -35,7 +35,7 @@ Pingap 将 `pingap-proxy/src/server.rs` 中的 pingora 回调映射为五个 `Pl
 | `upstream_response` | 上游响应头到达时 | 改写上游头、响应体变换 |
 | `response` | 响应头即将发往下游时 | 添加响应头、正文替换 |
 
-若 `step` 设为插件未实现的值，该插件静默跳过。只有 `directory`、`limit`、`request_id` 和 `stats` 会读取 `step`；其余插件固定自身步骤（见各插件文档）。
+若 `step` 设为插件未实现的值，该插件静默跳过。读取 `step` 的插件包括 `directory`、`limit`、`request_id`、`stats`、`challenge`、`waf`、`rewrite`、`mock` 与 `key_auth`；其余插件固定自身步骤（见各插件文档）。
 
 请求步骤插件的返回值：
 

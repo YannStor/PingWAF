@@ -22,14 +22,16 @@ PingWAF 在每个二进制中都内置了 pprof 风格的性能剖析——无�
 控制面：
 
 ```bash
-go tool pprof -http=: http://localhost:8080/api/v1/debug/pprof/profile?seconds=30
+go tool pprof -http=: http://localhost:9080/api/v1/debug/pprof/profile?seconds=30
 ```
 
-数据面（下例 admin 路径为 `/admin`，按实际配置调整；admin 插件鉴权用 `-H` 或浏览器会话）：
+数据面（剖析由二进制自带的 admin 插件提供，仅在传入 `--admin` 时挂载；请把
+`<admin-addr>` / `<admin-path>` 换成你的实际值——例如 `make dev` 下为
+`127.0.0.1:3018` 与 `/admin`——admin 插件鉴权用 `-H` 或浏览器会话）：
 
 ```bash
 curl -u admin:password \
-  "http://localhost:3000/admin/api/pprof/profile?seconds=30" -o pingwaf-cpu.pb.gz
+  "http://<admin-addr>/<admin-path>/api/pprof/profile?seconds=30" -o pingwaf-cpu.pb.gz
 go tool pprof -http=: pingwaf-cpu.pb.gz
 ```
 
@@ -37,7 +39,7 @@ go tool pprof -http=: pingwaf-cpu.pb.gz
 
 ```bash
 curl -u admin:password \
-  "http://localhost:3000/admin/api/pprof/flamegraph?seconds=30" > flamegraph.svg
+  "http://<admin-addr>/<admin-path>/api/pprof/flamegraph?seconds=30" > flamegraph.svg
 open flamegraph.svg
 ```
 

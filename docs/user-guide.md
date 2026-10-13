@@ -23,7 +23,8 @@ The dashboard provides:
 - **Logs**: Security events and access logs
 - **Account**: Profile, password, personal API keys and (for
   administrators) user management
-- **Settings**: Elasticsearch, global preferences, control-plane HTTPS
+- **Settings**: Elasticsearch, global preferences, origin certificate verification, control-plane HTTPS
+- **Config versions**: every configuration snapshot, with per-table diff and rollback
 
 ## Adding a Website
 
@@ -93,7 +94,7 @@ An origin pool is a set of origin nodes sharing one load-balancing algorithm and
 | Pool name | Label for the pool (e.g., "primary") |
 | Load balancing | `Round robin` or a hash algorithm (see below) |
 | SNI hostname | Non-empty enables **HTTPS to origin**; must be a bare hostname covered by the origin certificate (`$host` is not supported) |
-| Verify origin certificate | Turning this off skips certificate validation (not recommended) |
+| Verify origin certificate | Whether an HTTPS origin's certificate is validated. Unset inherits the global setting from the console's system settings; `true` requires a certificate that validates against the system trust store (or the pool's own CA); `false` accepts any certificate and is not recommended. |
 
 Load-balancing algorithms:
 
@@ -110,6 +111,14 @@ Load-balancing algorithms:
 | Query hash | `hash:query:<name>` | Pins by a query-string parameter |
 
 The site's default pool (marked **Default**) cannot be deleted, and a pool can only be deleted once no origin nodes and no routes reference it.
+
+The **Verify origin certificate** field only matters when the pool has an SNI
+hostname. Left unset it follows the deployment-wide default under
+**Settings → Origin**, which is off — accepting any certificate so that
+self-signed and internal-PKI origins keep working. Turn the global default on
+once every origin presents a certificate the proxy can chain to a trust store
+(a private CA counts; upload it to the pool), and leave per-pool overrides
+unset unless a specific origin cannot comply.
 
 ### Routes
 
@@ -286,14 +295,12 @@ Sites → [site] → Certificates → Add → Let's Encrypt
 
 **Challenge Types:**
 - **HTTP-01**: Requires port 80 reachable. Best for most setups.
-- **DNS-01**: Supports wildcard certificates. Providers:
-  - Cloudflare
-  - Route 53
-  - DigitalOcean
-  - Aliyun (Alibaba Cloud)
-  - DNSPod (Tencent Cloud)
-  - CloudXNS
-  - Manual
+- **DNS-01**: Supports wildcard certificates. Providers (`dns_provider` value in parentheses):
+  - Aliyun (Alibaba Cloud) — `ali`
+  - Cloudflare — `cf`
+  - DNSPod (Tencent Cloud) — `tencent`
+  - Huawei Cloud — `huawei`
+  - Manual — anything else
 
 Certificates auto-renew 30 days before expiry.
 
@@ -607,6 +614,25 @@ claude mcp add --transport http pingwaf https://waf.example.com:9080/mcp \
 ```
 
 Read-only credentials see only the read tools; administrators with a `write` key may also call `set_observation_mode` and `set_site_status`. The endpoint sits behind the same API protection as the console (access log, IP allowlist, WAF), so it obeys whatever **Settings → API protection** allows.
+
+## Config Versions
+
+**Config versions** in the sidebar records a version of the configuration on
+every change — per site, and deployment-wide for the global settings — and
+lets you roll one back. Administrators only.
+
+- **The list** shows each version's scope (site domain or global), config
+  hash, source, operator and row counts. Filter by scope and date, and page
+  through the history.
+- **The detail view** compares a version with the one before it, table by
+  table, so you can see exactly which rows a change touched before deciding.
+- **Rollback** restores the selected snapshot's rows and pushes the restored
+  configuration to the agents, behind a confirmation. The rollback is itself
+  recorded as a new version attributed to you, so it appears at the top of the
+  list and can be rolled back in turn.
+
+Rolling back is a configuration change like any other: agents pick it up
+through their normal bundle update, so nothing needs restarting.
 
 ## Internationalization (i18n)
 

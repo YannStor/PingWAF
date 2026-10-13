@@ -1,4 +1,10 @@
-# Pingap Modules 
+# Pingap Modules
+
+> PingWAF's workspace contains the upstream `pingap-*` crates below **plus** six
+> WAF-specific crates. The two are listed separately in
+> [docs/README.md](README.md#-crate-documentation): `pingwaf-proto`,
+> `pingwaf-server`, `pingwaf-agent`, `pingwaf-waf`, `pingwaf-challenge` and
+> `pingwaf-pprof`.
 
 - `acme`: Handles Automated Certificate Management Environment (ACME) protocol for automated SSL/TLS certificate issuance and renewal
 - `cache`: Manages caching mechanisms for improved performance and reduced backend load

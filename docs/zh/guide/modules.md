@@ -1,4 +1,11 @@
-# Pingap 模块
+# PingWAF 模块
+
+> 本仓库在下列上游 `pingap-*` 模块之外，还包含 6 个 WAF 专属 crate：
+> `pingwaf-proto`、`pingwaf-server`、`pingwaf-agent`、`pingwaf-waf`、
+> `pingwaf-challenge`、`pingwaf-pprof`。两者的完整说明见
+> [文档索引](../README.md#-crate-文档)。
+>
+> 本页下方的依赖图描述的是 `pingap-*` 代理基础部分。
 
 - `acme`：基于 ACME 协议自动申请与续期 SSL/TLS 证书
 - `cache`：缓存机制，提升性能并降低后端负载
@@ -11,7 +18,7 @@
 - `logger`：日志能力与日志管理
 - `otel`：OpenTelemetry 集成，用于分布式追踪与指标
 - `performance`：性能指标
-- `proxy`：Pingap 代理服务
+- `proxy`：PingWAF 数据面的代理服务（派生自 pingap）
 - `plugin`：插件系统，用于扩展功能
 - `pyroscope`：集成 Pyroscope 做持续剖析
 - `sentry`：通过 Sentry 做错误追踪与监控

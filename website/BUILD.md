@@ -1,14 +1,14 @@
 # Building the documentation site
 
-Bilingual documentation for Pingap, built with **[VitePress](https://vitepress.dev/)**
-and deployed to GitHub Pages (custom domain <https://pingap.io/>).
+Bilingual documentation for PingWAF, built with **[VitePress](https://vitepress.dev/)**
+and deployed to GitHub Pages.
 
 ## Languages
 
 | URL | Language | Source of truth |
 | --- | --- | --- |
-| <https://pingap.io/> | English (default) | `pingap-*/README.md`, `pingap-plugin/docs/*`, `docs/`, `examples/` |
-| <https://pingap.io/zh/> | 中文 | `docs/zh/**` |
+| `/` | English (default) | `pingap-*/README.md`, `pingap-plugin/docs/*`, `docs/`, `examples/` |
+| `/zh/` | 中文 | `docs/zh/**` |
 
 ## Layout
 
@@ -61,7 +61,10 @@ Edit files under `docs/zh/` (not under `website/zh/`). Then re-run
 
 ## CI
 
-`.github/workflows/pages.yml`:
+**There is currently no Pages workflow in this repository.** `.github/workflows/`
+holds `audit.yml`, `ci.yml`, `mark-stale.yaml` and `release.yml` only — no
+`pages.yml`. The steps below are what a Pages deploy needs, and are the manual
+procedure until a workflow exists:
 
 1. Runs `scripts/build-website.sh`
 2. `npm ci && npm run docs:build` in `website/`
