@@ -124,7 +124,7 @@ msrv:
 
 
 bloat:
-	cargo bloat --release --crates --bin pingap
+	cargo bloat --release --crates --bin pingwaf
 
 outdated:
 	cargo outdated
@@ -158,7 +158,7 @@ release-rustls-full:
 
 release-all:
 	cargo build --release --features=full
-	mv target/release/pingap target/release/pingap-full
+	mv target/release/pingwaf target/release/pingwaf-full
 	cargo build --release
 	ls -lh target/release
 
@@ -197,3 +197,11 @@ bump:
 # Fails when the two places disagree, which builds from a path checkout hide.
 check-version:
 	./scripts/bump-version.sh --check
+
+# Static consistency checks for docs and agent prompts: frontmatter, model
+# names, cross references, markdown links. No toolchain deps, runs anywhere.
+# Not in GUARDED: touches no cargo artifacts, so the disk guard is pointless.
+check-docs:
+	./scripts/check-docs-prompts.sh
+
+.PHONY: check-docs

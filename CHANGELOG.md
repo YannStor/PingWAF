@@ -8,11 +8,44 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
-## [unreleased]
+## [PingWAF 0.25.12] — 2026-10-14
 
-The security-release batch: three P0 reverse-proxy defects, nine P1
-functional defects, an HTTPS origin-certificate verification switch, and
-the missing front end for config versioning.
+The hardening release: crash-safe agent rule-cache persistence, a CI gate
+that finally does what the docs claimed, the upstream maintenance boundary
+written down, and the repository named after the product it ships.
+
+### 🛠 CI & maintenance
+
+- **The daily security audit now honours accepted findings.** The workflow
+  switched from `rustsec/audit-check` (which reads no configuration and
+  re-opened the same issue every day) to `cargo audit`, which enforces the
+  justification-carrying ignore list in `.cargo/audit.toml`.
+  RUSTSEC-2024-0449 (`unsafe-libyaml` unmaintained) was accepted there: it
+  reaches the tree only as a non-optional dependency of pingora-core 0.9 via
+  the deprecated `serde_yaml` — which upstream pingora still requires — and
+  never parses network input.
+
+- **CI now does what the docs always claimed.** The `rust` job runs the
+  test suite on a real toolchain matrix — 1.96.0 (MSRV), 1.97.0 and stable —
+  instead of only stable, and the rustls TLS backend moved from a bare
+  `cargo check` to its own job running the clippy gate plus the full test
+  suite (`make lint-rustls` / `make test-rustls` equivalents). README badges
+  were relabelled and CONTRIBUTING's CI description now matches the
+  workflow step for step (including demoting `cargo-machete` and
+  `cargo msrv` to local checks). Workflow permissions were narrowed to
+  `contents: read`, with `packages: write` scoped to the docker job.
+- **Maintenance boundary documented** in the new [UPSTREAM.md](./UPSTREAM.md):
+  the workspace is a hard fork of upstream `pingap`; the doc lists which
+  crates are inherited versus PingWAF-owned, the manual sync procedure
+  (fetch upstream → cherry-pick per fix → full gates → CHANGELOG), and test
+  ownership.
+- **Repository naming unified on `pingwaf`.** The root Cargo package was
+  renamed from `pingap` to `pingwaf` (metadata and deb-packaging included),
+  `default-run` now resolves to the shipped binary, the leftover
+  `pingap.service` was removed, and the `bloat` / `release-all` make targets
+  follow the shipped binary. The `pingap` bin itself stays as the
+  upstream-compatibility mode entry point and is not shipped by the release
+  pipeline.
 
 ### 🔒 Security
 
@@ -51,6 +84,19 @@ the missing front end for config versioning.
   A missing key now falls back to the client IP.
 
 ### 🐛 Fixes
+
+- **A crash could corrupt the agent's rule cache, and the agent kept that
+  quiet.** `sites.json` / `metadata.json` / `blocked_ips.json` were written
+  with plain `fs::write`, so power loss mid-write left a torn snapshot; a
+  startup load failure was logged at `debug` and the edge ran on empty rules
+  silently. Every cache file is now written atomically (same-directory temp
+  + fsync + rename, serialized behind a persist lock), the previous snapshot
+  is rolled to `sites.json.bak` — only while it still validates — and the
+  load path checks the metadata format version plus a CRC32/length stamp
+  over the payload, falling back primary → backup → empty-with-warning.
+  The load outcome and any degraded reason ride the heartbeat
+  (`cache_persist_healthy` / `cache_status_reason`) so the control plane
+  sees a fail-open edge instead of guessing.
 
 - **Request bodies were invisible to the WAF when not valid UTF-8 or
   compressed.** Body inspection bailed out on `from_utf8` failure, so a
