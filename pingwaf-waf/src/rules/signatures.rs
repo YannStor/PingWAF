@@ -2898,6 +2898,88 @@ pub fn sqli_into_file_statement_shaped(input: &str) -> bool {
     SQLI_INTO_FILE_TARGET.is_match(input)
 }
 
+/// A quote closed in front of the tautology's operator — the shape a
+/// quoted-context injection needs in order to get out of the string literal
+/// and into SQL: `1' OR 1=1`, `" OR "1"="1`, `') or ('1'='1`. Prose that
+/// merely mentions `1=1` has no reason to break a quote first.
+static SQLI_TAUTOLOGY_QUOTE_BREAK: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)['"`][\s)]*(?:\|\||&&|\bor\b|\band\b)"#).unwrap()
+});
+
+/// SQL punctuation a sentence about arithmetic does not produce: a boolean
+/// operator, or an operator followed straight into a quote or a parenthesis
+/// (the sub-term / cast shapes).
+static SQLI_TAUTOLOGY_STRUCTURE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)(?:\|\||&&)|(?:\bor\b|\band\b)\s*[('"`]|;"#).unwrap()
+});
+
+/// Does a tautology occurrence look like an injected statement rather than a
+/// sentence quoting `1=1`?
+///
+/// Used to decide whether a *long* value still scores: real probes are short,
+/// so length alone used to demote every tautology past 32 bytes, and padding
+/// a payload with filler to cross that line was free. The two shapes below
+/// are what a working injection needs and what prose lacks.
+pub fn sqli_tautology_statement_shaped(input: &str) -> bool {
+    SQLI_TAUTOLOGY_QUOTE_BREAK.is_match(input)
+        || SQLI_TAUTOLOGY_STRUCTURE.is_match(input)
+}
+
+/// How many distinct long words a value must carry before a tautology inside
+/// it is read as a quotation of arithmetic rather than a probe.
+const TAUTOLOGY_PROSE_WORDS: usize = 3;
+
+/// Distinct runs of four or more ASCII letters in `input`.
+///
+/// Letters only, and only when the run stands alone: a run glued to a digit
+/// or an underscore (`aaaaaaaa1`, `col_name`) is an identifier or a pad, not
+/// a word. Distinct as well, because a payload padded by repeating one SQL
+/// keyword is not prose however many times the keyword appears.
+fn distinct_long_words(input: &str) -> usize {
+    /// An identifier character: a letter run touching one of these is part
+    /// of a larger token rather than a word of its own.
+    fn glued_to_identifier(byte: Option<&u8>) -> bool {
+        byte.is_some_and(|b| b.is_ascii_digit() || *b == b'_')
+    }
+
+    let bytes = input.as_bytes();
+    let mut words: Vec<&str> = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if !bytes[index].is_ascii_alphabetic() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < bytes.len() && bytes[index].is_ascii_alphabetic() {
+            index += 1;
+        }
+        let word = &input[start..index];
+        let standalone =
+            start == 0 || !glued_to_identifier(bytes.get(start - 1));
+        if standalone
+            && !glued_to_identifier(bytes.get(index))
+            && word.len() >= 4
+            && !words.contains(&word)
+        {
+            words.push(word);
+        }
+    }
+    words.len()
+}
+
+/// Is the tautology part of a sentence?
+///
+/// `1 and 1=1 is a very basic mathematical operation` carries four distinct
+/// English-looking words and reads as a quotation of arithmetic; a payload
+/// padded to slip past a length test carries SQL vocabulary and repetition
+/// instead. Both tests have to hold before a long tautology is written off as
+/// a search phrase — the demotion is now narrower than the length test it
+/// replaces, never wider.
+pub fn tautology_sits_in_prose(input: &str) -> bool {
+    distinct_long_words(input) >= TAUTOLOGY_PROSE_WORDS
+}
+
 static SCRIPT_TAG_ATTR: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)<script[\s+][^>]*>").unwrap());
 static SCRIPT_TAG_COMPACT: Lazy<Regex> =
@@ -3265,6 +3347,67 @@ mod tests {
              immediately. then, we can address the issue promptly.",
         );
         assert!(!hit, "prose case/when/then should stay clean");
+    }
+
+    #[test]
+    fn tautology_prose_shape_is_recognised() {
+        // Reads as a sentence: several distinct English-looking words.
+        assert!(tautology_sits_in_prose(
+            "1 and 1=1 is a very basic mathematical operation"
+        ));
+        assert!(tautology_sits_in_prose(
+            "id=1 and 1=1 because the filter requires a match"
+        ));
+    }
+
+    #[test]
+    fn tautology_payloads_are_not_prose() {
+        // SQL vocabulary and repetitions are not words a sentence is made
+        // of, so a padded payload cannot claim the prose exemption.
+        assert!(!tautology_sits_in_prose("and true and true and true"));
+        assert!(!tautology_sits_in_prose(
+            "1 OR 1=1 OR 1=1 OR 1=1 OR 1=1 OR 1=1"
+        ));
+        // A single long alphabetic run is a pad, not a word.
+        assert!(!tautology_sits_in_prose(&format!(
+            "{}1' OR '1'='1",
+            "A".repeat(29)
+        )));
+    }
+
+    #[test]
+    fn distinct_long_words_counts_words_not_occurrences() {
+        assert_eq!(0, distinct_long_words("1 OR 1=1"));
+        assert_eq!(1, distinct_long_words("true true true"));
+        assert_eq!(0, distinct_long_words("aaaaaaaa1"));
+        // Letters glued to a digit are not a word.
+        assert_eq!(0, distinct_long_words("lorem1 ipsum2 dolor3"));
+        assert_eq!(2, distinct_long_words("match the pattern"));
+    }
+
+    #[test]
+    fn tautology_statement_shapes_are_recognised() {
+        // A quote closed in front of the operator: what a quoted-context
+        // injection needs and prose never has.
+        for payload in [
+            "1' OR 1=1",
+            "1' OR '1'='1",
+            "prefix' and '1'='1",
+            "\" OR \"1\"=\"1",
+            "') or ('1'='1",
+            "1'||'1'='1",
+        ] {
+            assert!(
+                sqli_tautology_statement_shaped(payload),
+                "{payload} should read as a statement"
+            );
+        }
+        // SQL punctuation a sentence does not use.
+        assert!(sqli_tautology_statement_shaped("1 and 1=1; something"));
+        assert!(sqli_tautology_statement_shaped("1 or (1=1)"));
+
+        // The inline-tautology needle form is not one of those shapes.
+        assert!(!sqli_tautology_statement_shaped("1 and 1=1"));
     }
 
     #[test]

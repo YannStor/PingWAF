@@ -16,5 +16,9 @@ regex = { workspace = true, features = ["std", "unicode-case", "unicode-perl"] }
 ahash = { workspace = true }
 aho-corasick = "1"
 base64 = { workspace = true }
+# Request bodies arrive `Content-Encoding: gzip` / `deflate` often enough
+# that inspecting the encoded bytes means inspecting nothing. Bounded,
+# in-memory decompression only (see `normalize::body`).
+flate2 = { workspace = true }
 ipnet = { workspace = true }
 once_cell = "1"

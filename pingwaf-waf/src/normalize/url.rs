@@ -32,7 +32,11 @@ fn percent_to_bytes(s: &str) -> Option<Vec<u8>> {
 /// encoding that exploits decoders which reject or mangle invalid UTF-8.
 /// Surviving invalid bytes map through Latin-1 so the payload *after* the
 /// bad byte (…`script>` behind `%C0%BC`) still becomes scannable text.
-fn bytes_to_scannable(bytes: &[u8]) -> String {
+///
+/// Visible to the whole `normalize` module: the request-body path reuses it
+/// so a body that is merely not valid UTF-8 is inspected rather than
+/// skipped (see `normalize::decode_body`).
+pub(super) fn bytes_to_scannable(bytes: &[u8]) -> String {
     if let Ok(s) = std::str::from_utf8(bytes) {
         return s.to_string();
     }

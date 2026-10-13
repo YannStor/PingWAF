@@ -29,7 +29,8 @@ use crate::rules::signatures::{
     detect_deser_shape, detect_expr_injection, detect_js_call, detect_sqli,
     detect_xss, path_tautology_segment, pt_double_exec_extension,
     pt_remote_backslash_include, sqli_into_file_statement_shaped,
-    sqli_union_statement_shaped, ssrf_protocol_smuggling, xss_markup_shaped,
+    sqli_tautology_statement_shaped, sqli_union_statement_shaped,
+    ssrf_protocol_smuggling, tautology_sits_in_prose, xss_markup_shaped,
     xss_script_tag_shaped, xss_script_uri_html_shaped, AttackCategory,
     SignatureEngine, SignatureHit,
 };
@@ -674,18 +675,23 @@ impl WafEngine {
                 // Same zero-score rule as the needle gate: a union-select
                 // or into-file fingerprint without statement structure is
                 // a search phrase, and the needle hit for it is skipped
-                // as well. Tautology / quote-keyword fingerprints over
-                // long values are prose that quotes the tokens ("1 and 1=1
-                // is a basic operation", keyword-list documents) — real
-                // tautology probes are tiny, and long quote-keyword attacks
-                // carry a UNION clause that has its own gate.
+                // as well. For tautology the discriminator is prose rather
+                // than length: a long value that breaks a quote in front of
+                // the operator, or carries SQL punctuation a sentence does
+                // not use, is a probe however long it is. Length alone used
+                // to decide, and padding `1' OR '1'='1` past 32 bytes — which
+                // costs an attacker nothing — turned it into a "search
+                // phrase" that scored zero. Long quote-keyword attacks carry
+                // a UNION clause that has its own gate.
                 let search_phrase = (sqli_fp.contains("union-select")
                     && !sqli_union_statement_shaped(needle))
                     || (sqli_fp.contains("into-file")
                         && !sqli_into_file_statement_shaped(needle))
                     || (sqli_fp.contains("tautology")
                         && needle.len() > 32
-                        && !sqli_fp.contains("comment-terminator"))
+                        && !sqli_fp.contains("comment-terminator")
+                        && !sqli_tautology_statement_shaped(needle)
+                        && tautology_sits_in_prose(needle))
                     || (sqli_fp.contains("quote-keyword")
                         && needle.len() > 256);
                 let (severity, critical) =
@@ -2324,6 +2330,81 @@ mod tests {
         );
     }
 
+    /// Form-encoded `POST` carrying `body` exactly as the wire delivered it.
+    fn post_form(path: &str, body: Vec<u8>) -> RequestData {
+        let mut r = req("POST", path, "");
+        r.headers.push((
+            "Content-Type".into(),
+            "application/x-www-form-urlencoded".into(),
+        ));
+        r.body = Some(body);
+        r
+    }
+
+    #[test]
+    fn non_utf8_body_is_still_inspected() {
+        // Regression for the body-skip evasion: the body block used to run
+        // only `if let Ok(text) = str::from_utf8(body)`, so a single
+        // trailing 0xFF byte took the whole payload out of the scan
+        // surface — no form parsing, no decoded value, score 0.
+        let e = engine();
+        let mut body = b"q=1' OR 1=1--".to_vec();
+        body.push(0xFF);
+        let v = e.inspect(&post_form("/api/search", body));
+        assert!(v.score > 0, "body was skipped: {}", v.details);
+        assert!(!v.matched_rules.is_empty(), "details: {}", v.details);
+    }
+
+    #[test]
+    fn gzip_encoded_body_is_inspected() {
+        // Same body, `Content-Encoding: gzip`. The request path had no
+        // decompressor at all, so the deflate stream reached the detectors
+        // as binary and — not being UTF-8 — hit the same early exit.
+        use std::io::Write;
+
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(b"q=1' OR 1=1--").expect("gzip write");
+        let body = encoder.finish().expect("gzip finish");
+
+        let e = engine();
+        let mut r = post_form("/api/search", body);
+        r.headers.push(("Content-Encoding".into(), "gzip".into()));
+        let v = e.inspect(&r);
+        assert!(v.score > 0, "gzip body was skipped: {}", v.details);
+        assert!(!v.matched_rules.is_empty(), "details: {}", v.details);
+    }
+
+    #[test]
+    fn form_body_values_stay_separately_addressed() {
+        // Decoding must not collapse the body into one blob: each form
+        // value is its own typed field, which is what makes the SQLi
+        // detectors fire on the payload rather than on the whole body.
+        let headers = vec![(
+            "Content-Type".to_string(),
+            "application/x-www-form-urlencoded".to_string(),
+        )];
+        let normalized = normalize_request(
+            "POST",
+            "/api/search",
+            "",
+            &headers,
+            Some(b"page=1&q=1'%20OR%201=1--"),
+            3,
+            false,
+        );
+        let names: Vec<&str> = normalized
+            .decoded_values
+            .iter()
+            .filter(|v| v.source == ValueSource::Body && v.field)
+            .map(|v| v.name.as_str())
+            .collect();
+        assert!(names.contains(&"q"), "values: {names:?}");
+        assert!(names.contains(&"page"), "values: {names:?}");
+    }
+
     #[test]
     fn strict_blocks_structural_ssti() {
         let e = strict_engine();
@@ -2494,6 +2575,28 @@ mod tests {
         assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
         let v = e.inspect(&req("POST", "/w", "tpl=win['constructor'](1)"));
         assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn padded_tautology_probe_blocks() {
+        // Padding a probe past the 32-byte mark used to be enough to have it
+        // filed as a "search phrase" and scored zero — length was the only
+        // discriminator, and filler is free. The first payload is the audit's
+        // shape; the second needs no quotes at all, because repetition is
+        // itself a way to be long.
+        let quoted = format!("q={}1'%20OR%20'1'='1", "A".repeat(29));
+        let numeric = format!("id={}", ["1 OR 1=1"; 5].join("%20OR%20"));
+        for e in [engine(), strict_engine()] {
+            for query in [&quoted, &numeric] {
+                let v = e.inspect(&req("GET", "/search", query));
+                assert_eq!(
+                    v.action,
+                    WafAction::Block,
+                    "{query} should block: {}",
+                    v.details
+                );
+            }
+        }
     }
 
     #[test]

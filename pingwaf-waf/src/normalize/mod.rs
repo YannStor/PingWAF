@@ -10,6 +10,7 @@
 //! upstream, and duplicating it per request was the engine's largest
 //! avoidable allocation cost.
 
+pub mod body;
 pub mod html;
 pub mod path;
 pub mod url;
@@ -18,6 +19,7 @@ use std::borrow::Cow;
 
 use once_cell::sync::Lazy;
 
+use crate::normalize::body::decode_body;
 use crate::normalize::html::decode_entities;
 use crate::normalize::path::normalize as normalize_path;
 use crate::normalize::url::multi_decode;
@@ -78,17 +80,21 @@ pub struct NormalizedRequest<'a> {
     /// ASCII case-insensitive.
     pub headers: &'a [(String, String)],
     pub body: Option<&'a [u8]>,
+    /// The body as text for the detectors: `Content-Encoding` undone and
+    /// non-UTF-8 bytes mapped through Latin-1 instead of dropping the whole
+    /// body. Borrows the wire bytes when they were already plain UTF-8.
+    pub body_text: Option<Cow<'a, str>>,
     pub cookies: Vec<(String, String)>,
     /// Flat list of every decoded value the detectors should scan.
     pub decoded_values: Vec<DecodedValue>,
 }
 
 impl NormalizedRequest<'_> {
-    /// Body decoded as UTF-8 when possible. A borrow, not a copy — the
-    /// previous `Option<String>` field cloned the entire body on every
-    /// request that carried one.
+    /// Body as text for rule evaluation. `None` only when the request had no
+    /// body; a body that is binary or compressed still yields text (see
+    /// [`body_text`](Self::body_text)).
     pub fn body_str(&self) -> Option<&str> {
-        self.body.and_then(|b| std::str::from_utf8(b).ok())
+        self.body_text.as_deref()
     }
 
     /// Case-insensitive header lookup; returns the first match.
@@ -207,7 +213,14 @@ pub fn normalize_request<'a>(
         });
     }
 
-    if let Some(body_bytes) = body {
+    // Decoded once and reused: the same text feeds both the per-value scan
+    // list built below and the rule engine's `body` operand. `Content-Encoding`
+    // is undone first, and a body that is not valid UTF-8 is mapped rather
+    // than skipped — see `normalize::body` for why the old early exit was an
+    // evasion.
+    let body_text = body.and_then(|bytes| decode_body(headers, bytes));
+
+    if let Some(text) = body_text.as_deref() {
         // Form-encoded bodies are split into parameters so each value is
         // inspected separately; anything else is scanned as a single blob.
         let ctype = headers
@@ -215,43 +228,39 @@ pub fn normalize_request<'a>(
             .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
             .map(|(_, v)| v.to_ascii_lowercase())
             .unwrap_or_default();
-        if let Ok(text) = std::str::from_utf8(body_bytes) {
-            if ctype.contains("application/x-www-form-urlencoded") {
-                parse_form_body(
-                    text,
-                    max_decode_layers,
-                    decode_escapes,
-                    &mut decoded_values,
-                );
-            } else if ctype.contains("json") || looks_like_json(text) {
-                // Structured bodies: keep the raw blob (bulk content can be
-                // benign), then add every string member as a *field* so the
-                // detectors see typed inputs — with JSON escape handling
-                // (`\u003c`) resolved by the parser itself.
-                let decoded =
-                    decode_value(text, max_decode_layers, decode_escapes);
-                decoded_values.push(DecodedValue {
-                    source: ValueSource::Body,
-                    name: String::new(),
-                    decoded,
-                    field: false,
-                });
-                unpack_json(
-                    text,
-                    max_decode_layers,
-                    decode_escapes,
-                    &mut decoded_values,
-                );
-            } else {
-                let decoded =
-                    decode_value(text, max_decode_layers, decode_escapes);
-                decoded_values.push(DecodedValue {
-                    source: ValueSource::Body,
-                    name: String::new(),
-                    decoded,
-                    field: false,
-                });
-            }
+        if ctype.contains("application/x-www-form-urlencoded") {
+            parse_form_body(
+                text,
+                max_decode_layers,
+                decode_escapes,
+                &mut decoded_values,
+            );
+        } else if ctype.contains("json") || looks_like_json(text) {
+            // Structured bodies: keep the raw blob (bulk content can be
+            // benign), then add every string member as a *field* so the
+            // detectors see typed inputs — with JSON escape handling
+            // (`\u003c`) resolved by the parser itself.
+            let decoded = decode_value(text, max_decode_layers, decode_escapes);
+            decoded_values.push(DecodedValue {
+                source: ValueSource::Body,
+                name: String::new(),
+                decoded,
+                field: false,
+            });
+            unpack_json(
+                text,
+                max_decode_layers,
+                decode_escapes,
+                &mut decoded_values,
+            );
+        } else {
+            let decoded = decode_value(text, max_decode_layers, decode_escapes);
+            decoded_values.push(DecodedValue {
+                source: ValueSource::Body,
+                name: String::new(),
+                decoded,
+                field: false,
+            });
         }
     }
 
@@ -265,6 +274,7 @@ pub fn normalize_request<'a>(
         query_params,
         headers,
         body,
+        body_text,
         cookies,
         decoded_values,
     }

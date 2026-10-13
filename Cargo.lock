@@ -5598,6 +5598,7 @@ dependencies = [
  "aho-corasick",
  "anyhow",
  "base64 0.23.1",
+ "flate2",
  "ipnet",
  "once_cell",
  "regex",
