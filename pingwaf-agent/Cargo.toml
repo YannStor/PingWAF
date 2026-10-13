@@ -31,6 +31,9 @@ uuid = { workspace = true }
 prost-types = { workspace = true }
 dashmap = { workspace = true }
 arc-swap = { workspace = true }
+# CRC32 of the persisted sites snapshot, checked against metadata.json on load
+# so a torn or corrupted snapshot is detected instead of silently parsed.
+crc32fast = { workspace = true }
 # Jitters the reconnect backoff so a fleet of agents never retries in lockstep.
 rand = { workspace = true }
 

@@ -636,6 +636,13 @@ impl ControlPlaneClient {
                             nanos: 0,
                         },
                     ),
+                    // Rule-cache disk health; the control plane alerts on a
+                    // false here because the edge is then running on empty
+                    // rules until the next sync lands.
+                    cache_persist_healthy: Some(
+                        rule_cache.cache_persist_healthy(),
+                    ),
+                    cache_status_reason: rule_cache.cache_status_reason(),
                 };
 
                 if hb_tx.send(hb).await.is_err() {

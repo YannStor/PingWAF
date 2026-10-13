@@ -85,6 +85,13 @@ message AgentHeartbeat {
   // bundle from the control plane. Absent = never synced.
   google.protobuf.Timestamp last_config_sync_at = 16;
   google.protobuf.Timestamp last_policy_sync_at = 17;
+
+  // Rule-cache disk health: false = no usable snapshot could be loaded, so
+  // the agent runs on empty rules until the next sync; true with a non-empty
+  // `cache_status_reason` = the backup snapshot was restored. Absent on
+  // older agents — the control plane treats that as healthy.
+  optional bool cache_persist_healthy = 18;
+  string cache_status_reason = 19;
 }
 
 // One dynamically blocked IP as enforced at the edge.

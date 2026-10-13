@@ -831,6 +831,27 @@ async fn persist_heartbeat(
     // would let a skewed client clock mark healthy agents offline.
     let health = agent_status::from_proto_health(message.health);
 
+    // Rule-cache disk health: absent on older agents (treat as healthy).
+    // A false means the edge could not load any usable snapshot and runs on
+    // empty rules until the next sync — surface it loudly, it is exactly the
+    // fail-open state an operator must know about. A non-empty reason with
+    // healthy=true is a backup restore worth a line, not an alarm.
+    if let Some(cache_healthy) = message.cache_persist_healthy {
+        if !cache_healthy {
+            tracing::warn!(
+                %agent_id,
+                reason = %message.cache_status_reason,
+                "agent rule cache is unhealthy; running on empty rules until the next sync"
+            );
+        } else if !message.cache_status_reason.is_empty() {
+            tracing::info!(
+                %agent_id,
+                reason = %message.cache_status_reason,
+                "agent restored its rule cache from backup"
+            );
+        }
+    }
+
     let mut active = agent::ActiveModel {
         id: Set(agent_id),
         ..Default::default()

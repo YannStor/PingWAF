@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use anyhow::Context;
 use arc_swap::ArcSwap;
 use chrono::{DateTime, TimeZone, Utc};
 use dashmap::DashMap;
@@ -13,6 +14,13 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use pingwaf_proto::control_plane as proto;
+
+mod persist;
+
+use persist::{
+    check_format_version, content_crc32, content_matches, write_atomic,
+    CacheHealth, LoadSource, CACHE_FORMAT_VERSION,
+};
 
 // ─────────────────────────────────────────────────────────────
 // Serializable cache types (local mirrors of proto types)
@@ -909,6 +917,14 @@ struct CacheMetadata {
     updated_at: DateTime<Utc>,
     agent_id: String,
     version: u32,
+    /// CRC32 of the exact `sites.json` bytes this metadata stamps. Absent in
+    /// snapshots written before integrity checking existed; `None` means the
+    /// load skips the CRC check but records why.
+    #[serde(default)]
+    sites_crc32: Option<u32>,
+    /// Byte length of the stamped `sites.json` payload.
+    #[serde(default)]
+    sites_len: Option<u64>,
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -941,6 +957,13 @@ pub struct RuleCache {
     /// Unix seconds of the last successful single-site rule bundle
     /// application; 0 = never.
     last_policy_sync_at: AtomicI64,
+    /// Serializes every persist path. Rule syncs, blocked-IP flushes and the
+    /// shutdown hook can all fire concurrently; interleaved writes would
+    /// stamp a sites.json whose CRC no longer matches metadata.json.
+    persist_lock: Mutex<()>,
+    /// Outcome of the latest disk load / persist cycle, reported by the
+    /// heartbeat so a silently degraded cache is visible to the operator.
+    health: CacheHealth,
 }
 
 impl RuleCache {
@@ -957,18 +980,18 @@ impl RuleCache {
             quota_domains: Mutex::new(HashSet::new()),
             last_config_sync_at: AtomicI64::new(0),
             last_policy_sync_at: AtomicI64::new(0),
+            persist_lock: Mutex::new(()),
+            health: CacheHealth::new(),
         });
 
         // Ensure cache directory exists
         if let Err(e) = std::fs::create_dir_all(&cache_dir) {
             warn!(error = %e, "Failed to create cache directory, running without persistence");
-        } else {
-            // Try to load existing cache from disk
-            if let Err(e) = cache.load_from_disk() {
-                debug!(error = %e, "No existing cache found on disk or failed to load");
-            } else {
-                info!("Loaded rule cache from disk");
-            }
+        } else if let Err(e) = cache.load_from_disk() {
+            // load_from_disk already logged the specific failure at the
+            // right level and recorded the health outcome; this is just the
+            // "keep going" note.
+            debug!(error = %e, "Continuing without a disk-loaded rule cache");
         }
 
         // Quotas persisted with the rules take effect before the first push
@@ -1659,82 +1682,302 @@ impl RuleCache {
 
     // ─── Disk Persistence ───────────────────────────────────
 
-    /// Persist current rules to disk.
+    /// Outcome of the latest cache load, for the heartbeat report.
+    pub fn health_status(&self) -> persist::CacheHealthStatus {
+        self.health.status()
+    }
+
+    /// Rule-cache disk health for the heartbeat.
+    pub fn cache_persist_healthy(&self) -> bool {
+        self.health.status().healthy
+    }
+
+    /// Degraded-state detail for the heartbeat; empty when all is well.
+    /// Truncated to keep heartbeat frames and control-plane logs bounded.
+    pub fn cache_status_reason(&self) -> String {
+        const MAX_CHARS: usize = 300;
+        let reason = self.health.status().reason.unwrap_or_default();
+        if reason.chars().count() <= MAX_CHARS {
+            reason
+        } else {
+            let cut: String = reason.chars().take(MAX_CHARS).collect();
+            format!("{cut}…")
+        }
+    }
+
+    /// Persist current rules to disk, feeding the outcome back into the
+    /// health signal. A failure marks the cache unhealthy; a success only
+    /// clears the reason when the cache is already healthy — a load failure
+    /// stays sticky until an actual successful *load* (next startup) clears
+    /// it, so a persist that happens to work cannot mask the fact that the
+    /// agent once came up on empty rules.
     pub fn persist_to_disk(&self) -> anyhow::Result<()> {
+        let outcome = self.persist_to_disk_inner();
+        let status = self.health.status();
+        match &outcome {
+            Ok(()) => {
+                if status.healthy {
+                    self.health.record(true, status.source, None);
+                }
+            },
+            Err(err) => self.health.record(
+                false,
+                status.source,
+                Some(format!("persist failed: {err:#}")),
+            ),
+        }
+        outcome
+    }
+
+    /// The current snapshot is rolled to `sites.json.bak` before the
+    /// overwrite — but only when it still parses, so a corrupt file can never
+    /// evict the last known-good backup. Every file lands atomically (same-
+    /// directory temp + fsync + rename), and metadata is stamped with the
+    /// CRC32 of the exact sites payload written just before it, so the load
+    /// path can detect a torn or partially applied persist. Caller holds
+    /// `persist_lock` via the wrapper.
+    fn persist_to_disk_inner(&self) -> anyhow::Result<()> {
         if !self.cache_dir.exists() {
             return Ok(());
         }
+        let _guard = self
+            .persist_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let rules = self.inner.load();
         let sites_path = self.cache_dir.join("sites.json");
         let metadata_path = self.cache_dir.join("metadata.json");
 
-        // Write sites
         let sites_json = serde_json::to_string_pretty(&**rules)?;
-        std::fs::write(&sites_path, sites_json)?;
+        self.roll_backup_if_valid(&sites_path)?;
 
-        // Write metadata
+        write_atomic(&sites_path, sites_json.as_bytes())?;
+
         let metadata = CacheMetadata {
             config_hash: rules.config_hash.to_string(),
             updated_at: rules.updated_at,
             agent_id: self.agent_id.clone(),
-            version: 1,
+            version: CACHE_FORMAT_VERSION,
+            sites_crc32: Some(content_crc32(sites_json.as_bytes())),
+            sites_len: Some(sites_json.len() as u64),
         };
         let meta_json = serde_json::to_string_pretty(&metadata)?;
-        std::fs::write(&metadata_path, meta_json)?;
+        write_atomic(&metadata_path, meta_json.as_bytes())?;
 
-        // Write blocked IPs
-        self.persist_blocked_ips()?;
+        // Caller holds the lock; the inner variant must not re-lock.
+        self.persist_blocked_ips_inner()?;
 
         debug!("Persisted rule cache to disk");
         Ok(())
     }
 
-    /// Load rules from disk.
-    pub fn load_from_disk(&self) -> anyhow::Result<()> {
-        let sites_path = self.cache_dir.join("sites.json");
-        let blocked_path = self.cache_dir.join("blocked_ips.json");
-
+    /// Copies `sites.json` and `metadata.json` to their `.bak` siblings
+    /// before an overwrite, keeping the roll-over only when the current
+    /// snapshot still parses — a corrupt primary must never destroy the last
+    /// known-good backup.
+    fn roll_backup_if_valid(&self, sites_path: &Path) -> anyhow::Result<()> {
         if !sites_path.exists() {
-            anyhow::bail!("No cache file found at {:?}", sites_path);
+            return Ok(());
         }
-
-        let sites_json = std::fs::read_to_string(&sites_path)?;
-        let cached: CachedRules = serde_json::from_str(&sites_json)?;
-
-        info!(
-            sites = cached.sites.len(),
-            config_hash = %cached.config_hash,
-            "Loaded rule cache from disk"
-        );
-
-        self.inner.store(Arc::new(cached));
-
-        // Load blocked IPs
-        if blocked_path.exists() {
-            let blocked_json = std::fs::read_to_string(&blocked_path)?;
-            let blocked: Vec<BlockedIpEntry> =
-                serde_json::from_str(&blocked_json)?;
-            let mut loaded = 0;
-            for entry in blocked {
-                if !entry.is_expired() {
-                    let key = format!("{}:{}", entry.site_id, entry.ip);
-                    self.blocked_ips.insert(key, entry);
-                    loaded += 1;
-                }
-            }
-            debug!(count = loaded, "Loaded blocked IPs from disk");
+        let metadata_path = self.cache_dir.join("metadata.json");
+        // Full validation, not just a parse: a tampered-but-parseable
+        // snapshot must never evict the last known-good backup.
+        if self.read_snapshot(sites_path, &metadata_path).is_err() {
+            debug!(
+                file = %sites_path.display(),
+                "current snapshot fails validation; keeping the previous backup instead of rolling it"
+            );
+            return Ok(());
         }
-
+        let bytes = std::fs::read(sites_path)?;
+        write_atomic(&sites_path.with_extension("json.bak"), &bytes)?;
+        if metadata_path.exists() {
+            let meta_bytes = std::fs::read(&metadata_path)?;
+            write_atomic(
+                &metadata_path.with_extension("json.bak"),
+                &meta_bytes,
+            )?;
+        }
         Ok(())
     }
 
-    /// Persist blocked IPs to disk.
+    /// Load rules from disk, falling back to the `.bak` snapshot when the
+    /// primary fails validation.
+    ///
+    /// Every outcome is recorded in `health` and logged at a level matching
+    /// its severity: a fresh node stays quiet, a backup restore warns, and a
+    /// total failure warns loudly because the agent then runs on empty rules
+    /// until the control plane re-pushes.
+    pub fn load_from_disk(&self) -> anyhow::Result<()> {
+        let sites_path = self.cache_dir.join("sites.json");
+        let metadata_path = self.cache_dir.join("metadata.json");
+
+        if !sites_path.exists() {
+            self.health.record(true, LoadSource::Fresh, None);
+            anyhow::bail!(
+                "no cache file found at {:?} (fresh node)",
+                sites_path
+            );
+        }
+
+        match self.read_snapshot(&sites_path, &metadata_path) {
+            Ok(cached) => {
+                self.inner.store(Arc::new(cached));
+                self.health.record(true, LoadSource::Disk, None);
+                self.load_blocked_ips(&self.cache_dir.join("blocked_ips.json"));
+                info!("Loaded rule cache from disk");
+                Ok(())
+            },
+            Err(primary_err) => {
+                let backup = sites_path.with_extension("json.bak");
+                if backup.exists() {
+                    match self.read_snapshot_unstamped(&backup) {
+                        Ok(cached) => {
+                            self.inner.store(Arc::new(cached));
+                            let reason = format!(
+                                "primary snapshot failed validation ({primary_err:#}); restored previous snapshot from backup"
+                            );
+                            warn!(reason = %reason, "Rule cache restored from sites.json.bak");
+                            self.health.record(
+                                true,
+                                LoadSource::Backup,
+                                Some(reason),
+                            );
+                            self.load_blocked_ips(
+                                &self.cache_dir.join("blocked_ips.json"),
+                            );
+                            Ok(())
+                        },
+                        Err(backup_err) => {
+                            let reason =
+                                format!("primary: {primary_err:#}; backup: {backup_err:#}");
+                            warn!(
+                                reason = %reason,
+                                "Rule cache unusable; running with empty rules until the control plane re-pushes"
+                            );
+                            self.health.record(
+                                false,
+                                LoadSource::Fresh,
+                                Some(reason),
+                            );
+                            Err(anyhow::anyhow!(
+                                "cache snapshot and backup both failed validation"
+                            ))
+                        },
+                    }
+                } else {
+                    warn!(
+                        reason = %primary_err,
+                        "Rule cache failed validation and no backup exists; running with empty rules until the control plane re-pushes"
+                    );
+                    self.health.record(
+                        false,
+                        LoadSource::Fresh,
+                        Some(format!("{primary_err:#}")),
+                    );
+                    Err(primary_err)
+                }
+            },
+        }
+    }
+
+    /// Reads and validates a primary snapshot: JSON parse, format version,
+    /// and — when the metadata stamps them — the CRC32 + length of the
+    /// payload. A missing or unreadable metadata file downgrades to parse
+    /// validation only and says so, so pre-integrity snapshots still load.
+    fn read_snapshot(
+        &self,
+        sites_path: &Path,
+        metadata_path: &Path,
+    ) -> anyhow::Result<CachedRules> {
+        let bytes = std::fs::read(sites_path)?;
+        if let Ok(meta_bytes) = std::fs::read(metadata_path) {
+            match serde_json::from_slice::<CacheMetadata>(&meta_bytes) {
+                Ok(metadata) => {
+                    check_format_version(metadata.version)
+                        .map_err(anyhow::Error::msg)?;
+                    if let (Some(crc), Some(len)) =
+                        (metadata.sites_crc32, metadata.sites_len)
+                    {
+                        if !content_matches(&bytes, crc, len) {
+                            anyhow::bail!(
+                                "sites.json failed its integrity check (crc32/length mismatch against metadata.json)"
+                            );
+                        }
+                    }
+                },
+                Err(e) => {
+                    debug!(
+                        error = %e,
+                        "metadata.json unreadable; loading sites.json with parse validation only"
+                    );
+                },
+            }
+        }
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing {:?}", sites_path))
+    }
+
+    /// Backup validation: the JSON must parse. A slightly stale backup is
+    /// still better than empty rules, so no integrity stamp is required.
+    fn read_snapshot_unstamped(
+        &self,
+        path: &Path,
+    ) -> anyhow::Result<CachedRules> {
+        let bytes = std::fs::read(path)?;
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing {:?}", path))
+    }
+
+    /// Loads blocked IPs, dropping entries that expired while persisted.
+    fn load_blocked_ips(&self, blocked_path: &Path) {
+        if !blocked_path.exists() {
+            return;
+        }
+        let blocked_json = match std::fs::read_to_string(blocked_path) {
+            Ok(json) => json,
+            Err(e) => {
+                warn!(error = %e, file = %blocked_path.display(), "Failed to read blocked IPs from disk");
+                return;
+            },
+        };
+        match serde_json::from_str::<Vec<BlockedIpEntry>>(&blocked_json) {
+            Ok(blocked) => {
+                let mut loaded = 0;
+                for entry in blocked {
+                    if !entry.is_expired() {
+                        let key = format!("{}:{}", entry.site_id, entry.ip);
+                        self.blocked_ips.insert(key, entry);
+                        loaded += 1;
+                    }
+                }
+                debug!(count = loaded, "Loaded blocked IPs from disk");
+            },
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    file = %blocked_path.display(),
+                    "Blocked IPs snapshot unreadable; dropping it and re-syncing from the control plane"
+                );
+            },
+        }
+    }
+
+    /// Persist blocked IPs to disk (serialized with the other persist paths).
     fn persist_blocked_ips(&self) -> anyhow::Result<()> {
         if !self.cache_dir.exists() {
             return Ok(());
         }
+        let _guard = self
+            .persist_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.persist_blocked_ips_inner()
+    }
 
+    /// Persist blocked IPs; the caller must hold `persist_lock`.
+    fn persist_blocked_ips_inner(&self) -> anyhow::Result<()> {
         let blocked_path = self.cache_dir.join("blocked_ips.json");
         let entries: Vec<BlockedIpEntry> = self
             .blocked_ips
@@ -1744,7 +1987,7 @@ impl RuleCache {
             .collect();
 
         let json = serde_json::to_string_pretty(&entries)?;
-        std::fs::write(&blocked_path, json)?;
+        write_atomic(&blocked_path, json.as_bytes())?;
         Ok(())
     }
 
@@ -2704,5 +2947,216 @@ mod tests {
         u.algo = "hash:cookie:session".to_string();
         let converted = RuleCache::convert_upstream_config(&u);
         assert_eq!(converted.algo, "hash:cookie:session");
+    }
+
+    // ─── Crash injection: torn writes, tampering, backup fallback ───
+
+    /// A torn `sites.json` (crash in the middle of a direct write) must fall
+    /// back to the rolled backup, and the restore must show up in health.
+    #[test]
+    fn torn_primary_falls_back_to_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+
+        let cache = RuleCache::new(root.clone(), "test".to_string()).unwrap();
+        cache.persist_to_disk().unwrap(); // first snapshot, no backup yet
+        cache.persist_to_disk().unwrap(); // rolls snapshot #1 to .bak
+
+        // Tear the primary the way a mid-write power cut would.
+        let sites = root.join("sites.json");
+        let bytes = std::fs::read(&sites).unwrap();
+        std::fs::write(&sites, &bytes[..bytes.len() / 2]).unwrap();
+
+        let reloaded = RuleCache::new(root, "test".to_string()).unwrap();
+        let health = reloaded.health_status();
+        assert_eq!(health.source, LoadSource::Backup);
+        assert!(health.healthy, "backup restore keeps the agent functional");
+        let reason = health.reason.unwrap_or_default();
+        assert!(reason.contains("backup"), "unexpected reason: {reason}");
+    }
+
+    /// Valid JSON whose content differs from the metadata CRC stamp must be
+    /// rejected — parse success alone is not integrity.
+    #[test]
+    fn tampered_primary_fails_crc_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+
+        let cache = RuleCache::new(root.clone(), "test".to_string()).unwrap();
+        cache.persist_to_disk().unwrap();
+        cache.persist_to_disk().unwrap(); // ensure a backup exists
+
+        let sites = root.join("sites.json");
+        let bytes = std::fs::read(&sites).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap();
+        value["config_hash"] = serde_json::Value::String("tampered".into());
+        std::fs::write(&sites, serde_json::to_string(&value).unwrap()).unwrap();
+
+        let reloaded = RuleCache::new(root, "test".to_string()).unwrap();
+        let health = reloaded.health_status();
+        assert_eq!(health.source, LoadSource::Backup);
+        let reason = health.reason.unwrap_or_default();
+        assert!(reason.contains("integrity"), "unexpected reason: {reason}");
+    }
+
+    /// Corrupt primary with no backup → the agent starts on empty rules,
+    /// reports unhealthy with a reason, and keeps working (fail-open).
+    #[test]
+    fn corrupt_primary_without_backup_degrades_to_unhealthy() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+
+        let cache = RuleCache::new(root.clone(), "test".to_string()).unwrap();
+        cache.persist_to_disk().unwrap(); // single snapshot, no backup
+
+        std::fs::write(root.join("sites.json"), b"{not json").unwrap();
+
+        let reloaded =
+            RuleCache::new(root.clone(), "test".to_string()).unwrap();
+        let health = reloaded.health_status();
+        assert!(!health.healthy);
+        assert_eq!(health.source, LoadSource::Fresh);
+        assert!(health.reason.is_some());
+
+        // Fail-open: the degraded cache still persists and serves.
+        reloaded.persist_to_disk().unwrap();
+        assert!(root.join("sites.json").exists());
+
+        // The persist fixed the disk, but the load failure stays sticky:
+        // health only clears on an actual successful load, never on a
+        // successful persist.
+        assert!(!reloaded.health_status().healthy);
+
+        // The next process loads the freshly written snapshot cleanly.
+        let third = RuleCache::new(root, "test".to_string()).unwrap();
+        let health = third.health_status();
+        assert_eq!(health.source, LoadSource::Disk);
+        assert!(health.healthy);
+    }
+
+    /// A tampered (valid JSON, wrong CRC) primary must not be rolled into
+    /// the backup: the persist keeps the previous good backup and writes a
+    /// fresh primary over the tampered one.
+    #[test]
+    fn tampered_primary_does_not_evict_good_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+
+        let cache = RuleCache::new(root.clone(), "test".to_string()).unwrap();
+        cache.persist_to_disk().unwrap();
+        cache.persist_to_disk().unwrap(); // backup now holds a good snapshot
+
+        let bak_before = std::fs::read(root.join("sites.json.bak")).unwrap();
+
+        let sites = root.join("sites.json");
+        let bytes = std::fs::read(&sites).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap();
+        value["config_hash"] = serde_json::Value::String("tampered".into());
+        std::fs::write(&sites, serde_json::to_string(&value).unwrap()).unwrap();
+
+        // In-process: the roll skips the tampered snapshot, then writes a
+        // fresh primary over it.
+        cache.persist_to_disk().unwrap();
+
+        assert_eq!(
+            std::fs::read(root.join("sites.json.bak")).unwrap(),
+            bak_before,
+            "the good backup must survive the tampered roll"
+        );
+
+        let reloaded = RuleCache::new(root, "test".to_string()).unwrap();
+        let health = reloaded.health_status();
+        assert_eq!(health.source, LoadSource::Disk);
+        assert!(health.healthy);
+    }
+
+    /// A metadata stamped with an unknown *higher* format version is treated
+    /// as incompatible and rejected rather than misread.
+    #[test]
+    fn future_format_version_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+
+        let cache = RuleCache::new(root.clone(), "test".to_string()).unwrap();
+        cache.persist_to_disk().unwrap();
+
+        let meta_path = root.join("metadata.json");
+        let mut meta: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&meta_path).unwrap())
+                .unwrap();
+        meta["version"] = serde_json::Value::from(CACHE_FORMAT_VERSION + 1);
+        std::fs::write(&meta_path, serde_json::to_string(&meta).unwrap())
+            .unwrap();
+
+        let reloaded = RuleCache::new(root, "test".to_string()).unwrap();
+        let health = reloaded.health_status();
+        assert!(!health.healthy);
+        let reason = health.reason.unwrap_or_default();
+        assert!(reason.contains("version"), "unexpected reason: {reason}");
+    }
+
+    /// Snapshots written before integrity stamping (no CRC fields in
+    /// metadata) still load, with parse validation only.
+    #[test]
+    fn legacy_metadata_without_crc_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+
+        let cache = RuleCache::new(root.clone(), "test".to_string()).unwrap();
+        cache.persist_to_disk().unwrap();
+
+        let meta_path = root.join("metadata.json");
+        let mut meta: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&meta_path).unwrap())
+                .unwrap();
+        if let Some(obj) = meta.as_object_mut() {
+            obj.remove("sites_crc32");
+            obj.remove("sites_len");
+        }
+        std::fs::write(&meta_path, serde_json::to_string(&meta).unwrap())
+            .unwrap();
+
+        let reloaded = RuleCache::new(root, "test".to_string()).unwrap();
+        let health = reloaded.health_status();
+        assert_eq!(health.source, LoadSource::Disk);
+        assert!(health.healthy);
+    }
+
+    /// Concurrent persist calls must not interleave: the lock serializes
+    /// them and the final on-disk pair stays consistent.
+    #[test]
+    fn concurrent_persists_stay_consistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+
+        let cache = RuleCache::new(root.clone(), "test".to_string()).unwrap();
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let cache = cache.clone();
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..5 {
+                    cache.persist_to_disk().unwrap();
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // The last persist must leave sites.json parseable and stamped by
+        // the metadata currently on disk.
+        let bytes = std::fs::read(root.join("sites.json")).unwrap();
+        let meta: CacheMetadata = serde_json::from_slice(
+            &std::fs::read(root.join("metadata.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(persist::content_matches(
+            &bytes,
+            meta.sites_crc32.unwrap(),
+            meta.sites_len.unwrap()
+        ));
+        serde_json::from_slice::<CachedRules>(&bytes).unwrap();
     }
 }
