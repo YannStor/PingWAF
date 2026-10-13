@@ -25,32 +25,63 @@ fmt:
 # ── Build hygiene ────────────────────────────────────────────────────────────
 # Cargo never garbage-collects target/: every feature set, test binary and
 # profile keeps its own artifacts forever — one checkout of this repo reached
-# 108 GB that way. The heavy targets below run `check-target` first. Once
-# target/ exceeds TARGET_MAX_GB it drops the incremental caches (the fastest
-# growing and cheapest part to lose), and only if that is not enough clears the
-# whole directory with `cargo clean`. Override per invocation
-# (`make test TARGET_MAX_GB=50`). `dev` is exempt on purpose: bacon owns that
-# loop and the incremental cache keeps it fast.
+# 108 GB that way. An October 2026 sweep still found 47 GB there, and none of it
+# was incremental cache (that directory was empty): deps/ held 2055 rlibs for
+# only 583 distinct crates — `pingap_core` alone had 41 copies — plus 21000
+# object files, all of it duplication between feature sets.
+#
+# The guarded targets below run `check-target` first. Once target/ exceeds
+# TARGET_MAX_GB, `scripts/sweep-target.sh` drops the incremental caches and the
+# intermediate artifacts older than TARGET_SWEEP_DAYS, and only if that is still
+# not enough does it fall back to a full `cargo clean`. Each step is safe —
+# cargo rebuilds whatever a later build needs — so the only thing being traded
+# away is rebuild time. Override per invocation (`make test TARGET_MAX_GB=50`).
+#
+# Bare `cargo build` / `cargo check` / bacon bypass all of this, which is how
+# this repo got to 47 GB in the first place: use `make build` / `make check`,
+# and run `make sweep` after a session that crossed feature sets. `dev` stays
+# exempt on purpose: bacon owns that loop and the incremental cache keeps it
+# fast.
 TARGET_MAX_GB ?= 20
+TARGET_SWEEP_DAYS ?= 3
 
-HEAVY := lint lint-rustls test test-rustls cov bench bench-all bloat \
+GUARDED := lint lint-rustls test test-rustls cov bench bench-all bloat \
+	build check \
 	release release-full release-rustls-full release-all release-perf \
 	release-pyro
 
-$(HEAVY): check-target
+.PHONY: $(GUARDED) check-target sweep sweep-dry
+
+$(GUARDED): check-target
 
 check-target:
 	@used=$$(du -sm target 2>/dev/null | cut -f1); \
 	limit=$$(( $(TARGET_MAX_GB) * 1024 )); \
 	if [ -n "$$used" ] && [ "$$used" -gt "$$limit" ]; then \
-		echo "target/ uses $${used} MB, over TARGET_MAX_GB=$(TARGET_MAX_GB): dropping incremental caches"; \
-		rm -rf target/*/incremental; \
+		echo "target/ uses $${used} MB, over TARGET_MAX_GB=$(TARGET_MAX_GB): sweeping"; \
+		./scripts/sweep-target.sh --quiet --days $(TARGET_SWEEP_DAYS); \
 		used=$$(du -sm target 2>/dev/null | cut -f1); \
 		if [ -n "$$used" ] && [ "$$used" -gt "$$limit" ]; then \
 			echo "still $${used} MB: cargo clean"; \
 			cargo clean; \
 		fi; \
 	fi
+
+# The guard's prune, on demand, without the budget check.
+sweep:
+	./scripts/sweep-target.sh --days $(TARGET_SWEEP_DAYS)
+
+# Same, but only report what would be removed.
+sweep-dry:
+	./scripts/sweep-target.sh --dry-run --days $(TARGET_SWEEP_DAYS)
+
+# Local builds. Bare `cargo build` / `cargo check` work too, but only these run
+# the disk guard first.
+build:
+	cargo build
+
+check:
+	cargo check --features=full --all-targets
 
 # Removes the build cache and the copied root `dist/`; `web/dist` is kept
 # because pingwaf-server embeds it at compile time.
