@@ -33,7 +33,7 @@ cd web && npx tsc -b && npx vitest run   # 前端类型检查与测试
 
 | 角色 | 目标模型 |
 |---|---|
-| Tech Lead / Architect / Bug Investigator / Security Reviewer / Code Reviewer | DeepSeek-V4.1-Flash |
+| Tech Lead / Architect / Bug Investigator / Security Reviewer / Code Reviewer | Deepseek-V4.1-Flash |
 | Frontend Engineer / Test Engineer / Documentation & Agent Prompt Engineer | GLM-5.3-Flash |
 | Rust Backend & WAF Engineer / CI/CD Engineer | GLM-5.3-FlashX |
 
