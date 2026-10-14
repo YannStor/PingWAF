@@ -5,6 +5,7 @@ pub mod client;
 pub mod config;
 pub mod heartbeat;
 pub mod probe;
+pub mod upstream_health;
 
 use std::sync::Arc;
 

@@ -35,11 +35,19 @@ pub mod event_type {
     /// A site's disconnected (failover) policy was changed — an
     /// availability/security-relevant decision worth an audit trail.
     pub const SITE_FAILOVER_CHANGED: &str = "site.failover_changed";
+    /// Every backend of a site's upstream failed health checks on a
+    /// reporting agent (see `crate::notify::upstream_monitor`). Severity
+    /// critical; recovery is reported as the same type with `info`
+    /// severity so one subscription covers the whole lifecycle.
+    pub const SITE_UPSTREAM_OFFLINE: &str = "site.upstream_offline";
+    /// Some (but not all) backends of a site's upstream are failing health
+    /// checks — capacity is reduced but traffic still flows.
+    pub const SITE_UPSTREAM_ABNORMAL: &str = "site.upstream_abnormal";
     /// An admin signed in from a country outside their recent-login
     /// baseline (see `crate::notify::login_anomaly`).
     pub const AUTH_LOGIN_ANOMALY: &str = "auth.login_anomaly";
 
-    pub const ALL: [&str; 10] = [
+    pub const ALL: [&str; 12] = [
         AGENT_OFFLINE,
         AGENT_ONLINE,
         AGENT_RESOURCE,
@@ -49,6 +57,8 @@ pub mod event_type {
         CERT_EXPIRED,
         CONFIG_SYNC_FAILED,
         SITE_FAILOVER_CHANGED,
+        SITE_UPSTREAM_OFFLINE,
+        SITE_UPSTREAM_ABNORMAL,
         AUTH_LOGIN_ANOMALY,
     ];
 }

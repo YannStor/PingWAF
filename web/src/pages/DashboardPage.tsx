@@ -26,8 +26,10 @@ import {
   Clock,
   UploadSimple,
   Cpu,
+  Info,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
+import { IpQuickActions } from '@/components/waf/IpQuickActions'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
@@ -350,6 +352,13 @@ export function DashboardPage() {
           {formatNumber(r.blocked)}
         </span>
       ),
+    },
+    {
+      key: 'actions',
+      header: t('pages.dashboard.quickActions'),
+      align: 'right',
+      width: '1%',
+      cell: (r) => <IpQuickActions ip={r.client_ip} siteId={r.top_site_id ?? null} />,
     },
   ]
 
@@ -837,9 +846,11 @@ export function DashboardPage() {
 
 /**
  * Admin-only "process resources" stat card fed by `/debug/pprof/memory`.
- * `rss_bytes` is the pingwaf process's own footprint (the headline number);
- * `used_memory_bytes`/`total_memory_bytes` are the *host's* RAM and are
- * labelled as such so they are never mistaken for the process footprint.
+ * The headline is the single most useful number — the pingwaf process's
+ * own RSS. Everything else (virtual memory, host RAM, container figures
+ * and their scope explanations) is folded into a details panel that only
+ * expands while the card is hovered or focused, keeping the dashboard
+ * clean while the full breakdown stays one gesture away.
  */
 function ProcessResourcesCard() {
   const { t } = useTranslation()
@@ -854,12 +865,18 @@ function ProcessResourcesCard() {
   }
 
   const snap = memory.data
+  const container = snap?.container_memory_scope != null && snap.container_memory_used_bytes != null
   return (
-    <Card className="p-4">
+    <Card className="group relative overflow-hidden p-4 transition-shadow group-hover:shadow-md">
       <div className="flex items-start justify-between">
         <span className="flex h-9 w-9 items-center justify-center rounded-lg text-success bg-success/10">
           <Cpu weight="duotone" className="h-[18px] w-[18px]" />
         </span>
+        <Info
+          weight="regular"
+          className="h-4 w-4 text-fg-subtle/50 transition-colors group-hover:text-fg-subtle"
+          aria-hidden
+        />
       </div>
       {snap === undefined ? (
         <div className="mt-3">
@@ -879,18 +896,38 @@ function ProcessResourcesCard() {
               })}
             </span>
           </p>
-          <p className="mt-1 text-xs text-fg-subtle/80 tabular-nums">
-            {t('pages.dashboard.processResources.processVirtual')}: {formatSize(snap.virtual_bytes)}
-          </p>
-          <p className="text-xs text-fg-subtle/80 tabular-nums">
-            {t('pages.dashboard.processResources.hostMemory')}:{' '}
-            {formatSize(snap.used_memory_bytes)} / {formatSize(snap.total_memory_bytes)}
-          </p>
+          {container && (
+            <p className="mt-1 text-xs text-fg-subtle/80 tabular-nums">
+              {t('pages.dashboard.processResources.containerMemory')}:{' '}
+              {formatSize(snap.container_memory_used_bytes ?? 0)} / {formatSize(snap.container_memory_limit_bytes ?? 0)}
+            </p>
+          )}
+          <div
+            className="pointer-events-none absolute inset-x-0 bottom-0 translate-y-full border-t border-line bg-elevated/95 p-4 opacity-0 shadow-[0_-4px_12px_rgba(0,0,0,0.08)] backdrop-blur transition-all duration-200 ease-out group-focus-within:pointer-events-auto group-focus-within:translate-y-0 group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100"
+            tabIndex={-1}
+          >
+            <p className="text-xs text-fg-subtle/80 tabular-nums">
+              {t('pages.dashboard.processResources.processVirtual')}: {formatSize(snap.virtual_bytes)}
+            </p>
+            {container && (
+              <p className="mt-0.5 text-xs text-fg-subtle/80 tabular-nums">
+                {t('pages.dashboard.processResources.containerMemoryScope', {
+                  scope: snap.container_memory_scope,
+                })}
+                : {formatSize(snap.container_memory_used_bytes ?? 0)} /{' '}
+                {formatSize(snap.container_memory_limit_bytes ?? 0)}
+              </p>
+            )}
+            <p className="mt-0.5 text-xs text-fg-subtle/80 tabular-nums">
+              {t('pages.dashboard.processResources.hostMemory')}:{' '}
+              {formatSize(snap.used_memory_bytes)} / {formatSize(snap.total_memory_bytes)}
+            </p>
+            <p className="mt-2 text-xs leading-relaxed text-fg-subtle/70">
+              {t('pages.dashboard.processResources.hint')}
+            </p>
+          </div>
         </>
       )}
-      <p className="mt-2 text-xs leading-relaxed text-fg-subtle/70">
-        {t('pages.dashboard.processResources.hint')}
-      </p>
     </Card>
   )
 }

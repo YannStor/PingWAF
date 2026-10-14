@@ -366,6 +366,8 @@ pub struct UpdateSettingsRequest {
     pub notify_cert_renewal_failed: Option<bool>,
     pub notify_config_sync_failed: Option<bool>,
     pub notify_site_failover_changed: Option<bool>,
+    /// Gates `site.upstream_offline` and `site.upstream_abnormal` together.
+    pub notify_site_upstream: Option<bool>,
     pub notify_auth_login_anomaly: Option<bool>,
     pub cert_expiry_warn_days: Option<u32>,
 }
@@ -416,6 +418,9 @@ async fn update_settings(
     }
     if let Some(value) = payload.notify_site_failover_changed {
         settings.notify_site_failover_changed = value;
+    }
+    if let Some(value) = payload.notify_site_upstream {
+        settings.notify_site_upstream = value;
     }
     if let Some(value) = payload.notify_auth_login_anomaly {
         settings.notify_auth_login_anomaly = value;

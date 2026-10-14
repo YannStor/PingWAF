@@ -289,6 +289,7 @@
       "topThreatIpsDescription": "产生最多被拦截请求的 IP。",
       "noThreats": "未检测到威胁",
       "noThreatsDescription": "所选时间窗口内没有被拦截的请求。",
+      "quickActions": "快捷操作",
       "topRules": "触发规则排行",
       "topRulesDescription": "匹配最多流量的规则。",
       "noRulesTriggered": "无规则触发",
@@ -312,8 +313,10 @@
         "processVirtual": "进程虚拟内存",
         "hostMemory": "宿主机内存（系统口径）",
         "hostMemorySystem": "宿主机内存（系统口径）",
+        "containerMemory": "容器内存（{{scope}} 口径）",
+        "containerMemoryScope": "容器内存（{{scope}}）",
         "collectedAt": "采集于 {{time}}",
-        "hint": "进程 RSS 是 pingwaf 二进制的真实占用；宿主机内存是整机内存，包含系统与其他进程。"
+        "hint": "进程 RSS 是 pingwaf 二进制的真实占用；容器内存（cgroup 口径）与 docker stats 一致；宿主机内存是整机内存，包含系统与其他进程。"
       }
     },
     "sites": {
@@ -1393,6 +1396,8 @@
       "event_cert_expired": "证书已过期",
       "event_config_sync_failed": "配置同步失败",
       "event_site_failover_changed": "断连策略变更",
+      "event_site_upstream_offline": "站点上游离线",
+      "event_site_upstream_abnormal": "站点上游异常",
       "event_auth_login_anomaly": "异地登录",
       "severity_info": "信息",
       "severity_warning": "警告",
@@ -2417,5 +2422,23 @@
     "set_query_param": "设置查询参数",
     "remove_query_param": "移除查询参数",
     "replace_body": "替换正文"
+  },
+  "components": {
+    "ipQuickActions": {
+      "reason": "控制台快捷操作",
+      "blockLabel": "封禁",
+      "challengeLabel": "JS 挑战",
+      "blockedTitle": "已加入黑名单",
+      "blockedDescription": "{{ip}} 已封禁，已下发到 {{agents}} 个节点。",
+      "challengedTitle": "已开启 JS 挑战",
+      "challengedDescription": "{{ip}} 将先完成 JS 挑战才能继续访问。",
+      "failedTitle": "操作失败",
+      "disabledHint": "该 IP 近期未命中任何站点，无法快捷操作。",
+      "blockConfirmTitle": "封禁 {{ip}}？",
+      "blockConfirmDescription": "动态封禁将下发到该站点的所有节点，可随时在封禁列表中解除。",
+      "challengeConfirmTitle": "对 {{ip}} 开启 JS 挑战？",
+      "challengeConfirmDescription": "将为该站点创建一条 JS 挑战 IP 规则，访问者须先通过挑战。",
+      "challengeRuleName": "JS 挑战 {{ip}}"
+    }
   }
 }

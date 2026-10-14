@@ -380,6 +380,8 @@ const EVENT_TOGGLE_KEY: Record<string, keyof NotificationSettings> = {
   'cert.renewal_failed': 'notify_cert_renewal_failed',
   'config.sync_failed': 'notify_config_sync_failed',
   'site.failover_changed': 'notify_site_failover_changed',
+  'site.upstream_offline': 'notify_site_upstream',
+  'site.upstream_abnormal': 'notify_site_upstream',
   'auth.login_anomaly': 'notify_auth_login_anomaly',
 }
 

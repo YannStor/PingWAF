@@ -676,6 +676,11 @@ impl ControlPlaneClient {
                         rule_cache.cache_persist_healthy(),
                     ),
                     cache_status_reason: rule_cache.cache_status_reason(),
+                    // Per-upstream backend health from the load balancer's
+                    // circuit breakers; the control plane turns sustained
+                    // loss into site.upstream_* alerts.
+                    upstream_health: crate::upstream_health::heartbeat_statuses(
+                    ),
                 };
 
                 if hb_tx.send(hb).await.is_err() {

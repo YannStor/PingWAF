@@ -169,6 +169,9 @@ const PAGE_5XX: &str = r##"<!DOCTYPE html>
     <div class="row"><span class="k">Time</span><span class="v">{{ timestamp }}</span></div>
     <div class="row"><span class="k">Host</span><span class="v">{{ host }}</span></div>
     <div class="row"><span class="k">Path</span><span class="v">{{ method }} {{ path }}</span></div>
+    {% if upstream_addr %}
+    <div class="row"><span class="k">Upstream</span><span class="v">{{ upstream_name }} → {{ upstream_addr }}</span></div>
+    {% endif %}
   </div>
   <p class="brand">Routed via <b>PingWAF</b></p>
 </div>
@@ -322,6 +325,7 @@ impl ErrorPagePlugin {
     /// Build the Tera render context for the current request.
     fn build_context(
         session: &Session,
+        ctx: &Ctx,
         status: u16,
         request_id: &str,
         client_ip: &str,
@@ -342,6 +346,11 @@ impl ErrorPagePlugin {
         c.insert("method", req.method.as_str());
         c.insert("path", req.uri.path());
         c.insert("host", host);
+        // Upstream context for gateway-class failures (502/503/504): the
+        // upstream group and the backend that was tried. Both are empty on
+        // non-upstream errors, so `{% if upstream_addr %}` guards work.
+        c.insert("upstream_name", ctx.upstream.name.as_ref());
+        c.insert("upstream_addr", &ctx.upstream.address);
         // Aliases the console documents for template authors.
         c.insert("request_path", req.uri.path());
         c.insert("request_host", host);
@@ -388,6 +397,7 @@ impl ErrorPagePlugin {
         let client_ip = ensure_client_ip(session, ctx).to_string();
         let context = Self::build_context(
             session,
+            ctx,
             status,
             &request_id,
             &client_ip,
@@ -706,6 +716,34 @@ use_defaults = true
         assert_eq!(true, out.contains("not a security block"));
         assert_eq!(true, out.contains("req-123"));
         assert_eq!(true, out.contains("PingWAF"));
+        // Without upstream context the details block omits the upstream
+        // row entirely — no empty "Upstream →" line.
+        assert_eq!(false, out.contains("Upstream"));
+    }
+
+    #[test]
+    fn test_render_default_5xx_shows_upstream_when_present() {
+        let plugin = ErrorPagePlugin::new(
+            &toml::from_str::<PluginConf>(r###"category = "error_page""###)
+                .unwrap(),
+        )
+        .unwrap();
+        let mut ctx = Context::new();
+        ctx.insert("request_id", "req-123");
+        ctx.insert("error_code", &503u16);
+        ctx.insert("timestamp", "2025-01-01T00:00:00Z");
+        ctx.insert("client_ip", "10.0.0.1");
+        ctx.insert("method", "GET");
+        ctx.insert("path", "/");
+        ctx.insert("host", "example.com");
+        ctx.insert("upstream_name", "origin-pool");
+        ctx.insert("upstream_addr", "10.0.0.9:8080");
+        let out = plugin.tera.render("pw_default_5xx", &ctx).unwrap();
+        // A gateway-class failure names the upstream group and the
+        // backend that was tried — that is what operators need when the
+        // 503 is an upstream outage rather than a bad request.
+        assert_eq!(true, out.contains("origin-pool"));
+        assert_eq!(true, out.contains("10.0.0.9:8080"));
     }
 
     #[test]

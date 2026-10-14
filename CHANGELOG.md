@@ -8,6 +8,83 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+### Fixed
+
+- **Memory numbers now match `docker stats`.** The memory snapshot read
+  `/proc/meminfo` through sysinfo, which inside a container reports the
+  *host's* RAM — so the dashboard and the About page disagreed with
+  `docker stats`. The snapshot now carries the cgroup figures
+  (`container_memory_used_bytes` / `container_memory_limit_bytes`, scope
+  `cgroup_v1` / `cgroup_v2`) whenever the process runs inside a
+  memory-limited container, and the dashboard resource card shows a single
+  headline figure (process RSS, plus the container line in a container)
+  with the full breakdown — virtual memory, host totals, scope
+  explanations — folded into a hover panel.
+- **Rule-sync no longer doubles agent memory on a large bundle swap.** The
+  agent's copy-on-write snapshot cloned every domain string and the whole
+  failover registry on each rule push. The registry and the global cache
+  settings are now shared behind `Arc` (a bundle swap replaces a pointer,
+  not a map), and the domain index stores `Arc<str>` keys and values —
+  the clone stays O(map headers) regardless of how many domains and
+  policies are registered. The on-disk cache format is unchanged.
+- **Log listings no longer scan the whole window to count matches.** The
+  `q`/`path`/`host` filters compile to leading-wildcard LIKEs, which a
+  btree cannot serve, and the pagination still ran an exact `COUNT(*)`
+  over the (up to 90-day) window. Two changes: pg_trgm GIN indexes now
+  serve those predicates (migration `…056`), and the count is bounded —
+  it stops after 10 001 id hits inside the database and reports
+  `total_truncated` so the console renders `10000+` instead of draining
+  every match. The wire format of uncapped listings is byte-identical.
+- **The admin site overview is capped.** `GET /analytics/sites` loaded
+  every site row with no limit and no ordering for the global view. It
+  now lists the newest 500 sites and reports `truncated` when the list
+  was cut; the site list itself is still fully browsable via pagination.
+- **A rate-limit table flood now fails closed.** Login-bucket entries were
+  reclaimable only after the *widest* window (one hour), and once the
+  10 000-entry table filled anyway, new peers were silently admitted
+  without tracking — disabling the limit on exactly the endpoints whose
+  bcrypt cost a flood targets. Entries now expire with their own
+  bucket's window (a 60-second login slot frees after 60 seconds), and
+  a still-full table rejects new peers with `429` plus a retry hint
+  instead of admitting them untracked.
+
+### Added
+
+- **Site upstream offline/degraded alerts.** Agents now report per-upstream
+  backend health in every heartbeat; the control plane confirms a
+  transition after two consecutive heartbeats (a single blip never pages)
+  and raises `site.upstream_offline` (critical, all backends down) or
+  `site.upstream_abnormal` (warning, partial loss), with recovery reported
+  as `site.upstream_offline` at info severity. A `notify_site_upstream`
+  settings switch gates both events; webhooks/e-mail/WeCom/DingTalk all
+  pick them up like any other event.
+- **Upstream context on gateway error pages.** 502/503/504 error-page
+  templates (built-in and console defaults) can now show which upstream
+  group and backend address were tried (`upstream_name`, `upstream_addr`),
+  so an origin outage page is distinguishable from a WAF block at a glance.
+- **One-click block / JS challenge from IP tables.** The dashboard's top
+  threat IPs and the site traffic page's top client IPs each gained
+  block and JS-challenge buttons (confirm dialog, toast feedback, query
+  invalidation). The cross-site dashboard targets the IP's most recently
+  active site; the site page applies to its own site.
+- **CPU profiling without Go tooling: `profile_cpu` MCP tool and SVG
+  dashboard.** The new MCP tool captures a CPU profile of the control
+  plane (`seconds` 1–30, `frequency` 1–199 — tighter than the REST
+  endpoints) and returns a summary, reading notes and a self-contained
+  SVG dashboard (usage panel, task distribution, key metrics, status
+  badge: `NORMAL` / `HIGH LOAD` / `IDLE` / `PLATFORM-LIMITED`); repeated
+  calls within 60 seconds replay the cached capture instead of stacking
+  sampler sessions. On non-Linux platforms it degrades to a live
+  point-in-time readout instead of failing. The same dashboard is
+  available over REST at `GET /debug/pprof/cpu/dashboard.svg`, with an
+  optional `?refresh=1-60` embedding a script that polls the new
+  `cpu/metrics` endpoint while the file is open in a browser (the
+  caller's Bearer token is inlined only when `refresh` is requested, the
+  response is `no-store`, and the dashboard prints a do-not-share
+  warning on itself).
+
 ## [PingWAF 0.26.2] — 2026-10-14
 
 ### Fixed

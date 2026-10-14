@@ -15,7 +15,7 @@ use pingwaf_proto::control_plane::{
     BlockedIp, CertEventAck, CertEventEntry, GetSiteConfigRequest, HostSample,
     LogAck, LogEntry, Metric, MetricAck, MetricBatch, RegisterAgentRequest,
     RegisterAgentResponse, RuleBundle, ServerCommand, SiteConfig, SiteStatus,
-    SyncRulesRequest,
+    SyncRulesRequest, UpstreamHealth,
 };
 use sea_orm::sea_query::Expr;
 use sea_orm::{
@@ -379,6 +379,7 @@ impl ControlPlaneTrait for ControlPlaneService {
             persist_heartbeat(&db, agent_id, &first).await;
             persist_host_samples(&db, agent_id, &first.host_samples).await;
             persist_blocked_ips(&db, agent_id, &first.blocked_ips).await;
+            record_upstream_health(&db, agent_id, &first.upstream_health).await;
             while let Some(message) = match inbound.message().await {
                 Ok(Some(message)) => Some(message),
                 Ok(None) => None,
@@ -394,6 +395,8 @@ impl ControlPlaneTrait for ControlPlaneService {
                 persist_host_samples(&db, agent_id, &message.host_samples)
                     .await;
                 persist_blocked_ips(&db, agent_id, &message.blocked_ips).await;
+                record_upstream_health(&db, agent_id, &message.upstream_health)
+                    .await;
             }
             mark_offline(&db, agent_id).await;
             registry.disconnect(&agent_id).await;
@@ -818,6 +821,30 @@ impl ControlPlaneTrait for ControlPlaneService {
 
         Ok(Response::new(config))
     }
+}
+
+/// Feeds the per-upstream health report of one heartbeat into the
+/// notification monitor. Absent on older agents — an empty report is a
+/// no-op.
+async fn record_upstream_health(
+    db: &DatabaseConnection,
+    agent_id: Uuid,
+    health: &[UpstreamHealth],
+) {
+    if health.is_empty() {
+        return;
+    }
+    let reports: Vec<_> = health
+        .iter()
+        .map(|entry| crate::notify::upstream_monitor::UpstreamReport {
+            upstream_name: entry.upstream_name.clone(),
+            healthy_backends: entry.healthy_backends,
+            total_backends: entry.total_backends,
+            unhealthy_backends: entry.unhealthy_backends.clone(),
+        })
+        .collect();
+    crate::notify::upstream_monitor::record_heartbeat(db, agent_id, &reports)
+        .await;
 }
 
 /// Persists the runtime counters of one heartbeat.

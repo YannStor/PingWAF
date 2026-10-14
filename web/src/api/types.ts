@@ -12,6 +12,8 @@
 export interface Page<T> {
   items: T[]
   total: number
+  /** True when `total` is a lower bound — the log listings cap their count. */
+  total_truncated?: boolean
   page: number
   page_size: number
 }
@@ -876,6 +878,8 @@ export interface TopIp {
   country_code: string | null
   requests: number
   blocked: number
+  /** Site the IP most recently requested; the target for quick actions. */
+  top_site_id?: string | null
 }
 
 /** `api::analytics::TopPath` */
@@ -901,6 +905,13 @@ export interface SiteOverview {
   plan: string
   requests: number
   blocked: number
+}
+
+/** `api::analytics::SitesOverviewResponse` — `/analytics/sites` envelope. */
+export interface SitesOverviewResponse {
+  sites: SiteOverview[]
+  /** True when the global view was capped at the server-side limit. */
+  truncated?: boolean
 }
 
 /** `api::analytics::SiteTrafficBucket` — one point of one site's series. */
@@ -2235,4 +2246,18 @@ export interface MemorySnapshot {
   used_memory_scope: string
   /** Always `"process"` — this process's own footprint. */
   process_memory_scope: string
+  /**
+   * Container memory in use (cgroup v2 `memory.current`, v1
+   * `memory.usage_in_bytes`) — the figure `docker stats` reports. Present
+   * only inside a memory-limited container.
+   */
+  container_memory_used_bytes?: number | null
+  /** Container memory limit; `null` when the cgroup has no limit. */
+  container_memory_limit_bytes?: number | null
+  /** `container_memory_used_bytes` rendered human-readable. */
+  container_memory_used?: string | null
+  /** `container_memory_limit_bytes` rendered human-readable. */
+  container_memory_limit?: string | null
+  /** `"cgroup_v1" | "cgroup_v2"`, or `null` outside a memory-limited container. */
+  container_memory_scope?: string | null
 }

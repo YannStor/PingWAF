@@ -37,6 +37,8 @@ export interface NotificationSettings {
   notify_cert_renewal_failed: boolean
   notify_config_sync_failed: boolean
   notify_site_failover_changed: boolean
+  /** Gates both site.upstream_offline and site.upstream_abnormal. */
+  notify_site_upstream: boolean
   notify_auth_login_anomaly: boolean
   cert_expiry_warn_days: number
 }
@@ -63,6 +65,8 @@ export const NOTIFICATION_EVENT_TYPES = [
   'cert.expired',
   'config.sync_failed',
   'site.failover_changed',
+  'site.upstream_offline',
+  'site.upstream_abnormal',
   'auth.login_anomaly',
 ] as const
 

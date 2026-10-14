@@ -804,6 +804,12 @@ fn run() -> Result<(), Box<dyn Error>> {
         config.basic.origin_verify_cert,
         webhook::get_webhook_sender(),
     )?;
+    // Wire the upstream provider into the agent so heartbeats carry
+    // per-backend health; the control plane turns sustained loss into
+    // site.upstream_offline / site.upstream_abnormal alerts.
+    pingwaf_agent::upstream_health::set_upstream_provider(
+        new_upstream_provider(),
+    );
     // Wire upstreams into Prometheus scrapes for per-backend gauges.
     #[cfg(feature = "tracing")]
     set_metrics_upstream_provider(new_upstream_provider());

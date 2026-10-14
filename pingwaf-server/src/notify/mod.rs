@@ -4,7 +4,8 @@
 //! in `notification_channels`: SMTP e-mail, WeCom and DingTalk webhooks, and
 //! a generic JSON webhook. Alerts are raised by the health monitor (agent
 //! offline/online), the control-plane self-monitor (CPU/memory/disk), the
-//! gRPC ingest (agent resource samples, ACME failures) and the API layer
+//! upstream monitor (site upstream backend loss, see [`upstream_monitor`]),
+//! the gRPC ingest (agent resource samples, ACME failures) and the API layer
 //! (IP group subscription sync failures, configuration sync errors).
 //!
 //! The manager is a process-wide singleton ([`init`]/[`global`]) so both the
@@ -19,6 +20,7 @@ pub mod email;
 pub mod login_anomaly;
 pub mod secretbox;
 pub mod self_monitor;
+pub mod upstream_monitor;
 pub mod webhook;
 
 use std::collections::HashMap;
@@ -133,6 +135,10 @@ pub struct NotificationSettings {
     /// Deliver failover-policy change alerts.
     #[serde(default = "default_true")]
     pub notify_site_failover_changed: bool,
+    /// Deliver site upstream health alerts (`site.upstream_offline` and
+    /// `site.upstream_abnormal` share this switch, like the cert pair).
+    #[serde(default = "default_true")]
+    pub notify_site_upstream: bool,
     /// Deliver anomalous-login alerts.
     #[serde(default = "default_true")]
     pub notify_auth_login_anomaly: bool,
@@ -165,6 +171,7 @@ impl Default for NotificationSettings {
             notify_cert_renewal_failed: true,
             notify_config_sync_failed: true,
             notify_site_failover_changed: true,
+            notify_site_upstream: true,
             notify_auth_login_anomaly: true,
             cert_expiry_warn_days: 30,
         }
@@ -194,6 +201,8 @@ impl NotificationSettings {
             event_type::SITE_FAILOVER_CHANGED => {
                 self.notify_site_failover_changed
             },
+            event_type::SITE_UPSTREAM_OFFLINE
+            | event_type::SITE_UPSTREAM_ABNORMAL => self.notify_site_upstream,
             event_type::AUTH_LOGIN_ANOMALY => self.notify_auth_login_anomaly,
             // Unknown types (e.g. the test button) are always delivered.
             _ => true,

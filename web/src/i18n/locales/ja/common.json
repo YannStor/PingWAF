@@ -289,6 +289,7 @@
       "topThreatIpsDescription": "最も多くのブロックリクエストを生成した IP。",
       "noThreats": "脅威は検出されていません",
       "noThreatsDescription": "選択した時間範囲内にブロックされたリクエストはありません。",
+      "quickActions": "クイック操作",
       "topRules": "発動ルールトップ",
       "topRulesDescription": "最も多くのトラフィックにマッチしたルール。",
       "noRulesTriggered": "ルールは発動していません",
@@ -312,8 +313,10 @@
         "processVirtual": "プロセス仮想メモリ",
         "hostMemory": "ホストメモリ（システム計測）",
         "hostMemorySystem": "ホストメモリ（システム計測）",
+        "containerMemory": "コンテナメモリ（{{scope}}）",
+        "containerMemoryScope": "コンテナメモリ（{{scope}}）",
         "collectedAt": "取得時刻 {{time}}",
-        "hint": "プロセス RSS は pingwaf バイナリの実際の使用量です。ホストメモリは OS や他のプロセスを含むマシン全体のメモリです。"
+        "hint": "プロセス RSS は pingwaf バイナリの実際の使用量です。コンテナメモリ（cgroup 計測）は docker stats と一致します。ホストメモリは OS や他のプロセスを含むマシン全体のメモリです。"
       }
     },
     "sites": {
@@ -1393,6 +1396,8 @@
       "event_cert_expired": "証明書失効",
       "event_config_sync_failed": "設定同期失敗",
       "event_site_failover_changed": "フェイルオーバー設定変更",
+      "event_site_upstream_offline": "サイト上流オフライン",
+      "event_site_upstream_abnormal": "サイト上流の縮退",
       "event_auth_login_anomaly": "不審なログイン地域",
       "severity_info": "情報",
       "severity_warning": "警告",
@@ -2417,5 +2422,23 @@
     "set_query_param": "クエリ設定",
     "remove_query_param": "クエリ削除",
     "replace_body": "本文置換"
+  },
+  "components": {
+    "ipQuickActions": {
+      "reason": "コンソールからのクイック操作",
+      "blockLabel": "ブロック",
+      "challengeLabel": "JS チャレンジ",
+      "blockedTitle": "IP をブロックしました",
+      "blockedDescription": "{{ip}} をブロックし、{{agents}} 個のエージェントへ配信しました。",
+      "challengedTitle": "JS チャレンジを有効化",
+      "challengedDescription": "{{ip}} はサイトにアクセスする前に JS チャレンジを通過する必要があります。",
+      "failedTitle": "操作に失敗しました",
+      "disabledHint": "この IP には最近のサイト利用がないため、クイック操作は利用できません。",
+      "blockConfirmTitle": "{{ip}} をブロックしますか？",
+      "blockConfirmDescription": "動的ブロックはこのサイトの全エージェントへ配信され、ブロック一覧からいつでも解除できます。",
+      "challengeConfirmTitle": "{{ip}} に JS チャレンジを課しますか？",
+      "challengeConfirmDescription": "このサイトに JS チャレンジの IP ルールを作成します。訪問者はまずチャレンジを通過する必要があります。",
+      "challengeRuleName": "JS チャレンジ {{ip}}"
+    }
   }
 }

@@ -9,6 +9,11 @@ description = "PingWAF data-plane agent: connects to the control plane over gRPC
 # Exposes `set_agent_instance` and `ControlPlaneClient::pop_log` so
 # downstream crates can install a never-connecting agent in tests.
 test-util = []
+# TLS backend passthrough: the upstream provider needs a TLS stack. The
+# host binary enables exactly one of these via its own feature chain.
+default = ["openssl"]
+openssl = ["pingap-upstream/openssl"]
+tls-rustls = ["pingap-upstream/tls-rustls"]
 
 [dependencies]
 pingwaf-proto = { path = "../pingwaf-proto" }
@@ -16,6 +21,10 @@ pingap-cache = { workspace = true }
 # Host-keyed caches must key on the same canonical form the request path
 # produces (`pingap_core::get_host` → `normalize_host`).
 pingap-core = { workspace = true }
+# The heartbeat reports upstream backend health via `UpstreamProvider::
+# healthy_status()`; the provider itself is injected by the binary that
+# owns the proxy, mirroring `pingap_performance::set_metrics_upstream_provider`.
+pingap-upstream = { workspace = true }
 tonic = { workspace = true, features = ["tls-ring", "tls-webpki-roots"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs"] }
 tokio-stream = { workspace = true, features = ["sync"] }

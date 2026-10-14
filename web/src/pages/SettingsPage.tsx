@@ -2823,6 +2823,19 @@ function PerformanceDiagnosticsCard() {
               <span>{t('pages.dashboard.processResources.processRss')}</span>
               <span className="font-medium text-fg-strong">{formatSize(memory.data.rss_bytes)}</span>
             </p>
+            {memory.data.container_memory_scope != null && (
+              <p className="mt-1 flex items-baseline justify-between gap-2">
+                <span>
+                  {t('pages.dashboard.processResources.containerMemoryScope', {
+                    scope: memory.data.container_memory_scope,
+                  })}
+                </span>
+                <span className="font-medium text-fg-strong">
+                  {formatSize(memory.data.container_memory_used_bytes ?? 0)} /{' '}
+                  {formatSize(memory.data.container_memory_limit_bytes ?? 0)}
+                </span>
+              </p>
+            )}
             <p className="mt-1 flex items-baseline justify-between gap-2">
               <span>{t('pages.dashboard.processResources.hostMemorySystem')}</span>
               <span className="font-medium text-fg-strong">

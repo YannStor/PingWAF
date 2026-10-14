@@ -92,6 +92,20 @@ message AgentHeartbeat {
   // older agents — the control plane treats that as healthy.
   optional bool cache_persist_healthy = 18;
   string cache_status_reason = 19;
+
+  // Per-upstream backend health as seen by this agent's load balancer
+  // (circuit-breaker state, not an active probe). The control plane turns
+  // sustained all-backends-down into `site.upstream_offline` alerts and
+  // partial loss into `site.upstream_abnormal`. Absent on older agents.
+  repeated UpstreamHealth upstream_health = 20;
+}
+
+// Backend health of one upstream, reported per heartbeat.
+message UpstreamHealth {
+  string upstream_name = 1;      // Upstream name as configured
+  uint32 healthy_backends = 2;    // Backends currently passing health checks
+  uint32 total_backends = 3;     // All configured backends
+  repeated string unhealthy_backends = 4;  // Backend addresses currently failing
 }
 
 // One dynamically blocked IP as enforced at the edge.

@@ -31,6 +31,7 @@ import {
   Lightning,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
+import { IpQuickActions } from '@/components/waf/IpQuickActions'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
@@ -194,6 +195,13 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
         ) : (
           <span className="text-[13px] text-fg-subtle">0</span>
         ),
+    },
+    {
+      key: 'actions',
+      header: t('pages.dashboard.quickActions'),
+      align: 'right',
+      width: '1%',
+      cell: (r) => <IpQuickActions ip={r.client_ip} siteId={siteId} />,
     },
   ]
 
