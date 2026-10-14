@@ -907,6 +907,50 @@ impl BlockedIpEntry {
     }
 }
 
+/// One CIDR block entry in the per-site secondary index: the net is parsed
+/// once at insert time so the lookup slow path never re-parses strings, and
+/// `expires_at` is mirrored so expired entries can be skipped — and evicted
+/// — without touching the main map.
+#[derive(Debug, Clone)]
+struct CidrEntry {
+    /// The full `"site_id:ip"` key into `blocked_ips`.
+    key: String,
+    net: ipnet::IpNet,
+    expires_at: Option<DateTime<Utc>>,
+}
+
+/// Collapses an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) to its IPv4
+/// form so client addresses and stored CIDR entries are always compared in
+/// one family, matching the control plane's normalised storage.
+fn normalize_mapped(addr: std::net::IpAddr) -> std::net::IpAddr {
+    match addr {
+        std::net::IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(std::net::IpAddr::V4)
+            .unwrap_or(addr),
+        v4 => v4,
+    }
+}
+
+/// Parses a stored block entry into its covering net, collapsing
+/// IPv4-mapped IPv6 CIDRs (written before the control plane normalised
+/// them) into the equivalent IPv4 net.
+fn parse_entry_net(ip: &str) -> Option<ipnet::IpNet> {
+    let net = ip.parse::<ipnet::IpNet>().ok()?;
+    match net {
+        ipnet::IpNet::V6(v6) => match v6.addr().to_ipv4_mapped() {
+            Some(v4) => ipnet::IpNet::new(
+                std::net::IpAddr::V4(v4),
+                v6.prefix_len() - 96,
+            )
+            .ok(),
+            // A real IPv6 range: keep it as-is.
+            None => Some(net),
+        },
+        v4 => Some(v4),
+    }
+}
+
 // ─────────────────────────────────────────────────────────────
 // Disk persistence metadata
 // ─────────────────────────────────────────────────────────────
@@ -941,6 +985,10 @@ pub struct RuleCache {
     inner: ArcSwap<CachedRules>,
     /// Dynamically blocked IPs: key = "site_id:ip"
     blocked_ips: DashMap<String, BlockedIpEntry>,
+    /// Secondary index over the CIDR entries of `blocked_ips`, keyed by site
+    /// id, with the nets pre-parsed. The lookup slow path walks only this —
+    /// per-site and parse-free — instead of scanning the whole map.
+    cidr_index: DashMap<String, Vec<CidrEntry>>,
     /// Disk persistence directory
     cache_dir: PathBuf,
     /// Agent ID for metadata
@@ -975,6 +1023,7 @@ impl RuleCache {
         let cache = Arc::new(Self {
             inner: ArcSwap::new(Arc::new(CachedRules::default())),
             blocked_ips: DashMap::new(),
+            cidr_index: DashMap::new(),
             cache_dir: cache_dir.clone(),
             agent_id,
             quota_domains: Mutex::new(HashSet::new()),
@@ -1511,19 +1560,8 @@ impl RuleCache {
 
     /// Check if an IP is dynamically blocked for a given site.
     pub fn is_ip_blocked(&self, site_id: &str, ip: &str) -> bool {
-        let key = format!("{}:{}", site_id, ip);
-        match self.blocked_ips.get(&key) {
-            Some(entry) => {
-                if entry.is_expired() {
-                    drop(entry);
-                    self.blocked_ips.remove(&key);
-                    false
-                } else {
-                    true
-                }
-            },
-            None => false,
-        }
+        self.blocked_lookup(site_id, ip, |entry| entry.is_expired())
+            .is_some()
     }
 
     /// The reason an IP is dynamically blocked for a site, or `None`. The
@@ -1531,19 +1569,108 @@ impl RuleCache {
     /// produced the block so callers can downgrade WAF-originated blocks
     /// without touching rate-limit or control-plane-issued ones.
     pub fn blocked_reason(&self, site_id: &str, ip: &str) -> Option<String> {
+        self.blocked_lookup(site_id, ip, |entry| entry.reason.clone())
+    }
+
+    /// Resolve the dynamic block covering `ip` for a site.
+    ///
+    /// A block entry is either a single address (legacy and still the common
+    /// case: WAF/rate-limit auto-blocks) or a CIDR range pushed by a
+    /// control-plane block command. The exact `"site:ip"` key is probed first
+    /// — O(1) and unchanged behaviour for single addresses — and only on a
+    /// miss does the per-site CIDR index run: pre-parsed nets, no scan of the
+    /// main map, so a never-blocked client pays nothing extra even while
+    /// thousands of auto-blocks accumulate. Expired entries are evicted on
+    /// sight.
+    fn blocked_lookup<T>(
+        &self,
+        site_id: &str,
+        ip: &str,
+        extract: impl Fn(&BlockedIpEntry) -> T,
+    ) -> Option<T> {
+        // Fast path: an exact single-address (or exact CIDR-string) entry.
         let key = format!("{}:{}", site_id, ip);
-        match self.blocked_ips.get(&key) {
-            Some(entry) => {
-                if entry.is_expired() {
-                    drop(entry);
-                    self.blocked_ips.remove(&key);
-                    None
-                } else {
-                    Some(entry.reason.clone())
-                }
-            },
-            None => None,
+        if let Some(entry) = self.blocked_ips.get(&key) {
+            if entry.is_expired() {
+                drop(entry);
+                self.blocked_ips.remove(&key);
+                self.index_remove_key(&key);
+            } else {
+                return Some(extract(&entry));
+            }
         }
+
+        // The control plane stores mapped-v6 client addresses collapsed to
+        // their IPv4 form; probe that spelling too, so `::ffff:203.0.113.5`
+        // hits the entry stored as `203.0.113.5`.
+        let parsed = ip.parse::<std::net::IpAddr>().ok();
+        if let Some(addr) = parsed.map(normalize_mapped) {
+            let normalized = addr.to_string();
+            if normalized != ip {
+                let key = format!("{}:{}", site_id, normalized);
+                if let Some(entry) = self.blocked_ips.get(&key) {
+                    if entry.is_expired() {
+                        drop(entry);
+                        self.blocked_ips.remove(&key);
+                        self.index_remove_key(&key);
+                    } else {
+                        return Some(extract(&entry));
+                    }
+                }
+            }
+        }
+
+        // Slow path: any CIDR entry of this site covering the address.
+        let addr = normalize_mapped(parsed?);
+        let index = self.cidr_index.get(site_id)?;
+        for entry in index.iter() {
+            if let Some(exp) = entry.expires_at {
+                if Utc::now() >= exp {
+                    continue;
+                }
+            }
+            if entry.net.contains(&addr) {
+                let blocked = self.blocked_ips.get(&entry.key)?;
+                return Some(extract(&blocked));
+            }
+        }
+        None
+    }
+
+    /// Maintains the CIDR index for a blocked-IP insert: CIDR-shaped entries
+    /// are indexed with their pre-parsed net (mapped-v6 collapsed to v4);
+    /// single addresses are simply absent from the index.
+    fn index_insert(&self, site_id: &str, key: &str, entry: &BlockedIpEntry) {
+        let Some(net) = parse_entry_net(&entry.ip) else {
+            return;
+        };
+        let mut index = self.cidr_index.entry(site_id.to_string()).or_default();
+        if let Some(existing) = index.iter_mut().find(|e| e.key == key) {
+            existing.net = net;
+            existing.expires_at = entry.expires_at;
+        } else {
+            index.push(CidrEntry {
+                key: key.to_string(),
+                net,
+                expires_at: entry.expires_at,
+            });
+        }
+    }
+
+    /// Removes one entry (given as its full `"site_id:ip"` key) from the
+    /// CIDR index; a no-op for single-address entries.
+    fn index_remove_key(&self, key: &str) {
+        let Some((site_id, _)) = key.split_once(':') else {
+            return;
+        };
+        if let Some(mut index) = self.cidr_index.get_mut(site_id) {
+            index.retain(|e| e.key != key);
+        }
+    }
+
+    /// Removes a whole site from the CIDR index.
+    fn index_remove_site(&self, site_id: &str) {
+        self.cidr_index.remove(site_id);
     }
 
     /// Block an IP for a site, optionally with a duration.
@@ -1569,7 +1696,8 @@ impl RuleCache {
             expires_at,
         };
 
-        self.blocked_ips.insert(key.clone(), entry);
+        self.blocked_ips.insert(key.clone(), entry.clone());
+        self.index_insert(site_id, &key, &entry);
         info!(site_id = %site_id, ip = %ip, reason = %reason, "Blocked IP");
 
         // Persist blocked IPs
@@ -1581,7 +1709,9 @@ impl RuleCache {
     /// Unblock an IP for a site.
     pub fn unblock_ip(&self, site_id: &str, ip: &str) {
         let key = format!("{}:{}", site_id, ip);
-        if self.blocked_ips.remove(&key).is_some() {
+        let removed = self.blocked_ips.remove(&key).is_some();
+        self.index_remove_key(&key);
+        if removed {
             info!(site_id = %site_id, ip = %ip, "Unblocked IP");
             if let Err(e) = self.persist_blocked_ips() {
                 warn!(error = %e, "Failed to persist blocked IPs");
@@ -1610,6 +1740,7 @@ impl RuleCache {
         let removed = stale.len();
         for key in &stale {
             self.blocked_ips.remove(key);
+            self.index_remove_key(key);
         }
         if removed > 0 {
             info!(
@@ -1639,6 +1770,7 @@ impl RuleCache {
         for key in &stale {
             self.blocked_ips.remove(key);
         }
+        self.index_remove_site(site_id);
         if removed > 0 {
             debug!(
                 site_id = %site_id,
@@ -1662,6 +1794,7 @@ impl RuleCache {
         }
         for key in &expired_keys {
             self.blocked_ips.remove(key);
+            self.index_remove_key(key);
         }
         if !expired_keys.is_empty() {
             debug!(count = expired_keys.len(), "Cleaned up expired IP blocks");
@@ -1948,6 +2081,7 @@ impl RuleCache {
                 for entry in blocked {
                     if !entry.is_expired() {
                         let key = format!("{}:{}", entry.site_id, entry.ip);
+                        self.index_insert(&entry.site_id, &key, &entry);
                         self.blocked_ips.insert(key, entry);
                         loaded += 1;
                     }
@@ -2444,6 +2578,134 @@ mod tests {
         assert_eq!(registry.get("example.com"), Some(&FailoverMode::Closed));
         assert_eq!(registry.get("m.example.com"), Some(&FailoverMode::Closed));
         assert_eq!(registry.get("other.example.com"), None);
+    }
+
+    #[test]
+    fn cidr_block_covers_member_addresses_including_ipv6() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache =
+            RuleCache::new(dir.path().to_path_buf(), "test".to_string())
+                .unwrap();
+
+        cache.block_ip("site-1", "203.0.113.0/24", None, "manual: range");
+        cache.block_ip("site-1", "2001:db8::/32", None, "manual: v6 range");
+        cache.block_ip("site-1", "198.51.100.7", None, "manual: single");
+
+        // Members of the range match; neighbours do not.
+        assert_eq!(
+            cache.blocked_reason("site-1", "203.0.113.55").as_deref(),
+            Some("manual: range")
+        );
+        assert_eq!(cache.blocked_reason("site-1", "203.0.114.55"), None);
+        assert_eq!(cache.blocked_reason("site-1", "198.51.100.55"), None);
+        // IPv6 CIDR matching.
+        assert!(cache.is_ip_blocked("site-1", "2001:db8:dead::1"));
+        assert!(!cache.is_ip_blocked("site-1", "2001:db9::1"));
+        // Legacy single-address behaviour is unchanged.
+        assert_eq!(
+            cache.blocked_reason("site-1", "198.51.100.7").as_deref(),
+            Some("manual: single")
+        );
+        // Another site is not affected by site-1's ranges.
+        assert_eq!(cache.blocked_reason("site-2", "203.0.113.55"), None);
+    }
+
+    #[test]
+    fn unblock_removes_exactly_the_address_or_range_requested() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache =
+            RuleCache::new(dir.path().to_path_buf(), "test".to_string())
+                .unwrap();
+
+        cache.block_ip("site-1", "10.0.0.0/24", None, "manual: range");
+        cache.block_ip("site-1", "10.0.0.7", None, "manual: single");
+
+        // Unblocking the range must not lift the single-IP block it covers.
+        cache.unblock_ip("site-1", "10.0.0.0/24");
+        assert_eq!(
+            cache.blocked_reason("site-1", "10.0.0.7").as_deref(),
+            Some("manual: single")
+        );
+
+        // Unblocking the single IP leaves an identical range untouched
+        // (re-add the range first).
+        cache.block_ip("site-1", "10.0.0.0/24", None, "manual: range");
+        cache.unblock_ip("site-1", "10.0.0.7");
+        assert_eq!(
+            cache.blocked_reason("site-1", "10.0.0.9").as_deref(),
+            Some("manual: range")
+        );
+    }
+
+    #[test]
+    fn cidr_index_stays_consistent_across_block_unblock_and_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache =
+            RuleCache::new(dir.path().to_path_buf(), "test".to_string())
+                .unwrap();
+
+        cache.block_ip("site-1", "10.1.0.0/16", None, "manual: range");
+        assert!(cache.is_ip_blocked("site-1", "10.1.2.3"));
+        // The slow path reads the index, not the main map: an unrelated
+        // non-CIDR entry in another site must not influence the result.
+        cache.block_ip("site-2", "10.1.9.9", None, "single");
+        assert!(!cache.is_ip_blocked("site-2", "10.1.2.3"));
+
+        // Unblock removes the indexed net — the covered address is free.
+        cache.unblock_ip("site-1", "10.1.0.0/16");
+        assert!(!cache.is_ip_blocked("site-1", "10.1.2.3"));
+
+        // Expired CIDR entries do not match and are dropped from the index.
+        cache.block_ip(
+            "site-1",
+            "10.2.0.0/16",
+            Some(Duration::from_millis(200)),
+            "temporary",
+        );
+        assert!(cache.is_ip_blocked("site-1", "10.2.5.5"));
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(!cache.is_ip_blocked("site-1", "10.2.5.5"));
+        cache.cleanup_expired_blocks();
+        assert!(!cache.is_ip_blocked("site-1", "10.2.5.5"));
+    }
+
+    #[test]
+    fn cidr_index_is_rebuilt_from_the_persisted_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache =
+            RuleCache::new(dir.path().to_path_buf(), "test".to_string())
+                .unwrap();
+        cache.block_ip("site-1", "10.3.0.0/16", None, "manual: range");
+        cache.persist_to_disk().unwrap();
+
+        // A fresh cache loads the snapshot and rebuilds the index.
+        let reloaded =
+            RuleCache::new(dir.path().to_path_buf(), "test".to_string())
+                .unwrap();
+        assert!(reloaded.is_ip_blocked("site-1", "10.3.44.5"));
+        assert_eq!(
+            reloaded.blocked_reason("site-1", "10.3.44.5").as_deref(),
+            Some("manual: range")
+        );
+        assert!(!reloaded.is_ip_blocked("site-1", "10.4.44.5"));
+
+        // Unblocking the reloaded range removes it for good.
+        reloaded.unblock_ip("site-1", "10.3.0.0/16");
+        assert!(!reloaded.is_ip_blocked("site-1", "10.3.44.5"));
+    }
+
+    #[test]
+    fn mapped_ipv6_clients_match_ipv4_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache =
+            RuleCache::new(dir.path().to_path_buf(), "test".to_string())
+                .unwrap();
+
+        cache.block_ip("site-1", "203.0.113.5", None, "single");
+        cache.block_ip("site-1", "203.0.114.0/24", None, "range");
+        assert!(cache.is_ip_blocked("site-1", "::ffff:203.0.113.5"));
+        assert!(cache.is_ip_blocked("site-1", "::ffff:203.0.114.9"));
+        assert!(!cache.is_ip_blocked("site-1", "::ffff:203.0.115.1"));
     }
 
     #[test]

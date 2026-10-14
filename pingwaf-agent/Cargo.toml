@@ -36,6 +36,8 @@ arc-swap = { workspace = true }
 crc32fast = { workspace = true }
 # Jitters the reconnect backoff so a fleet of agents never retries in lockstep.
 rand = { workspace = true }
+# CIDR matching for control-plane block commands that target a whole range.
+ipnet = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

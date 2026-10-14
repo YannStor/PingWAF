@@ -23,6 +23,136 @@ use crate::auth::AuthUser;
 use crate::models::{agent, agent_blocked_ip, security_event, site};
 use sea_orm::Set;
 
+/// The narrowest CIDR a manual block may target, per family. Anything wider
+/// (e.g. `0.0.0.0/0`, `10.0.0.0/8`, `2001:db8::/16`) is a fat-fingered
+/// network-wide ban waiting to happen, so it is rejected at the API.
+const MIN_IPV4_PREFIX: u8 = 16;
+const MIN_IPV6_PREFIX: u8 = 32;
+
+/// A validated block target: one address or one CIDR range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BlockTarget {
+    Single(std::net::IpAddr),
+    Cidr(ipnet::IpNet),
+}
+
+impl BlockTarget {
+    /// The canonical stored form: the input as typed for single addresses,
+    /// the normalised `addr/pfx` for CIDRs.
+    pub(crate) fn as_stored(&self) -> String {
+        match self {
+            Self::Single(ip) => ip.to_string(),
+            Self::Cidr(net) => net.to_string(),
+        }
+    }
+
+    /// Dashboard discriminator: `"single"` or `"cidr"`.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Single(_) => "single",
+            Self::Cidr(_) => "cidr",
+        }
+    }
+}
+
+/// Collapses an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) into its IPv4
+/// form, adjusting the prefix by the 96 mapped bits. `None` means the mapped
+/// prefix does not leave room for a whole IPv4 address (`< /96`), which no
+/// IPv4 CIDR can express.
+fn unmap(addr: std::net::IpAddr, pfx: u8) -> Option<(std::net::IpAddr, u8)> {
+    match addr {
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) if pfx >= 96 => Some((std::net::IpAddr::V4(v4), pfx - 96)),
+            Some(_) => None,
+            None => Some((addr, pfx)),
+        },
+        v4 => Some((v4, pfx)),
+    }
+}
+
+/// Parses the shape of a block/unblock target — a bare IP address or an
+/// `addr/pfx` CIDR — normalising host bits and IPv4-mapped IPv6 input into
+/// the plain IPv4 equivalent, with no width guard.
+fn parse_target_shape(raw: &str) -> Result<BlockTarget, ApiError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError::BadRequest(
+            "invalid IP address or CIDR: ''".to_string(),
+        ));
+    }
+    // ipnet's strict parser rejects `addr/pfx` with host bits set (e.g.
+    // `203.0.113.99/24`); truncate those instead of bouncing the input, so
+    // the stored entry and a later identical request always agree.
+    if let Some((addr_raw, pfx_raw)) = trimmed.split_once('/') {
+        let parsed = addr_raw
+            .parse::<std::net::IpAddr>()
+            .ok()
+            .zip(pfx_raw.parse::<u8>().ok())
+            .and_then(|(addr, pfx)| unmap(addr, pfx))
+            .and_then(|(addr, pfx)| ipnet::IpNet::new(addr, pfx).ok())
+            .map(|net| net.trunc());
+        if let Some(net) = parsed {
+            return Ok(BlockTarget::Cidr(net));
+        }
+    }
+    match trimmed.parse::<std::net::IpAddr>() {
+        // A bare `::ffff:a.b.c.d` is just the IPv4 address spelled in the
+        // mapped form — store (and later unblock) it as the v4 literal so
+        // both spellings refer to one entry.
+        Ok(std::net::IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
+            Some(v4) => Ok(BlockTarget::Single(std::net::IpAddr::V4(v4))),
+            None => Ok(BlockTarget::Single(std::net::IpAddr::V6(v6))),
+        },
+        Ok(ip) => Ok(BlockTarget::Single(ip)),
+        Err(_) => Err(ApiError::BadRequest(format!(
+            "invalid IP address or CIDR: '{trimmed}'"
+        ))),
+    }
+}
+
+/// Parses a block target: a bare IP address or an `addr/pfx` CIDR.
+/// CIDRs are capped at /16 (IPv4) and /32 (IPv6) so a whole-network ban
+/// cannot be issued by accident; the returned value is normalised.
+pub(crate) fn parse_block_target(raw: &str) -> Result<BlockTarget, ApiError> {
+    let target = parse_target_shape(raw)?;
+    if let BlockTarget::Cidr(net) = &target {
+        let min = match net {
+            ipnet::IpNet::V4(_) => MIN_IPV4_PREFIX,
+            ipnet::IpNet::V6(_) => MIN_IPV6_PREFIX,
+        };
+        if net.prefix_len() < min {
+            return Err(ApiError::BadRequest(format!(
+                "CIDR prefix too broad: '{}' — the narrowest \
+                 allowed range is /{min} for {}",
+                raw.trim(),
+                if min == MIN_IPV4_PREFIX {
+                    "IPv4"
+                } else {
+                    "IPv6"
+                }
+            )));
+        }
+    }
+    Ok(target)
+}
+
+/// Normalises an unblock target without the manual-block width guard:
+/// unblocking must never be stricter than blocking, and the returned string
+/// must match the form the block was stored under so the agent-side exact
+/// key removal hits. Still rejects non-IP/CIDR input.
+pub(crate) fn parse_unblock_target(raw: &str) -> Result<String, ApiError> {
+    parse_target_shape(raw).map(|target| target.as_stored())
+}
+
+/// Classifies a stored `ip` value for the dashboard lists.
+pub(crate) fn ip_kind(stored: &str) -> &'static str {
+    if stored.parse::<ipnet::IpNet>().is_ok() {
+        "cidr"
+    } else {
+        "single"
+    }
+}
+
 /// Per-IP attack rollup over `security_events`, grouped by client IP.
 #[derive(Debug, FromQueryResult)]
 struct AttackStats {
@@ -37,6 +167,8 @@ struct AttackStats {
 #[derive(Debug, Serialize)]
 pub struct BlockedIpResponse {
     pub ip: String,
+    /// `"single"` for one address, `"cidr"` for a range.
+    pub kind: &'static str,
     pub reason: Option<String>,
     pub blocked_at: DateTime<Utc>,
     /// None = permanent block (no automatic expiry).
@@ -107,6 +239,7 @@ async fn list(
             let stat = stat_map.get(&row.ip);
             BlockedIpResponse {
                 ip: row.ip.clone(),
+                kind: ip_kind(&row.ip),
                 reason: row.reason.clone(),
                 blocked_at: row.blocked_at,
                 expires_at: row.expires_at,
@@ -148,12 +281,10 @@ async fn unblock(
 ) -> Result<Response, ApiError> {
     let id = parse_uuid(&site_id, "site id")?;
     load_site_write(&state.db, id, &current).await?;
-    let ip = payload.ip.trim().to_string();
-    if ip.is_empty() || ip.parse::<std::net::IpAddr>().is_err() {
-        return Err(ApiError::BadRequest(format!(
-            "invalid IP address: '{ip}'"
-        )));
-    }
+    // Only the exact stored entry is lifted: unblocking a CIDR must not
+    // remove the single-IP blocks it happens to cover.
+    let target = parse_block_target(&payload.ip)?;
+    let ip = target.as_stored();
 
     let rows = agent_blocked_ip::Entity::find()
         .filter(agent_blocked_ip::Column::SiteId.eq(id))
@@ -213,6 +344,8 @@ async fn unblock(
 #[derive(Debug, Serialize)]
 pub struct GlobalBlockedIpResponse {
     pub ip: String,
+    /// `"single"` for one address, `"cidr"` for a range.
+    pub kind: &'static str,
     pub site_id: Uuid,
     pub site_name: String,
     pub reason: Option<String>,
@@ -346,6 +479,7 @@ async fn global_list(
             let stat = stat_map.get(&(row.site_id, row.ip.clone()));
             GlobalBlockedIpResponse {
                 ip: row.ip.clone(),
+                kind: ip_kind(&row.ip),
                 site_id: row.site_id,
                 site_name: site_names
                     .get(&row.site_id)
@@ -390,12 +524,8 @@ async fn manual_block(
 ) -> Result<Response, ApiError> {
     let id = parse_uuid(payload.site_id.trim(), "site id")?;
     load_site_write(&state.db, id, &current).await?;
-    let ip = payload.ip.trim().to_string();
-    if ip.is_empty() || ip.parse::<std::net::IpAddr>().is_err() {
-        return Err(ApiError::BadRequest(format!(
-            "invalid IP address: '{ip}'"
-        )));
-    }
+    let target = parse_block_target(&payload.ip)?;
+    let ip = target.as_stored();
     let duration = payload.duration_seconds.unwrap_or(0).max(0);
     let reason = payload
         .reason
@@ -475,6 +605,7 @@ async fn manual_block(
         StatusCode::ACCEPTED,
         Json(serde_json::json!({
             "ip": ip,
+            "kind": target.kind(),
             "site_id": id,
             "duration_seconds": duration,
             "agents": agent_ids.len(),
@@ -482,4 +613,97 @@ async fn manual_block(
         })),
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(raw: &str) -> Result<BlockTarget, ApiError> {
+        parse_block_target(raw)
+    }
+
+    #[test]
+    fn single_addresses_and_cidrs_parse_with_kind() {
+        assert_eq!(
+            parse("203.0.113.1").unwrap(),
+            BlockTarget::Single("203.0.113.1".parse().unwrap())
+        );
+        assert_eq!(parse("2001:db8::1").unwrap().kind(), "single");
+        assert_eq!(parse("203.0.113.0/24").unwrap().kind(), "cidr");
+        assert_eq!(
+            parse(" 2001:db8::/32 ").unwrap().as_stored(),
+            "2001:db8::/32"
+        );
+    }
+
+    #[test]
+    fn cidrs_are_normalised_before_storage() {
+        // Host bits set: ipnet truncates them, so the stored entry and a
+        // later unblock request with the same input agree on one string.
+        assert_eq!(
+            parse("203.0.113.99/24").unwrap().as_stored(),
+            "203.0.113.0/24"
+        );
+    }
+
+    #[test]
+    fn invalid_targets_are_rejected() {
+        assert!(parse("").is_err());
+        assert!(parse("not-an-ip").is_err());
+        assert!(parse("203.0.113.0/8x").is_err());
+    }
+
+    #[test]
+    fn broad_cidrs_are_rejected_with_a_clear_message() {
+        let err = parse("0.0.0.0/0").unwrap_err().to_string();
+        assert!(err.contains("prefix too broad"), "{err}");
+        assert!(err.contains("/16"), "{err}");
+        assert!(parse("10.0.0.0/8").is_err());
+        assert!(parse("2001:db8::/16").is_err());
+        // At the boundary: allowed.
+        assert!(parse("10.0.0.0/16").is_ok());
+        assert!(parse("2001:db8::/32").is_ok());
+    }
+
+    #[test]
+    fn ip_kind_classifies_stored_values() {
+        assert_eq!(ip_kind("203.0.113.1"), "single");
+        assert_eq!(ip_kind("203.0.113.0/24"), "cidr");
+        assert_eq!(ip_kind("2001:db8::/32"), "cidr");
+        assert_eq!(ip_kind("garbage"), "single");
+    }
+
+    #[test]
+    fn ipv4_mapped_cidrs_collapse_to_ipv4_and_inherit_its_guard() {
+        // /96 on the mapped range is 0.0.0.0/0 in disguise — beyond /16.
+        let err = parse("::ffff:0:0/96").unwrap_err().to_string();
+        assert!(err.contains("too broad"), "{err}");
+        assert!(err.contains("/16"), "{err}");
+        // /104 maps to 10.0.0.0/8 — judged by the v4 ceiling, rejected.
+        assert!(parse("::ffff:10.0.0.0/104").is_err());
+        // Mapped /120 maps to a v4 /24: allowed, stored in v4 form.
+        assert_eq!(
+            parse("::ffff:203.0.113.0/120").unwrap().as_stored(),
+            "203.0.113.0/24"
+        );
+        // Boundary: mapped /112 == v4 /16 is the narrowest allowed.
+        assert!(parse("::ffff:10.0.0.0/112").is_ok());
+    }
+
+    #[test]
+    fn bare_mapped_addresses_are_stored_as_ipv4() {
+        assert_eq!(
+            parse("::ffff:203.0.113.5").unwrap().as_stored(),
+            "203.0.113.5"
+        );
+        assert_eq!(parse("::ffff:203.0.113.5").unwrap().kind(), "single");
+        // Unblocking uses the same collapse, so the stored key matches.
+        assert_eq!(
+            parse_unblock_target("::ffff:203.0.113.0/120").unwrap(),
+            "203.0.113.0/24"
+        );
+        // Non-mapped v6 is untouched.
+        assert_eq!(parse_unblock_target("2001:db8::1").unwrap(), "2001:db8::1");
+    }
 }
