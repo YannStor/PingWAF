@@ -447,8 +447,12 @@ impl ControlPlaneClient {
     ) -> anyhow::Result<()> {
         let interval_secs = self.config.metrics_ship_interval_secs;
         if interval_secs == 0 {
-            debug!("Metric shipping disabled");
-            return Ok(());
+            // Shipping is disabled, but this future is part of the
+            // `try_connect_and_run` select: returning would tear the session
+            // down (reconnect storm, no commands). Park forever instead and
+            // let the shutdown branch end the connection.
+            debug!("Metric shipping disabled; idling shipper for the session");
+            return metric_shipper_disabled().await;
         }
         let mut client = ProtoClient::new(channel);
         let agent_token = self.agent_token.load_full();
@@ -1104,6 +1108,13 @@ impl ControlPlaneClient {
 // Helper functions for system information
 // ─────────────────────────────────────────────────────────────
 
+/// Future that never resolves: the value a disabled metric shipper parks on
+/// so it neither ships nor completes the surrounding select. Tested with a
+/// timeout — the contract is "does not complete".
+async fn metric_shipper_disabled() -> anyhow::Result<()> {
+    std::future::pending::<anyhow::Result<()>>().await
+}
+
 /// Attaches the agent token as `x-agent-token` metadata — the transport-level
 /// credential the control plane authenticates the shipping streams with (the
 /// ship message bodies carry no token field).
@@ -1303,6 +1314,19 @@ mod tests {
             request.metadata().get("x-agent-token").unwrap(),
             "abc.def.ghi"
         );
+    }
+
+    // A disabled metric shipper must never complete: inside
+    // `try_connect_and_run`'s select a completed future tears the whole
+    // gRPC session down, causing a reconnect storm and lost commands.
+    #[tokio::test]
+    async fn disabled_metric_shipper_never_completes() {
+        let result = tokio::time::timeout(
+            Duration::from_millis(50),
+            metric_shipper_disabled(),
+        )
+        .await;
+        assert!(result.is_err(), "disabled shipper resolved too early");
     }
 
     #[test]
