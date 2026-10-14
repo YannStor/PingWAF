@@ -8,6 +8,24 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.25.13] — 2026-10-14
+
+### ✨ Features
+
+- **Origin certificate verification is now a site-level setting, and its
+  entry points are consistent.** A new `sites.origin_verify_cert` column
+  forms a three-level cascade — pool pin > site default > deployment
+  default — resolved server-side when the rule bundle is built, so agents
+  need no change and pools that leave `verify_cert` unset follow their
+  site instead of jumping straight to the global switch. The site tier is
+  managed from a new "Origin certificate check" card on the site's SSL
+  page; the Basic page's origin-pools section shows the site default and
+  each pool's effective value at a glance, and the pool dialog keeps the
+  tri-state selector visible (disabled while the origin is HTTP) instead
+  of hiding it behind the HTTPS-origin switch. Existing pools are
+  unaffected: `NULL` still means "follow the parent level", and the
+  migration only adds a nullable column.
+
 ## [PingWAF 0.25.12] — 2026-10-14
 
 The hardening release: crash-safe agent rule-cache persistence, a CI gate
