@@ -1089,7 +1089,6 @@ const RATE_COUNTERS_GC_INTERVAL_SECS: u64 = 30;
 /// pressure matters more than the (still once-per-second) O(N) sweep.
 const RATE_COUNTERS_GC_PANIC_THRESHOLD: usize = 262_144;
 
-
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1167,15 +1166,15 @@ impl RateLimitPolicy {
                 // full O(N) walk on every request once an attacker has pushed
                 // the map past the threshold. The compare-exchange picks a
                 // single racer to run it; the others proceed without the walk.
-                let interval = if counters.len()
-                    >= RATE_COUNTERS_GC_PANIC_THRESHOLD
-                {
-                    1
-                } else {
-                    RATE_COUNTERS_GC_INTERVAL_SECS
-                };
-                let last =
-                    self.last_gc_sweep.load(std::sync::atomic::Ordering::Relaxed);
+                let interval =
+                    if counters.len() >= RATE_COUNTERS_GC_PANIC_THRESHOLD {
+                        1
+                    } else {
+                        RATE_COUNTERS_GC_INTERVAL_SECS
+                    };
+                let last = self
+                    .last_gc_sweep
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 if now.saturating_sub(last) >= interval
                     && self
                         .last_gc_sweep

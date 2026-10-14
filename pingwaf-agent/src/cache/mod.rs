@@ -2730,8 +2730,8 @@ mod tests {
         cache.flush_blocked_ips();
         let raw = std::fs::read(dir.path().join("blocked_ips.json"))
             .expect("flush wrote blocked_ips.json");
-        let entries: Vec<BlockedIpEntry> = serde_json::from_slice(&raw)
-            .expect("flushed snapshot parses");
+        let entries: Vec<BlockedIpEntry> =
+            serde_json::from_slice(&raw).expect("flushed snapshot parses");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].reason, "waf: sqli");
 
@@ -2767,12 +2767,7 @@ mod tests {
         // Fill to the (test) ceiling: first three entries are permanent,
         // the fourth is already-expiring, the fifth is the newest permanent.
         for i in 0..3 {
-            cache.block_ip(
-                "site-1",
-                &format!("10.0.0.{i}"),
-                None,
-                "waf: old",
-            );
+            cache.block_ip("site-1", &format!("10.0.0.{i}"), None, "waf: old");
         }
         cache.block_ip(
             "site-1",

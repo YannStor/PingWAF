@@ -309,9 +309,7 @@ async fn profile_memory() -> Result<Value, String> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some((taken_at, cached)) = cache.as_ref() {
-        if (taken_at.elapsed().as_millis() as u64)
-            < MEMORY_SNAPSHOT_CACHE_MS
-        {
+        if (taken_at.elapsed().as_millis() as u64) < MEMORY_SNAPSHOT_CACHE_MS {
             return Ok(cached.clone());
         }
     }
