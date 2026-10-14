@@ -15,9 +15,11 @@ PingWAF 在每个二进制中都内置了 pprof 风格的性能剖析——无�
 
 - `profile` — gzip 压缩的 pprof protobuf，与 `go tool pprof` 期望的线格式完全一致。采样时长 `seconds`（1-120，默认 30），频率 `frequency` Hz（1-1000，默认 99——避开整数以防止采样器与周期性任务同步）。
 - `flamegraph` — 由 inferno 渲染的 SVG 火焰图，浏览器直接打开。
-- `memory` — 进程 RSS 与系统内存的 JSON 快照，立即返回。
+- `memory` — 进程 RSS 与系统内存的 JSON 快照，立即返回。`rss_bytes` 是本进程占用；`total_memory_bytes`/`used_memory_bytes` 是**宿主机**内存（容器内即宿主总量，不是容器限额），由 `used_memory_scope: "system"` 与 `process_memory_scope: "process"` 标注。资源卡片应使用 `rss_bytes` 展示进程占用。
 
 采样是进程级单例：并发的第二个采集请求会收到 `409 Conflict`。报告符号化在异步运行时之外执行，因此一次采集的成本是一个睡眠中的请求加上采样器自身消耗的 CPU（99 Hz 约 1%）。
+
+采样器按**进程 CPU 时间**触发（`SIGPROF` / `ITIMER_PROF`），而非墙钟。空闲进程的采集窗口内拿不到样本：此时端点不再返回空剖析，而是回答 `409 Conflict` 并给出引导——在负载下重试，或改用 `memory` 快照。若会话期间 CPU 时间增量不足墙钟时长的 1%，同样按此拒绝。
 
 ## 采集剖析
 

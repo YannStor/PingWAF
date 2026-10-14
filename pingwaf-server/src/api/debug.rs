@@ -39,6 +39,18 @@ pub struct ProfileQuery {
     pub frequency: Option<i32>,
 }
 
+/// Maps profiling finish errors: an empty capture is not a server fault —
+/// the client asked to profile an idle process — so it is a `409 Conflict`
+/// with guidance, not a `500`.
+fn finish_err(err: ProfileError) -> ApiError {
+    match err {
+        ProfileError::NoSamples | ProfileError::Idle => {
+            ApiError::Conflict(err.to_string())
+        },
+        other => ApiError::Internal(other.to_string()),
+    }
+}
+
 fn begin_session(query: &ProfileQuery) -> Result<ProfilingSession, ApiError> {
     let frequency = query.frequency.unwrap_or_default();
     start_session(frequency).map_err(|err| match err {
@@ -67,7 +79,7 @@ async fn profile_cpu(
     let bytes = tokio::task::spawn_blocking(move || session.finish_pprof())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(finish_err)?;
 
     // The body is already gzip: `Content-Encoding` states that fact and
     // keeps the compression middleware from encoding it a second time.
@@ -103,7 +115,7 @@ async fn profile_flamegraph(
     let svg = tokio::task::spawn_blocking(move || session.finish_flamegraph())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(finish_err)?;
 
     Ok((
         StatusCode::OK,

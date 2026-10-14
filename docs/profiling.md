@@ -18,9 +18,11 @@ without constructing the URLs by hand.
 
 - `profile` — gzip-compressed pprof protobuf, the exact wire format `go tool pprof` expects. Sampling takes `seconds` (1-120, default 30) at `frequency` Hz (1-1000, default 99 — off-round so the sampler does not lock onto periodic work).
 - `flamegraph` — SVG flamegraph rendered by inferno; open it directly in a browser.
-- `memory` — JSON snapshot of process RSS and system RAM; returns immediately.
+- `memory` — JSON snapshot of process RSS and system RAM; returns immediately. `rss_bytes` is this process's footprint; `total_memory_bytes`/`used_memory_bytes` are the **host's** RAM (inside a container that is the host's total, not the container limit), marked by `used_memory_scope: "system"` vs `process_memory_scope: "process"`. Show the process card from `rss_bytes`.
 
 Sampling is process-global: a second concurrent capture gets `409 Conflict`. Report symbolisation runs off the async runtime, so a capture costs one sleeping request plus the CPU the sampler itself burns (~1% at 99 Hz).
+
+The sampler fires on **process CPU time** (`SIGPROF` / `ITIMER_PROF`), not wall clock. A capture of an idle process therefore yields no samples: instead of an empty profile the endpoints answer `409 Conflict` with guidance — retry under load, or use the `memory` snapshot. A session whose CPU time grew by less than 1% of its wall-clock window is rejected the same way.
 
 ## Capturing a profile
 

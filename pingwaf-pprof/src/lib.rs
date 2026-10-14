@@ -30,6 +30,9 @@ use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(target_os = "linux")]
+use std::time::Instant;
+
+#[cfg(target_os = "linux")]
 use std::io::Write;
 
 #[cfg(target_os = "linux")]
@@ -65,9 +68,25 @@ pub enum ProfileError {
     UnsupportedPlatform,
     /// The profiler failed to start (unsupported platform, resource limits).
     Start(String),
+    /// Zero samples were captured: the profiled process was idle for the
+    /// whole window. The sampler fires on process CPU time (`SIGPROF` via
+    /// `ITIMER_PROF`), so a process doing no work yields nothing (HTTP 409).
+    NoSamples,
+    /// CPU time grew by less than 1% of the wall-clock window, meaning the
+    /// process was essentially idle; the capture is refused rather than
+    /// returned as a misleading near-empty profile (HTTP 409).
+    Idle,
     /// Collecting, symbolising or encoding the report failed.
     Report(String),
 }
+
+/// Wall-clock fraction below which a session counts as idle. This must stay
+/// well below the signal handler's own CPU overhead at 99 Hz (roughly
+/// 0.5–2% of one core), or genuinely idle processes get misclassified as
+/// active; zero-sample captures are still rejected separately via
+/// `ProfileError::NoSamples`.
+#[cfg(target_os = "linux")]
+const IDLE_CPU_FRACTION: f64 = 0.001;
 
 impl std::error::Error for ProfileError {}
 
@@ -83,6 +102,17 @@ impl std::fmt::Display for ProfileError {
             ProfileError::Start(msg) => {
                 write!(f, "failed to start profiler: {msg}")
             },
+            ProfileError::NoSamples => f.write_str(
+                "no samples were captured during the profiling window: \
+                 the profiled process appeared idle — the sampler is \
+                 CPU-time based and needs active traffic; retry under load \
+                 or use the memory snapshot",
+            ),
+            ProfileError::Idle => f.write_str(
+                "the process spent almost no CPU time during the \
+                 profiling window (<1% of the wall clock), so the profile \
+                 would be nearly empty; retry under load",
+            ),
             ProfileError::Report(msg) => {
                 write!(f, "failed to build profile report: {msg}")
             },
@@ -100,6 +130,10 @@ fn report_err(err: pprof::Error) -> ProfileError {
 pub struct ProfilingSession {
     #[cfg(target_os = "linux")]
     guard: Option<ProfilerGuard<'static>>,
+    #[cfg(target_os = "linux")]
+    started_at: Instant,
+    #[cfg(target_os = "linux")]
+    start_cpu_ticks: Option<u64>,
 }
 
 /// Starts CPU sampling at `frequency` Hz (values outside `1..=MAX_FREQUENCY`
@@ -121,7 +155,11 @@ pub fn start_session(frequency: i32) -> Result<ProfilingSession, ProfileError> {
         .blocklist(&["libc", "libgcc", "pthread", "vdso"])
         .build();
     match started {
-        Ok(guard) => Ok(ProfilingSession { guard: Some(guard) }),
+        Ok(guard) => Ok(ProfilingSession {
+            guard: Some(guard),
+            started_at: Instant::now(),
+            start_cpu_ticks: process_cpu_ticks(),
+        }),
         Err(err) => {
             SESSION_ACTIVE.store(false, Ordering::SeqCst);
             Err(ProfileError::Start(err.to_string()))
@@ -145,6 +183,7 @@ impl ProfilingSession {
     #[cfg(target_os = "linux")]
     pub fn finish_pprof(mut self) -> Result<Vec<u8>, ProfileError> {
         let report = self.take_report()?;
+        self.reject_idle(&report)?;
         let profile = report.pprof().map_err(report_err)?;
         let raw = pprof::protos::Message::encode_to_vec(&profile);
         let mut encoder = flate2::write::GzEncoder::new(
@@ -167,6 +206,7 @@ impl ProfilingSession {
     #[cfg(target_os = "linux")]
     pub fn finish_flamegraph(mut self) -> Result<String, ProfileError> {
         let report = self.take_report()?;
+        self.reject_idle(&report)?;
         let mut svg = Vec::new();
         report.flamegraph(&mut svg).map_err(report_err)?;
         String::from_utf8(svg).map_err(|e| ProfileError::Report(e.to_string()))
@@ -190,6 +230,53 @@ impl ProfilingSession {
         self.guard = None;
         Ok(report)
     }
+
+    /// Rejects a capture that would be useless because the process did not
+    /// burn CPU during the window: zero samples, or CPU time below 1% of the
+    /// wall-clock duration.
+    ///
+    /// The CPU-time read comes from `/proc/self/stat` (utime+stime in clock
+    /// ticks); when that is unavailable (non-Linux, seccomp filter) the idle
+    /// check is skipped and only the empty-report guard applies.
+    #[cfg(target_os = "linux")]
+    fn reject_idle(&self, report: &pprof::Report) -> Result<(), ProfileError> {
+        if report.data.is_empty() {
+            return Err(ProfileError::NoSamples);
+        }
+        if let Some(start_ticks) = self.start_cpu_ticks {
+            let Some(end_ticks) = process_cpu_ticks() else {
+                return Ok(());
+            };
+            let cpu_secs = end_ticks.saturating_sub(start_ticks) as f64
+                / ticks_per_second() as f64;
+            let wall_secs = self.started_at.elapsed().as_secs_f64();
+            if cpu_secs < wall_secs * IDLE_CPU_FRACTION {
+                return Err(ProfileError::Idle);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Process CPU time since start, in clock ticks (`utime + stime` from
+/// `/proc/self/stat`). Linux-only; `None` when unreadable. The comm field may
+/// contain spaces, so parsing starts after its closing parenthesis.
+#[cfg(target_os = "linux")]
+fn process_cpu_ticks() -> Option<u64> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let rest = stat.rsplit_once(')')?.1;
+    // After the comm field the remaining fields start at `state` (field 3);
+    // utime (14) and stime (15) are therefore items 11 and 12 here.
+    let mut fields = rest.split_whitespace();
+    let utime = fields.nth(11)?.parse::<u64>().ok()?;
+    let stime = fields.next()?.parse::<u64>().ok()?;
+    Some(utime.saturating_add(stime))
+}
+
+/// The userspace-visible clock-tick rate for `/proc` fields, always 100.
+#[cfg(target_os = "linux")]
+fn ticks_per_second() -> u64 {
+    100
 }
 
 #[cfg(target_os = "linux")]
@@ -220,6 +307,14 @@ pub struct MemorySnapshot {
     pub used_memory: String,
     /// Unix epoch milliseconds at which the snapshot was taken.
     pub collected_at_ms: u64,
+    /// Scope of `used_memory_bytes`/`total_memory_bytes`: always `"system"`
+    /// today — sysinfo reports host RAM, which in a container is the host's
+    /// or VM's total, *not* the container limit. Client code that wants the
+    /// process footprint must use `rss_bytes`, never `used_memory_bytes`.
+    pub used_memory_scope: &'static str,
+    /// Scope of `rss_bytes`/`virtual_bytes`: always `"process"` — this is
+    /// this process's own footprint (`statm` via `memory-stats`).
+    pub process_memory_scope: &'static str,
 }
 
 /// Collects a [`MemorySnapshot`]. Process memory comes from `memory-stats`,
@@ -247,6 +342,8 @@ pub fn memory_snapshot() -> MemorySnapshot {
         total_memory: ByteSize(sys.total_memory()).to_string(),
         used_memory: ByteSize(sys.used_memory()).to_string(),
         collected_at_ms,
+        used_memory_scope: "system",
+        process_memory_scope: "process",
     }
 }
 
@@ -315,5 +412,27 @@ mod tests {
         assert!(snapshot.total_memory_bytes > 0);
         assert!(snapshot.used_memory_bytes > 0);
         assert!(snapshot.collected_at_ms > 0);
+        // Scope annotations: the totals are the machine's RAM, not the
+        // process footprint — frontend cards rely on these markers.
+        assert_eq!(snapshot.used_memory_scope, "system");
+        assert_eq!(snapshot.process_memory_scope, "process");
+    }
+
+    // The idle guard reads the process CPU clock; on Linux this must always
+    // resolve for our own process.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_cpu_ticks_is_readable() {
+        burn(10);
+        assert!(process_cpu_ticks().unwrap() > 0);
+    }
+
+    // Empty-capture errors carry the guidance admins need to self-serve.
+    #[test]
+    fn empty_capture_errors_explain_themselves() {
+        assert!(ProfileError::NoSamples
+            .to_string()
+            .contains("no samples were captured"));
+        assert!(ProfileError::Idle.to_string().contains("almost no CPU"));
     }
 }
