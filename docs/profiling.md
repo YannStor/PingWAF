@@ -61,6 +61,16 @@ make release-perf        # cargo build --profile=release-perf --features=perf
 
 `release-perf` inherits `release` but keeps `debug = 1` and disables stripping. It is a diagnostics build — production still runs the stripped `release` binary; take the `release-perf` binary to the same environment when investigating.
 
+### Prebuilt perf image
+
+For Docker deployments there is an on-demand pipeline: run the **Release (perf image)** workflow (Actions → *Release (perf image)* → *Run workflow*) or:
+
+```bash
+gh workflow run release-perf.yml
+```
+
+It builds `Dockerfile.perf` (the same multi-stage build, `--profile release-perf`) and publishes `ghcr.io/shuaizend/pingwaf:perf` (amd64). Deploy it in place of the regular tag, reproduce the load, capture the profile, then switch back — the image is 2-4× larger and never enters the version manifests.
+
 ## Reading the results
 
 - Widest boxes are where CPU time goes; the box above is the caller.

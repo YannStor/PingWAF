@@ -57,6 +57,10 @@ make release-perf        # cargo build --profile=release-perf --features=perf
 
 `release-perf` 继承 `release` 但保留 `debug = 1` 且不 strip。它是诊断用构建——生产环境仍运行 strip 过的 `release` 二进制；排查问题时把 `release-perf` 二进制带到同一环境。
 
+### 预构建 perf 镜像
+
+Docker 部署有按需产线：在 Actions 页运行 **Release (perf image)** 工作流（或 `gh workflow run release-perf.yml`），它会用 `Dockerfile.perf`（同样的多阶段构建，`--profile release-perf`）发布 `ghcr.io/shuaizend/pingwaf:perf`（amd64）。临时用它替换常规镜像、复现负载、采集剖析，然后切回常规镜像——该镜像体积为常规版的 2-4 倍，且不进入版本 manifest。
+
 ## 读图
 
 - 最宽的方块就是 CPU 时间所在；上方的方块是调用者。

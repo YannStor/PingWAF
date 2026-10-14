@@ -8,6 +8,41 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+### Fixed
+
+- **Automatic blocks no longer fsync the request hot path** (D2). Each block
+  used to serialize the whole blocked-IP map and fsync on the spot — N rapid
+  blocks cost N×O(N) disk work exactly during an attack. Mutations now mark
+  the map dirty and a background task flushes it every few seconds; shutdown
+  still persists synchronously.
+- **Blocked-IP map is bounded** (D3). `blocked_ips` (single addresses and
+  CIDR ranges) had no capacity ceiling, so an attacker rotating unique source
+  IPs could grow it — and the heartbeat snapshot that clones it — without
+  limit. At 100 000 entries, expired blocks are swept first, then the oldest
+  entries are evicted down to 90 000.
+- **Rate-counter GC no longer runs on every request past the threshold**
+  (D5). Once an attacker pushed the counter map past 65 536 keys, every
+  request paid a full O(N) sweep. Sweeps are now throttled to one per 30 s
+  (one per second past 262 144 entries).
+- **The control plane now enforces a global request-body limit** (S1). Only
+  the MCP endpoint and the GeoIP upload had one; with WAF self-protection
+  off, any endpoint would buffer an unbounded body. A 10 MiB default now
+  covers everything, with route-level limits (MCP 256 KiB, GeoIP 128 MiB)
+  still taking precedence.
+
+### Added
+
+- **MCP tool `profile_memory`** — a read-only memory snapshot of the
+  control-plane process (process RSS + host totals) with scope notes, cached
+  for a few seconds. Any authenticated MCP session may call it.
+- **On-demand profiling image pipeline.** `Dockerfile.perf` (mirror of the
+  release Dockerfile built with `--profile release-perf`, symbols kept) plus
+  the `Release (perf image)` workflow (`workflow_dispatch`) publishing
+  `ghcr.io/shuaizend/pingwaf:perf` (amd64 only, never in the version
+  manifests). Profiles taken from it symbolicate to real function names.
+
 ## [PingWAF 0.26.1] — 2026-10-14
 
 ### Fixed

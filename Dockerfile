@@ -3,6 +3,10 @@
 # Stage 1: Build the React frontend (npm cache mount)
 # Stage 2: Build the Rust binary (warm-up layer for dependency precompilation)
 # Stage 3: Minimal runtime image (behavior contract unchanged)
+#
+# NOTE: Dockerfile.perf mirrors this file with `--profile release-perf`
+# (symbols kept for pprof flamegraphs). Keep the two files in lockstep —
+# the layer structure must stay identical apart from the profile flag.
 
 # ─── Stage 1: Frontend ───────────────────────────────────────────────────────
 # Base images pull from public.ecr.aws (AWS's official mirror of Docker Hub
