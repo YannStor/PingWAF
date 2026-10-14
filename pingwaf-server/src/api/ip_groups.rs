@@ -14,7 +14,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::api::common::{
-    load_site_read, non_empty, parse_uuid, Page, Pagination,
+    load_site_write, non_empty, parse_uuid, require_write, Page, Pagination,
 };
 use crate::api::error::ApiError;
 use crate::api::sites::touch_site;
@@ -264,6 +264,7 @@ async fn create(
     _current: AuthUser,
     Json(payload): Json<CreateRequest>,
 ) -> Result<Response, ApiError> {
+    require_write(&_current)?;
     validate_name(&payload.name)?;
     if !ip_group_action::is_valid(&payload.action) {
         return Err(ApiError::BadRequest(format!(
@@ -335,6 +336,7 @@ async fn update(
     Path(group_id): Path<String>,
     Json(payload): Json<UpdateRequest>,
 ) -> Result<Json<ip_groups::Model>, ApiError> {
+    require_write(&_current)?;
     let target = parse_uuid(&group_id, "IP group id")?;
     let row = find_group(&state, target).await?;
     if row.subscription_kind.as_deref() == Some(subscription_kind::BUILTIN)
@@ -407,6 +409,7 @@ async fn remove(
     _current: AuthUser,
     Path(group_id): Path<String>,
 ) -> Result<Response, ApiError> {
+    require_write(&_current)?;
     let target = parse_uuid(&group_id, "IP group id")?;
     find_group(&state, target).await?;
 
@@ -562,6 +565,7 @@ async fn set_sites(
     Path(group_id): Path<String>,
     Json(payload): Json<SetSitesRequest>,
 ) -> Result<Response, ApiError> {
+    require_write(&_current)?;
     let target = parse_uuid(&group_id, "IP group id")?;
     let group = find_group(&state, target).await?;
 
@@ -579,7 +583,7 @@ async fn set_sites(
         .collect::<Result<Vec<_>, _>>()?;
 
     for sid in &site_ids {
-        load_site_read(&state.db, *sid, &_current).await?;
+        load_site_write(&state.db, *sid, &_current).await?;
     }
 
     let old_site_ids: Vec<Uuid> = ip_group_sites::Entity::find()
@@ -633,6 +637,7 @@ async fn sync_now(
     _current: AuthUser,
     Path(group_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    require_write(&_current)?;
     let target = parse_uuid(&group_id, "IP group id")?;
     let group = find_group(&state, target).await?;
 
@@ -904,4 +909,25 @@ pub async fn seed_builtin_groups(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::role;
+
+    /// Read-only roles must be refused on every mutating ip-groups endpoint.
+    /// Each write handler starts with `require_write`, which renders as 403.
+    #[test]
+    fn readonly_roles_are_refused_on_write_endpoints() {
+        for role_name in [role::VIEWER, role::AUDITOR] {
+            let user =
+                AuthUser::new(Uuid::new_v4(), "ro@example.com", role_name);
+            let err = require_write(&user).unwrap_err();
+            assert!(matches!(err, ApiError::Forbidden(_)));
+            assert_eq!(err.status(), axum::http::StatusCode::FORBIDDEN);
+        }
+        let admin = AuthUser::new(Uuid::new_v4(), "a@example.com", role::ADMIN);
+        assert!(require_write(&admin).is_ok());
+    }
 }
