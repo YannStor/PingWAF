@@ -21,7 +21,7 @@
 # coverage is not checked here.
 set -uo pipefail
 
-ALLOWED_MODELS="DeepSeek-V4.1-Flash GLM-5.3-Flash GLM-5.3-FlashX"
+ALLOWED_MODELS="DeepSeek-V4.1-Flash GLM-5.3-Flash GLM-5.3-FlashX inherit"
 errors=0
 
 fail() { echo "FAIL: $*"; errors=$((errors + 1)); }
