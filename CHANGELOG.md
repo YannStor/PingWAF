@@ -8,6 +8,87 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.26.0] — 2026-10-14
+
+### ⚠️ Breaking changes
+
+- **`GET /agents/{agent_id}/metrics` was removed.** The endpoint returned
+  aggregated edge-metric history (request/block counters, active
+  connections, site cache usage); the agent no longer ships these samples
+  and the API route is gone. Use the agent's host probes
+  (`GET /agents/{agent_id}/samples`) instead. The corresponding section was
+  removed from `docs/api.md`.
+- **`cookie_secret` is no longer part of the challenge API.** `GET/PUT
+  /sites/{site_id}/challenge` neither return nor accept the field; the
+  database column is dropped by migration `000054`. Challenge cookie
+  signing is handled internally by the server.
+- **IP group write endpoints now require write access (`admin`).** `POST/PUT/
+  DELETE /ip-groups`, `PUT /ip-groups/{group_id}/sites` and
+  `POST /ip-groups/{group_id}/sync` return `403` for viewer and auditor
+  accounts (reads are unchanged).
+- **Site domain conflicts are enforced with a `400`.** `POST /sites` and
+  `PUT /sites/{site_id}` return `400 "domain already in use by another site"`
+  on a conflicting `domain` (a database unique constraint backs the check).
+  Migration `000055` makes startup fail and list the conflicting domains when
+  the existing data already contains duplicates — resolve them manually
+  before upgrading.
+- **IP-group subscription sources must be public.** Subscription fetches do
+  not follow HTTP redirects (`redirect::Policy::none()`), and the initial
+  `source_url` host is DNS-resolved with every returned address checked
+  against a non-public IP blacklist (loopback, RFC 1918, link-local including
+  the cloud metadata service `169.254.169.254`, fe80::/10, fc00::/7,
+  0.0.0.0/8, multicast, 240.0.0.0/4, CGNAT 100.64.0.0/10, 192.0.0.0/24,
+  198.18.0.0/15, NAT64 64:ff9b::/96, IPv4-mapped IPv6). A rejected source
+  fails with an error naming `private, loopback or otherwise non-public
+  network` instead of reaching internal space. Known residual: because
+  reqwest resolves DNS again for the actual connection, a DNS-rebinding
+  TOCTOU is theoretically possible; the source is configured by an
+  authenticated admin, so the risk is accepted and documented rather than
+  mitigated.
+- **`PUT /sites/{site_id}/challenge` rejects unknown fields** with `422
+  Unprocessable Entity` (axum 0.8 maps serde `deny_unknown_fields` rejections
+  to 422; the body is plain text, not the JSON error envelope), instead of
+  silently ignoring them.
+- **Profiling downloads are forced.** `GET /debug/pprof/flamegraph` (and the
+  CPU profile endpoint) answer with `Content-Disposition: attachment`, so
+  browsers download the SVG / protobuf instead of trying to render it.
+
+### ✨ Features
+
+- **Manual IP blocks now accept CIDR ranges.** `POST /blocked-ips/block`
+  and `/sites/{site_id}/blocked-ips/unblock` take a single address or a
+  CIDR (host bits are truncated, e.g. `203.0.113.99/24` is stored as
+  `203.0.113.0/24`; re-blocking the same target is idempotent). Agents
+  match blocked clients with an exact-key fast path plus a CIDR prefix
+  scan (IPv4 and IPv6). The mask is capped — at most `/16` for IPv4 and
+  `/32` for IPv6 — so an accidental network-wide ban is rejected with
+  `400 "CIDR prefix too broad"`. Unblocking a CIDR only removes the
+  exactly identical entry; single addresses inside the range stay
+  blocked. Both list endpoints return a new `"kind": "single" | "cidr"`
+  field per row.
+
+### 🔒 Security & hardening
+
+- **`PUT /sites/{site_id}/challenge` validates `exempt_paths`.** Every entry
+  must start with `/`, contain no whitespace or control characters, be at
+  most 512 characters, and the list accepts at most 100 entries; invalid
+  input is rejected with `400`. Entries are trimmed and blanks dropped.
+
+### 📋 Logging
+
+- Stored `response_headers` (Postgres and Elasticsearch) no longer include
+  `content-security-policy-report-only`; `cookie` and `set-cookie` headers
+  are still kept for site-origin forensics.
+
+### 🖥 Console
+
+- New admin-only **Performance diagnostics** card under **Settings → About**
+  downloads CPU profiles, SVG flamegraphs and memory snapshots from the
+  existing `/debug/pprof/*` endpoints. The **Lifecycle** and **Config
+  versions** pages now redirect non-admin roles to the dashboard, and
+  viewer accounts no longer see the administrator cards on the Settings
+  page.
+
 ## [PingWAF 0.25.13] — 2026-10-14
 
 ### ✨ Features
