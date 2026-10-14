@@ -21,23 +21,20 @@
 use serde_json::Value;
 use uuid::Uuid;
 
-/// Builds the HTTP client used for subscription fetches. Redirects may only
-/// stay on http/https so a source cannot bounce the fetcher onto another
-/// scheme (e.g. an internal service) mid-chain.
+/// Builds the HTTP client used for subscription fetches.
+///
+/// Redirects are disabled entirely: the SSRF guard (`ensure_host_is_public`)
+/// only validates the source URL's host, so a public source answering with a
+/// `302 -> http://169.254.169.254/` would bypass every IP check. A
+/// subscription source that redirects has no legitimate use anyway — the
+/// operator controls the source list, and a hostile source is exactly the
+/// attacker model here.
 pub fn subscription_client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(concat!("PingWAF/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(30))
         .connect_timeout(std::time::Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 5 {
-                return attempt.error("too many redirects");
-            }
-            match attempt.url().scheme() {
-                "http" | "https" => attempt.follow(),
-                _ => attempt.error("redirect left the http/https schemes"),
-            }
-        }))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap_or_default()
 }
@@ -62,6 +59,106 @@ pub fn validate_source_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Returns `true` for addresses a subscription fetch must never touch:
+/// loopback, RFC 1918 private ranges, link-local (including the cloud
+/// metadata service 169.254.169.254), CGNAT `100.64.0.0/10`, IETF protocol
+/// assignments `192.0.0.0/24`, benchmarking `198.18.0.0/15`, IPv6
+/// link-local / unique-local, the NAT64 prefix `64:ff9b::/96`, IPv4-mapped
+/// IPv6 (judged against the V4 blacklist), the unspecified and this-network
+/// ranges, multicast and reserved space.
+pub fn is_ip_blocked_for_fetch(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    use std::net::IpAddr::{V4, V6};
+    match ip {
+        V4(v4) => {
+            // Shared CGNAT space.
+            let cgnat = v4.octets()[0] == 100 && v4.octets()[1] & 0xc0 == 0x40; // 100.64.0.0/10
+                                                                                // IETF protocol assignments (e.g. port control protocol).
+            let v4_reserved_by_ietf = v4.octets()[0] == 192
+                && v4.octets()[1] == 0
+                && v4.octets()[2] == 0; // 192.0.0.0/24
+                                        // Benchmarking space, must never be a real peer.
+            let benchmarking =
+                v4.octets()[0] == 198 && v4.octets()[1] & 0xfe == 0x12; // 198.18.0.0/15
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || cgnat
+                || v4_reserved_by_ietf
+                || benchmarking
+                || v4.octets()[0] == 0 // 0.0.0.0/8 ("this network")
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_unspecified()
+                // Reserved: 240.0.0.0/4.
+                || v4.octets()[0] & 0xf0 == 0xf0
+        },
+        V6(v6) => {
+            // IPv4-mapped IPv6 (::ffff:a.b.c.d) reaches V4 space over the
+            // same wire as the plain literal — judge it by the V4 blacklist
+            // instead of the V6 one, or `::ffff:169.254.169.254` sails by.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_ip_blocked_for_fetch(IpAddr::V4(v4));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || v6.is_unique_local()
+                || v6.segments()[0] & 0xffc0 == 0xfe80 // fe80::/10 link-local
+                // NAT64 prefix 64:ff9b::/96: a V6 address here embeds a V4
+                // endpoint the V6 checks never see.
+                || v6.segments()[0] == 0x64
+                    && v6.segments()[1] == 0xff9b
+                    && v6.segments()[2] == 0
+                    && v6.segments()[3] == 0
+                    && v6.segments()[4] == 0
+                    && v6.segments()[5] == 0
+        },
+    }
+}
+
+/// Resolves the URL's host and rejects every fetch target inside the
+/// non-routable ranges covered by [`is_ip_blocked_for_fetch`].
+///
+/// An IP-literal host is checked directly; a hostname is resolved and every
+/// returned address must pass, so an A/AAAA record cannot smuggle an internal
+/// endpoint behind a public-looking name.
+pub async fn ensure_host_is_public(url: &str) -> Result<(), String> {
+    validate_source_url(url)?;
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|err| format!("invalid source URL: {err}"))?;
+    let host = parsed
+        .host_str()
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| "source URL must include a host".to_string())?;
+
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if is_ip_blocked_for_fetch(ip) {
+            return Err(format!(
+                "source URL host {host} points into a private, loopback or \
+                 otherwise non-public network and is not allowed"
+            ));
+        }
+        return Ok(());
+    }
+
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let resolved = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|err| format!("failed to resolve the source host: {err}"))?;
+    for socket in resolved {
+        if is_ip_blocked_for_fetch(socket.ip()) {
+            return Err(format!(
+                "source host {host} resolves to {}, which is inside a \
+                 private, loopback or otherwise non-public network and is \
+                 not allowed",
+                socket.ip()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Downloads a subscription source and returns its validated IP ranges.
 pub async fn fetch_subscription_ranges(
     client: &reqwest::Client,
@@ -69,6 +166,10 @@ pub async fn fetch_subscription_ranges(
 ) -> Result<Vec<String>, String> {
     // Re-checked here so every caller is covered, not just the API paths.
     validate_source_url(url)?;
+    // Resolve-and-block the internal network ranges before any byte is sent:
+    // scheme + host validation alone would let a URL reach loopback, RFC 1918
+    // space or the cloud metadata service.
+    ensure_host_is_public(url).await?;
     let response = client
         .get(url)
         .send()
@@ -473,6 +574,78 @@ mod tests {
         assert!(parse_subscription("# only comments\n").is_err());
         assert!(parse_subscription("{not json").is_err());
         assert!(parse_subscription(r#"{"result": {}}"#).is_err());
+    }
+
+    #[test]
+    fn fetch_targets_in_private_networks_are_blocked() {
+        use std::net::IpAddr;
+        let parse = |s: &str| s.parse::<IpAddr>().unwrap();
+        // Loopback.
+        assert!(is_ip_blocked_for_fetch(parse("127.0.0.1")));
+        assert!(is_ip_blocked_for_fetch(parse("127.8.8.8")));
+        assert!(is_ip_blocked_for_fetch(parse("::1")));
+        // RFC 1918.
+        assert!(is_ip_blocked_for_fetch(parse("10.1.2.3")));
+        assert!(is_ip_blocked_for_fetch(parse("172.16.0.1")));
+        assert!(is_ip_blocked_for_fetch(parse("172.31.255.255")));
+        assert!(is_ip_blocked_for_fetch(parse("192.168.0.5")));
+        // 172.32.0.0+ is public again — the /12 bound must hold.
+        assert!(!is_ip_blocked_for_fetch(parse("172.32.0.1")));
+        // Link-local, including the cloud metadata service.
+        assert!(is_ip_blocked_for_fetch(parse("169.254.169.254")));
+        assert!(is_ip_blocked_for_fetch(parse("fe80::1")));
+        // Unique-local.
+        assert!(is_ip_blocked_for_fetch(parse("fc00::1")));
+        assert!(is_ip_blocked_for_fetch(parse("fd12:3456::1")));
+        // This-network, broadcast, multicast, reserved.
+        assert!(is_ip_blocked_for_fetch(parse("0.0.0.0")));
+        assert!(is_ip_blocked_for_fetch(parse("0.1.2.3")));
+        assert!(is_ip_blocked_for_fetch(parse("255.255.255.255")));
+        assert!(is_ip_blocked_for_fetch(parse("240.0.0.1")));
+        assert!(is_ip_blocked_for_fetch(parse("224.0.0.1")));
+        assert!(is_ip_blocked_for_fetch(parse("ff02::1")));
+        // Public addresses stay allowed.
+        assert!(!is_ip_blocked_for_fetch(parse("8.8.8.8")));
+        assert!(!is_ip_blocked_for_fetch(parse("1.1.1.1")));
+        assert!(!is_ip_blocked_for_fetch(parse("2606:4700::1111")));
+    }
+
+    #[test]
+    fn mapped_ipv6_and_extended_v4_ranges_are_blocked() {
+        use std::net::IpAddr;
+        let parse = |s: &str| s.parse::<IpAddr>().unwrap();
+        // IPv4-mapped IPv6 must be judged by the V4 blacklist.
+        assert!(is_ip_blocked_for_fetch(parse("::ffff:169.254.169.254")));
+        assert!(is_ip_blocked_for_fetch(parse("::ffff:10.0.0.1")));
+        assert!(is_ip_blocked_for_fetch(parse("::ffff:127.0.0.1")));
+        // CGNAT 100.64.0.0/10, both bounds and beyond.
+        assert!(is_ip_blocked_for_fetch(parse("100.64.0.1")));
+        assert!(is_ip_blocked_for_fetch(parse("100.127.255.254")));
+        assert!(!is_ip_blocked_for_fetch(parse("100.128.0.1")));
+        assert!(!is_ip_blocked_for_fetch(parse("100.63.255.254")));
+        // IETF protocol assignments 192.0.0.0/24.
+        assert!(is_ip_blocked_for_fetch(parse("192.0.0.9")));
+        assert!(!is_ip_blocked_for_fetch(parse("192.0.1.1")));
+        // Benchmarking 198.18.0.0/15.
+        assert!(is_ip_blocked_for_fetch(parse("198.18.0.1")));
+        assert!(is_ip_blocked_for_fetch(parse("198.19.255.1")));
+        assert!(!is_ip_blocked_for_fetch(parse("198.20.0.1")));
+        // NAT64 prefix 64:ff9b::/96 embedding a private V4 endpoint.
+        assert!(is_ip_blocked_for_fetch(parse("64:ff9b::a00:1")));
+        // The whole NAT64 prefix is refused, not only private embeds.
+        assert!(is_ip_blocked_for_fetch(parse("64:ff9b::808:808")));
+        // A public V6 address outside the NAT64 prefix stays allowed.
+        assert!(!is_ip_blocked_for_fetch(parse("2606:4700::1111")));
+    }
+
+    #[tokio::test]
+    async fn ip_literal_hosts_are_checked_directly() {
+        assert!(ensure_host_is_public("http://169.254.169.254/latest")
+            .await
+            .is_err());
+        assert!(ensure_host_is_public("http://10.0.0.1/list").await.is_err());
+        assert!(ensure_host_is_public("http://[::1]/list").await.is_err());
+        assert!(ensure_host_is_public("https://1.1.1.1/ips").await.is_ok());
     }
 
     #[test]
