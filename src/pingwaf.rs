@@ -1751,12 +1751,12 @@ mod tests {
 
         // Global settings: cap, budget and fallback TTL all land in the
         // generated configuration.
-        cached.global_cache = Some(GlobalCacheSettings {
+        cached.global_cache = Some(std::sync::Arc::new(GlobalCacheSettings {
             max_file_size_mb: Some(64),
             max_space_mb: Some(2048),
             master_enabled: Some(true),
             default_edge_ttl_seconds: Some(600),
-        });
+        }));
         let config = cached_rules_to_pingap_config(
             &cached,
             Path::new("/tmp/pingwaf-test-cache"),
@@ -1778,10 +1778,10 @@ mod tests {
         );
 
         // Master switch off: no cache plugin at all, not even in locations.
-        cached.global_cache = Some(GlobalCacheSettings {
+        cached.global_cache = Some(std::sync::Arc::new(GlobalCacheSettings {
             master_enabled: Some(false),
             ..Default::default()
-        });
+        }));
         let config = cached_rules_to_pingap_config(
             &cached,
             Path::new("/tmp/pingwaf-test-cache"),

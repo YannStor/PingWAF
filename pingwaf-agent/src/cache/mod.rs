@@ -37,13 +37,21 @@ pub struct CachedRules {
     /// `Arc`s of untouched sites.
     pub sites: HashMap<String, Arc<SiteRules>>,
     /// Domain → site_id index for fast lookup
-    pub domain_index: HashMap<String, String>,
+    ///
+    /// Keys and values are shared via `Arc<str>` so the copy-on-write
+    /// snapshot in the `rcu` updates clones pointers instead of every
+    /// domain string on the heap.
+    pub domain_index: HashMap<Arc<str>, Arc<str>>,
     /// Domain → disconnected (failover) policy, covering every site the
     /// control plane knows about — including ones whose rule bundle this
     /// agent has not (yet) received. Consulted when a host has no synced
     /// rules, which is exactly when `sites` cannot answer.
+    ///
+    /// Behind an `Arc` because every bundle replaces the registry
+    /// wholesale: an update swaps the pointer instead of re-cloning the
+    /// whole map into the new snapshot.
     #[serde(default)]
-    pub failover_registry: HashMap<String, FailoverMode>,
+    pub failover_registry: Arc<HashMap<String, FailoverMode>>,
     /// Control-plane-wide default for hosts absent from
     /// `failover_registry`. `None` when the server never sent it (old
     /// control plane), which makes the agent fall back to its local
@@ -52,9 +60,10 @@ pub struct CachedRules {
     pub global_fail_open: Option<bool>,
     /// Deployment-wide cache ceiling; `None` when the server never sent it
     /// (old control plane) — the generator and quota logic then fall back to
-    /// their built-in defaults.
+    /// their built-in defaults. Behind an `Arc` because bundles replace it
+    /// wholesale, like [`Self::failover_registry`].
     #[serde(default)]
-    pub global_cache: Option<GlobalCacheSettings>,
+    pub global_cache: Option<Arc<GlobalCacheSettings>>,
     /// Deployment-wide default for verifying an origin's TLS certificate.
     /// `None` when the server never sent it (old control plane); the
     /// configuration generator then keeps its historical lenient default
@@ -73,7 +82,7 @@ impl Default for CachedRules {
         Self {
             sites: HashMap::new(),
             domain_index: HashMap::new(),
-            failover_registry: HashMap::new(),
+            failover_registry: Arc::new(HashMap::new()),
             global_fail_open: None,
             global_cache: None,
             origin_verify_cert: None,
@@ -249,10 +258,13 @@ fn failover_registry_from(
 ///
 /// Exact hits cost a single lookup and no allocation; the wildcard walk
 /// only runs on a miss and reuses one buffer.
-fn lookup_with_wildcard<'a, V>(
-    map: &'a HashMap<String, V>,
+fn lookup_with_wildcard<'a, K, V>(
+    map: &'a HashMap<K, V>,
     domain: &str,
-) -> Option<&'a V> {
+) -> Option<&'a V>
+where
+    K: std::borrow::Borrow<str> + std::hash::Hash + Eq,
+{
     if let Some(value) = map.get(domain) {
         return Some(value);
     }
@@ -1277,6 +1289,17 @@ impl RuleCache {
             .get(&site_id)
             .map(|s| site_enforcement(Some(s)));
 
+        // Built once here and shared into the snapshot by pointer: the rcu
+        // closure can retry on contention, and a bundle push must not
+        // rebuild the registry (or re-convert the cache settings) on every
+        // retry.
+        let failover_registry =
+            Arc::new(failover_registry_from(&bundle.site_policies));
+        let global_cache = bundle
+            .global_cache
+            .as_ref()
+            .map(|gc| Arc::new(Self::convert_global_cache(gc)));
+
         // Swap in updated rules
         self.inner.rcu(|current| {
             let mut updated = (**current).clone();
@@ -1286,19 +1309,24 @@ impl RuleCache {
             if let Some(old_site) = updated.sites.get(&site_id) {
                 updated
                     .domain_index
-                    .remove(&normalize_host(&old_site.domain));
+                    .remove(normalize_host(&old_site.domain).as_str());
                 for alt in &old_site.alternate_domains {
-                    updated.domain_index.remove(&normalize_host(alt));
+                    updated.domain_index.remove(normalize_host(alt).as_str());
                 }
             }
-            // Insert new site
-            updated
-                .domain_index
-                .insert(normalize_host(&domain), site_id.clone());
+            // Insert new site. The site id is shared between the index
+            // entries instead of duplicated per domain, and domain keys
+            // are moved in from their Strings without a heap copy.
+            let site_id_key: Arc<str> = Arc::from(site_id.as_str());
+            updated.domain_index.insert(
+                Arc::from(normalize_host(&domain)),
+                Arc::clone(&site_id_key),
+            );
             for alt in &alternate_domains {
-                updated
-                    .domain_index
-                    .insert(normalize_host(alt), site_id.clone());
+                updated.domain_index.insert(
+                    Arc::from(normalize_host(alt)),
+                    Arc::clone(&site_id_key),
+                );
             }
             updated
                 .sites
@@ -1306,14 +1334,12 @@ impl RuleCache {
             // Every bundle carries the complete failover registry, so one
             // push refreshes it wholesale — including wholesale deletions
             // (an empty registry must replace a stale non-empty one).
-            updated.failover_registry =
-                failover_registry_from(&bundle.site_policies);
+            updated.failover_registry = Arc::clone(&failover_registry);
             if let Some(default_fail_open) = bundle.default_fail_open {
                 updated.global_fail_open = Some(default_fail_open);
             }
-            if let Some(global_cache) = &bundle.global_cache {
-                updated.global_cache =
-                    Some(Self::convert_global_cache(global_cache));
+            if let Some(cache) = &global_cache {
+                updated.global_cache = Some(Arc::clone(cache));
             }
             if let Some(origin_verify_cert) = bundle.origin_verify_cert {
                 updated.origin_verify_cert = Some(origin_verify_cert);
@@ -1371,32 +1397,47 @@ impl RuleCache {
             .map(|(id, s)| (id.clone(), site_enforcement(Some(s))))
             .collect();
 
+        // The bundles embed the same registry in every site; one pass over
+        // whichever bundle carries it is enough. Built once outside the
+        // rcu closure so a retry under contention cannot rebuild the
+        // registry or re-convert the cache settings. Replacement below is
+        // unconditional so deleting the last policy also clears the
+        // agent-side registry.
+        let mut failover_registry = None;
+        let mut global_fail_open = None;
+        let mut global_cache = None;
+        let mut origin_verify_cert = None;
+        for site in &config.sites {
+            if let Some(ref bundle) = site.rules {
+                failover_registry = Some(Arc::new(failover_registry_from(
+                    &bundle.site_policies,
+                )));
+                global_fail_open = bundle.default_fail_open;
+                global_cache = bundle
+                    .global_cache
+                    .as_ref()
+                    .map(|gc| Arc::new(Self::convert_global_cache(gc)));
+                origin_verify_cert = bundle.origin_verify_cert;
+                break;
+            }
+        }
+
         self.inner.rcu(|current| {
             let mut updated = (**current).clone();
             updated.config_hash = config.config_hash.as_str().into();
             updated.updated_at = Utc::now();
 
-            // The bundles embed the same registry in every site; one pass
-            // over whichever bundle carries it is enough. Replacement is
-            // unconditional so deleting the last policy also clears the
-            // agent-side registry.
-            for site in &config.sites {
-                if let Some(ref bundle) = site.rules {
-                    updated.failover_registry =
-                        failover_registry_from(&bundle.site_policies);
-                    if let Some(default_fail_open) = bundle.default_fail_open {
-                        updated.global_fail_open = Some(default_fail_open);
-                    }
-                    if let Some(global_cache) = &bundle.global_cache {
-                        updated.global_cache =
-                            Some(Self::convert_global_cache(global_cache));
-                    }
-                    if let Some(origin_verify_cert) = bundle.origin_verify_cert
-                    {
-                        updated.origin_verify_cert = Some(origin_verify_cert);
-                    }
-                    break;
-                }
+            if let Some(registry) = &failover_registry {
+                updated.failover_registry = Arc::clone(registry);
+            }
+            if let Some(default_fail_open) = global_fail_open {
+                updated.global_fail_open = Some(default_fail_open);
+            }
+            if let Some(cache) = &global_cache {
+                updated.global_cache = Some(Arc::clone(cache));
+            }
+            if let Some(verify_cert) = origin_verify_cert {
+                updated.origin_verify_cert = Some(verify_cert);
             }
 
             for site in &config.sites {
@@ -1405,9 +1446,9 @@ impl RuleCache {
                     // Override domain from site-level field
                     if !site.domain.is_empty() {
                         // Remove old domain index
-                        updated
-                            .domain_index
-                            .remove(&normalize_host(&site_rules.domain));
+                        updated.domain_index.remove(
+                            normalize_host(&site_rules.domain).as_str(),
+                        );
                         site_rules.domain = site.domain.clone();
                     }
                     site_rules.site_id = site.id.clone();
@@ -1421,15 +1462,19 @@ impl RuleCache {
                         trusted_ranges: site.trusted_proxy_ranges.clone(),
                     };
 
-                    // Update domain index
+                    // Update domain index; the site id is shared between
+                    // this site's entries instead of duplicated per
+                    // domain.
+                    let site_id_key: Arc<str> = Arc::from(site.id.as_str());
                     updated.domain_index.insert(
-                        normalize_host(&site_rules.domain),
-                        site.id.clone(),
+                        Arc::from(normalize_host(&site_rules.domain)),
+                        Arc::clone(&site_id_key),
                     );
                     for alt in &site_rules.alternate_domains {
-                        updated
-                            .domain_index
-                            .insert(normalize_host(alt), site.id.clone());
+                        updated.domain_index.insert(
+                            Arc::from(normalize_host(alt)),
+                            Arc::clone(&site_id_key),
+                        );
                     }
                     updated.sites.insert(site.id.clone(), Arc::new(site_rules));
                 }
@@ -1450,9 +1495,13 @@ impl RuleCache {
                 .collect();
             for id in &ghost_ids {
                 if let Some(old) = updated.sites.remove(id) {
-                    updated.domain_index.remove(&normalize_host(&old.domain));
+                    updated
+                        .domain_index
+                        .remove(normalize_host(&old.domain).as_str());
                     for alt in &old.alternate_domains {
-                        updated.domain_index.remove(&normalize_host(alt));
+                        updated
+                            .domain_index
+                            .remove(normalize_host(alt).as_str());
                     }
                 }
             }
@@ -1516,7 +1565,9 @@ impl RuleCache {
     pub fn get_site_rules(&self, domain: &str) -> Option<Arc<SiteRules>> {
         let rules = self.inner.load();
         let site_id = lookup_with_wildcard(&rules.domain_index, domain)?;
-        rules.sites.get(site_id).cloned()
+        // The index values are `Arc<str>` site ids; the sites map keys are
+        // `String`s, so borrow the id as a `str` for the lookup.
+        rules.sites.get(site_id.as_ref()).cloned()
     }
 
     /// The site's disconnected policy for `domain`, when the control plane
@@ -2666,6 +2717,58 @@ mod tests {
         assert_eq!(cached.global_fail_open, None);
     }
 
+    /// Copy-on-write snapshot economics: cloning a `CachedRules` — what
+    /// every rcu update does first — must share the registry and the
+    /// cache settings by pointer and reuse the domain-index strings,
+    /// not duplicate them. This is the regression guard for the
+    /// "large-bundle swap transiently doubles memory" issue: the clone
+    /// stays O(map headers + reference counts) regardless of how many
+    /// domains and policies are registered.
+    #[test]
+    fn cached_rules_clone_shares_the_heavy_fields() {
+        let rules = CachedRules {
+            sites: HashMap::new(),
+            domain_index: HashMap::from([
+                (Arc::from("example.com"), Arc::from("site-1")),
+                (Arc::from("*.example.net"), Arc::from("site-1")),
+            ]),
+            failover_registry: Arc::new(HashMap::from([(
+                "example.com".to_string(),
+                FailoverMode::Closed,
+            )])),
+            global_fail_open: None,
+            global_cache: Some(Arc::new(GlobalCacheSettings {
+                max_space_mb: Some(512),
+                ..Default::default()
+            })),
+            origin_verify_cert: None,
+            updated_at: Utc::now(),
+            config_hash: Arc::from("abc"),
+        };
+        let clone = rules.clone();
+        assert!(
+            Arc::ptr_eq(&rules.failover_registry, &clone.failover_registry),
+            "the registry must move by pointer, not by map copy"
+        );
+        assert!(
+            rules
+                .global_cache
+                .as_ref()
+                .zip(clone.global_cache.as_ref())
+                .is_some_and(|(a, b)| Arc::ptr_eq(a, b)),
+            "the cache settings must move by pointer"
+        );
+        for (key, value) in &rules.domain_index {
+            assert!(
+                clone
+                    .domain_index
+                    .get(key.as_ref())
+                    .is_some_and(|cloned| Arc::ptr_eq(value, cloned)),
+                "domain-index entries must be shared, not re-allocated"
+            );
+        }
+    }
+
     #[test]
     fn failover_registry_covers_alternate_domains() {
         use proto::SitePolicy;
@@ -3154,10 +3257,10 @@ mod tests {
             .into_iter()
             .collect(),
             domain_index: HashMap::new(),
-            failover_registry: HashMap::from([(
+            failover_registry: Arc::new(HashMap::from([(
                 "example.com".to_string(),
                 FailoverMode::Closed,
-            )]),
+            )])),
             global_fail_open: Some(true),
             global_cache: None,
             origin_verify_cert: Some(false),
@@ -3297,13 +3400,13 @@ mod tests {
                     .into_iter()
                     .collect(),
                 domain_index: HashMap::new(),
-                failover_registry: HashMap::new(),
+                failover_registry: Arc::new(HashMap::new()),
                 global_fail_open: None,
                 global_cache: global_space_mb.map(|max_space_mb| {
-                    GlobalCacheSettings {
+                    Arc::new(GlobalCacheSettings {
                         max_space_mb: Some(max_space_mb),
                         ..Default::default()
-                    }
+                    })
                 }),
                 origin_verify_cert: None,
                 updated_at: Utc::now(),
