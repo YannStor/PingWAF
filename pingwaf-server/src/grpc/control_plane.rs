@@ -1631,7 +1631,7 @@ fn access_log_row(
         request_body_truncated: Set(Some(entry.request_body_truncated)),
         scheme: Set(optional(&entry.scheme)),
         protocol: Set(optional(&entry.protocol)),
-        response_headers: Set(headers_json(&entry.response_headers)),
+        response_headers: Set(response_headers_json(&entry.response_headers)),
         response_body: Set(body_text(&entry.response_body)),
         response_body_size: Set(positive_i64(entry.response_body_size as i64)),
         response_body_truncated: Set(Some(entry.response_body_truncated)),
@@ -1744,7 +1744,7 @@ fn access_log_document(
         } else {
             Some(entry.response_status as u16)
         },
-        response_headers: headers_json(&entry.response_headers),
+        response_headers: response_headers_json(&entry.response_headers),
         response_body,
         response_body_size: positive_u64(entry.response_body_size),
         response_body_truncated,
@@ -1822,6 +1822,35 @@ fn security_event_document(
         request_body,
         request_body_truncated,
     })
+}
+
+/// Response-header variant of [`headers_json`]: always drops
+/// `content-security-policy-report-only` before the map is stored.
+///
+/// That header is produced by the upstream application (PingWAF never sets
+/// it), is often kilobytes long, and has no forensic value for attack
+/// tracing — its only effect here is log bloat. `cookie`/`set-cookie` are
+/// deliberately kept: site-level logs need them for attack tracing (session
+/// replay, hijack detection).
+///
+/// Note on the control plane's own traffic (9080): the console is a plain
+/// Axum listener started by `start_server`, not a pingap service, so its
+/// requests never enter the plugin log pipeline and are never shipped via
+/// `ShipLogs`. Its access log (`control_plane_access_logs`, written by
+/// `self_protection.rs`) stores only UA/referer — it has never stored
+/// cookies — so no cookie stripping is needed for control-plane traffic.
+fn response_headers_json(
+    headers: &std::collections::HashMap<String, String>,
+) -> Option<serde_json::Value> {
+    const CSP_REPORT_ONLY: &str = "content-security-policy-report-only";
+    // Single pass: drop the report-only CSP while building the map. An empty
+    // result falls through to `headers_json`, which returns `None`.
+    let filtered: std::collections::HashMap<String, String> = headers
+        .iter()
+        .filter(|(key, _)| !key.eq_ignore_ascii_case(CSP_REPORT_ONLY))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    headers_json(&filtered)
 }
 
 /// Converts a protocol header map into an indexable JSON object, or `None` when
@@ -1976,6 +2005,48 @@ mod tests {
         assert_eq!(parse_optional_uuid("nope"), None);
         let id = Uuid::new_v4();
         assert_eq!(parse_optional_uuid(&id.to_string()), Some(id));
+    }
+
+    #[test]
+    fn response_headers_drop_csp_report_only_but_keep_cookies() {
+        let headers = [
+            ("content-type", "text/html"),
+            ("Content-Security-Policy-Report-Only", "default-src 'self'"),
+            ("set-cookie", "sid=abc"),
+            ("cookie", "sid=abc"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect::<std::collections::HashMap<_, _>>();
+
+        let json = response_headers_json(&headers).unwrap();
+        let map = json.as_object().unwrap();
+        assert!(!map.contains_key("content-security-policy-report-only"));
+        assert!(!map.contains_key("Content-Security-Policy-Report-Only"));
+        assert_eq!(
+            map.get("set-cookie").and_then(|v| v.as_str()),
+            Some("sid=abc")
+        );
+        assert_eq!(map.get("cookie").and_then(|v| v.as_str()), Some("sid=abc"));
+        assert_eq!(
+            map.get("content-type").and_then(|v| v.as_str()),
+            Some("text/html")
+        );
+
+        // Request headers keep everything, including CSP report-only.
+        assert!(headers_json(&headers).is_some());
+    }
+
+    #[test]
+    fn response_headers_all_filtered_become_none() {
+        let headers = [(
+            "Content-Security-Policy-Report-Only".to_string(),
+            "x".to_string(),
+        )]
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(response_headers_json(&headers), None);
+        assert_eq!(response_headers_json(&Default::default()), None);
     }
 
     #[test]

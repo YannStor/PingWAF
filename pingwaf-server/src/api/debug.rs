@@ -79,6 +79,8 @@ async fn profile_cpu(
                 HeaderValue::from_static("application/octet-stream"),
             ),
             (header::CONTENT_ENCODING, HeaderValue::from_static("gzip")),
+            // Capture output is only valid for the instant it was produced.
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
             (
                 header::CONTENT_DISPOSITION,
                 HeaderValue::from_static(
@@ -105,18 +107,38 @@ async fn profile_flamegraph(
 
     Ok((
         StatusCode::OK,
-        [(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("image/svg+xml"),
-        )],
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("image/svg+xml"),
+            ),
+            // The SVG is attacker-influenceable markup rendered by an admin's
+            // browser: force a download and stop MIME sniffing.
+            (
+                header::CONTENT_DISPOSITION,
+                HeaderValue::from_static(
+                    "attachment; filename=\"flamegraph.svg\"",
+                ),
+            ),
+            (
+                header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            ),
+            // Capture output is only valid for the instant it was produced.
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+        ],
         svg,
     )
         .into_response())
 }
 
 /// `GET /api/v1/debug/pprof/memory`
-async fn memory(_admin: AdminUser) -> Json<pingwaf_pprof::MemorySnapshot> {
-    Json(pingwaf_pprof::memory_snapshot())
+async fn memory(_admin: AdminUser) -> Result<Response, ApiError> {
+    Ok((
+        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+        Json(pingwaf_pprof::memory_snapshot()),
+    )
+        .into_response())
 }
 
 /// Routes contributed to `/api/v1`.
