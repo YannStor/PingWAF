@@ -33,8 +33,8 @@ cd web && npx tsc -b && npx vitest run   # 前端类型检查与测试
 
 | 角色 | 目标模型 |
 |---|---|
-| Tech Lead / Architect / Bug Investigator / Security Reviewer / Code Reviewer | Deepseek-V4.1-Flash |
-| Frontend Engineer / Test Engineer / Documentation & Agent Prompt Engineer | GLM-5.3-Flash |
-| Rust Backend & WAF Engineer / CI/CD Engineer | GLM-5.3-FlashX |
+| Tech Lead / Architect / Bug Investigator / Security Reviewer / Code Reviewer | deepseek-v4.1-flash |
+| Frontend Engineer / Test Engineer / Documentation & Agent Prompt Engineer | glm-5.3-flash |
+| Rust Backend & WAF Engineer / CI/CD Engineer | glm-5.3-flashx |
 
 4. 安全红线：未经用户明确授权，禁止 commit/push/release、`git reset --hard`、删除分支/tag、触碰生产 Secrets；不伪造测试结果；安全修复须考虑绕过与回归。
