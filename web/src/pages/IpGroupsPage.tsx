@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -97,34 +97,42 @@ export function IpGroupsPage() {
    * before the server has refreshed the row. We remember the timestamp from
    * before the call and wait for the list query to reflect the new value.
    */
-  const [syncingId, setSyncingId] = useState<string | null>(null)
-  const syncedAtBefore = useRef<Map<string, string | null>>(new Map())
+  const [syncState, setSyncState] = useState<{
+    id: string
+    before: string | null
+  } | null>(null)
 
+  // Derived (not an effect): the sync is "still running" only while the row
+  // exists and its timestamp has not moved past the pre-call value.
+  const syncingRow = syncState
+    ? groups.find((g) => g.id === syncState.id)
+    : undefined
+  const stillSyncing =
+    !!syncingRow &&
+    !!syncState &&
+    (syncingRow.last_synced_at ?? null) === syncState.before
+
+  // Completion toast is a side effect on external data (the list query), not
+  // state derivation — no setState needed; syncState is simply overwritten
+  // by the next sync.
   useEffect(() => {
-    if (!syncingId) return
-    const row = groups.find((g) => g.id === syncingId)
-    const before = syncedAtBefore.current.get(syncingId)
-    if (!row) {
-      setSyncingId(null)
-      return
-    }
-    if ((row.last_synced_at ?? null) !== (before ?? null)) {
-      syncedAtBefore.current.delete(syncingId)
-      setSyncingId(null)
+    if (!syncingRow || !syncState) return
+    if ((syncingRow.last_synced_at ?? null) !== syncState.before) {
       toast.success(t('pages.ipGroups.synced'))
     }
-  }, [groups, syncingId, t, toast])
+  }, [syncingRow, syncState, t, toast])
 
   const syncMutation = useMutation({
     mutationFn: async (id: string) => {
-      const before = groups.find((g) => g.id === id)?.last_synced_at ?? null
-      syncedAtBefore.current.set(id, before)
-      setSyncingId(id)
+      setSyncState({
+        id,
+        before: groups.find((g) => g.id === id)?.last_synced_at ?? null,
+      })
       await ipGroupsApi.sync(id)
       await invalidate()
     },
     onError: (error) => {
-      setSyncingId(null)
+      setSyncState(null)
       toast.error(error.message || t('pages.ipGroups.syncFailed'))
     },
   })
@@ -264,8 +272,8 @@ export function IpGroupsPage() {
               <Button
                 size="sm"
                 variant="ghost"
-                loading={syncingId === row.id}
-                disabled={syncingId !== null && syncingId !== row.id}
+                loading={syncState?.id === row.id && stillSyncing}
+                disabled={stillSyncing && syncState?.id !== row.id}
                 onClick={() => syncMutation.mutate(row.id)}
                 title={t('pages.ipGroups.syncNow')}
               >

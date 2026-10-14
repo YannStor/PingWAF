@@ -39,7 +39,14 @@ function validateExemptPaths(paths: string[]): string | null {
   for (const p of paths) {
     if (p.length > EXEMPT_PATH_MAX_LENGTH) return 'tooLong'
     if (!p.startsWith('/')) return 'invalid'
-    if (/[\s\x00-\x1f\x7f]/.test(p)) return 'invalid'
+    // Whitespace plus C0 control characters and DEL, spelled out via code
+    // points (an explicit control-character regex trips ESLint's
+    // `no-control-regex`).
+    const hasControlOrSpace = [...p].some((ch) => {
+      const cp = ch.codePointAt(0) ?? 0
+      return /\s/.test(ch) || cp <= 0x1f || cp === 0x7f
+    })
+    if (hasControlOrSpace) return 'invalid'
   }
   return null
 }

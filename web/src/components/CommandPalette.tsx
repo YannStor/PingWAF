@@ -78,13 +78,7 @@ function groupFor(to: string): string {
  * quick actions (theme / language / settings). Plain substring matching keeps
  * it fast and dependency-free.
  */
-export function CommandPalette({
-  open,
-  onClose,
-}: {
-  open: boolean
-  onClose: () => void
-}) {
+export function CommandPalette({ onClose }: { onClose: () => void }) {
   const { t, i18n } = useTranslation()
   const navigate = useNavigate()
   const toggleTheme = useThemeStore((s) => s.toggle)
@@ -99,17 +93,17 @@ export function CommandPalette({
   // The full site list is shared with pages via the TanStack Query cache.
   const { data: sites } = useSitesList()
 
-  // Open/close lifecycle: snapshot focus, focus input, reset state.
+  // Open/close lifecycle is pure DOM side effects: the parent mounts the
+  // palette only while open, so state starts fresh on every mount and no
+  // state resets are needed here.
   useEffect(() => {
-    if (open) {
-      restoreRef.current = document.activeElement as HTMLElement | null
-      setQuery('')
-      setActive(0)
-      requestAnimationFrame(() => inputRef.current?.focus())
-    } else {
+    restoreRef.current = document.activeElement as HTMLElement | null
+    const raf = requestAnimationFrame(() => inputRef.current?.focus())
+    return () => {
+      cancelAnimationFrame(raf)
       restoreRef.current?.focus?.()
     }
-  }, [open])
+  }, [])
 
   const commands = useMemo<Command[]>(() => {
     const go = (to: string) => {
@@ -179,18 +173,14 @@ export function CommandPalette({
     return filtered.slice(0, MAX_RESULTS)
   }, [commands, q])
 
-  // Keep the active row in range when the result set shrinks.
-  useEffect(() => {
-    setActive((a) => Math.min(a, Math.max(0, results.length - 1)))
-  }, [results.length])
+  // Derived (not an effect): keep the active row in range when the result
+  // set shrinks without a cascading setState.
+  const activeIndex = results.length ? Math.min(active, results.length - 1) : 0
 
   useEffect(() => {
-    listRef.current
-      ?.querySelectorAll('[data-command]')
-      [active]?.scrollIntoView({ block: 'nearest' })
-  }, [active])
-
-  if (!open) return null
+    const rows = listRef.current?.querySelectorAll('[data-command]')
+    rows?.[activeIndex]?.scrollIntoView({ block: 'nearest' })
+  }, [activeIndex])
 
   // Bound on the panel container so ↑↓/Esc/Enter keep working when focus
   // leaves the input (e.g. after clicking somewhere in the list).
@@ -206,7 +196,7 @@ export function CommandPalette({
       setActive((a) => (results.length ? (a - 1 + results.length) % results.length : 0))
     } else if (e.key === 'Enter') {
       e.preventDefault()
-      results[active]?.run()
+      results[activeIndex]?.run()
     }
   }
 
@@ -260,7 +250,7 @@ export function CommandPalette({
                   onClick={cmd.run}
                   className={cn(
                     'flex w-full items-center gap-3 rounded-md px-3 py-2 text-left text-sm transition-colors',
-                    i === active ? 'bg-brand-soft text-brand' : 'text-fg',
+                    i === activeIndex ? 'bg-brand-soft text-brand' : 'text-fg',
                   )}
                 >
                   <IconCmp weight="duotone" className="h-4 w-4 shrink-0 text-fg-subtle" />

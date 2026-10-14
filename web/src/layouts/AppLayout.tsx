@@ -369,8 +369,10 @@ export function AppLayout() {
           replaced; the server refuses writes in the meantime. */}
       <ForceChangePasswordDialog />
 
-      {/* Global ⌘K command palette */}
-      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+      {/* Global ⌘K command palette — mounted only while open so its state
+          (query / active row) starts fresh each time and focus is captured
+          on mount and restored on unmount. */}
+      {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} />}
 
       {/* Floating AI assistant (ball + sliding panel, mounted for the whole
           signed-in layout; streaming state survives open/close cycles). */}
