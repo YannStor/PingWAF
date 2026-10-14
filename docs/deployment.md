@@ -429,7 +429,11 @@ shared by other clients that would otherwise be throttled together. Behind a
 large NAT exit (offices, campus networks) all users share one address and can
 exhaust the login budget with legitimate traffic; give the dashboard a
 dedicated ingress address in that case. Exceeding a limit answers `429` with
-a `Retry-After` header.
+a `Retry-After` header. These token buckets are counted **in-process**: the
+counters are not shared across control-plane instances, so in a multi-replica
+deployment each replica enforces the limits independently and the effective
+budget per source address is the configured threshold multiplied by the
+number of replicas — scale the thresholds up accordingly.
 
 ## Security Checklist
 

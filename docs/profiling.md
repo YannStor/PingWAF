@@ -9,6 +9,11 @@ Both planes are covered:
 | Control plane (`pingwaf-server`) | `GET /api/v1/debug/pprof/{profile,flamegraph,memory}` | Admin JWT bearer token |
 | Data plane (pingap admin plugin) | `GET {admin-path}/api/pprof/{profile,flamegraph,memory}` | Admin plugin credentials |
 
+In the console, administrators also find a **Performance diagnostics** card
+under **Settings → About** that downloads the same three artifacts (CPU
+profile, SVG flamegraph, memory snapshot) from the control-plane endpoints
+without constructing the URLs by hand.
+
 ## Endpoints
 
 - `profile` — gzip-compressed pprof protobuf, the exact wire format `go tool pprof` expects. Sampling takes `seconds` (1-120, default 30) at `frequency` Hz (1-1000, default 99 — off-round so the sampler does not lock onto periodic work).

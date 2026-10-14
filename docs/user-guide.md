@@ -23,7 +23,7 @@ The dashboard provides:
 - **Logs**: Security events and access logs
 - **Account**: Profile, password, personal API keys and (for
   administrators) user management
-- **Settings**: Elasticsearch, global preferences, origin certificate verification, control-plane HTTPS
+- **Settings**: Elasticsearch, global preferences, origin certificate verification, control-plane HTTPS, and (for administrators) a performance diagnostics card under **About** that downloads a CPU profile, SVG flamegraph or memory snapshot from the control plane's `/debug/pprof/*` endpoints (see `docs/profiling.md`). Administrator-only pages (**Config versions**, **Lifecycle**) redirect other roles to the dashboard.
 - **Config versions**: every configuration snapshot, with per-table diff and rollback
 
 ## Adding a Website
@@ -621,7 +621,8 @@ Read-only credentials see only the read tools; administrators with a `write` key
 
 **Config versions** in the sidebar records a version of the configuration on
 every change — per site, and deployment-wide for the global settings — and
-lets you roll one back. Administrators only.
+lets you roll one back. Administrators only: other roles are redirected away
+from the page.
 
 - **The list** shows each version's scope (site domain or global), config
   hash, source, operator and row counts. Filter by scope and date, and page

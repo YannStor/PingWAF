@@ -362,7 +362,13 @@ never matches the apex, so `example.com` plus `*.example.com` is a valid pair.
 Two sites may not claim overlapping hostnames: identical names, a wildcard
 covering another site's hostname, and nested wildcards are all rejected with
 `400` because pingap's host matching would make the winner depend on
-configuration order. An ACME certificate for a wildcard hostname requires the
+configuration order. A conflicting `domain` is additionally guarded by a
+database unique constraint: create and update requests return `400` with
+`"domain already in use by another site"`. When upgrading to the release that
+introduced this constraint (migration `000055`), startup fails and lists the
+conflicting domains if the existing data already contains duplicates — resolve
+them manually (rename or delete one of the sites) before the upgrade can
+complete. An ACME certificate for a wildcard hostname requires the
 `dns-01` challenge with a configured DNS provider — `http-01` cannot validate
 `*`, and the API refuses that combination.
 
@@ -1037,6 +1043,11 @@ Administrators may revoke any key, other callers only their own.
 
 ## Agents
 
+> **Note on `agent_metrics`:** the underlying edge-metric data is still
+> collected from agents over gRPC (`ShipMetrics`), stored in the database and
+> pruned by the retention policy — only the REST query endpoints were removed
+> (October 2026 change). There is no built-in consumer UI for it today.
+
 ### GET /agents
 
 List registered agents.
@@ -1121,39 +1132,6 @@ Host probe history (CPU, memory, network, disk), newest first. Cumulative counte
 
 **Query params:** `from`, `to` (RFC 3339), `page`, `page_size`.
 
-### GET /agents/{agent_id}/metrics
-
-Aggregated edge-metric history shipped by the agent (`pingwaf_requests_total`, `pingwaf_blocked_requests_total`, `pingwaf_active_connections`, `pingwaf_site_cache_used_bytes`). Rows are grouped by their label set and bucketed into `step`-second windows.
-
-**Query params:**
-| Param | Description |
-|-------|-------------|
-| `name` | Required. Metric name, e.g. `pingwaf_requests_total`. |
-| `from` | Inclusive lower bound, RFC 3339. Defaults to one hour before `to`. |
-| `to` | Exclusive upper bound, RFC 3339. Defaults to now. |
-| `step` | Bucket width in seconds, minimum 10. Defaults to 60. |
-
-**Response:**
-```json
-{
-  "name": "pingwaf_site_cache_used_bytes",
-  "from": "2024-01-01T11:00:00Z",
-  "to": "2024-01-01T12:00:00Z",
-  "step": 60,
-  "series": [
-    {
-      "labels": { "site": "example.com" },
-      "metric_type": 0,
-      "points": [
-        { "t": "2024-01-01T11:00:00Z", "avg": 1048576.0, "min": 1048576.0, "max": 1048576.0, "count": 2 }
-      ]
-    }
-  ]
-}
-```
-
-`metric_type`: `0` gauge, `1` counter. Metric samples are retained for 7 days by default (`PINGWAF_METRIC_RETENTION_DAYS`).
-
 ### DELETE /agents/{agent_id}
 
 Deregister an agent.
@@ -1178,8 +1156,8 @@ Send a command to an agent.
 |---------|---------|
 | `rule_update` | `{}` |
 | `config_reload` | `{}` |
-| `block_ip` | `{"ip": "...", "duration_secs": 3600}` |
-| `unblock_ip` | `{"ip": "..."}` |
+| `block_ip` | `{"ip": "single address or CIDR", "duration_secs": 3600}` |
+| `unblock_ip` | `{"ip": "single address or CIDR"}` |
 | `purge_cache` | `{"pattern": "..."}` |
 | `update_site` | `{"site_id": "..."}` |
 | `restart_agent` | `{}` |
@@ -1470,6 +1448,10 @@ id, and is readable by administrators only — see
 > `Set-Cookie` values are deliberately *not* redacted — the console is meant to
 > reproduce what a client actually sent — so `access_logs` is sensitive data.
 > Keep the retention window short (`DELETE /logs/purge`) and restrict access.
+> One exception on the response side: `content-security-policy-report-only`
+> is dropped from the stored `response_headers` (Postgres and Elasticsearch
+> alike) — it is noise from report-only CSP deployments, while `cookie` and
+> `set-cookie` are kept for site-origin forensics.
 
 Request and response bodies are prefixes: the agent stores at most
 `max_body_log_size` bytes per direction (8 KiB by default, 64 KiB ceiling,
@@ -1885,33 +1867,74 @@ Bulk import IP rules (one IP or CIDR per entry).
 
 ### GET /sites/{site_id}/blocked-ips
 
-Dynamic blocks the edge currently enforces for the site — WAF/rate-limit auto-blocks and server-issued block commands. Every agent reports the blocks it enforces on each heartbeat; rows are folded per IP, with the attack history folded in from the security-event log.
+Dynamic blocks the edge currently enforces for the site — WAF/rate-limit auto-blocks, server-issued block commands and manual CIDR blocks. Every agent reports the blocks it enforces on each heartbeat; rows are folded per IP (or CIDR), with the attack history folded in from the security-event log.
 
 **Response (200):**
 ```json
 [
   {
     "ip": "203.0.113.7",
+    "kind": "single",
     "reason": "waf: SQL injection in query string",
     "blocked_at": "2024-01-01T12:00:00Z",
     "expires_at": "2024-01-01T12:10:00Z",
     "agent_count": 2,
     "attack_count": 1842,
     "last_attack_at": "2024-01-01T11:59:58Z"
+  },
+  {
+    "ip": "198.51.100.0/24",
+    "kind": "cidr",
+    "reason": "manual block from dashboard",
+    "blocked_at": "2024-01-01T12:05:00Z",
+    "expires_at": null,
+    "agent_count": 2,
+    "attack_count": 0,
+    "last_attack_at": null
   }
 ]
 ```
 
-`expires_at` is `null` for permanent blocks; `reason` may be `null` for blocks reported by older agents.
+`expires_at` is `null` for permanent blocks; `reason` may be `null` for blocks reported by older agents. `kind` is `"single"` for one address and `"cidr"` for a range; the same field appears on every row of the global list (`GET /blocked-ips`).
+
+### POST /blocked-ips/block
+
+Issue a manual dynamic block for a site: a `BlockIp` command goes to every registered agent (queued for offline ones) and mirror rows are written so the dashboard reflects the block immediately; the next heartbeat reconciles any drift. `duration_seconds` of `0` (or omitted) blocks permanently until unblocked. Requires write permission on the site.
+
+The `ip` field accepts a single address **or a CIDR range** (e.g. `198.51.100.0/24`, `2001:db8:abcd::/48`). CIDRs are normalised — host bits are truncated (`203.0.113.99/24` is stored as `203.0.113.0/24`) — and re-blocking the same target is idempotent. To keep a fat-fingered network-wide ban from taking the edge down, the mask is capped: **at most /16 for IPv4 and /32 for IPv6**; broader prefixes are rejected with `400` and a message containing `CIDR prefix too broad`.
+
+**Request:**
+```json
+{
+  "site_id": "…",
+  "ip": "198.51.100.0/24",
+  "duration_seconds": 3600,
+  "reason": "manual block from dashboard"
+}
+```
+
+**Response (202):**
+```json
+{
+  "ip": "198.51.100.0/24",
+  "kind": "cidr",
+  "site_id": "…",
+  "duration_seconds": 3600,
+  "agents": 2,
+  "delivered": 2
+}
+```
 
 ### POST /sites/{site_id}/blocked-ips/unblock
 
 Lift a dynamic block: an `UnblockIp` command goes to every agent still enforcing it (queued when disconnected) and the mirrored rows are removed. Requires write permission.
 
+`ip` accepts a single address or a CIDR, matching the block input. Unblocking a CIDR only removes the **exactly identical** CIDR entry — it does not lift blocks for individual addresses that happen to fall inside the range (and vice versa).
+
 **Request:**
 ```json
 {
-  "ip": "203.0.113.7"
+  "ip": "198.51.100.0/24"
 }
 ```
 
@@ -1939,6 +1962,33 @@ out); `last_synced_at` and `last_sync_error` report the last run. Range
 changes propagate: sites that use the group for access rules, route gating,
 bot verification or proxy trust get their configuration re-pushed
 immediately.
+
+Subscription fetches refuse to contact non-public networks. Three layers apply
+(`pingwaf-server/src/subscription.rs`):
+
+* **No redirects.** The fetch client sets `redirect::Policy::none()`, so a
+  public source cannot answer with a `302 -> http://169.254.169.254/` and slip
+  past the IP checks.
+* **Full IP blacklist on the initial host.** The `source_url` host — an IP
+  literal directly, otherwise resolved via DNS with *every* returned address
+  checked — is validated against a blacklist: loopback, RFC 1918 private,
+  link-local (including the cloud metadata service `169.254.169.254`),
+  fe80::/10, fc00::/7 unique-local, 0.0.0.0/8, multicast, 240.0.0.0/4, CGNAT
+  100.64.0.0/10, IETF protocol assignments 192.0.0.0/24, benchmarking
+  198.18.0.0/15, the NAT64 prefix 64:ff9b::/96, and IPv4-mapped IPv6 (judged
+  by the IPv4 blacklist). A rejected URL fails with an error mentioning
+  `private, loopback or otherwise non-public network` — at validation time and
+  again before each sync sends a byte.
+* **Known residual risk.** DNS resolution and the actual connection are
+  performed independently by reqwest, so a DNS rebinding TOCTOU window
+  theoretically remains. The precondition is an already-authenticated admin
+  configuring the subscription source; the risk is accepted at the level of
+  this documentation note rather than mitigated in code.
+
+**Permissions:** reads are available to every role; the mutating endpoints
+(`POST/PUT/DELETE /ip-groups`, `PUT /ip-groups/{group_id}/sites` and
+`POST /ip-groups/{group_id}/sync`) require write access (`admin`) — viewer and
+auditor accounts receive `403`.
 
 ### GET /ip-groups
 
@@ -1984,7 +2034,7 @@ List IP groups (paginated), each with a `site_count`.
 
 ### POST /ip-groups
 
-Create an IP group (up to 10000 ranges).
+Create an IP group (up to 10000 ranges). Requires write access (`admin`).
 
 **Request:**
 ```json
@@ -2006,11 +2056,11 @@ Get an IP group with its `site_count`.
 
 ### PUT /ip-groups/{group_id}
 
-Update an IP group (all fields optional).
+Update an IP group (all fields optional). Requires write access (`admin`).
 
 ### DELETE /ip-groups/{group_id}
 
-Delete an IP group.
+Delete an IP group. Requires write access (`admin`).
 
 ### GET /ip-groups/{group_id}/sites
 
@@ -2018,7 +2068,7 @@ List the sites associated with a per-site group.
 
 ### PUT /ip-groups/{group_id}/sites
 
-Replace the site associations of a per-site group. Refused with `400` for global groups.
+Replace the site associations of a per-site group. Refused with `400` for global groups. Requires write access (`admin`).
 
 **Request:**
 ```json
@@ -2029,7 +2079,7 @@ Replace the site associations of a per-site group. Refused with `400` for global
 
 ### POST /ip-groups/{group_id}/sync
 
-Trigger an immediate subscription sync from `source_url`. On success the fetched ranges replace the stored ones; on failure the previous ranges are kept, the error is recorded in `last_sync_error`, and the API returns `502`.
+Trigger an immediate subscription sync from `source_url`. Requires write access (`admin`). On success the fetched ranges replace the stored ones; on failure the previous ranges are kept, the error is recorded in `last_sync_error`, and the API returns `502`.
 
 **Response (200):**
 ```json
@@ -2176,21 +2226,66 @@ action.
 
 ### GET /sites/{site_id}/challenge
 
-Get challenge configuration.
+Get challenge configuration, creating a disabled default when the site never
+saved one.
+
+**Response (200):**
+```json
+{
+  "id": "0d1b0f2e-…",
+  "site_id": "6f1c…",
+  "enabled": false,
+  "under_attack_mode": false,
+  "default_level": "non_interactive",
+  "clearance_duration_secs": 1800,
+  "rate_threshold": 100,
+  "exempt_paths": [],
+  "browser_integrity_check": true,
+  "tls_fingerprint_check": false,
+  "updated_at": "2026-09-30T09:00:00Z"
+}
+```
 
 ### PUT /sites/{site_id}/challenge
 
-Update challenge settings.
+Update challenge settings. All fields are optional; omitted fields keep their
+value. Site write permission is required. Unknown fields are rejected with
+`422 Unprocessable Entity` (`deny_unknown_fields`) — note that axum 0.8 maps
+serde deserialization rejections to 422, and the response body is plain text,
+not the unified JSON error envelope.
 
 **Request:**
 ```json
 {
   "enabled": true,
-  "mode": "passive",
-  "type": "js_challenge",
-  "expiry_secs": 3600
+  "under_attack_mode": true,
+  "default_level": "managed",
+  "clearance_duration_secs": 1800,
+  "rate_threshold": 100,
+  "exempt_paths": ["/health", "/static/"],
+  "browser_integrity_check": true,
+  "tls_fingerprint_check": false
 }
 ```
+
+| Field | Description |
+|-------|-------------|
+| `enabled` | Master switch for the challenge gate |
+| `under_attack_mode` | Show the under-attack banner; setting it to `true` also forces `enabled` to `true` |
+| `default_level` | `none`, `non_interactive`, `managed` or `interactive`; other values are rejected with `400` |
+| `clearance_duration_secs` | Clearance cookie lifetime, 60–86400 seconds |
+| `rate_threshold` | Requests per window before a challenge is issued, 1–10000000 |
+| `exempt_paths` | Bypass list; see validation rules below |
+| `browser_integrity_check` | Browser fingerprint heuristic |
+| `tls_fingerprint_check` | TLS fingerprint check |
+
+`exempt_paths` is an optional bypass list of path prefixes served without a
+challenge. Each entry must start with `/`, contain no whitespace or control
+characters, be at most 512 characters, and the list accepts at most 100
+entries — anything else is rejected with `400`. Entries are trimmed and blank
+entries are dropped. The challenge cookie signing secret is internal to the
+server and is not part of this API (the former `cookie_secret` field was
+removed; the database column is dropped by migration `000054`).
 
 ---
 
@@ -2283,6 +2378,15 @@ Delete an error page.
 ---
 
 ## Settings
+
+> **Control-plane-local settings.** The endpoints below take effect only in
+> the control-plane process itself; they are **not** pushed to agents and do
+> not appear in the rule bundle: `PUT /settings/elasticsearch` (a saved change
+> needs a control-plane restart to apply — the response's `requires_restart`
+> flag reports this), `GET/PUT /settings/api-protection` (the 9080
+> self-protection policy is rebuilt in-process), `GET/PUT /settings/ai`,
+> `GET/PUT /login-security` and the `/notifications/*` endpoints. In a
+> multi-instance deployment each instance must be configured separately.
 
 ### GET /settings/elasticsearch
 
@@ -3010,7 +3114,9 @@ go tool pprof -http=: -insecure https://localhost:9080/api/v1/debug/pprof/profil
 
 ### GET /debug/pprof/flamegraph
 
-Capture CPU samples and return an SVG flamegraph viewable directly in a browser. Same query parameters as above.
+Capture CPU samples and return an SVG flamegraph as a **forced download**
+(`Content-Disposition: attachment; filename="flamegraph.svg"`) rather than
+inline content. Same query parameters as above.
 
 ```bash
 curl -k -H "Authorization: Bearer $TOKEN" \
