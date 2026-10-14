@@ -306,7 +306,15 @@
       "statusCodesDescription": "選択した期間のレスポンスステータスの分布。",
       "recentThreats": "最近の脅威",
       "requestsToday": "本日のリクエスト",
-      "blockedToday": "本日のブロック"
+      "blockedToday": "本日のブロック",
+      "processResources": {
+        "processRss": "プロセス RSS",
+        "processVirtual": "プロセス仮想メモリ",
+        "hostMemory": "ホストメモリ（システム計測）",
+        "hostMemorySystem": "ホストメモリ（システム計測）",
+        "collectedAt": "取得時刻 {{time}}",
+        "hint": "プロセス RSS は pingwaf バイナリの実際の使用量です。ホストメモリは OS や他のプロセスを含むマシン全体のメモリです。"
+      }
     },
     "sites": {
       "failover": {
@@ -1353,7 +1361,8 @@
         "rx": "受信",
         "tx": "送信"
       },
-      "allSitesHint": "単一サイトにバインドされておらず、オーナーの全サイトに自動同期します"
+      "allSitesHint": "単一サイトにバインドされておらず、オーナーの全サイトに自動同期します",
+      "hostMemory": "ホストメモリ容量"
     },
     "notifications": {
       "title": "通知",

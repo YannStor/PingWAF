@@ -1,5 +1,6 @@
 import { BASE_URL, ApiError, refreshAccessToken } from './client'
 import { getAuthToken, useAuthStore } from '@/stores/authStore'
+import type { MemorySnapshot } from './types'
 
 /**
  * Debug / performance diagnostics — `/api/v1/debug/pprof/*` (admin only).
@@ -19,7 +20,8 @@ import { getAuthToken, useAuthStore } from '@/stores/authStore'
 export const PPROF_MAX_SECONDS = 120
 export const PPROF_DEFAULT_SECONDS = 30
 
-async function download(path: string, query?: Record<string, unknown>): Promise<Blob> {
+/** Shared request runner: auth header + single 401 token-refresh retry. */
+async function request(path: string, query?: Record<string, unknown>): Promise<Response> {
   let token = getAuthToken()
   let response: Response
   for (let attempt = 0; ; attempt++) {
@@ -59,6 +61,11 @@ async function download(path: string, query?: Record<string, unknown>): Promise<
     }
     throw new ApiError(message, response.status)
   }
+  return response
+}
+
+async function download(path: string, query?: Record<string, unknown>): Promise<Blob> {
+  const response = await request(path, query)
   return response.blob()
 }
 
@@ -95,3 +102,22 @@ export async function downloadMemorySnapshot(): Promise<void> {
   const blob = await download('/debug/pprof/memory')
   saveBlob(blob, 'pingwaf-memory.json')
 }
+
+/**
+ * JSON memory snapshot as a parsed object (mirror of `downloadMemorySnapshot`).
+ * Field scopes: `rss_bytes`/`virtual_bytes` are this process's own footprint
+ * (`process_memory_scope: "process"`); `used_memory_bytes`/`total_memory_bytes`
+ * are the **host's** RAM (`used_memory_scope: "system"`).
+ */
+export async function fetchMemorySnapshot(): Promise<MemorySnapshot> {
+  const response = await request('/debug/pprof/memory')
+  return (await response.json()) as MemorySnapshot
+}
+
+export const debugKeys = {
+  all: ['debug'] as const,
+  memory: () => [...debugKeys.all, 'memory'] as const,
+}
+
+/** Convenience alias used by pages. */
+export const debugApi = { memory: fetchMemorySnapshot }

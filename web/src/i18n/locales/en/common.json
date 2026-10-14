@@ -306,7 +306,15 @@
       "statusCodesDescription": "Response status distribution in the selected window.",
       "recentThreats": "Recent threats",
       "requestsToday": "Requests today",
-      "blockedToday": "Blocked today"
+      "blockedToday": "Blocked today",
+      "processResources": {
+        "processRss": "Process RSS",
+        "processVirtual": "Process virtual memory",
+        "hostMemory": "Host memory (system)",
+        "hostMemorySystem": "Host memory (system-wide)",
+        "collectedAt": "Collected at {{time}}",
+        "hint": "Process RSS is the real footprint of the pingwaf binary; host memory covers the whole machine including the OS and other processes."
+      }
     },
     "sites": {
       "failover": {
@@ -1353,7 +1361,8 @@
         "rx": "Receive",
         "tx": "Transmit"
       },
-      "allSitesHint": "Not bound to a single site; automatically serves every site of its owner"
+      "allSitesHint": "Not bound to a single site; automatically serves every site of its owner",
+      "hostMemory": "Host memory capacity"
     },
     "notifications": {
       "title": "Notifications",

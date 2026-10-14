@@ -73,6 +73,7 @@ import {
   downloadFlamegraph,
   downloadMemorySnapshot,
 } from '@/api/debug'
+import { debugApi, debugKeys } from '@/api/debug'
 import { ApiError } from '@/api/client'
 import { errorMessage, handleApiError } from '@/api/errors'
 import { useAuthStore } from '@/stores/authStore'
@@ -80,7 +81,7 @@ import { useCanWrite } from '@/hooks'
 import { useThemeStore, type ThemeMode } from '@/stores/themeStore'
 import { supportedLanguages } from '@/i18n'
 import { cn } from '@/lib/utils'
-import { formatDateTime } from '@/lib/format'
+import { formatDateTime, formatSize } from '@/lib/format'
 import type {
   AiSettings,
   AiTestResult,
@@ -2733,6 +2734,14 @@ function PerformanceDiagnosticsCard() {
   const [seconds, setSeconds] = useState(String(PPROF_DEFAULT_SECONDS))
   const [pending, setPending] = useState<'profile' | 'flamegraph' | 'memory' | null>(null)
 
+  // Live snapshot for the two-scope display below; silent on failure since it
+  // is supplementary to the download buttons.
+  const memory = useQuery({
+    queryKey: debugKeys.memory(),
+    queryFn: () => debugApi.memory(),
+    refetchInterval: 30_000,
+  })
+
   const parsedSeconds = Number(seconds)
   const secondsValid =
     Number.isInteger(parsedSeconds) && parsedSeconds >= 1 && parsedSeconds <= PPROF_MAX_SECONDS
@@ -2748,7 +2757,11 @@ function PerformanceDiagnosticsCard() {
       if (error instanceof ApiError && error.status === 501) {
         toast.error(t('pages.settings.pprofUnsupportedPlatform'))
       } else if (error instanceof ApiError && error.status === 409) {
-        toast.error(t('pages.settings.pprofBusy'))
+        // 409 now covers both "another session is active" and "no samples /
+        // idle process" — prefer the backend's own guidance when present.
+        toast.error(
+          error.message || t('pages.settings.pprofBusy'),
+        )
       } else {
         handleApiError(error, { title: t('pages.settings.pprofFailed') })
       }
@@ -2804,6 +2817,25 @@ function PerformanceDiagnosticsCard() {
             {t('pages.settings.pprofMemory')}
           </Button>
         </div>
+        {memory.data && (
+          <div className="rounded-lg bg-bg-subtle px-3 py-2 text-xs text-fg-subtle tabular-nums">
+            <p className="flex items-baseline justify-between gap-2">
+              <span>{t('pages.dashboard.processResources.processRss')}</span>
+              <span className="font-medium text-fg-strong">{formatSize(memory.data.rss_bytes)}</span>
+            </p>
+            <p className="mt-1 flex items-baseline justify-between gap-2">
+              <span>{t('pages.dashboard.processResources.hostMemorySystem')}</span>
+              <span className="font-medium text-fg-strong">
+                {formatSize(memory.data.used_memory_bytes)} / {formatSize(memory.data.total_memory_bytes)}
+              </span>
+            </p>
+            <p className="mt-1 text-[11px] text-fg-subtle/70">
+              {t('pages.dashboard.processResources.collectedAt', {
+                time: formatDateTime(memory.data.collected_at_ms),
+              })}
+            </p>
+          </div>
+        )}
         <p className="flex items-start gap-2 text-xs leading-relaxed text-fg-subtle">
           <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0" />
           {t('pages.settings.pprofHint')}

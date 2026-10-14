@@ -591,7 +591,7 @@ export function AgentsPage() {
               />
               <MetricTile
                 icon={<HardDrives weight="duotone" className="h-4 w-4" />}
-                label={t('pages.agents.memory')}
+                label={t('pages.agents.hostMemory')}
                 value={detail.memory_bytes != null ? formatSize(detail.memory_bytes) : '—'}
               />
               <MetricTile

@@ -306,7 +306,15 @@
       "statusCodesDescription": "所选时间窗口内的响应状态码分布。",
       "recentThreats": "最近威胁",
       "requestsToday": "今日请求",
-      "blockedToday": "今日拦截"
+      "blockedToday": "今日拦截",
+      "processResources": {
+        "processRss": "进程 RSS",
+        "processVirtual": "进程虚拟内存",
+        "hostMemory": "宿主机内存（系统口径）",
+        "hostMemorySystem": "宿主机内存（系统口径）",
+        "collectedAt": "采集于 {{time}}",
+        "hint": "进程 RSS 是 pingwaf 二进制的真实占用；宿主机内存是整机内存，包含系统与其他进程。"
+      }
     },
     "sites": {
       "failover": {
@@ -1353,7 +1361,8 @@
         "rx": "接收",
         "tx": "发送"
       },
-      "allSitesHint": "未单独绑定站点，自动同步属主账号全部站点的配置"
+      "allSitesHint": "未单独绑定站点，自动同步属主账号全部站点的配置",
+      "hostMemory": "主机内存容量"
     },
     "notifications": {
       "title": "通知",

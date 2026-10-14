@@ -25,6 +25,7 @@ import {
   Lightning,
   Clock,
   UploadSimple,
+  Cpu,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
@@ -37,6 +38,8 @@ import { ErrorState } from '@/components/ErrorState'
 import { Skeleton, SkeletonRows } from '@/components/ui/Skeleton'
 import { analyticsApi, analyticsKeys } from '@/api/analytics'
 import { agentsApi, agentKeys } from '@/api/agents'
+import { debugApi, debugKeys } from '@/api/debug'
+import { useAuthStore } from '@/stores/authStore'
 import { useSitesList } from '@/hooks'
 import { cn } from '@/lib/utils'
 import {
@@ -44,6 +47,7 @@ import {
   formatBucket,
   formatCompactNumber,
   formatLatency,
+  formatDateTime,
   formatNumber,
   formatPercent,
   formatSize,
@@ -109,6 +113,7 @@ export function DashboardPage() {
   const { t } = useTranslation()
   const [hours, setHours] = useState(24)
   const [siteId, setSiteId] = useState<string>('')
+  const isAdmin = useAuthStore((s) => s.user?.role) === 'admin'
 
   const { data: sites } = useSitesList()
 
@@ -496,6 +501,7 @@ export function DashboardPage() {
               </Card>
             )
           })}
+          {isAdmin && <ProcessResourcesCard />}
         </div>
       )}
 
@@ -826,5 +832,65 @@ export function DashboardPage() {
         </Card>
       </div>
     </div>
+  )
+}
+
+/**
+ * Admin-only "process resources" stat card fed by `/debug/pprof/memory`.
+ * `rss_bytes` is the pingwaf process's own footprint (the headline number);
+ * `used_memory_bytes`/`total_memory_bytes` are the *host's* RAM and are
+ * labelled as such so they are never mistaken for the process footprint.
+ */
+function ProcessResourcesCard() {
+  const { t } = useTranslation()
+  const memory = useQuery({
+    queryKey: debugKeys.memory(),
+    queryFn: () => debugApi.memory(),
+    refetchInterval: REFRESH_MS,
+  })
+
+  if (memory.isError) {
+    return <ErrorState variant="inline" error={memory.error} onRetry={() => memory.refetch()} retrying={memory.isFetching} />
+  }
+
+  const snap = memory.data
+  return (
+    <Card className="p-4">
+      <div className="flex items-start justify-between">
+        <span className="flex h-9 w-9 items-center justify-center rounded-lg text-success bg-success/10">
+          <Cpu weight="duotone" className="h-[18px] w-[18px]" />
+        </span>
+      </div>
+      {snap === undefined ? (
+        <div className="mt-3">
+          <Skeleton className="h-7 w-20" />
+          <Skeleton className="mt-2 h-3 w-24" />
+        </div>
+      ) : (
+        <>
+          <p className="mt-3 text-2xl font-semibold tracking-tight text-fg-strong tabular-nums">
+            {formatSize(snap.rss_bytes)}
+          </p>
+          <p className="mt-0.5 text-[13px] text-fg-subtle">
+            {t('pages.dashboard.processResources.processRss')}
+            <span className="ml-2 text-xs text-fg-subtle/70">
+              {t('pages.dashboard.processResources.collectedAt', {
+                time: formatDateTime(snap.collected_at_ms),
+              })}
+            </span>
+          </p>
+          <p className="mt-1 text-xs text-fg-subtle/80 tabular-nums">
+            {t('pages.dashboard.processResources.processVirtual')}: {formatSize(snap.virtual_bytes)}
+          </p>
+          <p className="text-xs text-fg-subtle/80 tabular-nums">
+            {t('pages.dashboard.processResources.hostMemory')}:{' '}
+            {formatSize(snap.used_memory_bytes)} / {formatSize(snap.total_memory_bytes)}
+          </p>
+        </>
+      )}
+      <p className="mt-2 text-xs leading-relaxed text-fg-subtle/70">
+        {t('pages.dashboard.processResources.hint')}
+      </p>
+    </Card>
   )
 }

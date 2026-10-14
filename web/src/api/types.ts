@@ -2210,3 +2210,29 @@ export interface McpStatus {
   prompts: number
   resources: number
 }
+
+/* ── Debug / memory snapshot ───────────────────────────────────────── */
+
+/** `pingwaf_pprof::MemorySnapshot` — `GET /debug/pprof/memory` (admin only). */
+export interface MemorySnapshot {
+  /** Resident set size of this process in bytes (the process footprint). */
+  rss_bytes: number
+  /** Virtual memory size of this process in bytes. */
+  virtual_bytes: number
+  /** Total physical RAM of the host machine in bytes. */
+  total_memory_bytes: number
+  /** Host RAM in use across the machine in bytes. */
+  used_memory_bytes: number
+  /** `rss_bytes` rendered human-readable, e.g. "120.3 MB". */
+  rss: string
+  /** `total_memory_bytes` rendered human-readable. */
+  total_memory: string
+  /** `used_memory_bytes` rendered human-readable. */
+  used_memory: string
+  /** Unix epoch milliseconds at which the snapshot was taken. */
+  collected_at_ms: number
+  /** Always `"system"` — host RAM, not the container/process limit. */
+  used_memory_scope: string
+  /** Always `"process"` — this process's own footprint. */
+  process_memory_scope: string
+}
