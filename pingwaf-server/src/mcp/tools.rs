@@ -169,6 +169,12 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "profile_memory",
+            description: "Memory snapshot of the control-plane process: process RSS (the real footprint) plus host-level memory totals. Read the notes in the result before quoting numbers — process and host scopes are labeled.",
+            write: false,
+            schema: json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+        },
+        ToolSpec {
             name: "set_observation_mode",
             description: "Turn global observation mode on or off. On: every detection keeps running but only records what it would have blocked. Off: protections enforce again. The change is pushed to all agents immediately.",
             write: true,
@@ -270,6 +276,7 @@ pub async fn call(
         "get_defense_status" => get_defense_status(ctx).await,
         "list_ip_groups" => list_ip_groups(ctx).await,
         "query_control_plane_logs" => query_control_plane_logs(ctx, args).await,
+        "profile_memory" => profile_memory().await,
         "set_observation_mode" => set_observation_mode(ctx, args).await,
         "set_site_status" => set_site_status(ctx, args).await,
         // `ensure_allowed` proved the name exists.
@@ -280,6 +287,59 @@ pub async fn call(
 // ─────────────────────────────────────────────────────────────
 // Argument helpers
 // ─────────────────────────────────────────────────────────────
+
+/// How long a `profile_memory` result stays cached. The snapshot refreshes
+/// host RAM via sysinfo on every collection, so an LLM polling the tool in a
+/// loop gets the cached copy instead of a fresh collection per call.
+const MEMORY_SNAPSHOT_CACHE_MS: u64 = 5_000;
+
+/// `(taken_at, result)` cache for `profile_memory`. Second-level freshness is
+/// plenty for a diagnostic snapshot, and the guard below keeps repeated calls
+/// from turning into a sysinfo refresh storm.
+static MEMORY_SNAPSHOT_CACHE: std::sync::Mutex<
+    Option<(std::time::Instant, Value)>,
+> = std::sync::Mutex::new(None);
+
+/// `profile_memory`: the control plane's own memory snapshot — process RSS
+/// plus host-level totals — with the scope notes an LLM needs to avoid the
+/// classic "host usage looks like process usage" misread. Read-only, so any
+/// authenticated MCP session may call it.
+async fn profile_memory() -> Result<Value, String> {
+    let mut cache = MEMORY_SNAPSHOT_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((taken_at, cached)) = cache.as_ref() {
+        if (taken_at.elapsed().as_millis() as u64)
+            < MEMORY_SNAPSHOT_CACHE_MS
+        {
+            return Ok(cached.clone());
+        }
+    }
+
+    let snapshot = pingwaf_pprof::memory_snapshot();
+    let value = json!({
+        "snapshot": {
+            "rss_bytes": snapshot.rss_bytes,
+            "virtual_bytes": snapshot.virtual_bytes,
+            "total_memory_bytes": snapshot.total_memory_bytes,
+            "used_memory_bytes": snapshot.used_memory_bytes,
+            "rss": snapshot.rss,
+            "total_memory": snapshot.total_memory,
+            "used_memory": snapshot.used_memory,
+            "collected_at_ms": snapshot.collected_at_ms,
+            "process_memory_scope": snapshot.process_memory_scope,
+            "used_memory_scope": snapshot.used_memory_scope,
+        },
+        "notes": [
+            "rss_bytes/rss is the control-plane process's own resident memory — quote this when asked how much memory the control plane uses.",
+            "used_memory_bytes/total_memory_bytes are HOST-level totals (system scope), not the process and not a container limit — a high value there does not mean the control plane is leaking.",
+            "virtual_bytes is address-space size and is normally much larger than RSS.",
+            "Snapshots are cached for a few seconds; collected_at_ms tells you how fresh this one is."
+        ]
+    });
+    *cache = Some((std::time::Instant::now(), value.clone()));
+    Ok(value)
+}
 
 fn db_error(err: sea_orm::DbErr) -> String {
     tracing::error!(error = %err, "tool database query failed");
@@ -945,6 +1005,44 @@ mod tests {
                 spec.name
             );
         }
+    }
+
+    /// `profile_memory` is read-only (every authenticated session may call
+    /// it) and its result is cached, so back-to-back calls must observe the
+    /// same snapshot instead of collecting twice.
+    #[tokio::test]
+    async fn profile_memory_is_read_only_and_cached() {
+        let spec = specs()
+            .into_iter()
+            .find(|s| s.name == "profile_memory")
+            .expect("profile_memory registered");
+        assert!(!spec.write, "profile_memory must stay read-only");
+
+        let read_only = mcp_list(false);
+        let names: Vec<&str> = read_only["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            names.contains(&"profile_memory"),
+            "read-only callers must see profile_memory"
+        );
+
+        let first = profile_memory().await.expect("first snapshot");
+        let second = profile_memory().await.expect("cached snapshot");
+        assert_eq!(
+            first["snapshot"]["collected_at_ms"],
+            second["snapshot"]["collected_at_ms"],
+            "a call inside the TTL must reuse the cached snapshot"
+        );
+        assert_eq!(first["snapshot"]["process_memory_scope"], "process");
+        assert_eq!(first["snapshot"]["used_memory_scope"], "system");
+        assert!(
+            !first["notes"].as_array().unwrap().is_empty(),
+            "scope guidance for LLM callers is mandatory"
+        );
     }
 
     #[test]

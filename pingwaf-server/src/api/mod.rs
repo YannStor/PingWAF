@@ -57,6 +57,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Json;
+use axum::extract::DefaultBodyLimit;
 use axum::Router;
 use serde_json::json;
 use std::future::Future;
@@ -71,6 +72,17 @@ pub use state::AppState;
 
 /// Prefix every REST route lives under.
 pub const API_PREFIX: &str = "/api/v1";
+
+/// Global request-body ceiling for the whole control plane (API + MCP +
+/// frontend fallback). Route-level limits override it where a route needs
+/// more (the GeoIP MMDB upload raises it to 128 MiB; MCP keeps its tighter
+/// 256 KiB cap), so this is the backstop that applies when WAF
+/// self-protection is disabled and a route never set its own bound: without
+/// it, any endpoint would happily buffer an unbounded body into memory.
+///
+/// 10 MiB covers the legitimate maximum payloads (config-snapshot import
+/// ~2 MiB, certificate PEM bundles) with room to spare.
+pub const DEFAULT_BODY_LIMIT_BYTES: usize = 10 * 1024 * 1024;
 
 /// Builds the complete HTTP router, including CORS, compression and tracing.
 pub fn build_router(state: AppState) -> Router {
@@ -144,6 +156,11 @@ pub fn build_router(state: AppState) -> Router {
         redirect,
         redirect_cleartext_to_https,
     ))
+    // Global body-size backstop (S1): applies to everything below — the
+    // nested `/api/v1` router, the MCP routes and the frontend fallback —
+    // while route-level `DefaultBodyLimit`s (MCP, GeoIP upload) still take
+    // precedence as the inner, more specific bounds.
+    .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT_BYTES))
     .layer(build_cors(&config.cors_origins))
     .layer(CompressionLayer::new())
     .layer(TraceLayer::new_for_http().make_span_with(

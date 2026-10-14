@@ -3077,6 +3077,7 @@ credentials).
 | `get_defense_status` | | Observation mode and the control plane's own guards. |
 | `list_ip_groups` | | Shared IP groups with size and sync state. |
 | `query_control_plane_logs` | | The 9080 access log, including allowlist/WAF verdicts. |
+| `profile_memory` | | Memory snapshot of the control-plane process (process RSS) plus host-level totals, with scope notes; cached for a few seconds. |
 | `set_observation_mode` | ✓ | Turn global observation mode on or off. |
 | `set_site_status` | ✓ | Activate or pause one site. |
 
