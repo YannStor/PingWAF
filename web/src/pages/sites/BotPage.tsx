@@ -13,6 +13,7 @@ import {
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
+import { useUnsavedGuard } from '@/hooks/useUnsavedGuard'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
@@ -92,6 +93,8 @@ export function BotPage() {
     },
   })
 
+  const unsavedDialog = useUnsavedGuard(dirty)
+
   const addWhitelistEntry = (pattern: string) => {
     const trimmed = pattern.trim()
     if (!config || !trimmed) return
@@ -129,6 +132,7 @@ export function BotPage() {
 
   return (
     <div className="animate-slide-up">
+      {unsavedDialog}
       <PageHeader
         title={t('pages.bot.title')}
         description={t('pages.bot.description')}

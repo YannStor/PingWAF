@@ -61,23 +61,41 @@ export function isValidIpv4(value: string): boolean {
   })
 }
 
-/** True for any IPv6 address (best-effort: colon-separated hex groups). */
+/**
+ * True for a valid IPv6 address, mirroring Rust's `IpAddr::from_str` rules:
+ * at most one `::` (which must compress at least one group), 1-4 hex digits
+ * per group, exactly 8 groups when no `::` is present, and an IPv4 tail
+ * (dotted quad, counts as two groups) only at the very end, e.g.
+ * `::ffff:192.168.1.1` or `1:2:3:4:5:6:1.2.3.4`.
+ */
 export function isValidIpv6(value: string): boolean {
   const v = value.trim()
-  if (!v.includes(':')) return false
-  // Allow the `::` shorthand and up to 8 groups of 1-4 hex digits.
-  const groups = v.split(':')
-  if (groups.length < 3 || groups.length > 8) return false
-  let seenDoubleColon = false
-  for (const g of groups) {
-    if (g === '') {
-      // Leading/trailing/compressed empties are only valid around `::`.
-      seenDoubleColon = true
-      continue
-    }
-    if (!/^[0-9a-fA-F]{1,4}$/.test(g)) return false
-  }
-  return seenDoubleColon || groups.length === 8
+  if (!v.includes(':') || v.includes(':::')) return false
+
+  // Split around the (single) `::` compression marker.
+  const parts = v.split('::')
+  if (parts.length > 2) return false
+  const compressed = parts.length === 2
+  const head = parts[0] ? parts[0].split(':') : []
+  const tail = compressed && parts[1] ? parts[1].split(':') : []
+  if (head.some((g) => g === '') || tail.some((g) => g === '')) return false
+
+  if (head.length + tail.length === 0) return compressed // bare `::`
+
+  // IPv4 tail is only allowed as the very last group of the address.
+  const last =
+    compressed && tail.length > 0 ? tail[tail.length - 1] : head[head.length - 1]
+  if (compressed && tail.length === 0 && last.includes('.')) return false
+  const hasV4Tail = last.includes('.')
+  const hexGroups = hasV4Tail ? [...head, ...tail].slice(0, -1) : [...head, ...tail]
+  if (!hexGroups.every((g) => /^[0-9a-fA-F]{1,4}$/.test(g))) return false
+  if (hasV4Tail && !isValidIpv4(last)) return false
+
+  // A dotted quad occupies two groups but already appears as one element
+  // in head/tail, so it adds one extra group to the count.
+  const total = head.length + tail.length + (hasV4Tail ? 1 : 0)
+  if (!compressed) return total === 8
+  return total <= 7 // `::` must compress at least one group
 }
 
 /**
@@ -90,6 +108,8 @@ export function validateIpCidr(value: string): string | null {
   const [addr, prefix, ...rest] = v.split('/')
   if (rest.length > 0) return 'malformed'
   if (prefix !== undefined) {
+    // `10.0.0.0/` — empty prefix is malformed, not prefix 0.
+    if (prefix === '') return 'malformed'
     const bits = Number(prefix)
     const isV6 = addr.includes(':')
     const max = isV6 ? 128 : 32
@@ -101,20 +121,101 @@ export function validateIpCidr(value: string): string | null {
   return 'address'
 }
 
-/** Splits a bulk-import textarea into unique, valid IP/CIDR entries. */
-export function parseIpList(raw: string): { valid: string[]; invalid: string[] } {
+/** Minimum prefix length per family (larger number = narrower range). */
+export interface MinPrefix {
+  v4: number
+  v6: number
+}
+
+/**
+ * Validates manual-block input: a single address or a CIDR range
+ * (`addr/prefix`, prefix within the address family's bit length). When
+ * `minPrefix` is given, ranges broader than the floor (e.g. `10.0.0.0/8`
+ * against `{ v4: 16, v6: 32 }`) are rejected with `tooBroad` — this mirrors
+ * the backend's manual-block width limits without affecting bulk import.
+ * Returns `null` when valid, or a short reason string the form can surface.
+ */
+export function validateIpOrCidr(
+  value: string,
+  minPrefix?: MinPrefix,
+): string | null {
+  const reason = validateIpCidr(value)
+  if (reason !== null || !minPrefix) return reason
+  const [addr, prefix] = value.trim().split('/')
+  if (prefix !== undefined) {
+    const bits = Number(prefix)
+    const floor = addr.includes(':') ? minPrefix.v6 : minPrefix.v4
+    if (bits < floor) return 'tooBroad'
+  }
+  return null
+}
+
+/**
+ * Validates a single IP address (no CIDR). Returns `null` when valid, or a
+ * short reason string the form can surface. Kept for callers that still need
+ * address-only input (e.g. IP rule panels).
+ */
+export function validateSingleIp(value: string): string | null {
+  const v = value.trim()
+  if (!v) return 'empty'
+  if (v.includes('/')) return 'cidr'
+  if (isValidIpv4(v) || isValidIpv6(v)) return null
+  return 'address'
+}
+
+/**
+ * Splits a bulk-import textarea into valid IP/CIDR entries.
+ *
+ * Duplicates (including repeats of invalid lines) are counted separately so
+ * callers can surface a compact message instead of listing every row.
+ */
+export function parseIpList(raw: string): {
+  valid: string[]
+  invalid: string[]
+  /** How many raw lines were dropped as repeats of an earlier entry. */
+  duplicateCount: number
+} {
   const valid: string[] = []
   const invalid: string[] = []
   const seen = new Set<string>()
+  let duplicateCount = 0
   for (const line of raw.split(/[\n,;]/)) {
     const entry = line.trim()
     if (!entry) continue
-    if (seen.has(entry)) continue
+    if (seen.has(entry)) {
+      duplicateCount += 1
+      continue
+    }
     seen.add(entry)
     if (validateIpCidr(entry) === null) valid.push(entry)
     else invalid.push(entry)
   }
-  return { valid, invalid }
+  return { valid, invalid, duplicateCount }
+}
+
+/**
+ * Compact, i18n-ready description of the invalid lines from
+ * {@link parseIpList}, grouped by rejection reason: e.g.
+ * `"3 invalid: a, b, c"` / `"2 duplicate entries ignored"`.
+ */
+export function summarizeInvalid(
+  invalid: string[],
+  duplicateCount: number,
+  t: (key: string, opts?: Record<string, unknown>) => string,
+): string | null {
+  const parts: string[] = []
+  if (invalid.length > 0) {
+    parts.push(
+      t('pages.ipRules.bulkInvalid', {
+        count: invalid.length,
+        list: invalid.slice(0, 5).join(', '),
+      }),
+    )
+  }
+  if (duplicateCount > 0) {
+    parts.push(t('pages.ipRules.bulkDuplicates', { count: duplicateCount }))
+  }
+  return parts.length > 0 ? parts.join(' ') : null
 }
 
 export const ipRuleKeys = {

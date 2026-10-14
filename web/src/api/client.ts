@@ -19,6 +19,7 @@ export type ApiErrorCode =
   | 'not_found'
   | 'conflict'
   | 'unprocessable_entity'
+  | 'not_implemented'
   | 'internal_error'
   | 'network_error'
 
@@ -182,6 +183,7 @@ async function readError(response: Response): Promise<ApiError> {
       : response.status === 403 ? 'forbidden'
       : response.status === 404 ? 'not_found'
       : response.status === 409 ? 'conflict'
+      : response.status === 501 ? 'not_implemented'
       : 'bad_request'
   }
   return new ApiError(message, response.status, code)

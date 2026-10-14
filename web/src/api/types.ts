@@ -123,6 +123,17 @@ export interface Site {
   plan: string
   /** Disk budget, in MiB, the agents may use for this site's cache. */
   cache_quota_mb: number
+  /**
+   * Site-level single-file cache cap in MiB (managed through the CacheSettings
+   * panel); `null` follows the global ceiling.
+   */
+  cache_max_file_size_mb?: number | null
+  /**
+   * Per-content-type single-file caps in MiB (managed through the CacheSettings
+   * panel), keyed `html/css/js/image/font/media/other`; missing keys follow
+   * `cache_max_file_size_mb`.
+   */
+  cache_type_limits_mb?: Record<string, number> | null
   /** Site sits behind a CDN/proxy: derive the client IP from `trusted_header`. */
   trust_proxy_headers: boolean
   /** Forwarded header trusted when `trust_proxy_headers` is on. */
@@ -1254,12 +1265,6 @@ export interface CreateApiKeyRequest {
 
 /* ── Misc ─────────────────────────────────────────────────────────── */
 
-/** `GET /api/v1/health` */
-export interface HealthResponse {
-  status: 'ok' | 'degraded' | string
-  database: 'up' | 'down' | string
-}
-
 /** `GET /api/v1/version` */
 export interface VersionResponse {
   name: string
@@ -1750,6 +1755,8 @@ export type UpdateIpRuleRequest = Partial<CreateIpRuleRequest>
  */
 export interface BlockedIp {
   ip: string
+  /** `single` = one address, `cidr` = a manual CIDR block (server-truncated). */
+  kind?: 'single' | 'cidr'
   reason: string | null
   blocked_at: string
   /** null = permanent block (no automatic expiry). */
@@ -1762,6 +1769,8 @@ export interface BlockedIp {
 
 export interface UnblockIpResponse {
   ip: string
+  /** `single` | `cidr` — matches what the caller passed to unblock. */
+  kind?: 'single' | 'cidr'
   agents: number
   delivered: number
 }
@@ -1773,6 +1782,8 @@ export interface UnblockIpResponse {
  */
 export interface GlobalBlockedIp {
   ip: string
+  /** `single` = one address, `cidr` = a manual CIDR block. */
+  kind?: 'single' | 'cidr'
   site_id: string
   site_name: string
   reason: string | null
@@ -1794,6 +1805,8 @@ export interface ManualBlockIpRequest {
 
 export interface ManualBlockIpResponse {
   ip: string
+  /** `single` or `cidr`, reflecting how the server parsed the input. */
+  kind?: 'single' | 'cidr'
   site_id: string
   duration_seconds: number
   agents: number

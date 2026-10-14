@@ -8,6 +8,7 @@ import {
   Gauge,
 } from '@phosphor-icons/react'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
+import { useUnsavedGuard } from '@/hooks/useUnsavedGuard'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
@@ -23,6 +24,25 @@ import { CHALLENGE_LEVELS, type ChallengeConfig } from '@/api/types'
 
 const MIN_CLEARANCE_SECS = 60
 const MAX_CLEARANCE_SECS = 86_400
+
+/** Bounds mirrored from the server's `exempt_paths` validation. */
+const EXEMPT_PATHS_MAX_COUNT = 100
+const EXEMPT_PATH_MAX_LENGTH = 512
+
+/**
+ * Mirrors the server-side `exempt_paths` checks: each entry must start with
+ * `/`, contain no whitespace or control characters, be at most 512 characters,
+ * and the list at most 100 entries. Returns an i18n key suffix or `null`.
+ */
+function validateExemptPaths(paths: string[]): string | null {
+  if (paths.length > EXEMPT_PATHS_MAX_COUNT) return 'tooMany'
+  for (const p of paths) {
+    if (p.length > EXEMPT_PATH_MAX_LENGTH) return 'tooLong'
+    if (!p.startsWith('/')) return 'invalid'
+    if (/[\s\x00-\x1f\x7f]/.test(p)) return 'invalid'
+  }
+  return null
+}
 
 /**
  * The mitigation module of the protection page: an entry card into the
@@ -145,6 +165,8 @@ function ChallengeConfigCard({ siteId }: { siteId: string }) {
     },
   })
 
+  const unsavedDialog = useUnsavedGuard(dirty)
+
   if (configQuery.isPending) {
     return <SkeletonCard className="h-64" />
   }
@@ -158,8 +180,11 @@ function ChallengeConfigCard({ siteId }: { siteId: string }) {
     )
   }
 
+  const exemptPathsIssue = config ? validateExemptPaths(config.exempt_paths) : null
+
   return (
     <div>
+      {unsavedDialog}
       {config ? (
         <div className="flex flex-col gap-4">
           {/* Under-attack mode is managed from the page-level banner; keep it
@@ -182,7 +207,7 @@ function ChallengeConfigCard({ siteId }: { siteId: string }) {
                     <Button
                       size="sm"
                       variant="primary"
-                      disabled={!dirty || save.isPending}
+                      disabled={!dirty || save.isPending || exemptPathsIssue !== null}
                       loading={save.isPending}
                       onClick={() => config && save.mutate(config)}
                     >
@@ -282,6 +307,11 @@ function ChallengeConfigCard({ siteId }: { siteId: string }) {
                 suggestions={['/health', '/status', '/api/heartbeat']}
                 onChange={(exempt_paths) => patch({ exempt_paths })}
               />
+              {exemptPathsIssue && (
+                <p className="mt-2 text-xs text-fg-danger">
+                  {t(`pages.cc.exemptPaths_${exemptPathsIssue}`)}
+                </p>
+              )}
             </CardBody>
           </Card>
         </div>

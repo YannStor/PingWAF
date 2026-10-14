@@ -26,11 +26,25 @@
     "configVersions": "Configuration versions",
     "selectSiteFirst": "Select a site first",
     "basic": "Basic",
-    "account": "Account"
+    "account": "Account",
+    "group": {
+      "overview": "Overview",
+      "trafficLogs": "Traffic & Logs",
+      "securityAssets": "Security Assets",
+      "platform": "Platform"
+    }
   },
   "sidebar": {
     "collapse": "Collapse",
     "expand": "Expand"
+  },
+  "palette": {
+    "sites": "Sites",
+    "actions": "Actions",
+    "noResults": "No results",
+    "toggleTheme": "Toggle dark theme",
+    "toggleLanguage": "Switch language",
+    "goToSettings": "Go to settings"
   },
   "common": {
     "save": "Save",
@@ -43,7 +57,35 @@
     "search": "Search",
     "confirm": "Confirm",
     "close": "Close",
+    "unsavedGuard": {
+      "title": "Unsaved changes",
+      "description": "You have unsaved changes that will be lost if you leave this page.",
+      "leave": "Leave",
+      "stay": "Stay"
+    },
     "back": "Back",
+    "batch": {
+      "selectAll": "Select all",
+      "selected": "{{count}} selected",
+      "clear": "Clear selection",
+      "progress": "{{done}}/{{total}}",
+      "done": "{{count}} completed",
+      "partial": "{{failed}} of {{total}} failed: {{names}}",
+      "pausing": "Pausing sites…",
+      "resuming": "Resuming sites…",
+      "deleting": "Deleting sites…",
+      "deleteTitle": "Delete selected sites?",
+      "deleteDescription": "This will permanently delete {{count}} site(s) and all their configuration. This cannot be undone.",
+      "unblockDescription": "Unblock {{count}} selected IP(s)?",
+      "pauseTitle": "Pause selected sites?",
+      "pauseDescription": "{{count}} active site(s) will be paused and stop proxying traffic through the WAF.",
+      "resumeTitle": "Resume selected sites?",
+      "resumeDescription": "{{count}} paused site(s) will be resumed."
+    },
+    "siteBanners": {
+      "agentDegraded": "{{count}} node(s) offline or degraded — configuration changes may not take effect immediately.",
+      "observationMode": "This site is in observation mode: attacks are logged but not blocked."
+    },
     "actions": "Actions",
     "enabled": "Enabled",
     "disabled": "Disabled",
@@ -69,7 +111,8 @@
     "lastUpdated": "Last updated",
     "show": "Show",
     "hide": "Hide",
-    "copy": "Copy"
+    "copy": "Copy",
+    "saveFailed": "Save failed"
   },
   "status": {
     "active": "Active",
@@ -331,7 +374,8 @@
       "overview": "Overview",
       "upstreams": "Upstreams",
       "pausedNote": "This site is paused — the edge answers every request with a 503 maintenance page.",
-      "visitSite": "Visit site"
+      "visitSite": "Visit site",
+      "visitSiteHttpHint": "Visit site (HTTP — no certificate issued yet)"
     },
     "waf": {
       "title": "Web Application Firewall",
@@ -567,7 +611,10 @@
       "tlsFingerprint": "TLS Fingerprint Check",
       "tlsFingerprintHint": "Compare the TLS handshake fingerprint against known clients.",
       "exemptPaths": "Exempt paths",
-      "exemptPathsHint": "Paths that bypass CC protection (press Enter to add)."
+      "exemptPathsHint": "Paths that bypass CC protection (press Enter to add).",
+      "exemptPaths_tooMany": "At most 100 exempt paths.",
+      "exemptPaths_tooLong": "Each exempt path must be at most 512 characters.",
+      "exemptPaths_invalid": "Each exempt path must start with \"/\" and contain no spaces."
     },
     "protection": {
       "title": "Web Protection",
@@ -676,6 +723,7 @@
       "bulkCreated": "Imported {{count}} rules",
       "bulkNone": "No valid addresses to import.",
       "bulkInvalid": "{{count}} invalid entries: {{list}}",
+      "bulkDuplicates": "{{count}} duplicate entries ignored",
       "invalidGeneric": "Enter a valid IP address or CIDR range.",
       "invalid": {
         "empty": "Enter an IP address or CIDR range.",
@@ -1550,7 +1598,6 @@
       "apiKeysDescription": "Manage programmatic access keys for agents and integrations.",
       "apiDocs": "API documentation",
       "account": "Account",
-      "adminOnly": "This section is only available to administrators.",
       "displayName": "Display name",
       "changePassword": "Change password",
       "currentPassword": "Current password",
@@ -1770,7 +1817,20 @@
       "passkeySwitchHint": "When off, the login form no longer offers passkeys and new passkeys cannot be bound. Existing credentials are kept and work again once re-enabled.",
       "passkeySwitchDescription": "Deployment-wide switch. Passkey binding and management live under \"Account settings\" in the top-right menu.",
       "passkeySwitchOn": "Passkey sign-in enabled.",
-      "passkeySwitchOff": "Passkey sign-in disabled."
+      "passkeySwitchOff": "Passkey sign-in disabled.",
+      "pprof": "Performance diagnostics",
+      "pprofDescription": "Capture CPU profiles and memory snapshots of the control plane for troubleshooting.",
+      "pprofSeconds": "Capture window (seconds)",
+      "pprofSecondsHint": "CPU is sampled for this many seconds before the file downloads (1-{{max}}).",
+      "pprofSecondsInvalid": "Enter an integer between 1 and {{max}}.",
+      "pprofCpuProfile": "CPU profile",
+      "pprofFlamegraph": "Flame graph",
+      "pprofMemory": "Memory snapshot",
+      "pprofHint": "CPU capture is process-global: only one session can run at a time, and it requires a Linux host. The memory snapshot always works.",
+      "pprofDownloaded": "Download started",
+      "pprofFailed": "Profiling failed",
+      "pprofUnsupportedPlatform": "CPU profiling is only available on Linux servers; the memory snapshot still works.",
+      "pprofBusy": "A profiling session is already running — wait for it to finish."
     },
     "geo": {
       "title": "Geo Restrictions",
@@ -1885,13 +1945,14 @@
       "unblockTitle": "Unblock IP",
       "unblockDescription": "Every agent enforcing this block will stop refusing the IP immediately.",
       "unblocked": "IP unblocked",
+      "unblocking": "Unblocking…",
       "empty": "No blocked IPs",
       "emptyDescription": "IPs blocked by WAF or rate limiting show up here with their attack history, and you can block IPs manually.",
       "blockTitle": "Block IP manually",
       "fieldSite": "Site",
       "fieldSitePh": "Select a site",
-      "fieldIp": "IP address",
-      "fieldIpPh": "e.g. 203.0.113.10",
+      "fieldIp": "IP address or CIDR",
+      "fieldIpPh": "e.g. 203.0.113.10 or 203.0.113.0/24",
       "fieldDuration": "Duration",
       "fieldReason": "Reason (optional)",
       "fieldReasonPh": "e.g. repeated credential stuffing",
@@ -1903,8 +1964,11 @@
       "blockConfirm": "Block",
       "blocked": "Blocked {{ip}} (delivered to {{delivered}}/{{agents}} agents)",
       "blockFailed": "Failed to block IP",
-      "ipInvalid": "Enter a valid IP address",
-      "ipNoCidr": "Single IPs only; use IP groups or access rules for CIDR ranges"
+      "ipInvalid": "Enter a valid IP address or CIDR range",
+      "ipPrefixInvalid": "CIDR prefix out of range (0-32 IPv4, 0-128 IPv6)",
+      "ipTooBroad": "Range too broad: at most /16 for IPv4, /32 for IPv6",
+      "kindCidr": "Range",
+      "fieldIpHint": "IP address or CIDR (narrowest /16 IPv4, /32 IPv6)."
     },
     "ipGroups": {
       "title": "IP Groups",
@@ -1960,6 +2024,7 @@
       "updateFailed": "Failed to update IP group",
       "deleteFailed": "Failed to delete IP group",
       "syncFailed": "Sync failed",
+      "syncErrorExpand": "Click to view the full sync error",
       "confirmDeleteTitle": "Delete IP group?",
       "confirmDeleteDesc": "This will permanently remove the IP group \"{{name}}\"."
     },
@@ -2299,6 +2364,11 @@
     "profile": {
       "title": "Account settings",
       "description": "Manage your display name, login name, password and passkeys."
+    },
+    "notFound": {
+      "title": "Page not found",
+      "description": "The page you are looking for doesn't exist or has been moved.",
+      "backToDashboard": "Back to dashboard"
     }
   },
   "challengeLevels": {

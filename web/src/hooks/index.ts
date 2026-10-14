@@ -33,7 +33,8 @@ export function useSiteDetail(siteId: string | undefined) {
 /**
  * True when the signed-in account may mutate anything.
  *
- * The server only has `admin` and `viewer`; viewers get a 403 on writes, so the
+ * There are three roles: `admin` (full read/write), `auditor` (read-only, like
+ * viewer) and `viewer` (read-only). Non-admins get a 403 on writes, so the
  * console disables the controls up front instead of letting them fail.
  */
 export function useCanWrite(): boolean {

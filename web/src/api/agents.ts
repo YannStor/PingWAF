@@ -23,8 +23,6 @@ export const agentsApi = {
   list: (query: AgentListQuery = {}) =>
     apiClient.get<Page<Agent>>('/agents', { query: { page_size: 200, ...query } }),
 
-  get: (id: string) => apiClient.get<Agent>(`/agents/${id}`),
-
   /**
    * Host probe history, newest first. The agent samples every 5 seconds but the
    * control plane persists one sample per minute and keeps a day of it, so

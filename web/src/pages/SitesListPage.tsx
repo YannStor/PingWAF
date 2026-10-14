@@ -37,6 +37,14 @@ const STATUS_TONE: Record<SiteStatus, BadgeTone> = {
   pending: 'neutral',
 }
 
+/** Per-field form errors — one slot per validated field. */
+interface SiteFormErrors {
+  name?: string
+  domain?: string
+  alternateDomains?: string
+  upstream?: string
+}
+
 interface SiteFormState {
   name: string
   domain: string
@@ -79,7 +87,18 @@ export function SitesListPage() {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<Site | null>(null)
   const [form, setForm] = useState<SiteFormState>(emptyForm)
-  const [formError, setFormError] = useState<string | null>(null)
+  const [formErrors, setFormErrors] = useState<SiteFormErrors>({})
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [batch, setBatch] = useState<{
+    kind: 'pause' | 'resume' | 'delete'
+    total: number
+    done: number
+    failed: string[]
+  } | null>(null)
+  const [pendingBatchDelete, setPendingBatchDelete] = useState(false)
+  const [pendingBatchToggle, setPendingBatchToggle] = useState<
+    'pause' | 'resume' | null
+  >(null)
   const [pendingDelete, setPendingDelete] = useState<Site | null>(null)
   const [pendingToggle, setPendingToggle] = useState<Site | null>(null)
 
@@ -105,6 +124,88 @@ export function SitesListPage() {
   }, [trafficQuery.data])
 
   const sites = sitesQuery.data ?? []
+
+  /* ── Row selection (Z1 batch operations) ─────────────────────────── */
+  const selectedIds = useMemo(
+    () => sites.filter((s) => selected.has(s.id)).map((s) => s.id),
+    [sites, selected],
+  )
+  const allSelected = sites.length > 0 && selectedIds.length === sites.length
+  const someSelected = selectedIds.length > 0 && !allSelected
+
+  const toggleRow = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+
+  const toggleAll = () =>
+    setSelected(allSelected ? new Set() : new Set(sites.map((s) => s.id)))
+
+  const clearSelection = () => setSelected(new Set())
+
+  /**
+   * Runs a mutation over the selection sequentially, tracking progress so the
+   * batch bar can show "3/10" while it runs. Failures are collected and
+   * summarised at the end; the list is invalidated once, after the loop.
+   */
+  const runBatch = async (
+    kind: 'pause' | 'resume' | 'delete',
+    rows: Site[],
+    apply: (row: Site) => Promise<unknown>,
+  ) => {
+    const failed: string[] = []
+    for (let done = 0; done < rows.length; done++) {
+      setBatch({ kind, total: rows.length, done, failed: [...failed] })
+      try {
+        await apply(rows[done])
+      } catch {
+        failed.push(rows[done].domain || rows[done].id)
+      }
+    }
+    setBatch({ kind, total: rows.length, done: rows.length, failed: [...failed] })
+    invalidate()
+    clearSelection()
+    if (failed.length === 0) {
+      toast.success(t('common.batch.done', { count: rows.length }))
+    } else {
+      toast.error(
+        t('common.batch.partial', {
+          failed: failed.length,
+          total: rows.length,
+          names: failed.slice(0, 3).join(', '),
+        }),
+      )
+    }
+    setBatch(null)
+  }
+
+  const batchPause = () => {
+    setPendingBatchToggle(null)
+    void runBatch(
+      'pause',
+      sites.filter((s) => selected.has(s.id) && s.status === 'active'),
+      (s) => sitesApi.update(s.id, { status: 'paused' }),
+    )
+  }
+
+  const batchResume = () => {
+    setPendingBatchToggle(null)
+    void runBatch(
+      'resume',
+      sites.filter((s) => selected.has(s.id) && s.status === 'paused'),
+      (s) => sitesApi.update(s.id, { status: 'active' }),
+    )
+  }
+
+  const batchDelete = () => {
+    const rows = sites.filter((s) => selected.has(s.id))
+    setPendingBatchDelete(false)
+    void runBatch('delete', rows, (s) => sitesApi.delete(s.id))
+  }
+
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: siteKeys.all })
@@ -158,7 +259,7 @@ export function SitesListPage() {
   const openCreate = () => {
     setEditing(null)
     setForm(emptyForm)
-    setFormError(null)
+    setFormErrors({})
     setDialogOpen(true)
   }
 
@@ -170,7 +271,7 @@ export function SitesListPage() {
       domain: site.domain,
       alternateDomains: site.alternate_domains ?? [],
     })
-    setFormError(null)
+    setFormErrors({})
     setDialogOpen(true)
   }
 
@@ -178,37 +279,67 @@ export function SitesListPage() {
     setDialogOpen(false)
     setEditing(null)
     setForm(emptyForm)
-    setFormError(null)
+    setFormErrors({})
+  }
+
+  /** Blur-level format check: cheap, per-field, no cross-field rules. */
+  const validateName = () => {
+    setFormErrors((e) => ({
+      ...e,
+      name: form.name.trim() ? undefined : t('pages.sites.nameRequired'),
+    }))
+  }
+
+  const validateDomainField = () => {
+    const domain = normaliseDomainInput(form.domain)
+    setFormErrors((e) => ({
+      ...e,
+      domain: DOMAIN_PATTERN.test(domain) ? undefined : t('pages.sites.domainInvalid'),
+    }))
+  }
+
+  const validateAlternateDomain = (index: number) => {
+    const raw = form.alternateDomains[index]
+    if (raw === undefined) return
+    const value = normaliseDomainInput(raw)
+    setFormErrors((e) => ({
+      ...e,
+      alternateDomains:
+        !value || DOMAIN_PATTERN.test(value)
+          ? undefined
+          : t('pages.sites.domainInvalid'),
+    }))
   }
 
   const submit = () => {
-    setFormError(null)
     const domain = normaliseDomainInput(form.domain)
     const name = form.name.trim()
+    const errors: SiteFormErrors = {}
 
-    if (!name) {
-      setFormError(t('pages.sites.nameRequired'))
-      return
-    }
-    if (!DOMAIN_PATTERN.test(domain)) {
-      setFormError(t('pages.sites.domainInvalid'))
-      return
-    }
+    if (!name) errors.name = t('pages.sites.nameRequired')
+    if (!DOMAIN_PATTERN.test(domain)) errors.domain = t('pages.sites.domainInvalid')
 
     const alternateDomains: string[] = []
     for (const raw of form.alternateDomains) {
       const value = normaliseDomainInput(raw)
       if (!value) continue
       if (!DOMAIN_PATTERN.test(value)) {
-        setFormError(t('pages.sites.domainInvalid'))
-        return
+        errors.alternateDomains = t('pages.sites.domainInvalid')
+        break
       }
       if (value === domain || alternateDomains.includes(value)) {
-        setFormError(t('pages.sites.domainDuplicate', { domain: value }))
-        return
+        errors.alternateDomains = t('pages.sites.domainDuplicate', { domain: value })
+        break
       }
       alternateDomains.push(value)
     }
+
+    if (!editing && !form.upstreamAddress.trim()) {
+      errors.upstream = t('pages.sites.upstreamRequired')
+    }
+
+    setFormErrors(errors)
+    if (Object.values(errors).some(Boolean)) return
 
     if (editing) {
       updateSite.mutate({
@@ -219,10 +350,6 @@ export function SitesListPage() {
     }
 
     const upstreamAddress = form.upstreamAddress.trim()
-    if (!upstreamAddress) {
-      setFormError(t('pages.sites.upstreamRequired'))
-      return
-    }
 
     const payload: CreateSiteRequest = {
       name,
@@ -239,6 +366,34 @@ export function SitesListPage() {
   const pending = createSite.isPending || updateSite.isPending
 
   const columns: Column<Site>[] = [
+    {
+      key: 'select',
+      header: (
+        <input
+          type="checkbox"
+          aria-label={t('common.batch.selectAll')}
+          checked={allSelected}
+          ref={(el) => {
+            if (el) el.indeterminate = someSelected
+          }}
+          onChange={toggleAll}
+          disabled={batch !== null}
+          className="h-4 w-4 cursor-pointer rounded border-border align-middle disabled:cursor-not-allowed disabled:opacity-50"
+        />
+      ),
+      width: '1%',
+      cell: (r) => (
+        <input
+          type="checkbox"
+          aria-label={r.name || r.domain}
+          checked={selected.has(r.id)}
+          onChange={() => toggleRow(r.id)}
+          onClick={(e) => e.stopPropagation()}
+          disabled={batch !== null}
+          className="h-4 w-4 cursor-pointer rounded border-border align-middle disabled:cursor-not-allowed disabled:opacity-50"
+        />
+      ),
+    },
     {
       key: 'domain',
       header: t('pages.sites.domain'),
@@ -392,6 +547,43 @@ export function SitesListPage() {
         )}
       </div>
 
+      {/* Batch operations bar */}
+      {batch ? (
+        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-md border border-line bg-recessed px-4 py-2.5 text-[13px]">
+          <span className="inline-flex items-center gap-2">
+            <span className="h-4 w-4 animate-spin-slow rounded-full border-2 border-brand border-t-transparent" />
+            {t('common.batch.progress', { done: batch.done, total: batch.total })}
+          </span>
+          <span className="text-fg-subtle">
+            {batch.kind === 'delete'
+              ? t('common.batch.deleting')
+              : batch.kind === 'pause'
+                ? t('common.batch.pausing')
+                : t('common.batch.resuming')}
+          </span>
+        </div>
+      ) : selectedIds.length > 0 && canWrite ? (
+        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-md border border-brand/40 bg-brand-soft px-4 py-2.5 text-[13px]">
+          <span className="font-medium text-fg-strong">
+            {t('common.batch.selected', { count: selectedIds.length })}
+          </span>
+          <div className="ml-auto flex items-center gap-2">
+            <Button size="sm" variant="secondary" icon={<Pause weight="duotone" className="h-4 w-4" />} onClick={() => setPendingBatchToggle('pause')}>
+              {t('pages.sites.deactivate')}
+            </Button>
+            <Button size="sm" variant="secondary" icon={<Play weight="duotone" className="h-4 w-4" />} onClick={() => setPendingBatchToggle('resume')}>
+              {t('pages.sites.activate')}
+            </Button>
+            <Button size="sm" variant="secondary" className="hover:text-fg-danger" icon={<Trash weight="duotone" className="h-4 w-4" />} onClick={() => setPendingBatchDelete(true)}>
+              {t('common.delete')}
+            </Button>
+            <Button size="sm" variant="ghost" icon={<X weight="bold" className="h-4 w-4" />} onClick={clearSelection}>
+              {t('common.batch.clear')}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
       {sitesQuery.isError && !sitesQuery.data ? (
         <ErrorState
           error={sitesQuery.error}
@@ -471,6 +663,8 @@ export function SitesListPage() {
             value={form.name}
             placeholder={t('pages.sites.namePlaceholder')}
             onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+            onBlur={validateName}
+            error={formErrors.name}
             autoFocus
             required
           />
@@ -479,9 +673,10 @@ export function SitesListPage() {
             value={form.domain}
             placeholder="example.com"
             hint={t('pages.sites.domainHint')}
-            error={formError ?? undefined}
+            error={formErrors.domain}
             prefixIcon={<Globe weight="duotone" />}
             onChange={(e) => setForm((f) => ({ ...f, domain: e.target.value }))}
+            onBlur={validateDomainField}
             required
           />
 
@@ -517,6 +712,7 @@ export function SitesListPage() {
                         ),
                       }))
                     }
+                    onBlur={() => validateAlternateDomain(index)}
                   />
                 </div>
                 <Button
@@ -544,6 +740,7 @@ export function SitesListPage() {
                 value={form.upstreamAddress}
                 placeholder="https://origin.example.com:443"
                 hint={t('pages.sites.upstreamHint')}
+                error={formErrors.upstream}
                 onChange={(e) => setForm((f) => ({ ...f, upstreamAddress: e.target.value }))}
                 required
               />
@@ -626,6 +823,62 @@ export function SitesListPage() {
             </p>
           </div>
         )}
+      </ConfirmDialog>
+      {/* Batch pause / resume confirmation */}
+      <ConfirmDialog
+        open={pendingBatchToggle !== null}
+        onClose={() => setPendingBatchToggle(null)}
+        onConfirm={pendingBatchToggle === 'resume' ? batchResume : batchPause}
+        title={
+          pendingBatchToggle === 'resume'
+            ? t('common.batch.resumeTitle')
+            : t('common.batch.pauseTitle')
+        }
+        description={
+          pendingBatchToggle === 'resume'
+            ? t('common.batch.resumeDescription', { count: selectedIds.length })
+            : t('common.batch.pauseDescription', { count: selectedIds.length })
+        }
+        confirmLabel={
+          pendingBatchToggle === 'resume'
+            ? t('pages.sites.activate')
+            : t('pages.sites.deactivate')
+        }
+        tone={pendingBatchToggle === 'resume' ? 'primary' : 'danger'}
+      >
+        <div className="max-h-40 overflow-y-auto rounded-md border border-line bg-recessed px-3 py-2">
+          {sites
+            .filter((s) =>
+              pendingBatchToggle === 'resume'
+                ? selected.has(s.id) && s.status === 'paused'
+                : selected.has(s.id) && s.status === 'active',
+            )
+            .map((s) => (
+              <p key={s.id} className="pw-mono truncate text-[13px] text-fg-strong">
+                {s.domain}
+              </p>
+            ))}
+        </div>
+      </ConfirmDialog>
+      {/* Batch delete confirmation */}
+      <ConfirmDialog
+        open={pendingBatchDelete}
+        onClose={() => setPendingBatchDelete(false)}
+        onConfirm={batchDelete}
+        title={t('common.batch.deleteTitle')}
+        description={t('common.batch.deleteDescription', { count: selectedIds.length })}
+        confirmLabel={t('common.delete')}
+        tone="danger"
+      >
+        <div className="max-h-40 overflow-y-auto rounded-md border border-line bg-recessed px-3 py-2">
+          {sites
+            .filter((s) => selected.has(s.id))
+            .map((s) => (
+              <p key={s.id} className="pw-mono truncate text-[13px] text-fg-strong">
+                {s.domain}
+              </p>
+            ))}
+        </div>
       </ConfirmDialog>
     </div>
   )

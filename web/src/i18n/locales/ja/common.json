@@ -26,11 +26,25 @@
     "configVersions": "設定バージョン",
     "selectSiteFirst": "サイトを選択してください",
     "basic": "基本",
-    "account": "アカウント"
+    "account": "アカウント",
+    "group": {
+      "overview": "概要",
+      "trafficLogs": "トラフィックとログ",
+      "securityAssets": "セキュリティ資産",
+      "platform": "プラットフォーム"
+    }
   },
   "sidebar": {
     "collapse": "折りたたむ",
     "expand": "展開"
+  },
+  "palette": {
+    "sites": "サイト",
+    "actions": "クイック操作",
+    "noResults": "結果なし",
+    "toggleTheme": "ダークテーマを切り替え",
+    "toggleLanguage": "言語を切り替え",
+    "goToSettings": "設定へ移動"
   },
   "common": {
     "save": "保存",
@@ -43,6 +57,34 @@
     "search": "検索",
     "confirm": "確認",
     "close": "閉じる",
+    "unsavedGuard": {
+      "title": "未保存の変更があります",
+      "description": "このページを離れると、未保存の変更は失われます。",
+      "leave": "離れる",
+      "stay": "留まる"
+    },
+    "batch": {
+      "selectAll": "すべて選択",
+      "selected": "{{count}} 件選択中",
+      "clear": "選択を解除",
+      "progress": "{{done}}/{{total}}",
+      "done": "{{count}} 件完了",
+      "partial": "{{total}} 件中 {{failed}} 件失敗：{{names}}",
+      "pausing": "サイトを一時停止中…",
+      "resuming": "サイトを再開中…",
+      "deleting": "サイトを削除中…",
+      "deleteTitle": "選択したサイトを削除しますか？",
+      "deleteDescription": "{{count}} 件のサイトとその設定を完全に削除します。元に戻せません。",
+      "unblockDescription": "選択した {{count}} 件の IP を解除しますか？",
+      "pauseTitle": "選択したサイトを一時停止しますか？",
+      "pauseDescription": "稼働中の {{count}} 件のサイトを一時停止し、WAF 経由のトラフィック転送を止めます。",
+      "resumeTitle": "選択したサイトを再開しますか？",
+      "resumeDescription": "一時停止中の {{count}} 件のサイトを再開します。"
+    },
+    "siteBanners": {
+      "agentDegraded": "{{count}} 個のノードがオフライン/劣化中のため、設定変更が即時反映されない場合があります。",
+      "observationMode": "このサイトは観察モードです：攻撃は記録のみでブロックされません。"
+    },
     "back": "戻る",
     "actions": "操作",
     "enabled": "有効",
@@ -69,7 +111,8 @@
     "lastUpdated": "最終更新",
     "show": "表示",
     "hide": "非表示",
-    "copy": "コピー"
+    "copy": "コピー",
+    "saveFailed": "保存に失敗しました"
   },
   "status": {
     "active": "アクティブ",
@@ -331,7 +374,8 @@
       "overview": "概要",
       "upstreams": "アップストリーム",
       "pausedNote": "このサイトは停止中です — エッジはすべてのリクエストに 503 メンテナンスページを返します。",
-      "visitSite": "サイトを見る"
+      "visitSite": "サイトを見る",
+      "visitSiteHttpHint": "サイトを開く（HTTP — 証明書がまだ発行されていません）"
     },
     "waf": {
       "title": "Web アプリケーションファイアウォール",
@@ -567,7 +611,10 @@
       "tlsFingerprint": "TLS 指紋チェック",
       "tlsFingerprintHint": "TLS ハンドシェイク指紋を既知クライアントと比較します。",
       "exemptPaths": "除外パス",
-      "exemptPathsHint": "CC 防御をバイパスするパス（Enter で追加）。"
+      "exemptPathsHint": "CC 防御をバイパスするパス（Enter で追加）。",
+      "exemptPaths_tooMany": "除外パスは最大 100 件です。",
+      "exemptPaths_tooLong": "各除外パスは 512 文字以内にしてください。",
+      "exemptPaths_invalid": "各除外パスは「/」で始まり、空白を含まない必要があります。"
     },
     "protection": {
       "title": "Web 保護",
@@ -676,6 +723,7 @@
       "bulkCreated": "{{count}} 件をインポートしました",
       "bulkNone": "インポートできる有効なアドレスがありません。",
       "bulkInvalid": "{{count}} 件の無効な入力：{{list}}",
+      "bulkDuplicates": "{{count}} 件の重複を無視しました",
       "invalidGeneric": "有効な IP アドレスまたは CIDR 範囲を入力してください。",
       "invalid": {
         "empty": "IP アドレスまたは CIDR 範囲を入力してください。",
@@ -1550,7 +1598,6 @@
       "apiKeysDescription": "エージェントや統合用のプログラム的アクセスキーを管理します。",
       "apiDocs": "API ドキュメント",
       "account": "アカウント",
-      "adminOnly": "このセクションは管理者のみ利用できます。",
       "displayName": "表示名",
       "changePassword": "パスワード変更",
       "currentPassword": "現在のパスワード",
@@ -1770,7 +1817,20 @@
       "passkeySwitchHint": "オフにするとログイン画面にパスキーが表示されなくなり、新しいパスキーの登録もできません。既存の資格情報は保持され、再度有効化すると復帰します。",
       "passkeySwitchDescription": "デプロイ全体のスイッチ。パスキーの登録と管理は右上の「アカウント設定」で行います。",
       "passkeySwitchOn": "パスキーログインを有効にしました。",
-      "passkeySwitchOff": "パスキーログインを無効にしました。"
+      "passkeySwitchOff": "パスキーログインを無効にしました。",
+      "pprof": "パフォーマンス診断",
+      "pprofDescription": "コントロールプレーンの CPU プロファイルとメモリスナップショットを取得し、パフォーマンスを調査します。",
+      "pprofSeconds": "採取時間（秒）",
+      "pprofSecondsHint": "CPU をこの秒数サンプリングしてからダウンロードします（1〜{{max}}）。",
+      "pprofSecondsInvalid": "1〜{{max}} の整数を入力してください。",
+      "pprofCpuProfile": "CPU プロファイル",
+      "pprofFlamegraph": "フレームグラフ",
+      "pprofMemory": "メモリスナップショット",
+      "pprofHint": "CPU 採取はプロセス全体に影響します：同時に実行できるセッションは 1 つだけで、Linux サーバーが必要です。メモリスナップショットは常に利用できます。",
+      "pprofDownloaded": "ダウンロードを開始しました",
+      "pprofFailed": "プロファイリングに失敗しました",
+      "pprofUnsupportedPlatform": "CPU 採取は Linux サーバーのみ対応しています。メモリスナップショットは引き続き利用できます。",
+      "pprofBusy": "プロファイリングセッションが実行中です。終了までお待ちください。"
     },
     "geo": {
       "title": "地域制限",
@@ -1885,13 +1945,14 @@
       "unblockTitle": "IP を解除",
       "unblockDescription": "このブロックを適用中のすべてのノードが直ちにこの IP の拒否を停止します。",
       "unblocked": "IP を解除しました",
+      "unblocking": "一括解除中…",
       "empty": "ブロック中の IP はありません",
       "emptyDescription": "WAF やレート制限でブロックされた IP が攻撃履歴とともにここに表示されます。手動でのブロックも可能です。",
       "blockTitle": "IP を手動ブロック",
       "fieldSite": "サイト",
       "fieldSitePh": "サイトを選択",
-      "fieldIp": "IP アドレス",
-      "fieldIpPh": "例: 203.0.113.10",
+      "fieldIp": "IP アドレスまたは CIDR",
+      "fieldIpPh": "例: 203.0.113.10 または 203.0.113.0/24",
       "fieldDuration": "期間",
       "fieldReason": "理由（任意）",
       "fieldReasonPh": "例: 継続的なクレデンシャルスタッフィング",
@@ -1903,8 +1964,11 @@
       "blockConfirm": "ブロック",
       "blocked": "{{ip}} をブロックしました（{{delivered}}/{{agents}} ノードに配信）",
       "blockFailed": "ブロックに失敗しました",
-      "ipInvalid": "有効な IP アドレスを入力してください",
-      "ipNoCidr": "単一 IP のみ指定可能です。CIDR レンジには IP グループまたはアクセスルールを使用してください"
+      "ipInvalid": "有効な IP アドレスまたは CIDR 範囲を入力してください",
+      "ipPrefixInvalid": "CIDR プレフィックス長が範囲外です（IPv4 0-32、IPv6 0-128）",
+      "ipTooBroad": "範囲が広すぎます：IPv4 は /16、IPv6 は /32 まで",
+      "kindCidr": "範囲",
+      "fieldIpHint": "IP アドレスまたは CIDR（最広 /16 IPv4、/32 IPv6）。"
     },
     "ipGroups": {
       "title": "IP グループ",
@@ -1960,6 +2024,7 @@
       "updateFailed": "IP グループの更新に失敗しました",
       "deleteFailed": "IP グループの削除に失敗しました",
       "syncFailed": "同期に失敗しました",
+      "syncErrorExpand": "クリックで同期エラーの全文を表示",
       "confirmDeleteTitle": "IP グループを削除しますか？",
       "confirmDeleteDesc": "IP グループ「{{name}}」を完全に削除します。"
     },
@@ -2299,6 +2364,11 @@
     "profile": {
       "title": "アカウント設定",
       "description": "表示名・ログイン名・パスワード・パスキーを管理します。"
+    },
+    "notFound": {
+      "title": "ページが見つかりません",
+      "description": "お探しのページは存在しないか、移動されました。",
+      "backToDashboard": "ダッシュボードへ戻る"
     }
   },
   "challengeLevels": {

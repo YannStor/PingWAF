@@ -38,9 +38,6 @@ export const sslApi = {
       query: { page_size: 200 },
     }),
 
-  get: (siteId: string, id: string) =>
-    apiClient.get<SslCertificate>(`/sites/${siteId}/certificates/${id}`),
-
   create: (siteId: string, data: CreateSslRequest) =>
     apiClient.post<SslCertificate>(`/sites/${siteId}/certificates`, data),
 

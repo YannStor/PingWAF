@@ -26,11 +26,25 @@
     "configVersions": "配置版本",
     "selectSiteFirst": "请先选择一个站点",
     "basic": "基础",
-    "account": "账户"
+    "account": "账户",
+    "group": {
+      "overview": "总览",
+      "trafficLogs": "流量与日志",
+      "securityAssets": "安全资产",
+      "platform": "平台"
+    }
   },
   "sidebar": {
     "collapse": "收起",
     "expand": "展开"
+  },
+  "palette": {
+    "sites": "站点",
+    "actions": "快捷操作",
+    "noResults": "无结果",
+    "toggleTheme": "切换暗色主题",
+    "toggleLanguage": "切换语言",
+    "goToSettings": "进入设置"
   },
   "common": {
     "save": "保存",
@@ -43,6 +57,34 @@
     "search": "搜索",
     "confirm": "确认",
     "close": "关闭",
+    "unsavedGuard": {
+      "title": "有未保存的更改",
+      "description": "离开当前页面将丢失未保存的更改。",
+      "leave": "离开",
+      "stay": "留下"
+    },
+    "batch": {
+      "selectAll": "全选",
+      "selected": "已选 {{count}} 项",
+      "clear": "取消选择",
+      "progress": "{{done}}/{{total}}",
+      "done": "{{count}} 项操作完成",
+      "partial": "{{total}} 项中 {{failed}} 项失败：{{names}}",
+      "pausing": "正在暂停站点…",
+      "resuming": "正在恢复站点…",
+      "deleting": "正在删除站点…",
+      "deleteTitle": "删除选中的站点？",
+      "deleteDescription": "将永久删除 {{count}} 个站点及其全部配置，此操作不可撤销。",
+      "unblockDescription": "解封选中的 {{count}} 个 IP？",
+      "pauseTitle": "暂停选中的站点？",
+      "pauseDescription": "将暂停 {{count}} 个运行中的站点，其流量不再经 WAF 代理转发。",
+      "resumeTitle": "恢复选中的站点？",
+      "resumeDescription": "将恢复 {{count}} 个已暂停的站点。"
+    },
+    "siteBanners": {
+      "agentDegraded": "{{count}} 个节点离线/降级，配置变更可能无法立即生效。",
+      "observationMode": "站点处于观察模式：攻击仅记录，不拦截。"
+    },
     "back": "返回",
     "actions": "操作",
     "enabled": "已启用",
@@ -69,7 +111,8 @@
     "lastUpdated": "最近更新",
     "show": "显示",
     "hide": "收起",
-    "copy": "复制"
+    "copy": "复制",
+    "saveFailed": "保存失败"
   },
   "status": {
     "active": "运行中",
@@ -331,7 +374,8 @@
       "overview": "概览",
       "upstreams": "上游服务",
       "pausedNote": "站点已暂停 — 边缘对所有请求返回 503 维护页。",
-      "visitSite": "访问站点"
+      "visitSite": "访问站点",
+      "visitSiteHttpHint": "访问站点（HTTP——尚未签发证书）"
     },
     "waf": {
       "title": "Web 应用防火墙",
@@ -567,7 +611,10 @@
       "tlsFingerprint": "TLS 指纹检查",
       "tlsFingerprintHint": "将 TLS 握手指纹与已知客户端比对。",
       "exemptPaths": "豁免路径",
-      "exemptPathsHint": "跳过 CC 防护的路径（回车添加）。"
+      "exemptPathsHint": "跳过 CC 防护的路径（回车添加）。",
+      "exemptPaths_tooMany": "豁免路径最多 100 条。",
+      "exemptPaths_tooLong": "每条豁免路径最长 512 个字符。",
+      "exemptPaths_invalid": "每条豁免路径必须以“/”开头且不含空白字符。"
     },
     "protection": {
       "title": "Web 防护",
@@ -676,6 +723,7 @@
       "bulkCreated": "已导入 {{count}} 条规则",
       "bulkNone": "没有可导入的有效地址。",
       "bulkInvalid": "{{count}} 个无效条目：{{list}}",
+      "bulkDuplicates": "{{count}} 个重复项已忽略",
       "invalidGeneric": "请输入有效的 IP 地址或 CIDR 范围。",
       "invalid": {
         "empty": "请输入 IP 地址或 CIDR 范围。",
@@ -1550,7 +1598,6 @@
       "apiKeysDescription": "管理节点和集成使用的程序化访问密钥。",
       "apiDocs": "API 文档",
       "account": "账户",
-      "adminOnly": "该部分仅对管理员可用。",
       "displayName": "显示名称",
       "changePassword": "修改密码",
       "currentPassword": "当前密码",
@@ -1770,7 +1817,20 @@
       "passkeySwitchHint": "关闭后登录页不再提供 Passkey 登录，也无法绑定新的 Passkey；已绑定的凭据会保留，重新开启后即可恢复使用。",
       "passkeySwitchDescription": "部署级总开关。Passkey 的绑定与管理在右上角\"账户设置\"中。",
       "passkeySwitchOn": "已启用 Passkey 登录。",
-      "passkeySwitchOff": "已禁用 Passkey 登录。"
+      "passkeySwitchOff": "已禁用 Passkey 登录。",
+      "pprof": "性能诊断",
+      "pprofDescription": "采集控制平面的 CPU 剖析与内存快照，用于性能排查。",
+      "pprofSeconds": "采集时长（秒）",
+      "pprofSecondsHint": "CPU 将按该时长采样后开始下载（1-{{max}}）。",
+      "pprofSecondsInvalid": "请输入 1 到 {{max}} 之间的整数。",
+      "pprofCpuProfile": "CPU 剖析文件",
+      "pprofFlamegraph": "火焰图",
+      "pprofMemory": "内存快照",
+      "pprofHint": "CPU 采集为进程全局：同一时间只能有一个会话，且要求 Linux 服务器。内存快照始终可用。",
+      "pprofDownloaded": "已开始下载",
+      "pprofFailed": "性能诊断失败",
+      "pprofUnsupportedPlatform": "CPU 采集仅支持 Linux 服务器；内存快照仍可使用。",
+      "pprofBusy": "已有采集会话进行中，请等待其结束后再试。"
     },
     "geo": {
       "title": "地域限制",
@@ -1885,13 +1945,14 @@
       "unblockTitle": "解封 IP",
       "unblockDescription": "所有执行封禁的节点将立即停止拒绝该 IP。",
       "unblocked": "IP 已解封",
+      "unblocking": "正在批量解封…",
       "empty": "暂无黑名单 IP",
       "emptyDescription": "被 WAF 或 CC 防护拦截的 IP 会连同攻击记录显示在这里，也可手动拉黑。",
       "blockTitle": "手动拉黑 IP",
       "fieldSite": "站点",
       "fieldSitePh": "请选择站点",
-      "fieldIp": "IP 地址",
-      "fieldIpPh": "例如 203.0.113.10",
+      "fieldIp": "IP 地址或 CIDR",
+      "fieldIpPh": "例如 203.0.113.10 或 203.0.113.0/24",
       "fieldDuration": "封禁时长",
       "fieldReason": "原因（可选）",
       "fieldReasonPh": "例如：持续撞库攻击",
@@ -1903,8 +1964,11 @@
       "blockConfirm": "确认拉黑",
       "blocked": "已拉黑 {{ip}}（{{delivered}}/{{agents}} 节点已下发）",
       "blockFailed": "拉黑失败",
-      "ipInvalid": "请输入合法的 IP 地址",
-      "ipNoCidr": "仅支持单个 IP；网段请使用 IP 组或访问限制规则"
+      "ipInvalid": "请输入合法的 IP 地址或 CIDR 网段",
+      "ipPrefixInvalid": "CIDR 前缀长度超出范围（IPv4 0-32、IPv6 0-128）",
+      "ipTooBroad": "网段过宽：IPv4 最宽 /16、IPv6 最宽 /32",
+      "kindCidr": "网段",
+      "fieldIpHint": "IP 地址或 CIDR 网段（最宽 /16 IPv4、/32 IPv6）。"
     },
     "ipGroups": {
       "title": "IP 组",
@@ -1960,6 +2024,7 @@
       "updateFailed": "更新 IP 组失败",
       "deleteFailed": "删除 IP 组失败",
       "syncFailed": "同步失败",
+      "syncErrorExpand": "点击查看完整同步错误",
       "confirmDeleteTitle": "删除 IP 组？",
       "confirmDeleteDesc": "将永久删除 IP 组「{{name}}」。"
     },
@@ -2299,6 +2364,11 @@
     "profile": {
       "title": "账户设置",
       "description": "管理个人资料、登录名、登录密码与 Passkey。"
+    },
+    "notFound": {
+      "title": "页面不存在",
+      "description": "您访问的页面不存在或已被移动。",
+      "backToDashboard": "返回概览"
     }
   },
   "challengeLevels": {

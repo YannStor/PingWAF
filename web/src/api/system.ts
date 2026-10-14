@@ -1,9 +1,8 @@
 import { apiClient } from './client'
-import type { HealthResponse, VersionResponse } from './types'
+import type { VersionResponse } from './types'
 
-/** Unauthenticated liveness/build metadata endpoints. */
+/** Unauthenticated build metadata endpoint. */
 export const systemApi = {
-  health: () => apiClient.get<HealthResponse>('/health', { skipAuth: true }),
   version: () => apiClient.get<VersionResponse>('/version', { skipAuth: true }),
 }
 

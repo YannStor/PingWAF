@@ -52,24 +52,6 @@ export const analyticsApi = {
     apiClient.get<SiteOverview[]>('/analytics/sites', { query: params }),
 }
 
-/** Aggregate consumed by the dashboard hero row. */
-export interface DashboardOverview {
-  summary: AnalyticsSummary
-  sites: SiteOverview[]
-}
-
-/**
- * Fan-out used by the dashboard: one round trip per widget, resolved together so
- * a slow endpoint cannot block the fast ones from painting.
- */
-export async function fetchDashboardOverview(params: RangeQuery = {}): Promise<DashboardOverview> {
-  const [summary, sites] = await Promise.all([
-    analyticsApi.summary(params),
-    analyticsApi.sitesOverview(params),
-  ])
-  return { summary, sites }
-}
-
 /** RFC 3339 helper — the backend parses `from`/`to` with `DateTime::parse_from_rfc3339`. */
 export function toRfc3339(date: Date): string {
   return date.toISOString()

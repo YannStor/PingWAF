@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus, Prohibit, ShieldWarning } from '@phosphor-icons/react'
+import { Plus, Prohibit, ShieldWarning, X } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
@@ -17,7 +17,8 @@ import { SkeletonRows } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { blockedIpsApi, blockedIpKeys } from '@/api/blockedIps'
-import { validateIpCidr } from '@/api/ipRules'
+import { errorMessage } from '@/api/errors'
+import { validateIpOrCidr } from '@/api/ipRules'
 import { useCanWrite, useSitesList } from '@/hooks'
 import { formatDateTime, formatNumber, formatRelative } from '@/lib/format'
 import type { GlobalBlockedIp } from '@/api/types'
@@ -49,6 +50,9 @@ export function BlockedIpsPage() {
   const [blockOpen, setBlockOpen] = useState(false)
   const [pendingUnblock, setPendingUnblock] =
     useState<GlobalBlockedIp | null>(null)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [batch, setBatch] = useState<{ total: number; done: number; failed: string[] } | null>(null)
+  const [pendingBatchUnblock, setPendingBatchUnblock] = useState(false)
 
   const { data: sites } = useSitesList()
 
@@ -67,6 +71,57 @@ export function BlockedIpsPage() {
   })
 
   const items = useMemo(() => listQuery.data ?? [], [listQuery.data])
+
+  /* ── Row selection + batch unblock ────────────────────────────────── */
+  const rowKeyOf = (r: GlobalBlockedIp) => `${r.site_id}:${r.ip}`
+  const selectedRows = useMemo(() => items.filter((r) => selected.has(rowKeyOf(r))), [items, selected])
+  const allSelected = items.length > 0 && selectedRows.length === items.length
+  const someSelected = selectedRows.length > 0 && !allSelected
+
+  const toggleRow = (r: GlobalBlockedIp) =>
+    setSelected((prev) => {
+      const next = new Set(prev)
+      const key = rowKeyOf(r)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+
+  const toggleAll = () =>
+    setSelected(allSelected ? new Set() : new Set(items.map(rowKeyOf)))
+
+  const clearSelection = () => setSelected(new Set())
+
+  /** Sequentially unblocks the selection with progress "3/10" reporting. */
+  const runBatchUnblock = async () => {
+    const rows = selectedRows
+    setPendingBatchUnblock(false)
+    if (rows.length === 0) return
+    const failed: string[] = []
+    for (let done = 0; done < rows.length; done++) {
+      setBatch({ total: rows.length, done, failed: [...failed] })
+      try {
+        await blockedIpsApi.unblock(rows[done].site_id, rows[done].ip)
+      } catch {
+        failed.push(rows[done].ip)
+      }
+    }
+    setBatch({ total: rows.length, done: rows.length, failed: [...failed] })
+    invalidate()
+    clearSelection()
+    if (failed.length === 0) {
+      toast.success(t('common.batch.done', { count: rows.length }))
+    } else {
+      toast.error(
+        t('common.batch.partial', {
+          failed: failed.length,
+          total: rows.length,
+          names: failed.slice(0, 3).join(', '),
+        }),
+      )
+    }
+    setBatch(null)
+  }
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: blockedIpKeys.global })
@@ -87,13 +142,44 @@ export function BlockedIpsPage() {
   const columns: Column<GlobalBlockedIp>[] = useMemo(
     () => [
       {
+        key: 'select',
+        header: (
+          <input
+            type="checkbox"
+            aria-label={t('common.batch.selectAll')}
+            checked={allSelected}
+            ref={(el) => {
+              if (el) el.indeterminate = someSelected
+            }}
+            onChange={toggleAll}
+            disabled={batch !== null}
+            className="h-4 w-4 cursor-pointer rounded border-border align-middle disabled:cursor-not-allowed disabled:opacity-50"
+          />
+        ),
+        width: '1%',
+        cell: (r) => (
+          <input
+            type="checkbox"
+            aria-label={r.ip}
+            checked={selected.has(rowKeyOf(r))}
+            onChange={() => toggleRow(r)}
+            onClick={(e) => e.stopPropagation()}
+            disabled={batch !== null}
+            className="h-4 w-4 cursor-pointer rounded border-border align-middle disabled:cursor-not-allowed disabled:opacity-50"
+          />
+        ),
+      },
+      {
         key: 'ip',
         header: t('pages.blockedIps.colIp'),
         accessor: (r) => r.ip,
         cell: (r) => (
           <div className="min-w-0">
-            <p className="pw-mono truncate text-[13px] font-medium text-fg-strong">
+            <p className="pw-mono flex items-center gap-1.5 truncate text-[13px] font-medium text-fg-strong">
               {r.ip}
+              {r.kind === 'cidr' && (
+                <Badge tone="warning">{t('pages.blockedIps.kindCidr')}</Badge>
+              )}
             </p>
             {r.reason && (
               <p className="line-clamp-1 text-xs text-fg-subtle">{r.reason}</p>
@@ -219,7 +305,7 @@ export function BlockedIpsPage() {
         ),
       },
     ],
-    [t, canWrite],
+    [t, canWrite, allSelected, someSelected, selected],
   )
 
   return (
@@ -236,6 +322,31 @@ export function BlockedIpsPage() {
           ) : undefined
         }
       />
+
+      {/* Batch unblock bar */}
+      {batch ? (
+        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-md border border-line bg-recessed px-4 py-2.5 text-[13px]">
+          <span className="inline-flex items-center gap-2">
+            <span className="h-4 w-4 animate-spin-slow rounded-full border-2 border-brand border-t-transparent" />
+            {t('common.batch.progress', { done: batch.done, total: batch.total })}
+          </span>
+          <span className="text-fg-subtle">{t('pages.blockedIps.unblocking')}</span>
+        </div>
+      ) : selectedRows.length > 0 && canWrite ? (
+        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-md border border-brand/40 bg-brand-soft px-4 py-2.5 text-[13px]">
+          <span className="font-medium text-fg-strong">
+            {t('common.batch.selected', { count: selectedRows.length })}
+          </span>
+          <div className="ml-auto flex items-center gap-2">
+            <Button size="sm" variant="secondary" icon={<Prohibit weight="duotone" className="h-4 w-4" />} onClick={() => setPendingBatchUnblock(true)}>
+              {t('pages.blockedIps.unblock')}
+            </Button>
+            <Button size="sm" variant="ghost" icon={<X weight="bold" className="h-4 w-4" />} onClick={clearSelection}>
+              {t('common.batch.clear')}
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
       <Card>
         <CardBody>
@@ -278,9 +389,11 @@ export function BlockedIpsPage() {
             />
           ) : (
             <Table
+              key={`${siteFilter}|${ipFilter}`}
               columns={columns}
               data={items}
               rowKey={(r) => `${r.site_id}:${r.ip}`}
+              pageSize={50}
               dense
             />
           )}
@@ -319,6 +432,23 @@ export function BlockedIpsPage() {
           </div>
         )}
       </ConfirmDialog>
+      <ConfirmDialog
+        open={pendingBatchUnblock}
+        onClose={() => setPendingBatchUnblock(false)}
+        onConfirm={() => void runBatchUnblock()}
+        title={t('pages.blockedIps.unblockTitle')}
+        description={t('common.batch.unblockDescription', { count: selectedRows.length })}
+        confirmLabel={t('pages.blockedIps.unblock')}
+        tone="primary"
+      >
+        <div className="max-h-40 overflow-y-auto rounded-md border border-line bg-recessed px-3 py-2">
+          {selectedRows.map((r) => (
+            <p key={`${r.site_id}:${r.ip}`} className="pw-mono truncate text-[13px] text-fg-strong">
+              {r.ip}
+            </p>
+          ))}
+        </div>
+      </ConfirmDialog>
     </>
   )
 }
@@ -343,10 +473,14 @@ function ManualBlockDialog({ onClose, onBlocked }: ManualBlockDialogProps) {
   const ipError = useMemo(() => {
     const v = ip.trim()
     if (!v) return null
-    // The edge command blocks a single address; CIDR ranges belong in IP
-    // rules, so reject them here even though they parse fine.
-    if (v.includes('/')) return t('pages.blockedIps.ipNoCidr')
-    return validateIpCidr(v) !== null ? t('pages.blockedIps.ipInvalid') : null
+    // The backend accepts a single address or a CIDR range; prefixes broader
+    // than /16 (IPv4) or /32 (IPv6) are rejected server-side with a 400, so
+    // the same floor is enforced here with a dedicated inline error.
+    const reason = validateIpOrCidr(v, { v4: 16, v6: 32 })
+    if (reason === 'prefix') return t('pages.blockedIps.ipPrefixInvalid')
+    if (reason === 'tooBroad') return t('pages.blockedIps.ipTooBroad')
+    if (reason !== null) return t('pages.blockedIps.ipInvalid')
+    return null
   }, [ip, t])
 
   const canSubmit = Boolean(siteId) && ip.trim().length > 0 && !ipError
@@ -369,10 +503,7 @@ function ManualBlockDialog({ onClose, onBlocked }: ManualBlockDialogProps) {
       )
       onBlocked()
     },
-    onError: (e) =>
-      toast.error(
-        e instanceof Error ? e.message : t('pages.blockedIps.blockFailed'),
-      ),
+    onError: (e) => toast.error(errorMessage(e) || t('pages.blockedIps.blockFailed')),
   })
 
   return (
@@ -401,6 +532,7 @@ function ManualBlockDialog({ onClose, onBlocked }: ManualBlockDialogProps) {
             value={ip}
             onChange={(e) => setIp(e.target.value)}
             placeholder={t('pages.blockedIps.fieldIpPh')}
+            hint={t('pages.blockedIps.fieldIpHint')}
           />
           {ipError && <p className="mt-1 text-xs text-danger">{ipError}</p>}
         </div>

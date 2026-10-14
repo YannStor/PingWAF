@@ -30,6 +30,7 @@ import {
   ipRulesApi,
   ipRuleKeys,
   parseIpList,
+  summarizeInvalid,
 } from '@/api/ipRules'
 import { ipGroupsApi, ipGroupKeys } from '@/api/ipGroups'
 import { AutoBlockedIpsCard } from '@/pages/sites/AutoBlockedIpsCard'
@@ -251,18 +252,14 @@ export function IpRulesPanel() {
         return
       }
     } else {
-      const { valid, invalid } = parseIpList(form.ranges)
+      const { valid, invalid, duplicateCount } = parseIpList(form.ranges)
       if (valid.length === 0) {
         setError(t('pages.ipRules.manualNone'))
         return
       }
-      if (invalid.length > 0) {
-        setError(
-          t('pages.ipRules.bulkInvalid', {
-            count: invalid.length,
-            list: invalid.slice(0, 5).join(', '),
-          }),
-        )
+      const problem = summarizeInvalid(invalid, duplicateCount, t)
+      if (problem) {
+        setError(problem)
         return
       }
     }
@@ -271,13 +268,14 @@ export function IpRulesPanel() {
 
   const submitBulk = () => {
     setError(null)
-    const { valid, invalid } = parseIpList(bulk)
+    const { valid, invalid, duplicateCount } = parseIpList(bulk)
     if (valid.length === 0) {
       setError(t('pages.ipRules.bulkNone'))
       return
     }
-    if (invalid.length > 0) {
-      setError(t('pages.ipRules.bulkInvalid', { count: invalid.length, list: invalid.slice(0, 5).join(', ') }))
+    const problem = summarizeInvalid(invalid, duplicateCount, t)
+    if (problem) {
+      setError(problem)
       return
     }
     bulkSave.mutate({ ip_ranges: valid, action: bulkAction, enabled: true })

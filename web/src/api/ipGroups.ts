@@ -22,9 +22,6 @@ export const ipGroupsApi = {
       query: { page_size: 50, ...query },
     }),
 
-  get: (id: string) =>
-    apiClient.get<IpGroupResponse>(`/ip-groups/${id}`),
-
   create: (data: CreateIpGroupRequest) =>
     apiClient.post<IpGroup>('/ip-groups', data),
 

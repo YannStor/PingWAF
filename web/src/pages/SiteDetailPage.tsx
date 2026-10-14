@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Globe,
   Shield,
@@ -27,7 +27,9 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
+import { AgentStatusBanner } from '@/components/AgentStatusBanner'
 import { sitesApi, siteKeys } from '@/api/sites'
+import { wafSettingsApi, wafSettingsKeys } from '@/api/wafSettings'
 import { useCanWrite, useSiteDetail } from '@/hooks'
 import { useSiteStore } from '@/stores/siteStore'
 import type { SiteStatus } from '@/api/types'
@@ -53,6 +55,12 @@ export function SiteDetailPage() {
 
   const detail = useSiteDetail(siteId)
   const site = detail.data?.site
+  // The per-site detail bundles the SSL state: with a certificate the site is
+  // safely reachable over HTTPS, otherwise fall back to plain HTTP.
+  const hasCertificate = Boolean(detail.data?.ssl?.has_certificate)
+  const visitTitle = hasCertificate
+    ? t('pages.siteDetail.visitSite')
+    : t('pages.siteDetail.visitSiteHttpHint')
 
   const toggleStatus = useMutation({
     mutationFn: (status: SiteStatus) => sitesApi.update(siteId as string, { status }),
@@ -67,6 +75,17 @@ export function SiteDetailPage() {
   })
 
   const paused = site?.status === 'paused'
+
+  // Z6: persistent observation-mode banner — reuse the posture query the
+  // protection pages use (same key), so any waf-settings mutation refreshes it.
+  const postureQuery = useQuery({
+    queryKey: wafSettingsKeys.posture(siteId ?? ''),
+    queryFn: () => wafSettingsApi.posture(siteId as string),
+    enabled: Boolean(siteId),
+    staleTime: 30_000,
+  })
+  const wafMode = postureQuery.data?.enforcement.mode
+  const observationMode = wafMode === 'off' || wafMode === 'monitor'
 
   const base = `/sites/${siteId}`
   const tabs = [
@@ -139,10 +158,10 @@ export function SiteDetailPage() {
               )}
               {site && (
                 <a
-                  href={`https://${site.domain}`}
+                  href={`${hasCertificate ? 'https' : 'http'}://${site.domain}`}
                   target="_blank"
                   rel="noreferrer"
-                  title={t('pages.siteDetail.visitSite')}
+                  title={visitTitle}
                   className="inline-flex items-center gap-1 rounded-md border border-line px-1.5 py-0.5 text-[11px] text-fg-subtle transition-colors hover:border-focus hover:text-link"
                 >
                   <ArrowSquareOut weight="duotone" className="h-3.5 w-3.5" />
@@ -164,9 +183,9 @@ export function SiteDetailPage() {
             {site && (site.alternate_domains?.length ?? 0) > 0 && (
               <p
                 className="pw-mono truncate text-xs text-fg-subtle"
-                title={site.alternate_domains.join(', ')}
+                title={site.alternate_domains?.join(', ')}
               >
-                + {site.alternate_domains.join(', ')}
+                + {site.alternate_domains?.join(', ')}
               </p>
             )}
           </div>
@@ -218,6 +237,17 @@ export function SiteDetailPage() {
           <p>{t('pages.siteDetail.pausedNote')}</p>
         </div>
       )}
+
+      {/* Z6: WAF enforcement is off/monitor — attacks are logged, not blocked. */}
+      {!paused && observationMode && (
+        <div className="mb-4 flex items-start gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-[13px] text-fg">
+          <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg" />
+          <p>{t('common.siteBanners.observationMode')}</p>
+        </div>
+      )}
+
+      {/* Z5: offline/degraded agents mean config changes may lag. */}
+      <AgentStatusBanner siteId={siteId} />
 
       {/* Tab nav */}
       <div className="mb-6 flex gap-1 overflow-x-auto border-b border-line">

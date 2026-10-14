@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import {
@@ -17,6 +17,8 @@ import { cn } from '@/lib/utils'
 import { Sidebar } from '@/components/ui/Sidebar'
 import { Breadcrumb, type BreadcrumbItem } from '@/components/ui/Breadcrumb'
 import { Button } from '@/components/ui/Button'
+import { CommandPalette } from '@/components/CommandPalette'
+import { useSitesList } from '@/hooks'
 import { useThemeStore } from '@/stores/themeStore'
 import { useAuthStore } from '@/stores/authStore'
 import { useAssistantWidgetStore } from '@/stores/assistantWidgetStore'
@@ -71,10 +73,16 @@ export function AppLayout() {
 
   const [collapsed, setCollapsed] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(false)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const [langMenuOpen, setLangMenuOpen] = useState(false)
   const userMenuRef = useRef<HTMLDivElement>(null)
   const langMenuRef = useRef<HTMLDivElement>(null)
+  const userBtnRef = useRef<HTMLButtonElement>(null)
+  const langBtnRef = useRef<HTMLButtonElement>(null)
+
+  // Shared site list cache — reused by the command palette and breadcrumbs.
+  const { data: sites } = useSitesList()
 
   // Close the mobile drawer on navigation (render-phase reset on prop change,
   // so the drawer never flashes open for the new page).
@@ -98,22 +106,46 @@ export function AppLayout() {
     return () => document.removeEventListener('mousedown', onClick)
   }, [])
 
-  // Cmd/Ctrl+K focus placeholder (search is a stub for now).
+  // Cmd/Ctrl+K opens the command palette.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
-        document.getElementById('global-search')?.focus()
+        setPaletteOpen((o) => !o)
       }
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
   }, [])
 
+  // Dropdown a11y: Esc closes and restores focus; ↑/↓ cycle menu items.
+  const dropdownKeyDown = (e: ReactKeyboardEvent, close: () => void) => {
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      close()
+      ;(e.currentTarget as HTMLElement).querySelector<HTMLButtonElement>('[aria-expanded]')?.focus()
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      const items = Array.from(
+        (e.currentTarget as HTMLElement).querySelectorAll<HTMLButtonElement>(
+          '[role="menuitem"]',
+        ),
+      )
+      if (items.length === 0) return
+      e.preventDefault()
+      const idx = items.indexOf(document.activeElement as HTMLButtonElement)
+      const next =
+        e.key === 'ArrowDown'
+          ? items[(idx + 1) % items.length]
+          : items[(idx - 1 + items.length) % items.length]
+      next?.focus()
+    }
+  }
+
   const crumbs = useMemo<BreadcrumbItem[]>(() => {
     const segments = location.pathname.split('/').filter(Boolean)
     const items: BreadcrumbItem[] = [{ label: t('app.name'), to: '/dashboard' }]
     let path = ''
+    let prevSeg = ''
     for (const seg of segments) {
       path += `/${seg}`
       // Skip the raw site id segment; label it as the site name context.
@@ -124,11 +156,15 @@ export function AppLayout() {
           to: crumbSections.has(seg) ? undefined : path,
         })
       } else if (/^[a-zA-Z0-9_-]{8,}$/.test(seg)) {
-        items.push({ label: seg.slice(0, 8), to: path })
+        // Site detail pages: resolve the id to the site domain via the shared
+        // sites list cache; fall back to the truncated id when not cached.
+        const site = prevSeg === 'sites' ? sites?.find((s) => s.id === seg) : undefined
+        items.push({ label: site?.domain || seg.slice(0, 8), to: path })
       }
+      prevSeg = seg
     }
     return items
-  }, [location.pathname, t])
+  }, [location.pathname, t, sites])
 
   const handleLogout = () => {
     logout()
@@ -183,30 +219,40 @@ export function AppLayout() {
           <Breadcrumb items={crumbs} className="hidden min-w-0 sm:block" />
 
           <div className="ml-auto flex items-center gap-2">
-            {/* Search (Cmd+K placeholder) */}
-            <div className="relative hidden lg:block">
+            {/* Search trigger — opens the ⌘K command palette */}
+            <button
+              type="button"
+              onClick={() => setPaletteOpen(true)}
+              className="relative hidden h-9 w-64 cursor-pointer rounded-md border border-line bg-recessed text-left text-sm text-fg-subtle/70 transition-colors hover:border-focus focus:border-focus focus:outline-none lg:block"
+            >
               <MagnifyingGlass
                 weight="duotone"
                 className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-fg-subtle"
               />
-              <input
-                id="global-search"
-                type="text"
-                readOnly
-                placeholder={t('search.placeholder')}
-                className="h-9 w-64 cursor-pointer rounded-md border border-line bg-recessed pl-9 pr-12 text-sm text-fg placeholder:text-fg-subtle/70 focus:border-focus focus:outline-none"
-              />
+              <span className="pl-9">{t('search.placeholder')}</span>
               <kbd className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rounded border border-line bg-elevated px-1.5 py-0.5 font-mono text-[10px] text-fg-subtle">
                 ⌘K
               </kbd>
-            </div>
+            </button>
+            {/* Search trigger (compact screens) */}
+            <Button
+              size="icon"
+              variant="ghost"
+              aria-label={t('search.placeholder')}
+              onClick={() => setPaletteOpen(true)}
+              className="lg:hidden"
+              icon={<MagnifyingGlass weight="duotone" className="h-5 w-5" />}
+            />
 
             {/* Language */}
-            <div className="relative" ref={langMenuRef}>
+            <div className="relative" ref={langMenuRef} onKeyDown={(e) => dropdownKeyDown(e, () => setLangMenuOpen(false))}>
               <Button
                 size="icon"
                 variant="ghost"
                 aria-label={t('user.language')}
+                aria-haspopup="menu"
+                aria-expanded={langMenuOpen}
+                ref={langBtnRef}
                 onClick={() => setLangMenuOpen((o) => !o)}
                 icon={<Translate weight="duotone" className="h-5 w-5" />}
               />
@@ -215,10 +261,12 @@ export function AppLayout() {
                   {supportedLanguages.map((lng) => (
                     <DropdownItem
                       key={lng}
+                      role="menuitem"
                       active={i18n.language?.startsWith(lng)}
                       onClick={() => {
                         void i18n.changeLanguage(lng)
                         setLangMenuOpen(false)
+                        langBtnRef.current?.focus()
                       }}
                     >
                       {langLabels[lng]}
@@ -255,9 +303,17 @@ export function AppLayout() {
             />
 
             {/* User menu */}
-            <div className="relative" ref={userMenuRef}>
+            <div
+              className="relative"
+              ref={userMenuRef}
+              onKeyDown={(e) => dropdownKeyDown(e, () => setUserMenuOpen(false))}
+            >
               <button
                 onClick={() => setUserMenuOpen((o) => !o)}
+                aria-haspopup="menu"
+                aria-expanded={userMenuOpen}
+                aria-label={t('user.account')}
+                ref={userBtnRef}
                 className="flex items-center gap-1.5 rounded-md px-1.5 py-1 transition-colors hover:bg-recessed"
               >
                 <UserCircle weight="duotone" className="h-7 w-7 text-brand" />
@@ -278,6 +334,7 @@ export function AppLayout() {
                     icon={<UserCircle className="h-4 w-4" />}
                     onClick={() => {
                       setUserMenuOpen(false)
+                      userBtnRef.current?.focus()
                       // Personal settings (profile, password, passkeys) —
                       // /account in the sidebar is global configuration only.
                       navigate('/profile')
@@ -287,7 +344,11 @@ export function AppLayout() {
                   </DropdownItem>
                   <DropdownItem
                     icon={<SignOut className="h-4 w-4" />}
-                    onClick={handleLogout}
+                    onClick={() => {
+                      setUserMenuOpen(false)
+                      userBtnRef.current?.focus()
+                      handleLogout()
+                    }}
                   >
                     {t('user.signOut')}
                   </DropdownItem>
@@ -307,6 +368,9 @@ export function AppLayout() {
       {/* First sign-in gate: blocks the whole console until the password is
           replaced; the server refuses writes in the meantime. */}
       <ForceChangePasswordDialog />
+
+      {/* Global ⌘K command palette */}
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
 
       {/* Floating AI assistant (ball + sliding panel, mounted for the whole
           signed-in layout; streaming state survives open/close cycles). */}
@@ -395,15 +459,18 @@ function DropdownItem({
   icon,
   onClick,
   active,
+  role,
 }: {
   children: ReactNode
   icon?: ReactNode
   onClick?: () => void
   active?: boolean
+  role?: string
 }) {
   return (
     <button
       onClick={onClick}
+      role={role}
       className={cn(
         'flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm transition-colors',
         active ? 'bg-brand-soft text-brand' : 'text-fg hover:bg-recessed',

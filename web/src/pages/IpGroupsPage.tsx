@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -59,6 +59,7 @@ export function IpGroupsPage() {
   const [editing, setEditing] = useState<IpGroupResponse | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
   const [pendingDelete, setPendingDelete] = useState<IpGroupResponse | null>(null)
+  const [expandedErrorId, setExpandedErrorId] = useState<string | null>(null)
 
   const { data: sites } = useSitesList()
 
@@ -77,8 +78,8 @@ export function IpGroupsPage() {
   const groups = useMemo(() => listQuery.data?.items ?? [], [listQuery.data])
   const total = listQuery.data?.total ?? 0
 
-  const invalidate = () => {
-    queryClient.invalidateQueries({ queryKey: ipGroupKeys.all })
+  const invalidate = async () => {
+    await queryClient.invalidateQueries({ queryKey: ipGroupKeys.all })
   }
 
   const deleteMutation = useMutation({
@@ -90,14 +91,42 @@ export function IpGroupsPage() {
     onError: () => toast.error(t('pages.ipGroups.deleteFailed')),
   })
 
-  const syncMutation = useMutation({
-    mutationFn: (id: string) => ipGroupsApi.sync(id),
-    onSuccess: () => {
+  /**
+   * Z4: the sync button stays loading until the group's `last_synced_at`
+   * actually changes in the list data — the mutation's own `isPending` ends
+   * before the server has refreshed the row. We remember the timestamp from
+   * before the call and wait for the list query to reflect the new value.
+   */
+  const [syncingId, setSyncingId] = useState<string | null>(null)
+  const syncedAtBefore = useRef<Map<string, string | null>>(new Map())
+
+  useEffect(() => {
+    if (!syncingId) return
+    const row = groups.find((g) => g.id === syncingId)
+    const before = syncedAtBefore.current.get(syncingId)
+    if (!row) {
+      setSyncingId(null)
+      return
+    }
+    if ((row.last_synced_at ?? null) !== (before ?? null)) {
+      syncedAtBefore.current.delete(syncingId)
+      setSyncingId(null)
       toast.success(t('pages.ipGroups.synced'))
-      invalidate()
+    }
+  }, [groups, syncingId, t, toast])
+
+  const syncMutation = useMutation({
+    mutationFn: async (id: string) => {
+      const before = groups.find((g) => g.id === id)?.last_synced_at ?? null
+      syncedAtBefore.current.set(id, before)
+      setSyncingId(id)
+      await ipGroupsApi.sync(id)
+      await invalidate()
     },
-    onError: (error) =>
-      toast.error(error.message || t('pages.ipGroups.syncFailed')),
+    onError: (error) => {
+      setSyncingId(null)
+      toast.error(error.message || t('pages.ipGroups.syncFailed'))
+    },
   })
 
   const subscriptionToggleMutation = useMutation({
@@ -200,14 +229,28 @@ export function IpGroupsPage() {
             ) : (
               <span className="text-fg-subtle">—</span>
             )}
-            {row.last_sync_error && (
-              <p
-                className="max-w-48 truncate text-xs text-danger"
-                title={row.last_sync_error}
-              >
-                {row.last_sync_error}
-              </p>
-            )}
+            {row.last_sync_error &&
+              (expandedErrorId === row.id ? (
+                <button
+                  type="button"
+                  className="max-w-64 cursor-pointer break-all text-left text-xs text-danger hover:underline"
+                  title={t('pages.ipGroups.syncErrorExpand')}
+                  onClick={() => setExpandedErrorId(null)}
+                >
+                  {row.last_sync_error}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="max-w-48 cursor-pointer text-left text-xs text-danger hover:underline"
+                  title={t('pages.ipGroups.syncErrorExpand')}
+                  onClick={() =>
+                    setExpandedErrorId((prev) => (prev === row.id ? null : row.id))
+                  }
+                >
+                  {row.last_sync_error}
+                </button>
+              ))}
           </div>
         ),
       },
@@ -221,6 +264,8 @@ export function IpGroupsPage() {
               <Button
                 size="sm"
                 variant="ghost"
+                loading={syncingId === row.id}
+                disabled={syncingId !== null && syncingId !== row.id}
                 onClick={() => syncMutation.mutate(row.id)}
                 title={t('pages.ipGroups.syncNow')}
               >

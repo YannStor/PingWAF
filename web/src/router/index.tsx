@@ -1,9 +1,11 @@
 import {
   createBrowserRouter,
+  Link,
   Navigate,
   useLocation,
 } from 'react-router-dom'
 import type { ReactElement } from 'react'
+import { useTranslation } from 'react-i18next'
 import { AppLayout } from '@/layouts/AppLayout'
 import { useAuthStore } from '@/stores/authStore'
 
@@ -53,15 +55,25 @@ function RequireAuth({ children }: { children: ReactElement }) {
   return children
 }
 
+/** Redirects non-admin users to the dashboard (the guards are server-backed too). */
+function RequireAdmin({ children }: { children: ReactElement }) {
+  const role = useAuthStore((s) => s.user?.role)
+  if (role !== 'admin') {
+    return <Navigate to="/dashboard" replace />
+  }
+  return children
+}
+
 function NotFoundPage() {
+  const { t } = useTranslation()
   return (
     <EmptyState
-      title="Page not found"
-      description="The page you are looking for doesn't exist or has been moved."
+      title={t('pages.notFound.title')}
+      description={t('pages.notFound.description')}
       action={
-        <Button variant="primary" onClick={() => (window.location.href = '/dashboard')}>
-          Back to dashboard
-        </Button>
+        <Link to="/dashboard">
+          <Button variant="primary">{t('pages.notFound.backToDashboard')}</Button>
+        </Link>
       }
     />
   )
@@ -130,8 +142,8 @@ export const router = createBrowserRouter([
       { path: 'agents', element: <AgentsPage /> },
       { path: 'ip-groups', element: <IpGroupsPage /> },
       { path: 'blocked-ips', element: <BlockedIpsPage /> },
-      { path: 'lifecycle', element: <LifecyclePage /> },
-      { path: 'config-versions', element: <ConfigVersionsPage /> },
+      { path: 'lifecycle', element: <RequireAdmin><LifecyclePage /></RequireAdmin> },
+      { path: 'config-versions', element: <RequireAdmin><ConfigVersionsPage /></RequireAdmin> },
       // Global surfaces. The per-site counterparts live under `/sites/:siteId`.
       { path: 'ssl', element: <GlobalSslPage /> },
       { path: 'traffic', element: <GlobalTrafficPage /> },

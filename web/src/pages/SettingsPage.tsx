@@ -38,6 +38,7 @@ import { Textarea } from '@/components/ui/Textarea'
 import { Badge } from '@/components/ui/Badge'
 import { Dialog } from '@/components/ui/Dialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { useAnyUnsaved, useRegisterUnsaved, useUnsavedGuard } from '@/hooks/useUnsavedGuard'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { SkeletonRows, SkeletonCard } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
@@ -65,6 +66,13 @@ import { aiApi, aiKeys } from '@/api/ai'
 import { mcpApi, mcpKeys } from '@/api/mcp'
 import { ipGroupKeys, ipGroupsApi } from '@/api/ipGroups'
 import { systemApi } from '@/api/system'
+import {
+  PPROF_DEFAULT_SECONDS,
+  PPROF_MAX_SECONDS,
+  downloadCpuProfile,
+  downloadFlamegraph,
+  downloadMemorySnapshot,
+} from '@/api/debug'
 import { ApiError } from '@/api/client'
 import { errorMessage, handleApiError } from '@/api/errors'
 import { useAuthStore } from '@/stores/authStore'
@@ -115,11 +123,26 @@ const SETTINGS_NAV = [
   { id: 'about', labelKey: 'pages.settings.about' },
 ]
 
+/** Sections hidden entirely for non-admin users (the cards render `null`). */
+const ADMIN_ONLY_NAV_IDS = new Set([
+  'control-plane-tls',
+  'observation-mode',
+  'api-protection',
+  'cache',
+  'origin-tls',
+  'ai-assistant',
+  'elasticsearch',
+  'log-retention',
+  'error-pages',
+])
+
 export function SettingsPage() {
   const { t, i18n } = useTranslation()
   const { mode, setMode } = useThemeStore()
   const canWrite = useCanWrite()
   const isAdmin = useAuthStore((s) => s.user?.role) === 'admin'
+  // Section cards register their dirty flags; the page guards as a whole.
+  const unsavedDialog = useUnsavedGuard(useAnyUnsaved())
 
   const themeOptions: { value: ThemeMode; label: string; icon: typeof Sun }[] = [
     { value: 'light', label: t('theme.light'), icon: Sun },
@@ -128,12 +151,16 @@ export function SettingsPage() {
   ]
 
   const navItems = useMemo(
-    () => SETTINGS_NAV.map(({ id, labelKey }) => ({ id, label: t(labelKey) })),
-    [t],
+    () =>
+      SETTINGS_NAV.filter(({ id }) => isAdmin || !ADMIN_ONLY_NAV_IDS.has(id)).map(
+        ({ id, labelKey }) => ({ id, label: t(labelKey) }),
+      ),
+    [t, isAdmin],
   )
 
   return (
     <div className="animate-slide-up">
+      {unsavedDialog}
       <PageHeader title={t('pages.settings.title')} description={t('pages.settings.description')} />
 
       <div className="flex max-w-6xl items-start gap-8">
@@ -146,93 +173,42 @@ export function SettingsPage() {
             <PasskeyToggleCard />
           </section>
           <section id="control-plane-tls" className="scroll-mt-6">
-            {isAdmin ? (
-              <ControlPlaneTlsCard canWrite={canWrite} />
-            ) : (
-              <AdminOnlyCard title={t('pages.settings.controlPlaneTls')} />
-            )}
+            {isAdmin && <ControlPlaneTlsCard canWrite={canWrite} />}
           </section>
           <section id="observation-mode" className="scroll-mt-6">
-            {isAdmin ? (
-              <ObservationModeCard canWrite={canWrite} />
-            ) : (
-              <AdminOnlyCard title={t('pages.settings.observationMode')} />
-            )}
+            {isAdmin && <ObservationModeCard canWrite={canWrite} />}
           </section>
           <section id="api-protection" className="scroll-mt-6">
-            {isAdmin ? (
-              <ApiProtectionCard canWrite={canWrite} />
-            ) : (
-              <AdminOnlyCard title={t('pages.settings.apiProtection')} />
-            )}
+            {isAdmin && <ApiProtectionCard canWrite={canWrite} />}
           </section>
           <section id="cache" className="scroll-mt-6">
-            {isAdmin ? (
-              <CacheSettingsCard canWrite={canWrite} />
-            ) : (
-              <AdminOnlyCard title={t('pages.settings.cache')} />
-            )}
+            {isAdmin && <CacheSettingsCard canWrite={canWrite} />}
           </section>
           <section id="origin-tls" className="scroll-mt-6">
-            {isAdmin ? (
-              <OriginTlsCard canWrite={canWrite} />
-            ) : (
-              <AdminOnlyCard title={t('pages.settings.originTls')} />
-            )}
+            {isAdmin && <OriginTlsCard canWrite={canWrite} />}
           </section>
           <section id="ai-assistant" className="scroll-mt-6">
-            {isAdmin ? (
-              <AiAssistantCard canWrite={canWrite} />
-            ) : (
-              <AdminOnlyCard title={t('pages.settings.aiAssistant')} />
-            )}
+            {isAdmin && <AiAssistantCard canWrite={canWrite} />}
           </section>
           <section id="mcp" className="scroll-mt-6">
             <McpCard />
           </section>
           <section id="elasticsearch" className="scroll-mt-6">
-            {isAdmin ? (
-              <ElasticsearchCard canWrite={canWrite} />
-            ) : (
-              <AdminOnlyCard title={t('pages.settings.elasticsearch')} />
-            )}
+            {isAdmin && <ElasticsearchCard canWrite={canWrite} />}
           </section>
           <section id="log-retention" className="scroll-mt-6">
-            {isAdmin ? (
-              <LogRetentionCard canWrite={canWrite} />
-            ) : (
-              <AdminOnlyCard title={t('pages.settings.logRetention')} />
-            )}
+            {isAdmin && <LogRetentionCard canWrite={canWrite} />}
           </section>
           <section id="error-pages" className="scroll-mt-6">
-            {isAdmin ? (
-              <ErrorPagesCard canWrite={canWrite} />
-            ) : (
-              <AdminOnlyCard title={t('pages.settings.errorPages')} />
-            )}
+            {isAdmin && <ErrorPagesCard canWrite={canWrite} />}
           </section>
-          <section id="about" className="scroll-mt-6">
+          <section id="about" className="scroll-mt-6 flex flex-col gap-4">
             <AboutCard />
+            {isAdmin && <PerformanceDiagnosticsCard />}
           </section>
         </div>
       </div>
     </div>
-  )
-}
-
-/** Placeholder shown in place of an administrator-only card. */
-function AdminOnlyCard({ title }: { title: string }) {
-  const { t } = useTranslation()
-  return (
-    <Card>
-      <CardHeader title={title} />
-      <CardBody>
-        <p className="flex items-start gap-2 text-sm text-fg-subtle">
-          <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg-warning" />
-          {t('pages.settings.adminOnly')}
-        </p>
-      </CardBody>
-    </Card>
   )
 }
 
@@ -325,6 +301,7 @@ function ElasticsearchCard({ canWrite }: { canWrite: boolean }) {
   const [urlsText, setUrlsText] = useState('')
   const [dirty, setDirty] = useState(false)
   const [testResult, setTestResult] = useState<EsTestResult | null>(null)
+  useRegisterUnsaved(dirty)
 
   const settings = useQuery({
     queryKey: settingsKeys.elasticsearch(),
@@ -659,6 +636,7 @@ function LogRetentionCard({ canWrite }: { canWrite: boolean }) {
   const [accessDays, setAccessDays] = useState('')
   const [securityDays, setSecurityDays] = useState('')
   const [dirty, setDirty] = useState(false)
+  useRegisterUnsaved(dirty)
 
   const settings = useQuery({
     queryKey: settingsKeys.logRetention(),
@@ -1636,6 +1614,7 @@ function CacheSettingsCard({ canWrite }: { canWrite: boolean }) {
       queryClient.setQueryData(settingsKeys.cache(), row)
       toast.success(t('pages.settings.cacheSaved'))
     },
+    onError: (error) => toast.error(errorMessage(error)),
   })
 
   const data = settings.data
@@ -1896,6 +1875,7 @@ function ApiProtectionCard({ canWrite }: { canWrite: boolean }) {
   const [draft, setDraft] = useState<ApiProtectionDraft | null>(null)
   const [dirty, setDirty] = useState(false)
   const [forceOpen, setForceOpen] = useState(false)
+  useRegisterUnsaved(dirty)
 
   const settings = useQuery({
     queryKey: apiProtectionKeys.settings(),
@@ -2183,6 +2163,7 @@ function AiAssistantCard({ canWrite }: { canWrite: boolean }) {
   const [draft, setDraft] = useState<AiDraft | null>(null)
   const [dirty, setDirty] = useState(false)
   const [testResult, setTestResult] = useState<AiTestResult | null>(null)
+  useRegisterUnsaved(dirty)
 
   const settings = useQuery({
     queryKey: aiKeys.settings(),
@@ -2734,6 +2715,99 @@ function AboutCard() {
             </div>
           </>
         )}
+      </CardBody>
+    </Card>
+  )
+}
+
+/* ── Performance diagnostics (pprof) ────────────────────────────────── */
+
+/**
+ * Admin-only profiling downloads against `/debug/pprof/*`. CPU capture blocks
+ * for the requested window, so each button carries its own pending state;
+ * `501` (non-Linux) and `409` (session already running) get explicit hints.
+ */
+function PerformanceDiagnosticsCard() {
+  const { t } = useTranslation()
+  const toast = useToast()
+  const [seconds, setSeconds] = useState(String(PPROF_DEFAULT_SECONDS))
+  const [pending, setPending] = useState<'profile' | 'flamegraph' | 'memory' | null>(null)
+
+  const parsedSeconds = Number(seconds)
+  const secondsValid =
+    Number.isInteger(parsedSeconds) && parsedSeconds >= 1 && parsedSeconds <= PPROF_MAX_SECONDS
+
+  const run = async (kind: 'profile' | 'flamegraph' | 'memory') => {
+    setPending(kind)
+    try {
+      if (kind === 'profile') await downloadCpuProfile(parsedSeconds)
+      else if (kind === 'flamegraph') await downloadFlamegraph(parsedSeconds)
+      else await downloadMemorySnapshot()
+      toast.success(t('pages.settings.pprofDownloaded'))
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 501) {
+        toast.error(t('pages.settings.pprofUnsupportedPlatform'))
+      } else if (error instanceof ApiError && error.status === 409) {
+        toast.error(t('pages.settings.pprofBusy'))
+      } else {
+        handleApiError(error, { title: t('pages.settings.pprofFailed') })
+      }
+    } finally {
+      setPending(null)
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader
+        title={t('pages.settings.pprof')}
+        description={t('pages.settings.pprofDescription')}
+      />
+      <CardBody className="flex flex-col gap-4">
+        <Input
+          type="number"
+          min={1}
+          max={PPROF_MAX_SECONDS}
+          label={t('pages.settings.pprofSeconds')}
+          hint={t('pages.settings.pprofSecondsHint', { max: PPROF_MAX_SECONDS })}
+          value={seconds}
+          error={seconds !== '' && !secondsValid ? t('pages.settings.pprofSecondsInvalid', { max: PPROF_MAX_SECONDS }) : undefined}
+          disabled={pending !== null}
+          onChange={(event) => setSeconds(event.target.value)}
+        />
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant="secondary"
+            loading={pending === 'profile'}
+            disabled={pending !== null || !secondsValid}
+            icon={<DownloadSimple weight="duotone" className="h-4 w-4" />}
+            onClick={() => void run('profile')}
+          >
+            {t('pages.settings.pprofCpuProfile')}
+          </Button>
+          <Button
+            variant="secondary"
+            loading={pending === 'flamegraph'}
+            disabled={pending !== null || !secondsValid}
+            icon={<DownloadSimple weight="duotone" className="h-4 w-4" />}
+            onClick={() => void run('flamegraph')}
+          >
+            {t('pages.settings.pprofFlamegraph')}
+          </Button>
+          <Button
+            variant="secondary"
+            loading={pending === 'memory'}
+            disabled={pending !== null}
+            icon={<DownloadSimple weight="duotone" className="h-4 w-4" />}
+            onClick={() => void run('memory')}
+          >
+            {t('pages.settings.pprofMemory')}
+          </Button>
+        </div>
+        <p className="flex items-start gap-2 text-xs leading-relaxed text-fg-subtle">
+          <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0" />
+          {t('pages.settings.pprofHint')}
+        </p>
       </CardBody>
     </Card>
   )

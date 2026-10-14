@@ -57,8 +57,6 @@ export const cachingApi = {
   /* ── Usage ───────────────────────────────────────────────────────── */
   status: (siteId: string) => apiClient.get<CacheStatus>(`/cache/status/${siteId}`),
 
-  statusAll: () => apiClient.get<CacheStatus[]>('/cache/status'),
-
   purge: (data: PurgeCacheRequest) =>
     apiClient.post<PurgeCacheResult>('/cache/purge', data),
 }
@@ -70,7 +68,6 @@ export const cacheKeys = {
     [...cacheKeys.site(siteId), 'rules', query ?? {}] as const,
   settings: (siteId: string) => [...cacheKeys.site(siteId), 'settings'] as const,
   status: (siteId: string) => [...cacheKeys.site(siteId), 'status'] as const,
-  statusAll: () => [...cacheKeys.all, 'status'] as const,
 }
 
 export default cachingApi
