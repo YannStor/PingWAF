@@ -9,7 +9,7 @@ use axum::Router;
 use chrono::{DateTime, Utc};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, EntityTrait,
-    PaginatorTrait, QueryFilter, QueryOrder, Set,
+    PaginatorTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -17,8 +17,8 @@ use uuid::Uuid;
 
 use crate::api::common::{
     ensure_acme_wildcard_supported, ensure_domains_available, load_site_read,
-    load_site_write, non_empty, normalise_domain, normalise_domain_list,
-    parse_uuid, require_write, Page, Pagination,
+    load_site_write, map_domain_conflict, non_empty, normalise_domain,
+    normalise_domain_list, parse_uuid, require_write, Page, Pagination,
 };
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
@@ -955,7 +955,10 @@ async fn create(
         updated_at: Set(timestamp),
     }
     .insert(&state.db)
-    .await?;
+    // The pre-check above is not atomic: a racing create can slip through it.
+    // The unique index and the conflicts trigger on `sites` are the backstop.
+    .await
+    .map_err(map_domain_conflict)?;
 
     // Every site starts with a default origin pool; the first origin node
     // goes into it.
@@ -1213,7 +1216,12 @@ async fn update(
     }
     active.updated_at = Set(Utc::now());
 
-    let updated = active.update(&state.db).await?;
+    let updated = active
+        .update(&state.db)
+        .await
+        // Same backstop as create: the uniqueness check above is a pre-check,
+        // the DB constraint decides under concurrency.
+        .map_err(map_domain_conflict)?;
     tracing::info!(%id, "site updated");
     notify_config_changed(&state, id, Some(&current.email)).await;
 
@@ -1793,11 +1801,15 @@ async fn upsert_ssl(
     {
         tls.https_enabled = Some(true);
     }
-    let posture = save_tls_posture(&state.db, &site, &tls).await?;
+    // The posture write and the ACME/certificate fields below hit the same
+    // `site_ssl` row twice; a failure between the two writes must not leave a
+    // half-applied posture behind, so both go through one transaction.
+    let txn = state.db.begin().await?;
+    let posture = save_tls_posture(&txn, &site, &tls).await?;
 
     let existing = site_ssl::Entity::find()
         .filter(site_ssl::Column::SiteId.eq(id))
-        .one(&state.db)
+        .one(&txn)
         .await?;
 
     let model = match existing {
@@ -1823,7 +1835,7 @@ async fn upsert_ssl(
                 active.acme_dns_config = Set(Some(config));
             }
             posture.apply_to(&mut active);
-            let updated = active.update(&state.db).await?;
+            let updated = active.update(&txn).await?;
             tracing::info!(site_id = %id, ssl = %row_id, "SSL configuration updated");
             updated
         },
@@ -1859,11 +1871,12 @@ async fn upsert_ssl(
                 created_at: Set(Utc::now()),
             };
             posture.apply_to(&mut active);
-            let inserted = active.insert(&state.db).await?;
+            let inserted = active.insert(&txn).await?;
             tracing::info!(site_id = %id, ssl = %row_id, "SSL configuration created");
             inserted
         },
     };
+    txn.commit().await?;
 
     // Bump the site so that agents notice the configuration changed.
     touch_site(&state, id).await?;

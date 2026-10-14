@@ -3,8 +3,8 @@
 
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
-    Statement,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait,
+    QueryFilter, Statement,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -448,6 +448,12 @@ pub fn ensure_acme_wildcard_supported(
 ///
 /// `exclude` is the site being edited, so that a site does not conflict with
 /// itself. New sites pass `None`.
+///
+/// This is a friendly pre-check only. The authoritative guard is the database
+/// itself: the unique index `uq_sites_domain` (primary hostnames) plus the
+/// `trg_site_domain_conflicts` trigger (alternate-hostname cross-site
+/// conflicts) reject racing writers, and [`map_domain_conflict`] turns those
+/// violations into the same 400 this function returns.
 pub async fn ensure_domains_available(
     db: &DatabaseConnection,
     domains: &[String],
@@ -466,9 +472,74 @@ pub async fn ensure_domains_available(
     Ok(())
 }
 
+/// Recognises a database-level hostname-conflict rejection.
+///
+/// Matches all three database-side sources of conflict, by their exact
+/// messages:
+///
+/// - the unique index on the primary hostname (constraint name
+///   `uq_sites_domain`);
+/// - the `trg_site_domain_conflicts` trigger's cross-site branch
+///   (`domain already in use by another site`);
+/// - the same trigger's same-site branch (`domain "x" is already in use by
+///   this site`) — matched via `is already in use by this site`.
+///
+/// Wildcard-overlap conflicts are still only caught by the pre-check; the
+/// pre-check's own `is already served by another site` ApiError message is
+/// never a `DbErr` and is deliberately not matched here.
+pub fn is_domain_conflict(err: &DbErr) -> bool {
+    let message = err.to_string();
+    message.contains("uq_sites_domain")
+        || message.contains("domain already in use")
+        || message.contains("is already in use by this site")
+}
+
+/// Maps a write error to a 400 when it is a hostname conflict, passing
+/// anything else through untouched.
+pub fn map_domain_conflict(err: DbErr) -> ApiError {
+    if is_domain_conflict(&err) {
+        ApiError::BadRequest(
+            "domain already in use by another site".to_string(),
+        )
+    } else {
+        err.into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn domain_conflicts_map_to_bad_request() {
+        let index_violation = DbErr::Custom(
+            "error returned by database: duplicate key value violates \
+             unique constraint \"uq_sites_domain\""
+                .to_string(),
+        );
+        let trigger_violation =
+            DbErr::Custom("domain already in use by another site".to_string());
+        // Migration 000055's trigger, same-site branch.
+        let same_site_violation = DbErr::Custom(
+            r#"domain "example.com" is already in use by this site"#
+                .to_string(),
+        );
+        for err in [index_violation, trigger_violation, same_site_violation] {
+            match map_domain_conflict(err) {
+                ApiError::BadRequest(message) => {
+                    assert!(message.contains("domain already in use"));
+                },
+                other => panic!("expected BadRequest, got {other:?}"),
+            }
+        }
+        // Anything unrelated must pass through unchanged, not be mislabelled
+        // as caller input.
+        let unrelated = DbErr::Custom("connection reset".to_string());
+        assert!(!matches!(
+            map_domain_conflict(unrelated),
+            ApiError::BadRequest(_)
+        ));
+    }
 
     #[test]
     fn pagination_is_clamped() {
