@@ -3077,7 +3077,8 @@ credentials).
 | `get_defense_status` | | Observation mode and the control plane's own guards. |
 | `list_ip_groups` | | Shared IP groups with size and sync state. |
 | `query_control_plane_logs` | | The 9080 access log, including allowlist/WAF verdicts. |
-| `profile_memory` | | Memory snapshot of the control-plane process (process RSS) plus host-level totals, with scope notes; cached for a few seconds. |
+| `profile_memory` | | Memory snapshot of the control-plane process (process RSS) plus host-level totals, and container (cgroup) figures inside a memory-limited container — the numbers `docker stats` reports; scope notes included; cached for a few seconds. |
+| `profile_cpu` | | Capture a CPU profile of the control plane (`seconds` 1-30 default 10, `frequency` 1-199 default 99) and return a summary, a self-contained SVG dashboard and reading notes; status covers `normal`/`high_load`/`idle`. Linux-only sampling — other platforms get a live point-in-time readout (`platform_limited`); repeated calls within 60 seconds replay the cached capture. |
 | `set_observation_mode` | ✓ | Turn global observation mode on or off. |
 | `set_site_status` | ✓ | Activate or pause one site. |
 

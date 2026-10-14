@@ -7,6 +7,9 @@
 //!   `go tool pprof` and speedscope
 //! * `.../pprof/flamegraph` — SVG flamegraph rendered by inferno, viewable
 //!   directly in a browser
+//! * `.../pprof/cpu/dashboard.svg` — self-contained SVG dashboard (usage,
+//!   task distribution, key metrics, status badge) rendered by
+//!   [`cpu_svg`], optionally with an embedded live-refresh script
 //! * `.../pprof/memory` — JSON snapshot of process RSS and system memory
 //!
 //! Sampling is process-global: `pprof` installs a single signal handler and
@@ -28,6 +31,14 @@
 use bytesize::ByteSize;
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub mod cgroup;
+pub mod cpu_svg;
+
+pub use cpu_svg::{
+    cpu_snapshot, render_cpu_dashboard_svg, CpuCaptureSummary, CpuLiveStats,
+    CpuStatus, DashboardSvgOpts, TopFrame,
+};
 
 #[cfg(target_os = "linux")]
 use std::time::Instant;
@@ -218,6 +229,33 @@ impl ProfilingSession {
         Err(ProfileError::UnsupportedPlatform)
     }
 
+    /// Stops sampling and returns a [`CpuCaptureSummary`] describing the
+    /// capture — the input for the SVG dashboard and the MCP `profile_cpu`
+    /// tool. Unlike the report finishers, an idle capture is not rejected
+    /// here: the summary simply carries [`CpuStatus::Idle`] so the
+    /// dashboard can annotate it instead of failing the request.
+    #[cfg(target_os = "linux")]
+    pub fn finish_summary(mut self) -> Result<CpuCaptureSummary, ProfileError> {
+        let report = self.take_report()?;
+        let cpu_secs = match (self.start_cpu_ticks, process_cpu_ticks()) {
+            (Some(start), Some(end)) => {
+                end.saturating_sub(start) as f64 / ticks_per_second() as f64
+            },
+            // `/proc` unreadable (seccomp filter): the window share is
+            // reported as zero rather than refusing the whole capture.
+            _ => 0.0,
+        };
+        let wall_secs = self.started_at.elapsed().as_secs_f64();
+        Ok(cpu_svg::summarize_report(&report, wall_secs, cpu_secs))
+    }
+
+    /// Unreachable off-Linux: `start_session` never hands out a session
+    /// there.
+    #[cfg(not(target_os = "linux"))]
+    pub fn finish_summary(self) -> Result<CpuCaptureSummary, ProfileError> {
+        Err(ProfileError::UnsupportedPlatform)
+    }
+
     #[cfg(target_os = "linux")]
     fn take_report(&mut self) -> Result<pprof::Report, ProfileError> {
         let Some(guard) = self.guard.as_ref() else {
@@ -315,6 +353,25 @@ pub struct MemorySnapshot {
     /// Scope of `rss_bytes`/`virtual_bytes`: always `"process"` — this is
     /// this process's own footprint (`statm` via `memory-stats`).
     pub process_memory_scope: &'static str,
+    /// Container memory in use, as reported by the cgroup filesystem
+    /// (cgroup v2 `memory.current`, v1 `memory.usage_in_bytes`) — the same
+    /// figure `docker stats` shows. `None` when the process is not inside a
+    /// memory-limited cgroup (bare metal, unlimited container, non-Linux).
+    pub container_memory_used_bytes: Option<u64>,
+    /// Container memory limit (v2 `memory.max`, v1 `memory.limit_in_bytes`);
+    /// `None` when the cgroup has no limit set or the container fields are
+    /// absent. Inside a limited container this is what `docker stats`
+    /// prints in the LIMIT column.
+    pub container_memory_limit_bytes: Option<u64>,
+    /// `container_memory_used_bytes` rendered human-readable.
+    pub container_memory_used: Option<String>,
+    /// `container_memory_limit_bytes` rendered human-readable.
+    pub container_memory_limit: Option<String>,
+    /// Scope of the container fields: `"cgroup_v1"` or `"cgroup_v2"`, or
+    /// `None` when they are absent. When present, prefer these numbers over
+    /// `used/total_memory_bytes` — the host fields report the machine's
+    /// RAM, which inside a container is not the container's budget.
+    pub container_memory_scope: Option<&'static str>,
 }
 
 /// Collects a [`MemorySnapshot`]. Process memory comes from `memory-stats`,
@@ -329,6 +386,9 @@ pub fn memory_snapshot() -> MemorySnapshot {
         sysinfo::RefreshKind::nothing().with_memory(kind),
     );
     sys.refresh_memory();
+    // Container numbers (what `docker stats` reports) take priority in the
+    // dashboard; absent outside a memory-limited cgroup.
+    let container = cgroup::container_memory();
     let collected_at_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -344,6 +404,15 @@ pub fn memory_snapshot() -> MemorySnapshot {
         collected_at_ms,
         used_memory_scope: "system",
         process_memory_scope: "process",
+        container_memory_used_bytes: container.as_ref().map(|c| c.used_bytes),
+        container_memory_limit_bytes: container.and_then(|c| c.limit_bytes),
+        container_memory_used: container
+            .as_ref()
+            .map(|c| ByteSize(c.used_bytes).to_string()),
+        container_memory_limit: container
+            .and_then(|c| c.limit_bytes)
+            .map(|l| ByteSize(l).to_string()),
+        container_memory_scope: container.map(|c| c.version.scope_label()),
     }
 }
 
@@ -392,6 +461,26 @@ mod tests {
         drop(session);
         let session = start_session(DEFAULT_FREQUENCY).expect("fourth start");
         drop(session);
+
+        // The summary finisher feeds the SVG dashboard and the MCP tool:
+        // it keeps idle captures instead of rejecting them.
+        let session = start_session(DEFAULT_FREQUENCY).expect("fifth start");
+        burn(200);
+        let summary = session.finish_summary().expect("capture summary");
+        assert!(summary.total_samples > 0);
+        assert_eq!(summary.frequency, DEFAULT_FREQUENCY);
+        assert!(!summary.top_frames.is_empty());
+        // The burn loop is CPU-bound, so the capture cannot be idle; the
+        // exact badge (NORMAL vs HIGH LOAD) depends on how much of the
+        // wall clock the runner granted us, so only rule out IDLE.
+        assert_ne!(summary.status, CpuStatus::Idle);
+        let svg = render_cpu_dashboard_svg(
+            &summary,
+            None,
+            &DashboardSvgOpts::default(),
+        );
+        assert!(svg.contains("<svg"));
+        assert!(svg.contains("TASK DISTRIBUTION"));
     }
 
     // Sampling the process via SIGPROF is unsafe off-Linux (see
@@ -416,6 +505,39 @@ mod tests {
         // process footprint — frontend cards rely on these markers.
         assert_eq!(snapshot.used_memory_scope, "system");
         assert_eq!(snapshot.process_memory_scope, "process");
+    }
+
+    /// The container fields are all-or-nothing: either the cgroup numbers
+    /// are present together (used + limit + scope, like `docker stats`),
+    /// or they are all absent. A partially populated group would break the
+    /// dashboard's "prefer container numbers" rule.
+    #[test]
+    fn memory_snapshot_container_fields_are_consistent() {
+        let snapshot = memory_snapshot();
+        match (
+            snapshot.container_memory_used_bytes,
+            snapshot.container_memory_scope,
+        ) {
+            (Some(used), Some(scope)) => {
+                assert!(used > 0);
+                assert!(scope == "cgroup_v1" || scope == "cgroup_v2");
+                assert!(snapshot.container_memory_limit_bytes.is_some());
+                assert!(snapshot
+                    .container_memory_limit_bytes
+                    .is_some_and(|l| l >= used));
+                assert_eq!(
+                    snapshot.container_memory_used,
+                    Some(ByteSize(used).to_string())
+                );
+            },
+            (None, None) => {
+                assert_eq!(snapshot.container_memory_used_bytes, None);
+                assert_eq!(snapshot.container_memory_limit_bytes, None);
+                assert_eq!(snapshot.container_memory_used, None);
+                assert_eq!(snapshot.container_memory_limit, None);
+            },
+            _ => panic!("container fields must be populated together"),
+        }
     }
 
     // The idle guard reads the process CPU clock; on Linux this must always

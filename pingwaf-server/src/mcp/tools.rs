@@ -170,9 +170,22 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "profile_memory",
-            description: "Memory snapshot of the control-plane process: process RSS (the real footprint) plus host-level memory totals. Read the notes in the result before quoting numbers — process and host scopes are labeled.",
+            description: "Memory snapshot of the control-plane process: process RSS (the real footprint) plus host-level totals, and container (cgroup) figures when running inside a memory-limited container. Read the notes in the result before quoting numbers — process, host and container scopes are labeled.",
             write: false,
             schema: json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+        },
+        ToolSpec {
+            name: "profile_cpu",
+            description: "Capture a CPU profile of the control-plane process and return a summary plus a self-contained SVG dashboard (usage over the window, task distribution, key metrics, status badge). The call blocks for the whole capture window (seconds, default 10, max 30). Sampling is Linux-only; on other platforms it degrades to a live point-in-time CPU readout. Repeated calls within 60 seconds return the cached last capture.",
+            write: false,
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "seconds": { "type": "integer", "minimum": 1, "maximum": 30, "description": "Capture window (default 10)" },
+                    "frequency": { "type": "integer", "minimum": 1, "maximum": 199, "description": "Sampling frequency in Hz (default 99; capped at 199 so the sampler stays under ~2% of one core)" }
+                },
+                "additionalProperties": false
+            }),
         },
         ToolSpec {
             name: "set_observation_mode",
@@ -277,6 +290,7 @@ pub async fn call(
         "list_ip_groups" => list_ip_groups(ctx).await,
         "query_control_plane_logs" => query_control_plane_logs(ctx, args).await,
         "profile_memory" => profile_memory().await,
+        "profile_cpu" => profile_cpu(args).await,
         "set_observation_mode" => set_observation_mode(ctx, args).await,
         "set_site_status" => set_site_status(ctx, args).await,
         // `ensure_allowed` proved the name exists.
@@ -327,16 +341,159 @@ async fn profile_memory() -> Result<Value, String> {
             "collected_at_ms": snapshot.collected_at_ms,
             "process_memory_scope": snapshot.process_memory_scope,
             "used_memory_scope": snapshot.used_memory_scope,
+            "container_memory_used_bytes": snapshot.container_memory_used_bytes,
+            "container_memory_limit_bytes": snapshot.container_memory_limit_bytes,
+            "container_memory_scope": snapshot.container_memory_scope,
         },
         "notes": [
             "rss_bytes/rss is the control-plane process's own resident memory — quote this when asked how much memory the control plane uses.",
             "used_memory_bytes/total_memory_bytes are HOST-level totals (system scope), not the process and not a container limit — a high value there does not mean the control plane is leaking.",
+            "container_memory_used_bytes/container_memory_limit_bytes are the cgroup numbers (what `docker stats` reports); present only inside a memory-limited container. When present, quote these — not the host totals — when asked how much memory the container uses.",
             "virtual_bytes is address-space size and is normally much larger than RSS.",
             "Snapshots are cached for a few seconds; collected_at_ms tells you how fresh this one is."
         ]
     });
     *cache = Some((std::time::Instant::now(), value.clone()));
     Ok(value)
+}
+
+/// Tighter clamps for the MCP `profile_cpu` tool than the REST capture
+/// endpoints: an LLM caller gets a shorter window and a lower sampling
+/// ceiling so a misbehaving loop cannot pin the sampler (and its ~2%-of-
+/// one-core overhead) for minutes.
+const CPU_CAPTURE_MAX_SECONDS: u64 = 30;
+/// Sampling frequency ceiling for the tool; 199 Hz keeps the signal
+/// handler's overhead around one percent of a single core.
+const CPU_CAPTURE_MAX_FREQUENCY: i32 = 199;
+/// How long the last `profile_cpu` result is replayed before a new
+/// capture may start. The profiler is a process-global singleton, so an
+/// LLM polling the tool in a loop must not queue captures back-to-back.
+const CPU_CAPTURE_COOLDOWN_MS: u64 = 60_000;
+
+/// `(taken_at, result)` cache for `profile_cpu`; see
+/// [`CPU_CAPTURE_COOLDOWN_MS`].
+static CPU_CAPTURE_CACHE: std::sync::Mutex<
+    Option<(std::time::Instant, Value)>,
+> = std::sync::Mutex::new(None);
+
+/// `profile_cpu`: captures a CPU profile and returns a summary, a
+/// self-contained SVG dashboard and the notes an LLM needs to read both.
+/// Guardrails: MCP-tight clamps on window and frequency, a cooldown that
+/// replays the last result instead of stacking captures, single-session
+/// interception (a concurrent capture answers with guidance instead of a
+/// second session), and a degradation path that returns a live readout
+/// on platforms without signal-safe sampling instead of an error.
+async fn profile_cpu(args: &Value) -> Result<Value, String> {
+    {
+        let cache = CPU_CAPTURE_CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((taken_at, cached)) = cache.as_ref() {
+            if (taken_at.elapsed().as_millis() as u64) < CPU_CAPTURE_COOLDOWN_MS
+            {
+                return Ok(cached.clone());
+            }
+        }
+    }
+
+    let (seconds, frequency) = cpu_capture_args(args);
+    let value = profile_cpu_capture(seconds, frequency).await?;
+    let mut cache = CPU_CAPTURE_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *cache = Some((std::time::Instant::now(), value.clone()));
+    Ok(value)
+}
+
+/// Parses and clamps the tool's `seconds`/`frequency` arguments. Split
+/// out so the clamps are directly testable.
+fn cpu_capture_args(args: &Value) -> (u64, i32) {
+    let seconds = args
+        .get("seconds")
+        .and_then(Value::as_u64)
+        .unwrap_or(10)
+        .clamp(1, CPU_CAPTURE_MAX_SECONDS);
+    let frequency =
+        args.get("frequency")
+            .and_then(Value::as_i64)
+            .unwrap_or(i64::from(pingwaf_pprof::DEFAULT_FREQUENCY))
+            .clamp(1, i64::from(CPU_CAPTURE_MAX_FREQUENCY)) as i32;
+    (seconds, frequency)
+}
+
+/// Runs one capture (or the degraded live readout) and shapes the tool
+/// result.
+async fn profile_cpu_capture(
+    seconds: u64,
+    frequency: i32,
+) -> Result<Value, String> {
+    match pingwaf_pprof::start_session(frequency) {
+        Ok(session) => {
+            tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+            let summary =
+                tokio::task::spawn_blocking(move || session.finish_summary())
+                    .await
+                    .map_err(|e| format!("the capture task failed: {e}"))?
+                    .map_err(|err| err.to_string())?;
+            Ok(cpu_capture_json(&summary, None, cpu_capture_notes(false)))
+        },
+        // No signal-safe unwinder on this platform (macOS in particular);
+        // degrade to the live point-in-time readout rather than failing.
+        Err(pingwaf_pprof::ProfileError::UnsupportedPlatform) => {
+            let live = tokio::task::spawn_blocking(pingwaf_pprof::cpu_snapshot)
+                .await
+                .map_err(|e| format!("the live snapshot task failed: {e}"))?;
+            let summary =
+                pingwaf_pprof::CpuCaptureSummary::platform_limited(&live);
+            Ok(cpu_capture_json(
+                &summary,
+                Some(&live),
+                cpu_capture_notes(true),
+            ))
+        },
+        // A concurrent capture owns the process-global sampler; tell the
+        // caller instead of silently queueing behind it.
+        Err(other) => Err(other.to_string()),
+    }
+}
+
+/// Builds the tool result: status, the serialized summary, the SVG
+/// dashboard and scope notes.
+fn cpu_capture_json(
+    summary: &pingwaf_pprof::CpuCaptureSummary,
+    live: Option<&pingwaf_pprof::CpuLiveStats>,
+    notes: Vec<&'static str>,
+) -> Value {
+    let svg = pingwaf_pprof::render_cpu_dashboard_svg(
+        summary,
+        live,
+        &pingwaf_pprof::DashboardSvgOpts::default(),
+    );
+    json!({
+        "status": summary.status,
+        "summary": summary,
+        "svg": svg,
+        "notes": notes,
+    })
+}
+
+/// The reading guidance attached to every `profile_cpu` result.
+fn cpu_capture_notes(platform_limited: bool) -> Vec<&'static str> {
+    let mut notes = vec![
+        "summary.process_cpu_fraction is the share of ONE core the control plane burned during the window; values above 1.0 mean several cores were busy.",
+        "summary.top_frames shares are inclusive: the fraction of sampled stacks that contained the function at least once. Shared plumbing (event loops, dispatchers) can appear in most stacks — it is not necessarily the hot spot by itself.",
+        "svg is a self-contained dashboard; save it with a .svg extension or paste it anywhere images render.",
+    ];
+    if platform_limited {
+        notes.push(
+            "CPU sampling needs Linux's signal-safe unwinder, unavailable on this platform. This result is a live point-in-time readout from sysinfo (process_cpu_percent is the share of one core right now), not a capture window; ask again to see movement.",
+        );
+    } else {
+        notes.push(
+            "Captures are Linux-only (SIGPROF sampling) and a repeated call within 60 seconds replays this cached result instead of starting a new capture.",
+        );
+    }
+    notes
 }
 
 fn db_error(err: sea_orm::DbErr) -> String {
@@ -1040,6 +1197,83 @@ mod tests {
         assert!(
             !first["notes"].as_array().unwrap().is_empty(),
             "scope guidance for LLM callers is mandatory"
+        );
+    }
+
+    /// `profile_cpu` clamps its window and frequency to the MCP-tight
+    /// caps before anything starts sampling.
+    #[test]
+    fn cpu_capture_args_are_clamped() {
+        assert_eq!(cpu_capture_args(&json!({})), (10, 99));
+        assert_eq!(cpu_capture_args(&json!({ "seconds": 0 })), (1, 99));
+        assert_eq!(
+            cpu_capture_args(&json!({ "seconds": 999 })),
+            (CPU_CAPTURE_MAX_SECONDS, 99)
+        );
+        assert_eq!(
+            cpu_capture_args(&json!({ "frequency": 5000 })),
+            (10, CPU_CAPTURE_MAX_FREQUENCY)
+        );
+        assert_eq!(
+            cpu_capture_args(&json!({ "seconds": 5, "frequency": 50 })),
+            (5, 50)
+        );
+    }
+
+    /// `profile_cpu` is read-only, and its cooldown replays the last
+    /// capture instead of stacking a second one onto the process-global
+    /// sampler. The first call runs the real path on Linux (a 1s
+    /// capture) and the degraded live readout elsewhere; both must
+    /// produce a status, notes and a dashboard.
+    #[tokio::test]
+    async fn profile_cpu_is_read_only_and_cooled_down() {
+        let spec = specs()
+            .into_iter()
+            .find(|s| s.name == "profile_cpu")
+            .expect("profile_cpu registered");
+        assert!(!spec.write, "profile_cpu must stay read-only");
+
+        let read_only = mcp_list(false);
+        let names: Vec<&str> = read_only["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            names.contains(&"profile_cpu"),
+            "read-only callers must see profile_cpu"
+        );
+
+        let first = profile_cpu(&json!({ "seconds": 1 }))
+            .await
+            .expect("first capture");
+        let second = profile_cpu(&json!({ "seconds": 1 }))
+            .await
+            .expect("cooldown replay");
+        assert_eq!(
+            first["summary"]["collected_at_ms"],
+            second["summary"]["collected_at_ms"],
+            "a call inside the cooldown must replay the cached capture"
+        );
+
+        let status = first["status"].as_str().expect("status present");
+        assert!(
+            ["normal", "high_load", "idle", "platform_limited"]
+                .contains(&status),
+            "unexpected status {status}"
+        );
+        assert!(
+            first["svg"]
+                .as_str()
+                .is_some_and(|svg| svg.contains("<svg")),
+            "the dashboard must be an inline SVG"
+        );
+        assert!(
+            first["notes"]
+                .as_array()
+                .is_some_and(|notes| notes.len() >= 4),
+            "reading guidance for LLM callers is mandatory"
         );
     }
 

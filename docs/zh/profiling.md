@@ -6,7 +6,7 @@ PingWAF 在每个二进制中都内置了 pprof 风格的性能剖析——无�
 
 | 平面 | 端点 | 鉴权 |
 | --- | --- | --- |
-| 控制面（`pingwaf-server`） | `GET /api/v1/debug/pprof/{profile,flamegraph,memory}` | 管理员 JWT Bearer token |
+| 控制面（`pingwaf-server`） | `GET /api/v1/debug/pprof/{profile,flamegraph,memory}`、`GET /api/v1/debug/pprof/cpu/{metrics,dashboard.svg}` | 管理员 JWT Bearer token |
 | 数据面（pingap admin 插件） | `GET {admin-path}/api/pprof/{profile,flamegraph,memory}` | admin 插件凭据 |
 
 在控制台中，管理员也可以在「设置 → 关于」的**性能诊断**卡片里直接下载这三类文件（CPU 剖析、SVG 火焰图、内存快照），无需手工拼 URL。
@@ -15,7 +15,9 @@ PingWAF 在每个二进制中都内置了 pprof 风格的性能剖析——无�
 
 - `profile` — gzip 压缩的 pprof protobuf，与 `go tool pprof` 期望的线格式完全一致。采样时长 `seconds`（1-120，默认 30），频率 `frequency` Hz（1-1000，默认 99——避开整数以防止采样器与周期性任务同步）。
 - `flamegraph` — 由 inferno 渲染的 SVG 火焰图，浏览器直接打开。
-- `memory` — 进程 RSS 与系统内存的 JSON 快照，立即返回。`rss_bytes` 是本进程占用；`total_memory_bytes`/`used_memory_bytes` 是**宿主机**内存（容器内即宿主总量，不是容器限额），由 `used_memory_scope: "system"` 与 `process_memory_scope: "process"` 标注。资源卡片应使用 `rss_bytes` 展示进程占用。
+- `cpu/dashboard.svg` — 一次采集的自包含 SVG **仪表盘**：窗口内进程 CPU 占比、任务分布（按包含性样本占比排序的热点函数）、关键指标，以及颜色编码的状态徽章（`NORMAL` / `HIGH LOAD` / `IDLE` / `PLATFORM-LIMITED`）。与原始采集端点不同，它在非 Linux 平台**降级**而非报 501：渲染实时读数并标注 `PLATFORM-LIMITED`。加 `?refresh=<1-60>` 后 SVG 会内嵌一段脚本，在浏览器打开文件期间轮询 `cpu/metrics` 刷新实时行；由于该端点是 Bearer 鉴权，而保存后的文件无法携带请求头，调用方本次请求的 token 会被内嵌进轮询脚本（由 `refresh` 参数显式开启、响应 `no-store`，且仪表盘自身印有"勿外传"警示）。
+- `cpu/metrics` — 轻量实时 CPU 快照（进程与主机占用、核心数），供仪表盘刷新脚本轮询；仅一次 sysinfo 刷新，不占用采样会话。
+- `memory` — 进程 RSS 与系统内存的 JSON 快照，立即返回。`rss_bytes` 是本进程占用；`total_memory_bytes`/`used_memory_bytes` 是**宿主机**内存（容器内即宿主总量，不是容器限额），由 `used_memory_scope: "system"` 与 `process_memory_scope: "process"` 标注。在设置了内存限额的容器内，快照还会附带 cgroup 口径的 `container_memory_used_bytes`/`container_memory_limit_bytes`（`container_memory_scope: "cgroup_v1" | "cgroup_v2"`），与 `docker stats` 显示一致——存在时应优先于宿主机口径引用。资源卡片应使用 `rss_bytes` 展示进程占用。
 
 采样是进程级单例：并发的第二个采集请求会收到 `409 Conflict`。报告符号化在异步运行时之外执行，因此一次采集的成本是一个睡眠中的请求加上采样器自身消耗的 CPU（99 Hz 约 1%）。
 
@@ -47,6 +49,17 @@ curl -u admin:password \
 open flamegraph.svg
 ```
 
+控制面 CPU 仪表盘（自包含 SVG；追加 `&refresh=5` 内嵌实时刷新脚本后在浏览器打开）：
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:9080/api/v1/debug/pprof/cpu/dashboard.svg?seconds=10&refresh=5" \
+  > cpu-dashboard.svg
+open cpu-dashboard.svg
+```
+
+MCP `profile_cpu` 工具返回同一仪表盘（JSON 结果的 `svg` 字段），连同摘要与解读说明；60 秒内的重复调用会重放缓存的上次采集。
+
 ## 符号：用 `release-perf` 构建
 
 默认 `release` profile 会 strip 调试符号，`release` 二进制的剖析里大多是 `Unknown` 帧。要可读的火焰图：
@@ -71,4 +84,4 @@ Docker 部署有按需产线：在 Actions 页运行 **Release (perf image)** �
 
 ## 平台支持
 
-CPU 采样**仅在 Linux 上提供**：采样信号处理器在 Linux 上使用 pprof-rs 自带的信号安全 DWARF 展开器。macOS 上展开需要经过 libunwind，它不是异步信号安全的，可能直接在处理器内中止进程（tikv/pprof-rs#36），因此采集端点在非 Linux 平台拒绝启动并返回 `501 Not Implemented`，而不是冒着进程崩溃的风险。`memory` 快照在所有平台可用。
+CPU 采样**仅在 Linux 上提供**：采样信号处理器在 Linux 上使用 pprof-rs 自带的信号安全 DWARF 展开器。macOS 上展开需要经过 libunwind，它不是异步信号安全的，可能直接在处理器内中止进程（tikv/pprof-rs#36），因此采集端点在非 Linux 平台拒绝启动并返回 `501 Not Implemented`，而不是冒着进程崩溃的风险。`memory` 快照、`cpu/metrics` 与 `cpu/dashboard.svg` 的降级模式在所有平台可用。
