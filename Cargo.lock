@@ -5488,6 +5488,7 @@ dependencies = [
  "ipnet",
  "pingap-cache",
  "pingap-core",
+ "pingap-upstream",
  "pingwaf-proto",
  "prost-types 0.14.4",
  "rand 0.10.3",

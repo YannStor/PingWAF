@@ -14,6 +14,17 @@ description = "ImageOptim for pingap"
 name = "pingap_imageoptim"
 path = "src/lib.rs"
 
+[features]
+# TLS backend, mirrored from the workspace root convention: exactly one of
+# `openssl` (default) and `tls-rustls`. The optimiser itself needs no TLS
+# stack; the passthrough exists so its dependency chain (pingap-plugin →
+# pingwaf-agent → pingap-upstream) compiles in standalone `-p` builds.
+# Workspace builds strip this default and enable exactly one backend via
+# the root's own feature chain.
+default = ["openssl"]
+openssl = ["pingap-plugin/openssl"]
+tls-rustls = ["pingap-plugin/tls-rustls"]
+
 [dependencies]
 async-trait = { workspace = true }
 bytemuck = { workspace = true }

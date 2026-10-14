@@ -16,6 +16,15 @@ path = "src/lib.rs"
 
 [features]
 geo = []
+# TLS backend, mirrored from the workspace root convention: exactly one of
+# `openssl` (default) and `tls-rustls` must be on. The plugin itself needs
+# no TLS stack; the passthrough exists so the agent dependency (and through
+# it pingap-upstream) compiles in standalone `-p pingap-plugin` builds.
+# Workspace builds strip this default and enable exactly one backend via
+# the root's own feature chain.
+default = ["openssl"]
+openssl = ["pingwaf-agent/openssl"]
+tls-rustls = ["pingwaf-agent/tls-rustls"]
 
 [dependencies]
 # 0.46's MSRV is 1.91; pingap's floor is 1.96 so this is fine.
@@ -51,7 +60,11 @@ pingap-core = { workspace = true }
 pingap-util = { workspace = true }
 pingwaf-waf = { path = "../pingwaf-waf" }
 pingwaf-challenge = { path = "../pingwaf-challenge" }
-pingwaf-agent = { path = "../pingwaf-agent" }
+# `default-features = false` keeps the TLS backend exclusive: the agent's
+# default forwards openssl to pingap-upstream, which must never unify with
+# a rustls build of the workspace (the two pingora backends are mutually
+# exclusive). The binary's feature chain enables exactly one backend.
+pingwaf-agent = { path = "../pingwaf-agent", default-features = false }
 pingora = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
@@ -79,8 +92,9 @@ tokio-test = { workspace = true }
 # Rule bundles are pushed to the test agent through the proto types.
 pingwaf-proto = { path = "../pingwaf-proto" }
 # Enables the test-util feature (agent instance installer + log introspection)
-# for the waf plugin access-log tests.
-pingwaf-agent = { path = "../pingwaf-agent", features = ["test-util"] }
+# for the waf plugin access-log tests. Default features stay off for the
+# same TLS-backend exclusivity as the regular dependency above.
+pingwaf-agent = { path = "../pingwaf-agent", default-features = false, features = ["test-util"] }
 
 [lints.clippy]
 # Set the unwrap_used lint level to deny

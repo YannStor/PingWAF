@@ -75,7 +75,12 @@ pingap-upstream = { workspace = true }
 pingap-util = { workspace = true }
 pingap-webhook = { workspace = true }
 pingwaf-server = { path = "pingwaf-server" }
-pingwaf-agent = { path = "pingwaf-agent" }
+# TLS backend is selected by this crate's own feature chain (`openssl` /
+# `tls-rustls`), mirroring the `pingap-*` workspace convention: the
+# dependency must not drag `pingwaf-agent`'s default (openssl) into a
+# rustls build — the two pingora backends are mutually exclusive and
+# unify into a compile error if both end up on.
+pingwaf-agent = { path = "pingwaf-agent", default-features = false }
 pingwaf-pprof = { workspace = true }
 anyhow = { workspace = true }
 pingora = { workspace = true }
@@ -119,16 +124,20 @@ openssl = [
     "pingap-acme/openssl",
     "pingap-certificate/openssl",
     "pingap-performance/openssl",
+    "pingap-plugin/openssl",
     "pingap-proxy/openssl",
     "pingap-upstream/openssl",
+    "pingwaf-agent/openssl",
 ]
 tls-rustls = [
     "pingora/rustls",
     "pingap-acme/tls-rustls",
     "pingap-certificate/tls-rustls",
     "pingap-performance/tls-rustls",
+    "pingap-plugin/tls-rustls",
     "pingap-proxy/tls-rustls",
     "pingap-upstream/tls-rustls",
+    "pingwaf-agent/tls-rustls",
 ]
 pyro = ["pingap-pyroscope"]
 imageoptim = ["pingap-imageoptim"]
@@ -371,12 +380,12 @@ pingap-config = { version = "0.26.2", path = "pingap-config" }
 pingap-core = { version = "0.26.2", path = "pingap-core" }
 pingap-discovery = { version = "0.26.2", path = "pingap-discovery" }
 pingap-health = { version = "0.26.2", path = "pingap-health" }
-pingap-imageoptim = { version = "0.26.2", path = "pingap-imageoptim" }
+pingap-imageoptim = { version = "0.26.2", path = "pingap-imageoptim", default-features = false }
 pingap-location = { version = "0.26.2", path = "pingap-location" }
 pingap-logger = { version = "0.26.2", path = "pingap-logger" }
 pingap-otel = { version = "0.26.2", path = "pingap-otel" }
 pingap-performance = { version = "0.26.2", path = "pingap-performance", default-features = false }
-pingap-plugin = { version = "0.26.2", path = "pingap-plugin" }
+pingap-plugin = { version = "0.26.2", path = "pingap-plugin", default-features = false }
 pingap-proxy = { version = "0.26.2", path = "pingap-proxy", default-features = false }
 pingap-pyroscope = { version = "0.26.2", path = "pingap-pyroscope" }
 pingap-sentry = { version = "0.26.2", path = "pingap-sentry" }
