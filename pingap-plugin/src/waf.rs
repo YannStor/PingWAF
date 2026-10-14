@@ -72,6 +72,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tor_geoip::GeoipDb;
@@ -1076,6 +1077,19 @@ struct RateCounter {
 /// Only pay for garbage collection above this many live counters.
 const RATE_COUNTERS_GC_THRESHOLD: usize = 65_536;
 
+/// Once the map passes `RATE_COUNTERS_GC_THRESHOLD`, a full `retain` sweep
+/// runs at most this often (unix seconds between sweeps). An attacker pushing
+/// unique counter keys past the threshold must not turn every request into an
+/// O(N) walk; between sweeps the map may grow, but the sweep cadence bounds
+/// the CPU cost on the hot path.
+const RATE_COUNTERS_GC_INTERVAL_SECS: u64 = 30;
+
+/// Past this many counters the sweep cadence tightens to every second: the
+/// map is growing faster than the relaxed interval can trim it, and memory
+/// pressure matters more than the (still once-per-second) O(N) sweep.
+const RATE_COUNTERS_GC_PANIC_THRESHOLD: usize = 262_144;
+
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1087,6 +1101,9 @@ fn unix_now() -> u64 {
 #[derive(Default)]
 struct RateLimitPolicy {
     rules: Vec<CompiledRateRule>,
+    /// Unix second of the last expired-counter sweep (`counters` is shared per
+    /// site, this is the per-policy gate that throttles the O(N) retain).
+    last_gc_sweep: AtomicU64,
 }
 
 impl RateLimitPolicy {
@@ -1097,6 +1114,7 @@ impl RateLimitPolicy {
                 .iter()
                 .filter_map(CompiledRateRule::build)
                 .collect(),
+            last_gc_sweep: AtomicU64::new(0),
         }
     }
 
@@ -1144,7 +1162,33 @@ impl RateLimitPolicy {
             }
             let key = rule.counter_key(request_data, host, asn);
             if counters.len() > RATE_COUNTERS_GC_THRESHOLD {
-                counters.retain(|_, entry| now < entry.expires_at);
+                // Throttled sweep: at most one retain per interval (one per
+                // second once the panic threshold is passed), instead of a
+                // full O(N) walk on every request once an attacker has pushed
+                // the map past the threshold. The compare-exchange picks a
+                // single racer to run it; the others proceed without the walk.
+                let interval = if counters.len()
+                    >= RATE_COUNTERS_GC_PANIC_THRESHOLD
+                {
+                    1
+                } else {
+                    RATE_COUNTERS_GC_INTERVAL_SECS
+                };
+                let last =
+                    self.last_gc_sweep.load(std::sync::atomic::Ordering::Relaxed);
+                if now.saturating_sub(last) >= interval
+                    && self
+                        .last_gc_sweep
+                        .compare_exchange(
+                            last,
+                            now,
+                            std::sync::atomic::Ordering::Relaxed,
+                            std::sync::atomic::Ordering::Relaxed,
+                        )
+                        .is_ok()
+                {
+                    counters.retain(|_, entry| now < entry.expires_at);
+                }
             }
             let window = now / rule.period_secs;
             let mut entry = counters.entry(key).or_insert(RateCounter {
@@ -6049,6 +6093,81 @@ inspect_body = true"###,
             .unwrap()
     }
 
+    /// Above the GC threshold the expired-counter sweep runs at most once per
+    /// interval instead of on every request: an attacker rotating unique keys
+    /// must not turn each request into an O(N) walk over the whole map.
+    #[test]
+    fn rate_counter_gc_is_throttled_above_the_threshold() {
+        let policy = RateLimitPolicy {
+            rules: vec![CompiledRateRule {
+                id: "rl-gc".to_string(),
+                name: "gc".to_string(),
+                expression: None,
+                chars: vec![RateChar::Ip],
+                period_secs: 60,
+                threshold: 1_000_000,
+                mitigation_secs: 0,
+                action: RateAction::Block,
+            }],
+            last_gc_sweep: AtomicU64::new(0),
+        };
+        let counters: DashMap<String, RateCounter> = DashMap::new();
+
+        // Fill the map past the GC threshold with already-expired entries.
+        let now = unix_now();
+        for i in 0..=RATE_COUNTERS_GC_THRESHOLD {
+            counters.insert(
+                format!("stale-{i}"),
+                RateCounter {
+                    window: 0,
+                    count: 1,
+                    blocked_until: 0,
+                    expires_at: now.saturating_sub(1),
+                },
+            );
+        }
+
+        let request = RequestData::new("GET", "/");
+        let evaluate = |counters: &DashMap<String, RateCounter>| {
+            policy.evaluate(counters, &request, "example.com", false, None)
+        };
+
+        // First evaluation above the threshold wins the CAS and sweeps the
+        // expired entries; the one legitimate live counter survives.
+        evaluate(&counters);
+        assert_eq!(counters.len(), 1);
+
+        // Re-arm the map with expired entries and pin the last sweep to
+        // "now": the interval has not elapsed, so repeated evaluations must
+        // not sweep — the map stays at threshold+1 entries.
+        for i in 0..=RATE_COUNTERS_GC_THRESHOLD {
+            counters.insert(
+                format!("stale2-{i}"),
+                RateCounter {
+                    window: 0,
+                    count: 1,
+                    blocked_until: 0,
+                    expires_at: now.saturating_sub(1),
+                },
+            );
+        }
+        policy
+            .last_gc_sweep
+            .store(unix_now(), std::sync::atomic::Ordering::Relaxed);
+        for _ in 0..5 {
+            evaluate(&counters);
+        }
+        assert_eq!(counters.len(), RATE_COUNTERS_GC_THRESHOLD + 2);
+
+        // Once the interval has passed (last sweep pinned far in the past),
+        // the next evaluation sweeps again.
+        policy
+            .last_gc_sweep
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        evaluate(&counters);
+        assert_eq!(counters.len(), 1);
+    }
+
     #[test]
     fn rate_rule_build_filters_unenforceable_rules() {
         let build = |rule: proto::RateLimitRule| {
@@ -6273,6 +6392,7 @@ inspect_body = true"###,
                 mitigation_secs: 0,
                 action: RateAction::Block,
             }],
+            last_gc_sweep: AtomicU64::new(0),
         };
         let counters: DashMap<String, RateCounter> = DashMap::new();
         let request = |ip: &str, path: &str| RequestData {
