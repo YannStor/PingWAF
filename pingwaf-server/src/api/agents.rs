@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::common::{
-    load_site_read, non_empty, parse_optional_datetime, parse_uuid, query_all,
+    load_site_read, non_empty, parse_optional_datetime, parse_uuid,
     require_write, scope_site, Page, Pagination,
 };
 use crate::api::error::ApiError;
@@ -97,19 +97,6 @@ pub struct SamplesQuery {
     pub to: Option<String>,
 }
 
-/// Window and aggregation for the edge-metrics endpoint.
-#[derive(Debug, Deserialize)]
-pub struct MetricsQuery {
-    /// Metric name, e.g. `pingwaf_requests_total`.
-    pub name: Option<String>,
-    /// Inclusive lower bound, RFC 3339. Defaults to one hour before `to`.
-    pub from: Option<String>,
-    /// Exclusive upper bound, RFC 3339. Defaults to now.
-    pub to: Option<String>,
-    /// Bucket width in seconds, minimum 10. Defaults to 60.
-    pub step: Option<i64>,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct CommandRequest {
     /// One of `restart`, `purge_cache`, `block_ip`, `unblock_ip`, `reload`.
@@ -171,7 +158,6 @@ pub fn routes() -> Router<AppState> {
         .route("/agents/enroll", post(enroll))
         .route("/agents/{agent_id}", get(show).delete(remove))
         .route("/agents/{agent_id}/samples", get(samples))
-        .route("/agents/{agent_id}/metrics", get(metrics))
         .route("/agents/{agent_id}/commands", post(send_command))
 }
 
@@ -387,153 +373,6 @@ async fn samples(
     Ok(Json(Page::new(items, total, pagination)))
 }
 
-/// One aggregated bucket of a metric time series.
-#[derive(Debug, Serialize)]
-pub struct MetricPoint {
-    /// Bucket start, RFC 3339.
-    pub t: DateTime<Utc>,
-    pub avg: f64,
-    pub min: f64,
-    pub max: f64,
-    pub count: u64,
-}
-
-/// One label-set's bucketed series.
-#[derive(Debug, Serialize)]
-pub struct MetricsSeries {
-    pub labels: serde_json::Value,
-    pub metric_type: i32,
-    pub points: Vec<MetricPoint>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct MetricsResponse {
-    pub name: String,
-    pub from: DateTime<Utc>,
-    pub to: DateTime<Utc>,
-    pub step: i64,
-    pub series: Vec<MetricsSeries>,
-}
-
-/// `GET /api/v1/agents/{agent_id}/metrics` — aggregated edge-metric history.
-///
-/// Rows shipped through `ShipMetrics` are grouped by their label set and
-/// bucketed into `step`-second windows with `avg`/`min`/`max` per bucket, so a
-/// chart can render a month of data from a bounded number of points. The
-/// bucketing runs in PostgreSQL: only one row per (label set, bucket) ever
-/// crosses the wire, no matter how many raw points the window holds.
-async fn metrics(
-    State(state): State<AppState>,
-    current: AuthUser,
-    Path(agent_id): Path<String>,
-    Query(query): Query<MetricsQuery>,
-) -> Result<Json<MetricsResponse>, ApiError> {
-    let id = parse_uuid(&agent_id, "agent id")?;
-    load_agent(&state, id, &current).await?;
-
-    let name = non_empty(&query.name)
-        .ok_or_else(|| ApiError::BadRequest("name is required".to_string()))?
-        .to_string();
-
-    let to = parse_optional_datetime(&query.to, "to")?.unwrap_or_else(Utc::now);
-    let from = parse_optional_datetime(&query.from, "from")?
-        .unwrap_or(to - chrono::Duration::hours(1));
-    if from >= to {
-        return Err(ApiError::BadRequest(
-            "'from' must be before 'to'".to_string(),
-        ));
-    }
-    let step = query.step.unwrap_or(60).max(10);
-
-    // `step` is a validated integer and the bucket expression only feeds
-    // GROUP BY, so binding both keeps the query plannable. The floor mirrors
-    // the integer division the in-memory aggregator used to perform.
-    let sql = "SELECT labels, metric_type, \
-                     floor(extract(epoch FROM (recorded_at - $3)) / $5)::BIGINT AS bucket, \
-                     AVG(value) AS avg, MIN(value) AS min, MAX(value) AS max, \
-                     COUNT(*) AS count \
-              FROM agent_metrics \
-              WHERE agent_id = $1 AND name = $2 \
-                AND recorded_at >= $3 AND recorded_at < $4 \
-              GROUP BY labels, metric_type, bucket \
-              ORDER BY labels::text ASC, metric_type ASC, bucket ASC";
-    let values: Vec<sea_orm::Value> = vec![
-        id.into(),
-        name.clone().into(),
-        from.into(),
-        to.into(),
-        step.into(),
-    ];
-    let rows = query_all(&state.db, sql, values).await?;
-
-    let mut buckets = Vec::with_capacity(rows.len());
-    for row in &rows {
-        buckets.push(AggregatedBucket {
-            labels: row
-                .try_get("", "labels")
-                .unwrap_or(serde_json::Value::Null),
-            metric_type: row.try_get("", "metric_type").unwrap_or_default(),
-            bucket: row.try_get("", "bucket").unwrap_or_default(),
-            avg: row.try_get("", "avg").unwrap_or_default(),
-            min: row.try_get("", "min").unwrap_or_default(),
-            max: row.try_get("", "max").unwrap_or_default(),
-            count: row.try_get::<i64>("", "count").unwrap_or_default().max(0)
-                as u64,
-        });
-    }
-
-    Ok(Json(MetricsResponse {
-        name,
-        from,
-        to,
-        step,
-        series: series_from_buckets(from, step, buckets),
-    }))
-}
-
-/// One (label set, bucket) aggregate as produced by the metrics query.
-struct AggregatedBucket {
-    labels: serde_json::Value,
-    metric_type: i32,
-    bucket: i64,
-    avg: f64,
-    min: f64,
-    max: f64,
-    count: u64,
-}
-
-/// Folds the query's aggregated rows into the response's series. Rows arrive
-/// ordered by (labels, metric type, bucket); each run of equal label set and
-/// type becomes one series.
-fn series_from_buckets(
-    from: DateTime<Utc>,
-    step: i64,
-    buckets: Vec<AggregatedBucket>,
-) -> Vec<MetricsSeries> {
-    let mut series: Vec<MetricsSeries> = Vec::new();
-    for bucket in buckets {
-        if series.last().is_none_or(|s| {
-            s.labels != bucket.labels || s.metric_type != bucket.metric_type
-        }) {
-            series.push(MetricsSeries {
-                labels: bucket.labels.clone(),
-                metric_type: bucket.metric_type,
-                points: Vec::new(),
-            });
-        }
-        series.last_mut().expect("series just pushed").points.push(
-            MetricPoint {
-                t: from + chrono::Duration::seconds(bucket.bucket * step),
-                avg: bucket.avg,
-                min: bucket.min,
-                max: bucket.max,
-                count: bucket.count,
-            },
-        );
-    }
-    series
-}
-
 /// `DELETE /api/v1/agents/{agent_id}` — de-registers an agent.
 async fn remove(
     State(state): State<AppState>,
@@ -710,11 +549,25 @@ pub fn build_command(
                     "ip_addresses must not be empty".to_string(),
                 ));
             }
+            // Reuse the manual-block guard: every entry goes through the
+            // same /16 (v4) and /32 (v6) ceiling as `POST /blocked-ips/block`,
+            // so a command can never blanket-ban `0.0.0.0/0`, and each entry
+            // is written back in its normalised (host bits truncated,
+            // mapped-v6 collapsed) form so agents key on one canonical
+            // string.
+            let normalized: Vec<String> = payload
+                .ip_addresses
+                .iter()
+                .map(|raw| {
+                    crate::api::blocked_ips::parse_block_target(raw)
+                        .map(|target| target.as_stored())
+                })
+                .collect::<Result<_, _>>()?;
             (
                 command_type::BLOCK_IP,
                 Some(server_command_payload::BlockIp(BlockIpCommand {
                     site_id: site.clone(),
-                    ip_addresses: payload.ip_addresses.clone(),
+                    ip_addresses: normalized,
                     duration_seconds: payload.duration_seconds.unwrap_or(0),
                     reason: payload
                         .reason
@@ -729,12 +582,21 @@ pub fn build_command(
                     "ip_addresses must not be empty".to_string(),
                 ));
             }
+            // No width guard here — unblocking must never be stricter than
+            // blocking — but the same normalisation, so the key matches the
+            // one the block was stored under and the agent's exact removal
+            // hits.
+            let normalized: Vec<String> = payload
+                .ip_addresses
+                .iter()
+                .map(|raw| crate::api::blocked_ips::parse_unblock_target(raw))
+                .collect::<Result<_, _>>()?;
             (
                 command_type::UNBLOCK_IP,
                 Some(server_command_payload::UnblockIp(
                     pingwaf_proto::control_plane::UnblockIpCommand {
                         site_id: site.clone(),
-                        ip_addresses: payload.ip_addresses.clone(),
+                        ip_addresses: normalized,
                     },
                 )),
             )
@@ -819,85 +681,80 @@ mod tests {
         assert!(build_command(&request("self-destruct"), None).is_err());
     }
 
-    fn aggregated(
-        labels: serde_json::Value,
-        metric_type: i32,
-        bucket: i64,
-        avg: f64,
-        min: f64,
-        max: f64,
-        count: u64,
-    ) -> AggregatedBucket {
-        AggregatedBucket {
-            labels,
-            metric_type,
-            bucket,
-            avg,
-            min,
-            max,
-            count,
+    fn ips(command: &str, addresses: &[&str]) -> CommandRequest {
+        let mut req = request(command);
+        req.ip_addresses = addresses.iter().map(|s| s.to_string()).collect();
+        req
+    }
+
+    fn block_payload(req: &CommandRequest) -> Vec<String> {
+        match build_command(req, None).unwrap().payload.unwrap() {
+            server_command_payload::BlockIp(cmd) => cmd.ip_addresses,
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    fn unblock_payload(req: &CommandRequest) -> Vec<String> {
+        match build_command(req, None).unwrap().payload.unwrap() {
+            server_command_payload::UnblockIp(cmd) => cmd.ip_addresses,
+            other => panic!("unexpected payload: {other:?}"),
         }
     }
 
     #[test]
-    fn aggregation_buckets_by_labels_and_step() {
-        let from = Utc::now();
-        let step = 60;
-
-        // Rows exactly as the SQL hands them back: ordered by label set,
-        // metric type, then bucket index.
-        let rows = vec![
-            aggregated(serde_json::json!({}), 1, 0, 20.0, 10.0, 30.0, 2),
-            aggregated(serde_json::json!({}), 1, 1, 50.0, 50.0, 50.0, 1),
-            aggregated(
-                serde_json::json!({"site": "a.example.com"}),
-                1,
-                0,
-                7.0,
-                7.0,
-                7.0,
-                1,
-            ),
-            // The same label set with a different metric type is its own
-            // series even when it shares the label text.
-            aggregated(
-                serde_json::json!({"site": "a.example.com"}),
-                2,
-                0,
-                9.0,
-                9.0,
-                9.0,
-                1,
-            ),
-        ];
-
-        let series = series_from_buckets(from, step, rows);
-
-        assert_eq!(series.len(), 3, "label sets are separate series");
-        let plain = &series[0];
-        assert_eq!(plain.labels, serde_json::json!({}));
-        assert_eq!(plain.points.len(), 2);
-        assert_eq!(plain.points[0].t, from);
-        assert_eq!(plain.points[0].avg, 20.0);
-        assert_eq!(plain.points[0].min, 10.0);
-        assert_eq!(plain.points[0].max, 30.0);
-        assert_eq!(plain.points[0].count, 2);
-        assert_eq!(plain.points[1].t, from + chrono::Duration::seconds(60));
-        assert_eq!(plain.points[1].avg, 50.0);
-
-        let labelled = &series[1];
-        assert_eq!(labelled.points.len(), 1);
-        assert_eq!(labelled.points[0].avg, 7.0);
-        assert_eq!(labelled.metric_type, 1);
-
-        let other_type = &series[2];
-        assert_eq!(other_type.metric_type, 2);
-        assert_eq!(other_type.points[0].avg, 9.0);
+    fn block_ip_rejects_cidrs_wider_than_the_manual_block_guard() {
+        for raw in [
+            "0.0.0.0/0",
+            "::/0",
+            "10.0.0.0/8",
+            "2001:db8::/16",
+            // /96 v6 numerically covers the whole IPv4-mapped space; it is
+            // the mapped spelling of 0.0.0.0/0 and must hit the same guard.
+            "::ffff:0:0/96",
+        ] {
+            let err = build_command(&ips("block_ip", &[raw]), None)
+                .err()
+                .unwrap_or_else(|| panic!("{raw} must be rejected"));
+            assert!(err.to_string().contains("too broad"), "{raw}: {err}");
+        }
     }
 
     #[test]
-    fn aggregation_of_empty_window_is_empty() {
-        let series = series_from_buckets(Utc::now(), 60, Vec::new());
-        assert!(series.is_empty());
+    fn block_ip_normalises_targets_like_the_manual_block_path() {
+        assert_eq!(
+            block_payload(&ips("block_ip", &["203.0.113.99/24"])),
+            vec!["203.0.113.0/24".to_string()]
+        );
+        assert_eq!(
+            block_payload(&ips("block_ip", &[" 203.0.113.7 "])),
+            vec!["203.0.113.7".to_string()]
+        );
+        assert_eq!(
+            block_payload(&ips(
+                "block_ip",
+                &["::ffff:203.0.113.0/120", "2001:db8::/32"]
+            )),
+            vec!["203.0.113.0/24".to_string(), "2001:db8::/32".to_string()]
+        );
+        // /104 on a mapped address maps to a v4 /8 — beyond the v4 ceiling.
+        assert!(build_command(
+            &ips("block_ip", &["::ffff:10.0.0.0/104"]),
+            None
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn unblock_ip_is_normalised_but_not_width_guarded() {
+        // Same normalisation as blocking, so the exact key matches.
+        assert_eq!(
+            unblock_payload(&ips(
+                "unblock_ip",
+                &["203.0.113.99/24", "::ffff:203.0.113.5"]
+            )),
+            vec!["203.0.113.0/24".to_string(), "203.0.113.5".to_string()]
+        );
+        // Invalid input is still rejected.
+        assert!(build_command(&ips("unblock_ip", &["nonsense"]), None).is_err());
     }
 }

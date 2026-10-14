@@ -20,7 +20,6 @@ pub struct Model {
     pub exempt_paths: Vec<String>,
     pub browser_integrity_check: bool,
     pub tls_fingerprint_check: bool,
-    pub cookie_secret: Option<String>,
     pub updated_at: DateTimeUtc,
 }
 
