@@ -10,7 +10,10 @@ use axum::routing::get;
 use axum::Json;
 use axum::Router;
 use chrono::{DateTime, Duration, Utc};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, TryGetable, Value};
+use sea_orm::{
+    ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, TryGetable,
+    Value,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -37,6 +40,12 @@ const INTERVALS: [&str; 4] = ["minute", "hour", "day", "week"];
 
 /// Sites tracked by the per-site traffic chart.
 const TOP_SITES_LIMIT: i64 = 8;
+/// Upper bound on the site rows `GET /analytics/sites` loads for the
+/// admin global view. The control plane realistically serves far fewer
+/// sites; the cap turns an unbounded `site::find().all()` into a bounded
+/// query (newest sites first) and the response's `truncated` flag says
+/// the list was cut.
+const SITES_OVERVIEW_CAP: usize = 500;
 
 /// Fixed bucket widths (seconds) accepted by `/analytics/traffic`.
 const TRAFFIC_STEPS: [i64; 8] = [5, 10, 30, 60, 300, 900, 3600, 86_400];
@@ -158,6 +167,10 @@ pub struct TopIp {
     pub country_code: Option<String>,
     pub requests: i64,
     pub blocked: i64,
+    /// Site the IP most recently requested (the natural target for a
+    /// one-click block/challenge from the dashboard's cross-site view);
+    /// `None` when the log rows carry no resolvable site.
+    pub top_site_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -695,7 +708,8 @@ async fn top_ips(
         "SELECT client_ip, \
                 MAX(country_code) AS country_code, \
                 COUNT(*) AS requests, \
-                COUNT(*) FILTER (WHERE status_code = 403 OR status_code = 429) AS blocked \
+                COUNT(*) FILTER (WHERE status_code = 403 OR status_code = 429) AS blocked, \
+                (ARRAY_AGG(site_id ORDER BY timestamp DESC))[1] AS top_site_id \
          FROM access_logs WHERE {where_sql} \
          GROUP BY client_ip ORDER BY requests DESC LIMIT ${limit_placeholder}"
     );
@@ -708,6 +722,7 @@ async fn top_ips(
                 country_code: try_get::<String>(row, "country_code"),
                 requests: get_value::<i64>(row, "requests"),
                 blocked: get_value::<i64>(row, "blocked"),
+                top_site_id: try_get::<Uuid>(row, "top_site_id"),
             })
             .collect(),
     ))
@@ -772,18 +787,40 @@ async fn status_codes(
     ))
 }
 
+/// Response envelope of `GET /api/v1/analytics/sites`.
+#[derive(Serialize)]
+struct SitesOverviewResponse {
+    sites: Vec<SiteOverview>,
+    /// True when the global view listed more sites than
+    /// [`SITES_OVERVIEW_CAP`]; only the newest sites are included.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    truncated: bool,
+}
+
 /// `GET /api/v1/analytics/sites` — traffic per site, used by the home page.
 async fn sites_overview(
     State(state): State<AppState>,
     current: AuthUser,
     Query(query): Query<RangeQuery>,
-) -> Result<Json<Vec<SiteOverview>>, ApiError> {
+) -> Result<Json<SitesOverviewResponse>, ApiError> {
     let resolved = resolve(&state, &current, &query).await?;
 
-    let sites = match resolved.site_id {
+    let mut sites = match resolved.site_id {
         Some(id) => vec![load_site_read(&state.db, id, &current).await?],
-        None => site::Entity::find().all(&state.db).await?,
+        None => {
+            site::Entity::find()
+                .order_by_desc(site::Column::CreatedAt)
+                .limit(SITES_OVERVIEW_CAP as u64 + 1)
+                .all(&state.db)
+                .await?
+        },
     };
+    // One extra row fetched tells truncation apart from an exact fit
+    // without a second (count) query.
+    let truncated = sites.len() > SITES_OVERVIEW_CAP;
+    if truncated {
+        sites.truncate(SITES_OVERVIEW_CAP);
+    }
 
     // Two grouped counts over the window — traffic from the access log and
     // blocked traffic from the security event log — merged onto the site list
@@ -838,7 +875,10 @@ async fn sites_overview(
         })
         .collect();
 
-    Ok(Json(out))
+    Ok(Json(SitesOverviewResponse {
+        sites: out,
+        truncated,
+    }))
 }
 
 /// Reads a column, falling back to the type's default when the aggregate

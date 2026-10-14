@@ -270,6 +270,7 @@ export function LogsPage() {
   const active =
     tab === 'security' ? securityQuery : tab === 'access' ? accessQuery : controlQuery
   const total = active.data?.total ?? 0
+  const totalTruncated = active.data?.total_truncated ?? false
   const rows = active.data?.items ?? []
 
   const purge = useMutation({
@@ -1177,6 +1178,7 @@ export function LogsPage() {
                   page={page}
                   pageSize={pageSize}
                   total={total}
+                  totalTruncated={totalTruncated}
                   onChange={setPage}
                   pageSizeOptions={PAGE_SIZES}
                   onPageSizeChange={setPageSize}

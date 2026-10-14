@@ -117,13 +117,13 @@ export function SitesListPage() {
 
   const trafficBySite = useMemo(() => {
     const map = new Map<string, { requests: number; blocked: number }>()
-    for (const row of trafficQuery.data ?? []) {
+    for (const row of trafficQuery.data?.sites ?? []) {
       map.set(row.site_id, { requests: row.requests, blocked: row.blocked })
     }
     return map
   }, [trafficQuery.data])
 
-  const sites = sitesQuery.data ?? []
+  const sites = useMemo(() => sitesQuery.data ?? [], [sitesQuery.data])
 
   /* ── Row selection (Z1 batch operations) ─────────────────────────── */
   const selectedIds = useMemo(

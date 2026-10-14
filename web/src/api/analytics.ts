@@ -2,8 +2,8 @@ import { apiClient } from './client'
 import type {
   AnalyticsSummary,
   RangeQuery,
-  SiteOverview,
   SiteTrafficBucket,
+  SitesOverviewResponse,
   StatusCodeCount,
   TimeBucket,
   TopIp,
@@ -48,8 +48,12 @@ export const analyticsApi = {
   statusCodes: (params: RangeQuery = {}) =>
     apiClient.get<StatusCodeCount[]>('/analytics/status-codes', { query: params }),
 
+  /**
+   * Traffic per site for the home page; the global view is server-capped
+   * (newest sites first) and `truncated` reports whether the list was cut.
+   */
   sitesOverview: (params: RangeQuery = {}) =>
-    apiClient.get<SiteOverview[]>('/analytics/sites', { query: params }),
+    apiClient.get<SitesOverviewResponse>('/analytics/sites', { query: params }),
 }
 
 /** RFC 3339 helper — the backend parses `from`/`to` with `DateTime::parse_from_rfc3339`. */

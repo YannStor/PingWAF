@@ -7,6 +7,12 @@
 //! address, never by forwarding headers, so the limit cannot be dodged by
 //! spoofing `X-Forwarded-For`.
 //!
+//! The table is capped; entries expire with their own bucket's window, and
+//! when the cap is hit anyway the endpoints fail closed (429) rather than
+//! admitting peers without tracking — an untracked login still costs a
+//! bcrypt hash, so failing open would silently disable the limit exactly
+//! when a flood needs it most.
+//!
 //! Deployments behind one shared NAT exit (offices, campus networks) all
 //! present the same address and can hit the limits with legitimate traffic;
 //! the limits are generous, but such operators should give the dashboard a
@@ -14,6 +20,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::atomic::Ordering;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -46,9 +53,6 @@ const PASSWORD: Rate = Rate {
     limit: 10,
 };
 
-/// Widest bucket window; entries untouched this long are reclaimable.
-const MAX_WINDOW: Duration = REGISTER.window;
-
 #[derive(Clone, Copy)]
 struct Rate {
     window: Duration,
@@ -59,13 +63,26 @@ type Counters = HashMap<(&'static str, IpAddr), Entry>;
 
 struct Entry {
     window_start: Instant,
+    /// This entry's own bucket window. Entries become reclaimable
+    /// `window` after their window started, so a 60-second login slot is
+    /// reclaimable after 60 seconds instead of lingering for the widest
+    /// bucket's hour.
+    window: Duration,
     count: u32,
 }
 
 /// Upper bound on tracked (bucket, peer) pairs. Peers are real sockets, so
-/// growth is bounded by the network; the cap only turns a flood of unique
-/// peers into "admitted untracked" instead of unbounded memory.
+/// growth is bounded by the network; the cap keeps a flood of unique peers
+/// from growing memory without bound. When the table is full the
+/// credential endpoints **fail closed** — rejecting the peer with a
+/// 429 — rather than admitting it untracked, because an untracked login
+/// still costs a bcrypt hash per request.
 const MAX_ENTRIES: usize = 10_000;
+
+/// One-shot latch so the "table full" transition logs once per episode
+/// instead of once per rejected request.
+static TABLE_FULL_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 static COUNTERS: LazyLock<Mutex<Counters>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -91,7 +108,8 @@ fn bucket_for(
 }
 
 /// Counts one request. Returns `Err(seconds until the window resets)` once
-/// the peer exceeds the bucket's limit.
+/// the peer exceeds the bucket's limit — or, when the table is full with
+/// unexpired entries, `Err(seconds until the oldest window frees a slot)`.
 fn consume(
     counters: &mut Counters,
     bucket: &'static str,
@@ -100,28 +118,55 @@ fn consume(
     now: Instant,
 ) -> Result<(), u64> {
     if !counters.contains_key(&(bucket, ip)) && counters.len() >= MAX_ENTRIES {
+        // Reclaim with each entry's own window, not the widest bucket's:
+        // most slots are 60-second windows and must not be held hostage
+        // for an hour by the registration bucket's span.
         counters.retain(|_, entry| {
-            now.duration_since(entry.window_start) < MAX_WINDOW
+            now.duration_since(entry.window_start) < entry.window
         });
         if counters.len() >= MAX_ENTRIES {
-            tracing::debug!(
-                "rate-limit table full; admitting peer without tracking"
-            );
-            return Ok(());
+            // Still full: a genuine flood of unique peers. Admitting the
+            // peer would silently disable the limit on exactly the
+            // endpoints whose per-request cost (a bcrypt hash) makes them
+            // the cheapest way to exhaust the CPU, so the request fails
+            // closed until the oldest window expires.
+            if !TABLE_FULL_WARNED.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    bucket,
+                    "rate-limit table full; rejecting new peers until \
+                     their windows expire"
+                );
+            }
+            // Retry hint: the soonest an existing entry expires and frees
+            // a slot for this peer.
+            let soonest = counters
+                .values()
+                .map(|entry| {
+                    entry
+                        .window
+                        .saturating_sub(now.duration_since(entry.window_start))
+                })
+                .min()
+                .unwrap_or(rate.window);
+            return Err(soonest.as_secs().max(1));
+        }
+        if TABLE_FULL_WARNED.swap(false, Ordering::Relaxed) {
+            tracing::info!("rate-limit table has headroom again");
         }
     }
 
     let entry = counters.entry((bucket, ip)).or_insert(Entry {
         window_start: now,
+        window: rate.window,
         count: 0,
     });
-    if now.duration_since(entry.window_start) >= rate.window {
+    if now.duration_since(entry.window_start) >= entry.window {
         entry.window_start = now;
         entry.count = 0;
     }
     entry.count += 1;
     if entry.count > rate.limit {
-        let remaining = rate
+        let remaining = entry
             .window
             .saturating_sub(now.duration_since(entry.window_start));
         return Err(remaining.as_secs().max(1));
@@ -318,39 +363,92 @@ mod tests {
     }
 
     #[test]
-    fn a_flood_of_unique_peers_is_admitted_untracked() {
+    fn a_flood_of_unique_peers_is_rejected_until_windows_expire() {
         let mut counters = Counters::new();
         let now = Instant::now();
-        let rate = Rate {
-            window: MAX_WINDOW,
+        let hour = Rate {
+            window: Duration::from_secs(3600),
             limit: 1,
         };
         for i in 0..MAX_ENTRIES {
             counters.insert(
-                ("login", ip(&format!("10.78.{}.{}", i / 256, i % 256))),
+                ("register", ip(&format!("10.78.{}.{}", i / 256, i % 256))),
                 Entry {
                     window_start: now,
+                    window: hour.window,
                     count: 1,
                 },
             );
         }
 
-        // A fresh peer is admitted without growing the table.
+        // Fresh peer, full table, nothing reclaimable: rejected with a
+        // bounded retry hint instead of admitted untracked — admitting it
+        // would silently disable the limit on the credential endpoints,
+        // whose per-request bcrypt cost is exactly what the flood is after.
+        let fresh =
+            consume(&mut counters, "register", hour, ip("10.79.0.1"), now);
+        let retry = fresh.expect_err("a full table must fail closed");
         assert!(
-            consume(&mut counters, "login", rate, ip("10.79.0.1"), now).is_ok()
+            (1..=3600).contains(&retry),
+            "retry hint must be within the widest window, got {retry}"
         );
-        assert_eq!(counters.len(), MAX_ENTRIES);
+        assert_eq!(counters.len(), MAX_ENTRIES, "no slot was consumed");
 
-        // Once its entry expires, the peer is tracked again.
+        // Once the windows expire the entries are reclaimable and the
+        // peer is tracked again.
+        let later = now + hour.window;
         assert!(consume(
             &mut counters,
-            "login",
-            rate,
-            ip("10.79.0.1"),
-            now + MAX_WINDOW
+            "register",
+            hour,
+            ip("10.79.0.2"),
+            later
         )
         .is_ok());
-        assert!(counters.contains_key(&("login", ip("10.79.0.1"))));
+        assert!(counters.contains_key(&("register", ip("10.79.0.2"))));
+    }
+
+    /// Entries expire with their own bucket's window: a table full of
+    /// 60-second login slots becomes reclaimable after 60 seconds even
+    /// though the registration bucket's hour has not passed — the
+    /// pre-fix behavior held them for the widest window.
+    #[test]
+    fn short_window_entries_do_not_linger_for_the_widest_bucket() {
+        let mut counters = Counters::new();
+        let now = Instant::now();
+        // One long-window registration slot …
+        counters.insert(
+            ("register", ip("10.80.0.1")),
+            Entry {
+                window_start: now,
+                window: REGISTER.window,
+                count: 1,
+            },
+        );
+        // … and the rest 60-second login slots.
+        for i in 0..MAX_ENTRIES - 1 {
+            counters.insert(
+                ("login", ip(&format!("10.81.{}.{}", i / 256, i % 256))),
+                Entry {
+                    window_start: now,
+                    window: LOGIN.window,
+                    count: 1,
+                },
+            );
+        }
+
+        let later = now + LOGIN.window + Duration::from_secs(1);
+        // Every login slot is expired and reclaimable at `later` — an
+        // hour before the registration window ends.
+        assert!(
+            consume(&mut counters, "login", LOGIN, ip("10.82.0.1"), later)
+                .is_ok()
+        );
+        assert_eq!(
+            counters.len(),
+            2,
+            "only the register slot and the new peer remain"
+        );
     }
 
     /// Drives the middleware through the same shape production uses — a

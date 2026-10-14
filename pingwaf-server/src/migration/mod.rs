@@ -60,6 +60,7 @@ pub mod m20240101_000052_origin_settings;
 pub mod m20240101_000053_site_origin_verify_cert;
 pub mod m20240101_000054_drop_challenge_cookie_secret;
 pub mod m20240101_000055_site_domain_unique;
+pub mod m20240101_000056_log_search_trgm;
 
 use sea_orm_migration::prelude::*;
 
@@ -131,6 +132,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000053_site_origin_verify_cert::Migration),
             Box::new(m20240101_000054_drop_challenge_cookie_secret::Migration),
             Box::new(m20240101_000055_site_domain_unique::Migration),
+            Box::new(m20240101_000056_log_search_trgm::Migration),
         ]
     }
 }
@@ -142,7 +144,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 55);
+        assert_eq!(migrations.len(), 56);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

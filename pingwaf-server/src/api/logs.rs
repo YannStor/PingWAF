@@ -5,16 +5,17 @@ use axum::routing::get;
 use axum::Json;
 use axum::Router;
 use chrono::{DateTime, Duration, Utc};
+use sea_orm::sea_query::{Alias, Expr, PostgresQueryBuilder};
 use sea_orm::{
-    ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+    ColumnTrait, Condition, DatabaseConnection, EntityTrait, QueryFilter,
+    QueryOrder, QuerySelect, QueryTrait,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::common::{
-    non_empty, parse_optional_datetime, parse_uuid, scope_site, Page,
-    Pagination,
+    non_empty, parse_optional_datetime, parse_uuid, query_all, scope_site,
+    Page, Pagination,
 };
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
@@ -26,6 +27,15 @@ const DEFAULT_WINDOW_HOURS: i64 = 24;
 /// Hard ceiling on the requested window, so a stray `from=1970` cannot scan the
 /// whole table.
 const MAX_WINDOW_DAYS: i64 = 90;
+/// Upper bound on how many matching rows the log listings count exactly.
+/// The count subquery stops after `COUNT_CAP + 1` id hits, so a broad
+/// free-text search — whose leading-wildcard LIKE a btree cannot serve —
+/// costs the same as a narrow one instead of draining every match in the
+/// (up to 90-day) window. Beyond the cap the page reports
+/// `total = COUNT_CAP` and sets `total_truncated`, which the console
+/// renders as "10000+"; investigation flows refine the query rather
+/// than paging through ten thousand rows.
+const COUNT_CAP: u64 = 10_000;
 
 #[derive(Debug, Deserialize)]
 pub struct SecurityQuery {
@@ -240,6 +250,31 @@ pub(crate) fn free_text_filter(
         .add(host_column.like(pattern))
 }
 
+/// Bounded `COUNT(*)` for one of the log listings. The caller supplies a
+/// matching-ids query already limited to `COUNT_CAP + 1`; this counts it
+/// inside the database, so the ids never travel to the application and
+/// the scan stops early instead of visiting every match. Returns
+/// `(total, truncated)` — `total` is capped at [`COUNT_CAP`] and
+/// `truncated` tells the page envelope the true count is larger.
+async fn capped_total(
+    db: &DatabaseConnection,
+    capped: sea_orm::sea_query::SelectStatement,
+) -> Result<(u64, bool), ApiError> {
+    let (sql, values) = sea_orm::sea_query::Query::select()
+        .expr_as(Expr::cust("COUNT(*)"), Alias::new("count"))
+        .from_subquery(capped, Alias::new("capped"))
+        .build(PostgresQueryBuilder);
+    let rows = query_all(db, &sql, values.0).await?;
+    // COUNT(*) over a subquery returns exactly one row; a missing or
+    // unreadable value means zero matches, not a failure.
+    let count = rows
+        .first()
+        .and_then(|row| row.try_get::<i64>("", "count").ok())
+        .unwrap_or_default()
+        .max(0) as u64;
+    Ok((count.min(COUNT_CAP), count > COUNT_CAP))
+}
+
 /// Resolves and validates the `from`/`to` window.
 pub(crate) fn resolve_window(
     from: &Option<String>,
@@ -332,14 +367,30 @@ async fn list_security(
         ));
     }
 
-    let paginator = security_event::Entity::find()
+    // Bounded count: the id-only subquery stops at the cap, so neither a
+    // broad free-text search nor a wide window makes the count the most
+    // expensive part of the listing.
+    let capped = security_event::Entity::find()
+        .filter(condition.clone())
+        .select_only()
+        .column(security_event::Column::Id)
+        .limit(COUNT_CAP + 1)
+        .into_query();
+    let (total, total_truncated) = capped_total(&state.db, capped).await?;
+
+    let rows = security_event::Entity::find()
         .filter(condition)
         .order_by_desc(security_event::Column::Timestamp)
-        .paginate(&state.db, pagination.limit());
-
-    let total = paginator.num_items().await?;
-    let rows = paginator.fetch_page(pagination.index()).await?;
-    Ok(Json(Page::new(rows, total, pagination)))
+        .offset(pagination.offset())
+        .limit(pagination.limit())
+        .all(&state.db)
+        .await?;
+    Ok(Json(Page::new_capped(
+        rows,
+        total,
+        pagination,
+        total_truncated,
+    )))
 }
 
 /// `GET /api/v1/logs/access`
@@ -422,14 +473,28 @@ async fn list_access(
         ));
     }
 
-    let paginator = access_log::Entity::find()
+    // Bounded count, same shape as the security-event listing.
+    let capped = access_log::Entity::find()
+        .filter(condition.clone())
+        .select_only()
+        .column(access_log::Column::Id)
+        .limit(COUNT_CAP + 1)
+        .into_query();
+    let (total, total_truncated) = capped_total(&state.db, capped).await?;
+
+    let rows = access_log::Entity::find()
         .filter(condition)
         .order_by_desc(access_log::Column::Timestamp)
-        .paginate(&state.db, pagination.limit());
-
-    let total = paginator.num_items().await?;
-    let rows = paginator.fetch_page(pagination.index()).await?;
-    Ok(Json(Page::new(rows, total, pagination)))
+        .offset(pagination.offset())
+        .limit(pagination.limit())
+        .all(&state.db)
+        .await?;
+    Ok(Json(Page::new_capped(
+        rows,
+        total,
+        pagination,
+        total_truncated,
+    )))
 }
 
 /// Rows deleted per statement by [`purge_logs`].

@@ -118,16 +118,33 @@ impl Pagination {
 pub struct Page<T> {
     pub items: Vec<T>,
     pub total: u64,
+    /// True when `total` is a lower bound rather than the exact count —
+    /// the log listings cap their count query, so a broad free-text
+    /// search reports `COUNT_CAP` matches plus this flag instead of
+    /// scanning every hit. Absent (false) means the total is exact.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub total_truncated: bool,
     pub page: u64,
     pub page_size: u64,
 }
 
 impl<T> Page<T> {
     pub fn new(items: Vec<T>, total: u64, pagination: Pagination) -> Self {
+        Self::new_capped(items, total, pagination, false)
+    }
+
+    /// Like [`Self::new`], for listings whose count is bounded by a cap.
+    pub fn new_capped(
+        items: Vec<T>,
+        total: u64,
+        pagination: Pagination,
+        total_truncated: bool,
+    ) -> Self {
         let p = pagination.normalise();
         Self {
             items,
             total,
+            total_truncated,
             page: p.page,
             page_size: p.page_size,
         }
@@ -509,6 +526,30 @@ pub fn map_domain_conflict(err: DbErr) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `total_truncated` flag must be absent (not `false`) on exact
+    /// counts, so the wire format of every existing list endpoint stays
+    /// byte-identical, and present only when a listing really is capped.
+    #[test]
+    fn page_serialises_total_truncated_only_when_capped() {
+        let exact = serde_json::to_value(Page::new(
+            vec![1_u64],
+            7,
+            Pagination::default(),
+        ))
+        .expect("exact page serialises");
+        assert!(exact.get("total_truncated").is_none());
+
+        let capped = serde_json::to_value(Page::new_capped(
+            vec![1_u64],
+            10_000,
+            Pagination::default(),
+            true,
+        ))
+        .expect("capped page serialises");
+        assert_eq!(capped["total_truncated"], true);
+        assert_eq!(capped["total"], 10_000);
+    }
 
     #[test]
     fn domain_conflicts_map_to_bad_request() {

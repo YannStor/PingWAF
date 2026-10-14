@@ -13,6 +13,12 @@ export interface PaginationProps {
   /** Page-size picker values; omit to hide the control. */
   pageSizeOptions?: number[]
   onPageSizeChange?: (size: number) => void
+  /**
+   * True when `total` is a lower bound: the server capped the count, so
+   * the true count is larger. Renders "10000+" instead of "10000"; page
+   * numbers only cover the capped window.
+   */
+  totalTruncated?: boolean
 }
 
 /** Window of page numbers rendered around the current one. */
@@ -43,6 +49,7 @@ export function Pagination({
   className,
   pageSizeOptions,
   onPageSizeChange,
+  totalTruncated,
 }: PaginationProps) {
   const { t } = useTranslation()
   const pageCount = Math.max(1, Math.ceil(total / pageSize))
@@ -58,7 +65,11 @@ export function Pagination({
     >
       <div className="flex items-center gap-3 text-[13px] text-fg-subtle">
         <span>
-          {t('pagination.showing', { from, to, total })}
+          {t('pagination.showing', {
+            from,
+            to,
+            total: totalTruncated ? `${total}+` : total,
+          })}
         </span>
         {pageSizeOptions && onPageSizeChange && (
           <label className="flex items-center gap-1.5">
