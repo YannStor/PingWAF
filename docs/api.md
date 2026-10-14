@@ -405,6 +405,7 @@ List sites (paginated).
       "trust_last_hop": false,
       "trusted_proxy_ranges": [],
       "trusted_proxy_group_ids": [],
+      "origin_verify_cert": null,
       "created_at": "...",
       "updated_at": "..."
     }
@@ -468,6 +469,13 @@ IP groups (see [IP Groups](#ip-groups)); the union of the group's ranges and
 the hand-entered `trusted_proxy_ranges` forms the effective trust scope. The
 console's Cloudflare subscription group covers the official CDN ranges for
 exactly this purpose.
+
+`origin_verify_cert` sets the site-level default for origin TLS certificate
+verification: omitting the key leaves the current value unchanged, `null`
+clears the site's preference, and `true`/`false` pins a site-wide default for
+every origin pool under the site. It only applies to pools whose own
+`verify_cert` is `null` — see [origin pools](#post-sitessite_idupstream-pools) for the
+full precedence order.
 
 ### DELETE /sites/{site_id}
 
@@ -543,7 +551,7 @@ Create an origin pool.
 
 `lb_algorithm` accepts `round_robin`, `random`, `least_connections` or `hash:<type>[:<key>]` with type in `ip`, `url`, `path` (no key) or `header`, `cookie`, `query` (key required). A non-empty `sni` enables TLS to the origin.
 
-`verify_cert` is tri-state: `true` requires the origin's certificate to validate against the system trust store or the pool's own CA, `false` accepts any certificate (not recommended), and `null` — the default — defers to [the global `/settings/origin` value](#get-settingsorigin). Only meaningful when `sni` is set.
+`verify_cert` is tri-state: `true` requires the origin's certificate to validate against the system trust store or the pool's own CA, `false` accepts any certificate (not recommended), and `null` — the default — defers first to the site-level `origin_verify_cert` default and, when that is also unset, to [the global `/settings/origin` value](#get-settingsorigin). Only meaningful when `sni` is set.
 
 ### PUT /sites/{site_id}/upstream-pools/{pool_id}
 

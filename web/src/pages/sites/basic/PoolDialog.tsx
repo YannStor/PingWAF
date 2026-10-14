@@ -191,33 +191,39 @@ export function PoolDialog({
           description={t('pages.basic.httpsOriginHint')}
         />
         {form.httpsOrigin && (
-          <>
-            <Input
-              label={t('pages.basic.sni')}
-              value={form.sni}
-              placeholder="origin.example.com"
-              hint={t('pages.basic.sniHint')}
-              prefixIcon={<Lock weight="duotone" />}
-              onChange={(e) => setForm((f) => ({ ...f, sni: e.target.value }))}
-              required
-            />
-            <Select
-              label={t('pages.basic.verifyCert')}
-              value={form.verifyCert}
-              hint={t('pages.basic.verifyCertHint')}
-              options={VERIFY_CERT_OPTIONS.map((o) => ({
-                value: o.value,
-                label: t(o.labelKey),
-              }))}
-              onChange={(e) =>
-                setForm((f) => ({
-                  ...f,
-                  verifyCert: e.target.value as VerifyCertMode,
-                }))
-              }
-            />
-          </>
+          <Input
+            label={t('pages.basic.sni')}
+            value={form.sni}
+            placeholder="origin.example.com"
+            hint={t('pages.basic.sniHint')}
+            prefixIcon={<Lock weight="duotone" />}
+            onChange={(e) => setForm((f) => ({ ...f, sni: e.target.value }))}
+            required
+          />
         )}
+        {/* Always visible — a hidden field read as "the option is gone".
+            Disabled while the origin is HTTP: without SNI there is no TLS
+            handshake, so there is nothing to verify. */}
+        <Select
+          label={t('pages.basic.verifyCert')}
+          value={form.verifyCert}
+          hint={
+            form.httpsOrigin
+              ? t('pages.basic.verifyCertHint')
+              : t('pages.basic.verifyCertDisabledHint')
+          }
+          disabled={!form.httpsOrigin}
+          options={VERIFY_CERT_OPTIONS.map((o) => ({
+            value: o.value,
+            label: t(o.labelKey),
+          }))}
+          onChange={(e) =>
+            setForm((f) => ({
+              ...f,
+              verifyCert: e.target.value as VerifyCertMode,
+            }))
+          }
+        />
         <Switch
           checked={form.healthCheckEnabled}
           onCheckedChange={(healthCheckEnabled) =>

@@ -599,6 +599,7 @@ mod tests {
             failover_policy: "inherit".to_string(),
             trusted_proxy_ranges: Vec::new(),
             trusted_proxy_group_ids: Vec::new(),
+            origin_verify_cert: None,
             created_at: timestamp,
             updated_at: timestamp,
         };

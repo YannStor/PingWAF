@@ -133,6 +133,11 @@ export interface Site {
   trusted_proxy_ranges: string[]
   /** IP groups whose ranges merge into the trusted-proxy scope. */
   trusted_proxy_group_ids: string[]
+  /**
+   * Site-wide origin certificate check: `null` means every pool without
+   * its own pin follows the deployment-wide `origin_settings.verify_cert`.
+   */
+  origin_verify_cert: boolean | null
   user_id: string
   created_at: string
   updated_at: string
@@ -257,6 +262,12 @@ export interface UpdateSiteRequest {
   trusted_proxy_ranges?: string[]
   /** IP groups whose ranges merge into the trusted-proxy scope. */
   trusted_proxy_group_ids?: string[]
+  /**
+   * Site-wide origin certificate check, as the middle tier of the
+   * pool → site → global cascade. `null` clears the site's opinion
+   * (pools follow the global default again).
+   */
+  origin_verify_cert?: boolean | null
 }
 
 export interface CreateUpstreamRequest {

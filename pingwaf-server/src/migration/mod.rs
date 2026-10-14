@@ -57,6 +57,7 @@ pub mod m20240101_000049_certificate_failure_reason;
 pub mod m20240101_000050_cache_settings;
 pub mod m20240101_000051_cache_type_policy;
 pub mod m20240101_000052_origin_settings;
+pub mod m20240101_000053_site_origin_verify_cert;
 
 use sea_orm_migration::prelude::*;
 
@@ -125,6 +126,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000050_cache_settings::Migration),
             Box::new(m20240101_000051_cache_type_policy::Migration),
             Box::new(m20240101_000052_origin_settings::Migration),
+            Box::new(m20240101_000053_site_origin_verify_cert::Migration),
         ]
     }
 }
@@ -136,7 +138,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 52);
+        assert_eq!(migrations.len(), 53);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

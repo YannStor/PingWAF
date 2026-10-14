@@ -62,6 +62,10 @@ pub struct SiteResponse {
     /// IP groups whose ranges are merged into `trusted_proxy_ranges` when
     /// the agent configuration is built.
     pub trusted_proxy_group_ids: Vec<Uuid>,
+    /// Site-wide default for verifying an HTTPS origin's certificate;
+    /// `None` means every pool without its own pin follows the
+    /// deployment-wide `origin_settings.verify_cert`.
+    pub origin_verify_cert: Option<bool>,
     pub user_id: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -86,6 +90,7 @@ impl From<site::Model> for SiteResponse {
             trust_last_hop: model.trust_last_hop,
             trusted_proxy_ranges: model.trusted_proxy_ranges,
             trusted_proxy_group_ids: model.trusted_proxy_group_ids,
+            origin_verify_cert: model.origin_verify_cert,
             user_id: model.user_id,
             created_at: model.created_at,
             updated_at: model.updated_at,
@@ -236,6 +241,14 @@ pub struct UpdateSiteRequest {
     /// Every id must reference an existing IP group.
     #[serde(default)]
     pub trusted_proxy_group_ids: Option<Vec<Uuid>>,
+    /// Site-wide origin certificate check for this site's HTTPS pools, as
+    /// the middle tier of the pool → site → global cascade. The key being
+    /// present with `null` clears the site's opinion (pools follow the
+    /// global default again); `true`/`false` pins it for every pool that
+    /// does not pin its own value. A missing key leaves the stored value
+    /// alone.
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    pub origin_verify_cert: Option<Option<bool>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -936,6 +949,8 @@ async fn create(
         failover_policy: Set("inherit".to_string()),
         trusted_proxy_ranges: Set(Vec::new()),
         trusted_proxy_group_ids: Set(Vec::new()),
+        // New sites start with no opinion: pools follow the global default.
+        origin_verify_cert: Set(None),
         created_at: Set(timestamp),
         updated_at: Set(timestamp),
     }
@@ -1189,6 +1204,12 @@ async fn update(
             }
         }
         active.trusted_proxy_group_ids = Set(normalized);
+    }
+    // Present-and-null clears the site's opinion (pools fall back to the
+    // global default); present-and-bool pins it. A missing key is already
+    // `None` and must not touch the stored value, hence the outer check.
+    if let Some(verify_cert) = payload.origin_verify_cert {
+        active.origin_verify_cert = Set(verify_cert);
     }
     active.updated_at = Set(Utc::now());
 
@@ -2243,6 +2264,37 @@ pub async fn touch_site(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Three-state semantics of the nullable site field: a missing key must
+    /// leave the stored value alone, a present `null` clears the site's
+    /// opinion, and a bool pins it. Losing the outer `Some` in
+    /// `Option<Option<bool>>` would silently turn `null` into "no change".
+    #[test]
+    fn origin_verify_cert_request_is_three_state() {
+        let absent: UpdateSiteRequest =
+            serde_json::from_str(r#"{}"#).expect("absent key");
+        assert_eq!(absent.origin_verify_cert, None, "missing key = no change");
+
+        let cleared: UpdateSiteRequest =
+            serde_json::from_str(r#"{"origin_verify_cert": null}"#)
+                .expect("present null");
+        assert_eq!(
+            cleared.origin_verify_cert,
+            Some(None),
+            "explicit null clears the site's opinion"
+        );
+
+        let pinned: UpdateSiteRequest =
+            serde_json::from_str(r#"{"origin_verify_cert": false}"#)
+                .expect("present bool");
+        assert_eq!(pinned.origin_verify_cert, Some(Some(false)));
+
+        // Wrong types must be rejected, not coerced.
+        assert!(serde_json::from_str::<UpdateSiteRequest>(
+            r#"{"origin_verify_cert": "false"}"#
+        )
+        .is_err());
+    }
 
     #[test]
     fn proxy_ranges_normalize_to_canonical_cidr() {

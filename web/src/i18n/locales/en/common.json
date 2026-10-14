@@ -887,6 +887,17 @@
       "deleteTitle": "Delete certificate",
       "deleteDescription": "This removes the certificate from the site. This cannot be undone.",
       "siteDescription": "Serve this site over HTTPS and choose the certificate, TLS version window and mTLS policy.",
+      "originVerify": {
+        "title": "Origin certificate check",
+        "description": "Whether origins for this site must present a trusted certificate. Applies to every origin pool of this site without its own pin.",
+        "label": "Site default",
+        "cascadeHint": "Precedence: pool pin > site level (here) > deployment default (Settings → Origin TLS verification).",
+        "effectiveHint": "Each pool's effective value is shown on its card under Basic → Origin pools; a value pinned inside a pool dialog overrides this setting.",
+        "inherit": "Follow the deployment default",
+        "verify": "Verify certificates (strict)",
+        "skip": "Do not verify (lenient, for self-signed origins)",
+        "saved": "Origin certificate check saved"
+      },
       "httpsCardTitle": "HTTPS & certificate",
       "httpsCardHint": "Whether this site serves HTTPS and which certificate it presents.",
       "httpsEnabled": "Enable HTTPS",
@@ -2162,9 +2173,9 @@
       "sni": "SNI hostname",
       "sniHint": "Hostname covered by the origin certificate; $host is not supported",
       "verifyCert": "Origin certificate check",
-      "verifyCertHint": "Follow the deployment default keeps this pool in step with Settings → Origin TLS verification; pinning a value here overrides that switch for this pool only.",
+      "verifyCertHint": "\"Follow the site setting\" first checks this site's origin certificate check (SSL page), then falls back to Settings → Origin TLS verification; pinning a value here fixes it for this pool.",
       "verifyCertMode": {
-        "inherit": "Follow the deployment default",
+        "inherit": "Follow site/deployment default",
         "verify": "Require a trusted certificate",
         "skip": "Do not verify"
       },
@@ -2182,7 +2193,6 @@
       "healthCheckHealthyHint": "Consecutive successes before a node recovers, 1-10",
       "certVerified": "certificate verified",
       "certNotVerified": "certificate not verified",
-      "certInherit": "certificate check follows the deployment default",
       "httpOrigin": "HTTP to origin",
       "routesTitle": "Routes",
       "routesDescription": "Dispatch requests to different pools by path; unmatched traffic goes to the default pool.",
@@ -2280,7 +2290,11 @@
         "headerRealIp": "X-Real-IP",
         "headerCf": "CF-Connecting-IP (Cloudflare)",
         "headerTrueClient": "True-Client-IP"
-      }
+      },
+      "verifyCertDisabledHint": "Turn on \"HTTPS origin\" to configure certificate verification (HTTP origins have no TLS handshake, so there is nothing to verify).",
+      "certFollowGlobal": "certificate check follows the deployment default",
+      "originTlsSummary": "Origin certificate check (site default):",
+      "originTlsSettingsLink": "Configure on the SSL page →"
     },
     "profile": {
       "title": "Account settings",

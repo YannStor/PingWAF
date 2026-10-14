@@ -629,6 +629,7 @@ async fn load_mtls(
 fn pools_to_proto(
     pools: &[site_upstream_pools::Model],
     upstreams: &[site_upstreams::Model],
+    site_default: Option<bool>,
 ) -> Vec<UpstreamConfig> {
     let mut configs = Vec::with_capacity(pools.len());
     for pool in pools {
@@ -679,7 +680,12 @@ fn pools_to_proto(
             pool_id: pool.id.to_string(),
             algo: pool.lb_algorithm.clone(),
             sni: pool.sni.clone().unwrap_or_default(),
-            verify_cert: pool.verify_cert,
+            // Three-level cascade, resolved top-down: the pool's own pin
+            // wins; a pool without one takes the site-wide default; when
+            // both are unset the wire value stays `NULL` and the agent
+            // fills in the deployment-wide default from
+            // `RuleBundle.origin_verify_cert`.
+            verify_cert: pool.verify_cert.or(site_default),
             is_default: pool.is_default,
         });
     }
@@ -1191,7 +1197,11 @@ pub async fn build_rule_bundle(
         ssl: ssl
             .as_ref()
             .map(|row| ssl_to_proto(row, &certificates, &mtls)),
-        upstreams: pools_to_proto(&pools, &upstreams),
+        upstreams: pools_to_proto(
+            &pools,
+            &upstreams,
+            site_row.origin_verify_cert,
+        ),
         routes: routes_to_proto(&routes, &pools, &upstreams, &route_groups),
         bot_protection: Some(bot_protection_to_proto(
             bot.as_ref(),
@@ -1747,6 +1757,7 @@ mod tests {
         let configs = pools_to_proto(
             &[default_pool.clone(), tls_pool, empty_pool],
             &nodes,
+            None,
         );
         assert_eq!(configs.len(), 2);
 
@@ -1765,7 +1776,7 @@ mod tests {
         assert_eq!(configs[1].peers.len(), 1);
         assert!(!configs[1].is_default);
 
-        assert!(pools_to_proto(&[], &nodes).is_empty());
+        assert!(pools_to_proto(&[], &nodes, None).is_empty());
     }
 
     #[test]
@@ -1773,8 +1784,96 @@ mod tests {
         let mut pool = pool_model("default", "round_robin", None, true);
         pool.verify_cert = Some(false);
         let nodes = vec![node_model(pool.id, "10.0.0.1:8080", 1)];
-        let configs = pools_to_proto(&[pool], &nodes);
+        let configs = pools_to_proto(&[pool], &nodes, None);
         assert_eq!(configs[0].verify_cert, Some(false));
+    }
+
+    /// The three-level certificate-verification cascade: a pool pin wins
+    /// over the site default; a pool without one inherits the site value;
+    /// when both are unset the wire value stays `NULL` (the agent fills in
+    /// the deployment-wide default from `RuleBundle.origin_verify_cert`).
+    #[test]
+    fn site_origin_verify_cert_cascade() {
+        let pinned_true = site_upstream_pools::Model {
+            verify_cert: Some(true),
+            ..pool_model(
+                "pinned-true",
+                "round_robin",
+                Some("a.example.com"),
+                false,
+            )
+        };
+        let unpinned =
+            pool_model("unpinned", "round_robin", Some("b.example.com"), false);
+        let pinned_false = site_upstream_pools::Model {
+            verify_cert: Some(false),
+            ..pool_model(
+                "pinned-false",
+                "round_robin",
+                Some("c.example.com"),
+                false,
+            )
+        };
+        let both_unset = pool_model(
+            "both-unset",
+            "round_robin",
+            Some("d.example.com"),
+            false,
+        );
+        // Pools without nodes are skipped, so each pool carries one node.
+        let nodes = vec![
+            node_model(pinned_true.id, "10.0.0.1:8080", 1),
+            node_model(unpinned.id, "10.0.0.2:8080", 1),
+            node_model(pinned_false.id, "10.0.0.3:8080", 1),
+            node_model(both_unset.id, "10.0.0.4:8080", 1),
+        ];
+
+        // Strict site default: the explicit opt-out survives, everything
+        // unpinned inherits the site's verify.
+        let configs = pools_to_proto(
+            &[
+                pinned_true.clone(),
+                unpinned.clone(),
+                pinned_false.clone(),
+                both_unset.clone(),
+            ],
+            &nodes,
+            Some(true),
+        );
+        assert_eq!(configs[0].verify_cert, Some(true), "pool pin wins");
+        assert_eq!(configs[1].verify_cert, Some(true), "site fills in");
+        assert_eq!(
+            configs[2].verify_cert,
+            Some(false),
+            "explicit opt-out survives a strict site"
+        );
+        assert_eq!(configs[3].verify_cert, Some(true), "site fills in");
+
+        // Lenient site default: only the strict pin keeps verifying.
+        let configs = pools_to_proto(
+            &[pinned_true, unpinned, pinned_false, both_unset],
+            &nodes,
+            Some(false),
+        );
+        assert_eq!(configs[0].verify_cert, Some(true), "pool pin wins");
+        assert_eq!(configs[1].verify_cert, Some(false), "site fills in");
+        assert_eq!(
+            configs[2].verify_cert,
+            Some(false),
+            "opt-out keeps skipping"
+        );
+        assert_eq!(configs[3].verify_cert, Some(false), "site fills in");
+
+        // No site opinion: the wire value stays `NULL` and the agent falls
+        // back to `RuleBundle.origin_verify_cert`.
+        let unpinned =
+            pool_model("unpinned", "round_robin", Some("e.example.com"), false);
+        let nodes = vec![node_model(unpinned.id, "10.0.0.5:8080", 1)];
+        let configs = pools_to_proto(&[unpinned], &nodes, None);
+        assert_eq!(
+            configs[0].verify_cert, None,
+            "global fallback is the agent's job"
+        );
     }
 
     #[test]
@@ -1786,7 +1885,7 @@ mod tests {
         // default TCP probe.
         let pool = pool_model("plain", "round_robin", None, false);
         let nodes = nodes_of(pool.id);
-        let configs = pools_to_proto(&[pool], &nodes);
+        let configs = pools_to_proto(&[pool], &nodes, None);
         assert_eq!(configs[0].health_check, None);
 
         // Enabled: every knob rides through, normalized path included.
@@ -1798,7 +1897,7 @@ mod tests {
         pool.health_check_timeout_ms = 2000;
         pool.health_check_unhealthy_threshold = 3;
         pool.health_check_healthy_threshold = 2;
-        let configs = pools_to_proto(&[pool], &nodes);
+        let configs = pools_to_proto(&[pool], &nodes, None);
         let hc = configs[0].health_check.as_ref().expect("health check");
         assert!(hc.enabled);
         assert_eq!(hc.path, "/healthz");
@@ -1816,7 +1915,7 @@ mod tests {
         pool.health_check_timeout_ms = 0;
         pool.health_check_unhealthy_threshold = 0;
         pool.health_check_healthy_threshold = 0;
-        let configs = pools_to_proto(&[pool], &nodes);
+        let configs = pools_to_proto(&[pool], &nodes, None);
         let hc = configs[0].health_check.as_ref().expect("health check");
         assert_eq!(hc.interval_seconds, 1);
         assert_eq!(hc.timeout_ms, 1);

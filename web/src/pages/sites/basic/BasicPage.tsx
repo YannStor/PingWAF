@@ -146,6 +146,7 @@ export function BasicPage() {
         <div className="mt-3">
           <OriginPoolsSection
             siteId={siteId}
+            siteOriginVerifyCert={siteQuery.data?.site.origin_verify_cert ?? null}
             poolsQuery={poolsQuery}
             upstreamsQuery={upstreamsQuery}
             onEditPool={(pool) => setPoolRequest({ mode: 'edit', pool })}

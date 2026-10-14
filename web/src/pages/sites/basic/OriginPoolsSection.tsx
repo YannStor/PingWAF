@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { UseQueryResult } from '@tanstack/react-query'
@@ -33,12 +34,15 @@ import { LB_OPTION_KEYS, splitLbAlgorithm } from './types'
  */
 export function OriginPoolsSection({
   siteId,
+  siteOriginVerifyCert,
   poolsQuery,
   upstreamsQuery,
   onEditPool,
   onCreatePool,
 }: {
   siteId: string
+  /** The site's own origin certificate check; `null` follows the global default. */
+  siteOriginVerifyCert: boolean | null
   poolsQuery: UseQueryResult<UpstreamPool[], Error>
   upstreamsQuery: UseQueryResult<Upstream[], Error>
   onEditPool: (pool: UpstreamPool) => void
@@ -178,6 +182,37 @@ export function OriginPoolsSection({
 
   return (
     <>
+      {/* Site-wide origin TLS default — the middle tier of the cascade.
+          Rendered at the top so the effective policy is visible without
+          opening any pool dialog. */}
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-bg-subtle/60 px-4 py-2.5 text-[13px]">
+        <span className="flex items-center gap-1.5 text-fg-subtle">
+          <Lock weight="duotone" className="h-3.5 w-3.5" />
+          {t('pages.basic.originTlsSummary')}
+          <span
+            className={
+              'font-medium ' +
+              (siteOriginVerifyCert === null
+                ? 'text-fg'
+                : siteOriginVerifyCert
+                  ? 'text-success'
+                  : 'text-warning')
+            }
+          >
+            {siteOriginVerifyCert === null
+              ? t('pages.basic.certFollowGlobal')
+              : siteOriginVerifyCert
+                ? t('pages.basic.certVerified')
+                : t('pages.basic.certNotVerified')}
+          </span>
+        </span>
+        <Link
+          to={`/sites/${siteId}/ssl`}
+          className="text-fg-subtle transition-colors hover:text-fg"
+        >
+          {t('pages.basic.originTlsSettingsLink')}
+        </Link>
+      </div>
       {poolsQuery.isError && !poolsQuery.data ? (
         <ErrorState
           error={poolsQuery.error}
@@ -240,9 +275,10 @@ export function OriginPoolsSection({
                           <Lock weight="duotone" className="h-3.5 w-3.5" />
                           <span className="pw-mono">{pool.sni}</span>
                           <span className="text-fg-subtle/70">
-                            {pool.verify_cert === null
-                              ? t('pages.basic.certInherit')
-                              : pool.verify_cert
+                            {(pool.verify_cert ?? siteOriginVerifyCert) ===
+                            null
+                              ? t('pages.basic.certFollowGlobal')
+                              : (pool.verify_cert ?? siteOriginVerifyCert)
                                 ? t('pages.basic.certVerified')
                                 : t('pages.basic.certNotVerified')}
                           </span>

@@ -94,7 +94,7 @@ An origin pool is a set of origin nodes sharing one load-balancing algorithm and
 | Pool name | Label for the pool (e.g., "primary") |
 | Load balancing | `Round robin` or a hash algorithm (see below) |
 | SNI hostname | Non-empty enables **HTTPS to origin**; must be a bare hostname covered by the origin certificate (`$host` is not supported) |
-| Verify origin certificate | Whether an HTTPS origin's certificate is validated. Unset inherits the global setting from the console's system settings; `true` requires a certificate that validates against the system trust store (or the pool's own CA); `false` accepts any certificate and is not recommended. |
+| Verify origin certificate | Whether an HTTPS origin's certificate is validated. Unset inherits the site default (SSL page's origin certificate check) and then the global setting from the console's system settings; `true` requires a certificate that validates against the system trust store (or the pool's own CA); `false` accepts any certificate and is not recommended. |
 
 Load-balancing algorithms:
 
@@ -113,12 +113,14 @@ Load-balancing algorithms:
 The site's default pool (marked **Default**) cannot be deleted, and a pool can only be deleted once no origin nodes and no routes reference it.
 
 The **Verify origin certificate** field only matters when the pool has an SNI
-hostname. Left unset it follows the deployment-wide default under
-**Settings → Origin**, which is off — accepting any certificate so that
-self-signed and internal-PKI origins keep working. Turn the global default on
-once every origin presents a certificate the proxy can chain to a trust store
-(a private CA counts; upload it to the pool), and leave per-pool overrides
-unset unless a specific origin cannot comply.
+hostname. Left unset it follows a three-level cascade: the site default on the
+site's SSL page (**Origin certificate check**), and when the site has no
+preference either, the deployment-wide default under **Settings → Origin TLS
+verification**, which is off — accepting any certificate so that self-signed
+and internal-PKI origins keep working. Turn the global default on once every
+origin presents a certificate the proxy can chain to a trust store (a private
+CA counts; upload it to the pool), pin the site default for a whole site, and
+leave per-pool overrides unset unless a specific origin cannot comply.
 
 ### Routes
 

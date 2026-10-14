@@ -887,6 +887,17 @@
       "deleteTitle": "証明書を削除",
       "deleteDescription": "サイトから証明書を削除します。この操作は元に戻せません。",
       "siteDescription": "このサイトで HTTPS を提供し、証明書・TLS バージョン範囲・mTLS ポリシーを設定します。",
+      "originVerify": {
+        "title": "オリジン証明書の検証",
+        "description": "このサイトがオリジンへ接続する際、信頼できる証明書を要求するかどうか。個別に固定されていない全プールに適用されます。",
+        "label": "サイト既定の動作",
+        "cascadeHint": "優先順位：プール個別指定 > サイトレベル（ここ）> デプロイ既定（設定 → オリジン TLS 検証）。",
+        "effectiveHint": "各プールの実効値は「基本設定 → オリジンプール」のカードで確認できます。プール-dialog で固定した値はここに影響されません。",
+        "inherit": "デプロイ既定に従う",
+        "verify": "証明書を検証（厳格）",
+        "skip": "検証しない（緩和、自己署名オリジン向け）",
+        "saved": "オリジン証明書検証の設定を保存しました"
+      },
       "httpsCardTitle": "HTTPS と証明書",
       "httpsCardHint": "このサイトが HTTPS を提供するかどうかと、提示する証明書。",
       "httpsEnabled": "HTTPS を有効化",
@@ -2162,9 +2173,9 @@
       "sni": "SNI ホスト名",
       "sniHint": "オリジン証明書がカバーするホスト名。$host は使用できません",
       "verifyCert": "オリジン証明書の検証",
-      "verifyCertHint": "「デプロイ全体の既定に従う」を選ぶと、このプールは「設定 → オリジン TLS 検証」に追従します。ここで明示すると、このプールだけその値に固定されます。",
+      "verifyCertHint": "「サイト設定に従う」はまずこのサイトのオリジン証明書検証（SSL ページ）を確認し、未指定なら「設定 → オリジン TLS 検証」に従います。ここで明示すると、このプールだけその値に固定されます。",
       "verifyCertMode": {
-        "inherit": "デプロイ既定に従う",
+        "inherit": "サイト/デプロイ既定に従う",
         "verify": "検証を必須にする",
         "skip": "検証しない"
       },
@@ -2182,7 +2193,6 @@
       "healthCheckHealthyHint": "連続 N 回成功で正常に復帰します（1-10）",
       "certVerified": "証明書を検証",
       "certNotVerified": "証明書を検証しない",
-      "certInherit": "証明書検証：デプロイ既定に従う",
       "httpOrigin": "HTTP でオリジン接続",
       "routesTitle": "ルーティング",
       "routesDescription": "パスごとにリクエストを別のプールへ振り分けます。一致しないトラフィックはデフォルトプールに転送されます。",
@@ -2280,7 +2290,11 @@
         "headerRealIp": "X-Real-IP",
         "headerCf": "CF-Connecting-IP（Cloudflare）",
         "headerTrueClient": "True-Client-IP"
-      }
+      },
+      "verifyCertDisabledHint": "「HTTPS オリジン」をオンにすると証明書検証を設定できます（HTTP オリジンには TLS ハンドシェイクがなく、検証対象がありません）。",
+      "certFollowGlobal": "証明書検証：デプロイ既定に従う",
+      "originTlsSummary": "オリジン証明書検証（サイト既定）：",
+      "originTlsSettingsLink": "SSL ページで設定 →"
     },
     "profile": {
       "title": "アカウント設定",

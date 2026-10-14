@@ -89,6 +89,11 @@ pub mod sites {
         /// vendor-published proxy networks (e.g. the built-in Cloudflare
         /// subscription) instead of pasting CIDRs by hand.
         pub trusted_proxy_group_ids: Vec<Uuid>,
+        /// Site-wide default for verifying an HTTPS origin's certificate:
+        /// `Some` pins every pool of this site that does not pin its own
+        /// `verify_cert`; `None` means the site has no opinion and each pool
+        /// follows the deployment-wide `origin_settings.verify_cert`.
+        pub origin_verify_cert: Option<bool>,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
     }

@@ -887,6 +887,17 @@
       "deleteTitle": "删除证书",
       "deleteDescription": "这将从站点移除该证书，且无法撤销。",
       "siteDescription": "为该站点启用 HTTPS，并配置证书、TLS 版本范围与 mTLS 策略。",
+      "originVerify": {
+        "title": "源站证书校验",
+        "description": "本站点回源时是否要求源站出示可信任证书。作用于本站全部未单独固定的源站池。",
+        "label": "站点默认行为",
+        "cascadeHint": "生效优先级：源站池单独固定 > 站点级（此处）> 全局默认（设置 → 回源 TLS 校验）。",
+        "effectiveHint": "各源站池的最终生效值可在「基础设置 → 源站池」卡片上直接查看；在源站池对话框中单独固定的取值不受此处影响。",
+        "inherit": "跟随全局默认",
+        "verify": "校验证书（严格）",
+        "skip": "不校验（宽松，自签源站适用）",
+        "saved": "源站证书校验设置已保存"
+      },
       "httpsCardTitle": "HTTPS 与证书",
       "httpsCardHint": "该站点是否提供 HTTPS，以及对外出示哪张证书。",
       "httpsEnabled": "启用 HTTPS",
@@ -2162,9 +2173,9 @@
       "sni": "SNI 主机名",
       "sniHint": "源站证书覆盖的主机名，不能使用 $host",
       "verifyCert": "回源证书校验",
-      "verifyCertHint": "「跟随全局默认」会与该池一同随「设置 → 回源 TLS 校验」变化；在此显式指定后，本池固定使用该取值，不再受全局开关影响。",
+      "verifyCertHint": "「跟随站点设置」会先看本站点的「源站证书校验」（SSL 页），站点未指定时再随「设置 → 回源 TLS 校验」；在此显式指定后，本池固定使用该取值。",
       "verifyCertMode": {
-        "inherit": "跟随全局默认",
+        "inherit": "跟随站点/全局设置",
         "verify": "必须校验证书",
         "skip": "不校验证书"
       },
@@ -2182,7 +2193,6 @@
       "healthCheckHealthyHint": "连续成功 N 次恢复健康，1-10",
       "certVerified": "校验证书",
       "certNotVerified": "不校验证书",
-      "certInherit": "证书校验：跟随全局",
       "httpOrigin": "HTTP 回源",
       "routesTitle": "路由规则",
       "routesDescription": "按路径将请求分发到不同源站池；未命中的流量走默认池。",
@@ -2280,7 +2290,11 @@
         "headerRealIp": "X-Real-IP",
         "headerCf": "CF-Connecting-IP（Cloudflare）",
         "headerTrueClient": "True-Client-IP"
-      }
+      },
+      "verifyCertDisabledHint": "开启「HTTPS 源站」后可配置证书校验（HTTP 回源没有 TLS 握手，无可校验对象）。",
+      "certFollowGlobal": "证书校验：跟随全局默认",
+      "originTlsSummary": "源站证书校验（站点默认）：",
+      "originTlsSettingsLink": "前往 SSL 页设置 →"
     },
     "profile": {
       "title": "账户设置",

@@ -38,8 +38,15 @@ import {
   TLS_VERSIONS,
   type SslCertificate,
   type SslSettings,
+
   type UpdateSslSettingsRequest,
 } from '@/api/types'
+import { sitesApi, siteKeys } from '@/api/sites'
+import {
+  verifyCertMode,
+  verifyCertPayload,
+  type VerifyCertMode,
+} from './basic/types'
 
 /** Largest HSTS lifetime the server accepts, in seconds (two years). */
 const MAX_HSTS_AGE = 63_072_000
@@ -105,6 +112,100 @@ const toDrafts = (s: SslSettings): PostureDrafts => ({
 /** A label for the certificate picker: domain plus expiry, when recorded. */
 function certOptionLabel(cert: SslCertificate): string {
   return cert.expires_at ? `${cert.domain} · ${formatDate(cert.expires_at)}` : cert.domain
+}
+
+/**
+ * Site-wide origin certificate check — the middle tier of the pool → site →
+ * global cascade. `null` ("follow the deployment default") leaves every pool
+ * without its own pin on `Settings → Origin TLS verification`. Pools that
+ * pin a value keep it; the Basic page shows each pool's effective state.
+ */
+function OriginVerifyCard({ siteId, canWrite }: { siteId: string; canWrite: boolean }) {
+  const { t } = useTranslation()
+  const toast = useToast()
+  const queryClient = useQueryClient()
+  const siteQuery = useQuery({
+    queryKey: siteKeys.detail(siteId),
+    queryFn: () => sitesApi.get(siteId),
+    enabled: Boolean(siteId),
+  })
+  const site = siteQuery.data?.site ?? null
+
+  // Local draft, seeded once from the first server copy; unsaved edits must
+  // survive background refetches (window focus, cache invalidation) — the
+  // same seed-once pattern the SSL posture cards below use. Re-keyed on the
+  // site id so navigating between sites re-seeds from that site's data.
+  const [draft, setDraft] = useState<VerifyCertMode | null>(null)
+  const [seededFor, setSeededFor] = useState<string | null>(null)
+  if (site && seededFor !== site.id) {
+    setSeededFor(site.id)
+    setDraft(verifyCertMode(site.origin_verify_cert ?? null))
+  }
+
+  const save = useMutation({
+    mutationFn: (mode: VerifyCertMode) =>
+      sitesApi.update(siteId, { origin_verify_cert: verifyCertPayload(mode) }),
+    onSuccess: (_data, mode) => {
+      // The Basic page pools section shares this cache entry.
+      queryClient.invalidateQueries({ queryKey: siteKeys.detail(siteId) })
+      setDraft(mode)
+      toast.success(t('pages.ssl.originVerify.saved'))
+    },
+  })
+
+  const dirty =
+    draft !== null &&
+    site !== null &&
+    draft !== verifyCertMode(site.origin_verify_cert ?? null)
+
+  return (
+    <Card className="mb-6">
+      <CardHeader
+        title={t('pages.ssl.originVerify.title')}
+        description={t('pages.ssl.originVerify.description')}
+        action={
+          canWrite && (
+            <Button
+              variant="primary"
+              size="sm"
+              loading={save.isPending}
+              disabled={!dirty}
+              onClick={() => draft && save.mutate(draft)}
+            >
+              {t('common.save')}
+            </Button>
+          )
+        }
+      />
+      <CardBody className="flex flex-col gap-4">
+        {siteQuery.isPending && !draft ? (
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <SkeletonStat />
+            <SkeletonStat />
+          </div>
+        ) : (
+          <>
+            <Select
+              label={t('pages.ssl.originVerify.label')}
+              value={draft ?? 'inherit'}
+              disabled={!canWrite}
+              hint={t('pages.ssl.originVerify.cascadeHint')}
+              options={[
+                { value: 'inherit', label: t('pages.ssl.originVerify.inherit') },
+                { value: 'verify', label: t('pages.ssl.originVerify.verify') },
+                { value: 'skip', label: t('pages.ssl.originVerify.skip') },
+              ]}
+              onChange={(e) => setDraft(e.target.value as VerifyCertMode)}
+            />
+            <p className="flex items-start gap-1.5 text-xs text-fg-subtle">
+              <Info weight="duotone" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              {t('pages.ssl.originVerify.effectiveHint')}
+            </p>
+          </>
+        )}
+      </CardBody>
+    </Card>
+  )
 }
 
 /**
@@ -453,6 +554,10 @@ export function SslPage() {
           </p>
         </div>
       )}
+
+      {/* Site-wide origin certificate check: the middle tier between the
+          deployment default and each pool's own pin. */}
+      <OriginVerifyCard siteId={siteId} canWrite={canWrite} />
 
       {/* HTTPS + certificate source — the posture that matters most */}
       <Card className="mb-6">

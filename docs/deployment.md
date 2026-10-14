@@ -305,17 +305,24 @@ curl -k -X POST https://localhost:9080/api/v1/sites/{site_id}/certificates \
 ### Origin Certificate Verification
 
 When a site's origin pool has an SNI hostname, traffic to the origin goes over
-HTTPS. Whether that origin's certificate is validated is a separate decision
-from the certificate the proxy serves to clients:
+HTTPS. Whether that origin's certificate is validated is a separate decision from the
+certificate the proxy serves to clients. The effective value resolves through a
+three-level cascade — the first level that is set wins:
 
-- **Global default** — **Settings → Origin** in the dashboard, or
-  `PUT /api/v1/settings/origin`. The console writes `verify_cert: false` so
-  that self-signed and internal-PKI origins keep working; set it to `true`
-  when every origin presents a publicly trusted certificate. The value reaches
-  the agents through the next rule bundle, so no restart is needed.
-- **Per pool** — an origin pool's own `verify_cert` always wins. `true`
-  forces validation, `false` forces acceptance, and leaving it unset inherits
-  the global default.
+1. **Per pool** — an origin pool's own `verify_cert` (origin pool dialog).
+   `true` forces validation, `false` forces acceptance, and leaving it unset
+   falls through to the site default.
+2. **Per site** — the site's `origin_verify_cert` (origin certificate check
+   card on the site's SSL page, or `origin_verify_cert` on
+   `PUT /api/v1/sites/{site_id}`). `true`/`false` pins a default for every
+   pool of the site; `null` (no site preference) falls through to the global
+   default.
+3. **Global default** — **Settings → Origin TLS verification** in the
+   dashboard, or `PUT /api/v1/settings/origin`. The console writes
+   `verify_cert: false` so that self-signed and internal-PKI origins keep
+   working; set it to `true` when every origin presents a publicly trusted
+   certificate. The value reaches the agents through the next rule bundle, so
+   no restart is needed.
 
 Accepting an unvalidated origin certificate means an attacker who can
 intercept the connection to the origin can impersonate it. Prefer issuing the
