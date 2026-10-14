@@ -8,6 +8,35 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.26.1] — 2026-10-14
+
+### Fixed
+
+- **Empty pprof artifacts are gone.** `finish_pprof`/`finish_flamegraph`
+  return a `NoSamples` error on zero-sample captures instead of writing a
+  0-byte file; the debug API maps it to `409` with guidance
+  ("CPU-time based, retry under load or use the memory snapshot").
+- **Idle-process profiling is rejected up front.** A capture session
+  records `/proc/self/stat` CPU ticks; if the CPU delta stays below 0.1%
+  of wall time the session ends with `409 Idle` instead of a useless
+  report.
+- **Disabling metric shipping no longer disconnects the agent.** With
+  `metrics_ship_interval_secs == 0` the metric future parks on
+  `std::future::pending()` so the gRPC session is no longer torn down and
+  reconnected in a loop; shutdown still completes normally.
+
+### Added
+
+- **Memory accounting is unambiguous.** `MemorySnapshot` now carries
+  `process_memory_scope: "process"` and `used_memory_scope: "system"`
+  annotations; `rss_bytes` is process RSS while `used/total_memory_bytes`
+  are host-level (`/proc/meminfo`) values.
+- **Dashboard "process resources" card** (admin-only, 30s polling):
+  process RSS as the primary figure, with process virtual memory and
+  host memory usage/total clearly labeled; the settings page splits the
+  memory snapshot into process vs host rows, and the agent drawer labels
+  memory as host memory capacity.
+
 ## [PingWAF 0.26.0] — 2026-10-14
 
 ### ⚠️ Breaking changes
