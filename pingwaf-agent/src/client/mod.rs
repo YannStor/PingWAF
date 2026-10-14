@@ -70,6 +70,11 @@ type PurgeCacheFn = Box<dyn Fn(&str, &[String], &[String]) + Send + Sync>;
 /// How often expired dynamic IP blocks are swept from the rule cache.
 const BLOCK_SWEEP_INTERVAL_SECS: u64 = 60;
 
+/// How often the debounced blocked-IP disk flush runs (see
+/// `RuleCache::flush_blocked_ips`). Blocks take effect in memory instantly;
+/// this only bounds how far a crash can set the disk copy back.
+const BLOCK_FLUSH_INTERVAL_SECS: u64 = 5;
+
 /// Callback types for server commands that affect the host application.
 #[derive(Default)]
 pub struct CommandHandlers {
@@ -319,6 +324,30 @@ impl ControlPlaneClient {
                     break;
                 }
                 rule_cache.cleanup_expired_blocks();
+            }
+        });
+        handles.push(handle);
+
+        // Blocked-IP persistence is debounced off the request hot path: each
+        // persist serializes the whole map and fsyncs, so N rapid blocks
+        // must not cost N×O(N) fsyncs. This loop writes the latest state out
+        // every few seconds; shutdown still persists through
+        // `persist_to_disk`.
+        let rule_cache = Arc::clone(&self.rule_cache);
+        let shutdown = Arc::clone(&self.shutdown_signal);
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(
+                BLOCK_FLUSH_INTERVAL_SECS,
+            ));
+            interval.set_missed_tick_behavior(
+                tokio::time::MissedTickBehavior::Delay,
+            );
+            loop {
+                interval.tick().await;
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+                rule_cache.flush_blocked_ips();
             }
         });
         handles.push(handle);

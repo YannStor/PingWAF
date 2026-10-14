@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -975,6 +975,16 @@ struct CacheMetadata {
 // RuleCache — the main public interface
 // ─────────────────────────────────────────────────────────────
 
+/// Upper bound on dynamically blocked addresses and ranges (single IPs and
+/// CIDR nets share the `blocked_ips` map). An attacker rotating unique source
+/// IPs must not be able to grow this map — and the heartbeat snapshot that
+/// clones all of it — without limit inside a memory-capped edge container.
+const MAX_BLOCKED_IP_ENTRIES: usize = 100_000;
+
+/// Headroom left below [`MAX_BLOCKED_IP_ENTRIES`] when eviction runs, so one
+/// pass buys room for thousands of new blocks instead of firing per insert.
+const BLOCKED_CAPACITY_HEADROOM: usize = 10_000;
+
 /// Thread-safe local rule cache with disk persistence.
 ///
 /// Uses `ArcSwap` for lock-free reads on the hot path and a separate
@@ -1009,6 +1019,12 @@ pub struct RuleCache {
     /// shutdown hook can all fire concurrently; interleaved writes would
     /// stamp a sites.json whose CRC no longer matches metadata.json.
     persist_lock: Mutex<()>,
+    /// Set whenever `blocked_ips` mutates. Block/unblock are request hot-path
+    /// operations and each persist is a full serialize + fsync, so the write
+    /// is debounced: mutation only sets this flag, a low-frequency background
+    /// task flushes it to disk (see `flush_blocked_ips`), and shutdown
+    /// persists through `persist_to_disk` as before.
+    blocked_dirty: AtomicBool,
     /// Outcome of the latest disk load / persist cycle, reported by the
     /// heartbeat so a silently degraded cache is visible to the operator.
     health: CacheHealth,
@@ -1031,6 +1047,7 @@ impl RuleCache {
             last_policy_sync_at: AtomicI64::new(0),
             persist_lock: Mutex::new(()),
             health: CacheHealth::new(),
+            blocked_dirty: AtomicBool::new(false),
         });
 
         // Ensure cache directory exists
@@ -1696,14 +1713,19 @@ impl RuleCache {
             expires_at,
         };
 
+        // Enforce the capacity ceiling before inserting: sweep expired
+        // entries first, then evict the oldest blocks (D3).
+        if self.blocked_ips.len() >= MAX_BLOCKED_IP_ENTRIES {
+            self.enforce_blocked_capacity();
+        }
+
         self.blocked_ips.insert(key.clone(), entry.clone());
         self.index_insert(site_id, &key, &entry);
         info!(site_id = %site_id, ip = %ip, reason = %reason, "Blocked IP");
 
-        // Persist blocked IPs
-        if let Err(e) = self.persist_blocked_ips() {
-            warn!(error = %e, "Failed to persist blocked IPs");
-        }
+        // Persistence is debounced off the hot path (D2): N rapid blocks
+        // cost one fsync, not N × O(N).
+        self.mark_blocked_dirty();
     }
 
     /// Unblock an IP for a site.
@@ -1713,9 +1735,7 @@ impl RuleCache {
         self.index_remove_key(&key);
         if removed {
             info!(site_id = %site_id, ip = %ip, "Unblocked IP");
-            if let Err(e) = self.persist_blocked_ips() {
-                warn!(error = %e, "Failed to persist blocked IPs");
-            }
+            self.mark_blocked_dirty();
         }
     }
 
@@ -1748,9 +1768,7 @@ impl RuleCache {
                 removed,
                 "cleared WAF auto-blocks after leaving enforcing mode"
             );
-            if let Err(e) = self.persist_blocked_ips() {
-                warn!(error = %e, "Failed to persist blocked IPs");
-            }
+            self.mark_blocked_dirty();
         }
         removed
     }
@@ -1777,9 +1795,7 @@ impl RuleCache {
                 removed,
                 "cleared blocks for removed site"
             );
-            if let Err(e) = self.persist_blocked_ips() {
-                warn!(error = %e, "Failed to persist blocked IPs");
-            }
+            self.mark_blocked_dirty();
         }
         removed
     }
@@ -1798,8 +1814,92 @@ impl RuleCache {
         }
         if !expired_keys.is_empty() {
             debug!(count = expired_keys.len(), "Cleaned up expired IP blocks");
-            let _ = self.persist_blocked_ips();
+            self.mark_blocked_dirty();
         }
+    }
+
+    /// Marks the blocked-IP map as changed. The disk write itself is
+    /// debounced to a background flush (see [`RuleCache::flush_blocked_ips`]):
+    /// a crash may lose the most recent few seconds of blocks, which is
+    /// acceptable — blocks are transient defense state, re-propagated by the
+    /// control plane on restart.
+    fn mark_blocked_dirty(&self) {
+        self.blocked_dirty.store(true, Ordering::Release);
+    }
+
+    /// Persists the blocked-IP map if it changed since the last flush.
+    /// Called from a low-frequency background loop, which is what bounds the
+    /// fsync rate; rule syncs and shutdown still write through directly.
+    pub fn flush_blocked_ips(&self) {
+        if !self.blocked_dirty.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        if let Err(e) = self.persist_blocked_ips() {
+            // Keep the map marked so the next pass retries instead of
+            // silently dropping the pending write.
+            self.blocked_dirty.store(true, Ordering::Release);
+            warn!(error = %e, "Failed to persist blocked IPs");
+        }
+    }
+
+    /// Brings `blocked_ips` back under [`MAX_BLOCKED_IP_ENTRIES`]: expired
+    /// entries are swept first, then the oldest blocks are evicted down to
+    /// the headroom line. Under a rotating-source-IP attack the oldest
+    /// blocks are the least valuable (they would have expired anyway).
+    fn enforce_blocked_capacity(&self) {
+        self.enforce_blocked_capacity_inner(
+            MAX_BLOCKED_IP_ENTRIES,
+            BLOCKED_CAPACITY_HEADROOM,
+        );
+    }
+
+    /// Parameterized twin of [`RuleCache::enforce_blocked_capacity`] so tests
+    /// can exercise the eviction policy without inserting six-figure entry
+    /// counts. `limit` is the hard ceiling, `headroom` the post-eviction size.
+    fn enforce_blocked_capacity_inner(&self, limit: usize, headroom: usize) {
+        let expired: Vec<String> = self
+            .blocked_ips
+            .iter()
+            .filter(|e| e.value().is_expired())
+            .map(|e| e.key().clone())
+            .collect();
+        for key in &expired {
+            self.blocked_ips.remove(key);
+            self.index_remove_key(key);
+        }
+
+        let target = limit.saturating_sub(headroom).max(1);
+        let remaining = self.blocked_ips.len();
+        if remaining <= target {
+            if !expired.is_empty() {
+                debug!(
+                    expired = expired.len(),
+                    remaining,
+                    "swept expired blocks after hitting the blocked-IP capacity ceiling"
+                );
+            }
+            return;
+        }
+
+        let mut by_age: Vec<(String, DateTime<Utc>)> = self
+            .blocked_ips
+            .iter()
+            .map(|e| (e.key().clone(), e.value().blocked_at))
+            .collect();
+        by_age.sort_by_key(|(_, blocked_at)| *blocked_at);
+        let evict = remaining - target;
+        for (key, _) in by_age.into_iter().take(evict) {
+            self.blocked_ips.remove(&key);
+            self.index_remove_key(&key);
+        }
+        warn!(
+            expired = expired.len(),
+            evicted = evict,
+            remaining = target,
+            limit,
+            "blocked-IP map hit its capacity ceiling; swept expired and \
+             evicted the oldest entries"
+        );
     }
 
     /// Snapshot of every block currently in force, for the heartbeat report.
@@ -2608,6 +2708,116 @@ mod tests {
         );
         // Another site is not affected by site-1's ranges.
         assert_eq!(cache.blocked_reason("site-2", "203.0.113.55"), None);
+    }
+
+    #[test]
+    fn block_persist_is_debounced_until_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache =
+            RuleCache::new(dir.path().to_path_buf(), "test".to_string())
+                .unwrap();
+
+        cache.block_ip("site-1", "203.0.113.7", None, "waf: sqli");
+        // The map is authoritative immediately — enforcement needs no disk.
+        assert_eq!(
+            cache.blocked_reason("site-1", "203.0.113.7").as_deref(),
+            Some("waf: sqli")
+        );
+        // ...but nothing was written: the hot path only marks dirty.
+        assert!(!dir.path().join("blocked_ips.json").exists());
+
+        // The flush task's unit of work persists the pending change.
+        cache.flush_blocked_ips();
+        let raw = std::fs::read(dir.path().join("blocked_ips.json"))
+            .expect("flush wrote blocked_ips.json");
+        let entries: Vec<BlockedIpEntry> = serde_json::from_slice(&raw)
+            .expect("flushed snapshot parses");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].reason, "waf: sqli");
+
+        // Write the rule snapshot too so a reload takes the disk path, then
+        // verify the flushed blocks are restored by a fresh cache.
+        cache.persist_to_disk().unwrap();
+        let reloaded =
+            RuleCache::new(dir.path().to_path_buf(), "test".to_string())
+                .unwrap();
+        assert_eq!(
+            reloaded.blocked_reason("site-1", "203.0.113.7").as_deref(),
+            Some("waf: sqli")
+        );
+
+        // Unblock also only marks dirty; the next flush removes it on disk.
+        cache.unblock_ip("site-1", "203.0.113.7");
+        assert_eq!(cache.blocked_reason("site-1", "203.0.113.7"), None);
+        cache.flush_blocked_ips();
+        cache.persist_to_disk().unwrap();
+        let reloaded =
+            RuleCache::new(dir.path().to_path_buf(), "test".to_string())
+                .unwrap();
+        assert_eq!(reloaded.blocked_reason("site-1", "203.0.113.7"), None);
+    }
+
+    #[test]
+    fn blocked_capacity_evicts_expired_then_oldest() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache =
+            RuleCache::new(dir.path().to_path_buf(), "test".to_string())
+                .unwrap();
+
+        // Fill to the (test) ceiling: first three entries are permanent,
+        // the fourth is already-expiring, the fifth is the newest permanent.
+        for i in 0..3 {
+            cache.block_ip(
+                "site-1",
+                &format!("10.0.0.{i}"),
+                None,
+                "waf: old",
+            );
+        }
+        cache.block_ip(
+            "site-1",
+            "10.0.1.1",
+            Some(Duration::from_millis(1)),
+            "waf: expiring",
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        cache.block_ip("site-1", "10.0.2.1", None, "waf: newest");
+
+        // limit=5, headroom=2 → target=3: the expired entry is swept first
+        // (4 remain), then the single oldest block is evicted.
+        cache.enforce_blocked_capacity_inner(5, 2);
+
+        assert_eq!(cache.blocked_reason("site-1", "10.0.1.1"), None);
+        assert_eq!(cache.blocked_reason("site-1", "10.0.0.0"), None);
+        assert_eq!(
+            cache.blocked_reason("site-1", "10.0.0.1").as_deref(),
+            Some("waf: old")
+        );
+        assert_eq!(
+            cache.blocked_reason("site-1", "10.0.0.2").as_deref(),
+            Some("waf: old")
+        );
+        assert_eq!(
+            cache.blocked_reason("site-1", "10.0.2.1").as_deref(),
+            Some("waf: newest")
+        );
+        assert!(cache.blocked_ips.len() <= 3);
+
+        // A CIDR range evicted by capacity leaves no stale index rows:
+        // covered addresses stop matching once the range is gone. Separate
+        // cache so the eviction targets the range as the oldest entry.
+        let dir2 = tempfile::tempdir().unwrap();
+        let cache2 =
+            RuleCache::new(dir2.path().to_path_buf(), "test".to_string())
+                .unwrap();
+        cache2.block_ip("site-1", "10.9.0.0/16", None, "waf: old range");
+        std::thread::sleep(Duration::from_millis(10));
+        cache2.block_ip("site-1", "10.9.1.1", None, "waf: newest");
+        assert!(cache2.is_ip_blocked("site-1", "10.9.0.5"));
+        // limit=2, headroom=1 → target=1: the oldest entry (the range) goes.
+        cache2.enforce_blocked_capacity_inner(2, 1);
+        assert!(!cache2.is_ip_blocked("site-1", "10.9.0.5"));
+        assert!(cache2.is_ip_blocked("site-1", "10.9.1.1"));
     }
 
     #[test]
