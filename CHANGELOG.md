@@ -10,6 +10,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+## [PingWAF 0.27.0] — 2026-10-15
+
 ### Fixed
 
 - **Memory numbers now match `docker stats`.** The memory snapshot read
