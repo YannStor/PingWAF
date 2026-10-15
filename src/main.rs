@@ -92,9 +92,15 @@ mod server_locations;
 mod upstreams;
 mod webhook;
 
-// Avoid musl's default allocator due to lackluster performance
-// https://nickb.dev/blog/default-musl-allocator-considered-harmful-to-performance
-#[cfg(target_env = "musl")]
+// Use mimalloc on every platform.
+//
+// On musl this replaces the default allocator, which has lackluster
+// performance (https://nickb.dev/blog/default-musl-allocator-considered-harmful-to-performance).
+// On glibc it replaces malloc's per-thread arenas: production evidence
+// (2026-10-15 demo OOM post-mortem) showed 64 MiB glibc arena segments that
+// are never trimmed back to the OS, so the startup allocation peak stayed
+// resident as ~620 MB of RSS and eventually OOM-killed the process.
+// mimalloc purges freed pages eagerly, releasing that memory instead.
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

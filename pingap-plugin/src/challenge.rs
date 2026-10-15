@@ -54,9 +54,12 @@ use pingwaf_challenge::{
 };
 use std::borrow::Cow;
 use std::path::Path;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, LazyLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
+
+use crate::host_cache::{HostCacheSweep, touch};
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -289,7 +292,7 @@ fn brand_page(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title} · PingWAF</title>
-<style>{pw_style}</style>
+{pw_style}
 </head>
 <body>
 <div class="card">
@@ -518,6 +521,10 @@ struct CachedChallengeEngine {
     /// request fingerprint check stays allocation-free.
     fingerprint: Arc<str>,
     engine: Option<Arc<ChallengeEngine>>,
+    /// Unix seconds of the last cache hit; feeds the host-cache TTL sweep
+    /// (`host_cache`) — wildcard-matched scanner hosts would otherwise cache
+    /// a compiled engine forever.
+    last_used: AtomicU64,
 }
 
 /// Builds the decision engine for one site's challenge configuration. Every
@@ -635,6 +642,8 @@ pub struct ChallengePlugin {
     pow_difficulty: u32,
     /// Per-site decision engines built from agent rules, keyed by host.
     site_engines: DashMap<String, CachedChallengeEngine>,
+    /// Sweep gate for the `site_engines` host cache (TTL + hard cap).
+    engine_sweep: HostCacheSweep,
     /// Per host+IP request counter used to feed `request_rate` to the engine.
     rates: DashMap<String, RateWindow>,
 }
@@ -682,6 +691,10 @@ impl ChallengePlugin {
             return None;
         }
         let agent = PingWafAgent::instance()?;
+        let now = crate::host_cache::unix_now();
+        self.engine_sweep.prune(&self.site_engines, now, |cached| {
+            cached.last_used.load(std::sync::atomic::Ordering::Relaxed)
+        });
         let Some(site_rules) = agent.get_rules_for_domain(host) else {
             // The host no longer resolves in the cache (deleted or renamed
             // site): drop the compiled engine so the per-domain cache
@@ -698,6 +711,7 @@ impl ChallengePlugin {
         if let Some(cached) = self.site_engines.get(host)
             && cached.fingerprint == fingerprint
         {
+            touch(&cached.last_used, now);
             return cached.engine.clone();
         }
         let engine = Arc::new(build_site_engine(
@@ -711,6 +725,7 @@ impl ChallengePlugin {
             CachedChallengeEngine {
                 fingerprint,
                 engine: Some(Arc::clone(&engine)),
+                last_used: AtomicU64::new(now),
             },
         );
         Some(engine)
@@ -909,6 +924,7 @@ impl TryFrom<&PluginConf> for ChallengePlugin {
             cookie_secret,
             pow_difficulty,
             site_engines: DashMap::new(),
+            engine_sweep: HostCacheSweep::default(),
             rates: DashMap::new(),
         })
     }
@@ -1142,6 +1158,52 @@ mod tests {
         let closed = fail_closed_page("req-f");
         assert_eq!(StatusCode::SERVICE_UNAVAILABLE, closed.status);
         assert_eq!(Some("pingwaf"), header_value(&closed, "server").as_deref());
+    }
+
+    #[test]
+    fn brand_page_does_not_emit_nested_style_tags() {
+        // Regression: `PW_STYLE` is itself a complete `<style>...</style>`
+        // partial — wrapping it in another `<style>` produced
+        // `<style><style>...</style></style>`, which fails strict HTML
+        // validation even though browsers tolerate it.
+        for (label, body) in [
+            (
+                "paused",
+                String::from_utf8_lossy(&paused_page("req-p").body).to_string(),
+            ),
+            (
+                "rate-limit",
+                String::from_utf8_lossy(
+                    &rate_limit_page("req-r", "over threshold", 30).body,
+                )
+                .to_string(),
+            ),
+            (
+                "auth",
+                String::from_utf8_lossy(
+                    &basic_auth_page("req-a", "restricted", "login required")
+                        .body,
+                )
+                .to_string(),
+            ),
+            (
+                "fail-closed",
+                String::from_utf8_lossy(&fail_closed_page("req-f").body)
+                    .to_string(),
+            ),
+        ] {
+            assert_eq!(
+                1,
+                body.matches("<style>").count(),
+                "{label}: expected exactly one <style> tag, body head: {}",
+                &body[..body.len().min(400)]
+            );
+            assert_eq!(
+                1,
+                body.matches("</style>").count(),
+                "{label}: expected exactly one </style> tag"
+            );
+        }
     }
 
     #[test]

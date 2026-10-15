@@ -124,6 +124,9 @@ Like the other PingWAF plugins, when a `PingWafAgent` control-plane instance is
 running and has error pages for the request's domain, those pages take priority
 over the local configuration. Agent-supplied pages are compiled per host and
 cached, then rebuilt automatically when the agent's config hash changes.
+Entries idle for more than 600 seconds are evicted, least-recently-used
+entries are dropped beyond 1024 hosts (the bound converges within one sweep
+interval), and a background sweep runs at most once a minute.
 
 ## Usage notes
 

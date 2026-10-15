@@ -62,7 +62,10 @@ use serde::Deserialize;
 use std::borrow::Cow;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use tracing::{debug, warn};
+
+use crate::host_cache::{HostCacheSweep, touch};
 
 /// Key under which the response-body modifier is stashed in [`Ctx`].
 const PLUGIN_ID: &str = "_rewrite_";
@@ -1241,6 +1244,10 @@ fn convert_operation(op: &CacheRewriteOperation) -> Option<RewriteOperation> {
 struct CachedSiteRules {
     fingerprint: Arc<str>,
     rules: Arc<Vec<CompiledRewriteRule>>,
+    /// Unix seconds of the last cache hit; feeds the host-cache TTL sweep
+    /// (`host_cache`) — wildcard-matched scanner hosts would otherwise cache
+    /// a compiled rule set forever.
+    last_used: AtomicU64,
 }
 
 /// Request/response rewrite plugin.
@@ -1250,6 +1257,8 @@ pub struct RewritePlugin {
     rules: Arc<ArcSwap<Vec<CompiledRewriteRule>>>,
     /// Agent-supplied rules keyed by host.
     site_rules: DashMap<String, CachedSiteRules>,
+    /// Sweep gate for the `site_rules` host cache (TTL + hard cap).
+    rules_sweep: HostCacheSweep,
     hash_value: String,
 }
 
@@ -1268,10 +1277,15 @@ impl RewritePlugin {
             && let Some(site) = agent.get_rules_for_domain(host)
             && !site.rewrite_rules.is_empty()
         {
+            let now = crate::host_cache::unix_now();
+            self.rules_sweep.prune(&self.site_rules, now, |cached| {
+                cached.last_used.load(std::sync::atomic::Ordering::Relaxed)
+            });
             let fingerprint = agent.config_hash();
             if let Some(cached) = self.site_rules.get(host)
                 && cached.fingerprint == fingerprint
             {
+                touch(&cached.last_used, now);
                 return cached.rules.clone();
             }
             let converted = convert_agent_rules(&site.rewrite_rules);
@@ -1299,6 +1313,7 @@ impl RewritePlugin {
                 CachedSiteRules {
                     fingerprint,
                     rules: Arc::clone(&rules),
+                    last_used: AtomicU64::new(now),
                 },
             );
             return rules;
@@ -1351,6 +1366,7 @@ impl TryFrom<&PluginConf> for RewritePlugin {
             plugin_step,
             rules: Arc::new(ArcSwap::from_pointee(compiled)),
             site_rules: DashMap::new(),
+            rules_sweep: HostCacheSweep::default(),
             hash_value,
         })
     }

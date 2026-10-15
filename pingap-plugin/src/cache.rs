@@ -54,8 +54,11 @@ use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 use tracing::{debug, error, info};
+
+use crate::host_cache::{HostCacheSweep, touch};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -132,6 +135,10 @@ struct SiteCacheRules {
 struct CachedSiteCacheRules {
     fingerprint: Arc<str>,
     rules: Arc<SiteCacheRules>,
+    /// Unix seconds of the last cache hit; feeds the host-cache TTL sweep
+    /// (`host_cache`) — wildcard-matched scanner hosts would otherwise cache
+    /// a compiled rule set forever.
+    last_used: AtomicU64,
 }
 
 /// Which request parts an expression references.
@@ -414,6 +421,8 @@ pub struct Cache {
     // Per-site cache rules compiled from agent (control plane) rules,
     // keyed by request host — mirrors the waf plugin's site engines.
     site_cache_rules: DashMap<String, CachedSiteCacheRules>,
+    // Sweep gate for the `site_cache_rules` host cache (TTL + hard cap).
+    cache_rules_sweep: HostCacheSweep,
 }
 
 /// Helper function to initialize or retrieve the eviction manager singleton.
@@ -689,6 +698,7 @@ impl TryFrom<&PluginConf> for Cache {
             check_cache_control: get_bool_conf(value, "check_cache_control"),
             skip,
             site_cache_rules: DashMap::new(),
+            cache_rules_sweep: HostCacheSweep::default(),
         };
         Ok(params)
     }
@@ -707,10 +717,16 @@ impl Cache {
             return None;
         }
         let site_rules = agent.get_rules_for_domain(host)?;
+        let now = crate::host_cache::unix_now();
+        self.cache_rules_sweep
+            .prune(&self.site_cache_rules, now, |cached| {
+                cached.last_used.load(std::sync::atomic::Ordering::Relaxed)
+            });
         let fingerprint = agent.config_hash();
         if let Some(cached) = self.site_cache_rules.get(host)
             && cached.fingerprint == fingerprint
         {
+            touch(&cached.last_used, now);
             return Some(Arc::clone(&cached.rules));
         }
         let rules = Arc::new(build_site_cache_rules(&site_rules));
@@ -719,6 +735,7 @@ impl Cache {
             CachedSiteCacheRules {
                 fingerprint,
                 rules: Arc::clone(&rules),
+                last_used: AtomicU64::new(now),
             },
         );
         Some(rules)

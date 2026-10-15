@@ -139,7 +139,10 @@ Rules are resolved per request:
 
 Local rules are held in an `ArcSwap` and hot-swapped on reload; agent rules are
 converted to the same compiled representation and cached per host in a
-`DashMap`, so the hot path never re-parses configuration.
+`DashMap`, so the hot path never re-parses configuration. Entries idle for more
+than 600 seconds are evicted, least-recently-used entries are dropped beyond
+1024 hosts (the bound converges within one sweep interval), and a background
+sweep runs at most once a minute.
 
 ## Examples
 

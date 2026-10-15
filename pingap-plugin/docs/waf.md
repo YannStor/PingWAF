@@ -124,4 +124,9 @@ stacks = ["php"]
   does not recognise is scanned as-is. The scan therefore covers the bytes a
   payload actually carries, not just the ones that happened to be readable.
 - The engine is held behind `Arc<RwLock<..>>` and per-domain engines are cached,
-  so control-plane rule updates hot-reload without restarting pingap.
+  so control-plane rule updates hot-reload without restarting pingap. Cached
+  engines idle for more than 600 seconds are evicted, least-recently-used
+  entries are dropped beyond 1024 hosts (the bound converges within one sweep
+  interval), and a background sweep runs at most once a minute —
+  wildcard sites that see random scanner hosts no longer grow the cache
+  without bound.

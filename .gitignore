@@ -105,6 +105,9 @@ docs-internal/
 # WorkBuddy local session memory & workspace data
 .workbuddy/
 
+# playwright-cli local browser automation artifacts
+.playwright-cli/
+
 # CodeBuddy IDE local workspace: session plans, agent prompts and rules.
 # Local-only by design — never commit (see scripts/hooks/pre-commit and the
 # CI guard in .github/workflows/ci.yml).

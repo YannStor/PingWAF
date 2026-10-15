@@ -257,6 +257,7 @@ mod csrf;
 mod directory;
 mod error_page;
 mod forward_auth;
+mod host_cache;
 #[cfg(feature = "geo")]
 mod geo_restriction;
 mod ip_restriction;

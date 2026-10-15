@@ -54,8 +54,11 @@ use pingwaf_challenge::generate_request_id;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use tera::{Context, Tera};
 use tracing::{debug, warn};
+
+use crate::host_cache::{HostCacheSweep, touch};
 
 /// Key under which the response-body replacer is stashed in [`Ctx`].
 const PLUGIN_ID: &str = "_error_page_";
@@ -219,6 +222,10 @@ struct CachedSitePages {
     fingerprint: Arc<str>,
     tera: Arc<Tera>,
     pages: CompiledErrorPageMap,
+    /// Unix seconds of the last cache hit; feeds the host-cache TTL sweep
+    /// (`host_cache`) — wildcard-matched scanner hosts would otherwise cache
+    /// a compiled Tera instance forever.
+    last_used: AtomicU64,
 }
 
 /// Fully replaces the response body with a pre-rendered error page.
@@ -258,6 +265,8 @@ pub struct ErrorPagePlugin {
     use_defaults: bool,
     /// Agent-supplied pages keyed by host.
     site_pages: DashMap<String, CachedSitePages>,
+    /// Sweep gate for the `site_pages` host cache (TTL + hard cap).
+    pages_sweep: HostCacheSweep,
     hash_value: String,
 }
 
@@ -293,10 +302,15 @@ impl ErrorPagePlugin {
             && let Some(site) = agent.get_rules_for_domain(host)
             && !site.error_pages.is_empty()
         {
+            let now = crate::host_cache::unix_now();
+            self.pages_sweep.prune(&self.site_pages, now, |cached| {
+                cached.last_used.load(std::sync::atomic::Ordering::Relaxed)
+            });
             let fingerprint = agent.config_hash();
             if let Some(cached) = self.site_pages.get(host)
                 && cached.fingerprint == fingerprint
             {
+                touch(&cached.last_used, now);
                 return (cached.tera.clone(), cached.pages.clone());
             }
             match build_site_pages(&site.error_pages) {
@@ -307,6 +321,7 @@ impl ErrorPagePlugin {
                             fingerprint,
                             tera: tera.clone(),
                             pages: pages.clone(),
+                            last_used: AtomicU64::new(now),
                         },
                     );
                     return (tera, pages);
@@ -611,6 +626,7 @@ impl TryFrom<&PluginConf> for ErrorPagePlugin {
             tera: Arc::new(tera),
             use_defaults,
             site_pages: DashMap::new(),
+            pages_sweep: HostCacheSweep::default(),
             hash_value,
         })
     }

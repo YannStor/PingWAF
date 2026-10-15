@@ -273,6 +273,42 @@ deployments, upgrade the control plane first, then the agents** (see
 [Rolling Upgrade](#rolling-upgrade-distributed)): a new server rejects shipping
 streams that carry no token, while an old server simply ignores the metadata.
 
+## Small-Memory Instances
+
+On instances with less than 2 GiB of RAM (especially all-in-one deployments
+that share the box with PostgreSQL):
+
+- **Cap the container's memory.** Prevent a single process from squeezing out
+  the database on the same host:
+  `docker run --memory=1g ...` (the same flag works with podman), or in
+  Compose:
+
+  ```yaml
+  services:
+    pingwaf:
+      mem_limit: 1g
+  ```
+
+- **The allocator returns freed memory to the OS.** PingWAF links
+  [mimalloc](https://github.com/microsoft/mimalloc) as its global allocator on
+  every platform (previously only musl builds used it; glibc builds went
+  through the system allocator, whose per-thread arenas could pin tens of
+  megabytes of RSS). Freed pages are now purged back to the kernel instead of
+  lingering until a restart. Tune the purge cadence with the
+  `MIMALLOC_PURGE_DELAY` environment variable — it is in **milliseconds**,
+  the images ship `1000` (mimalloc v3's own default); lower it (e.g. `100`)
+  to return memory sooner at a small CPU cost.
+- **Set transparent hugepages to `madvise`** on the host kernel
+  (`/sys/kernel/mm/transparent_hugepage/enabled`); `always` lets the
+  hugepage backing inflate resident memory.
+- **Swap is a buffer, not a substitute.** Configuring swap absorbs slow growth,
+  but a sudden burst allocates faster than the kernel can swap out, so the OOM
+  killer still fires first — keep the memory cap.
+
+To observe actual memory usage, use the built-in memory snapshot endpoints —
+see [Profiling](./profiling.md) for the process RSS / cgroup figures the
+dashboard reads.
+
 ## SSL/TLS Configuration
 
 ### Automatic (ACME / Let's Encrypt)
@@ -589,6 +625,9 @@ psql "postgres://pingwaf:password@localhost:5432/pingwaf" -c "SELECT 1"
 - Reduce `db_max_connections`
 - Lower `log_batch_size`
 - Check if cache disk quota is configured
+- Read the memory snapshot endpoints
+  ([Profiling](./profiling.md)) to see whether it is process RSS or the
+  host that is under pressure
 
 ### Health check endpoint
 

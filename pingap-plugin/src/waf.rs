@@ -29,6 +29,7 @@ use super::{
     get_str_slice_conf,
 };
 use crate::bot_dns::{DnsVerdict, bot_dns_verifier, known_bot_family};
+use crate::host_cache::{HostCacheSweep, touch};
 use crate::challenge::{
     ChallengeKind, VERIFY_ENDPOINT, basic_auth_page, block_page,
     build_challenge_response, fail_closed_page, paused_page, rate_limit_page,
@@ -74,7 +75,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, LazyLock, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use tor_geoip::GeoipDb;
 use tracing::{debug, warn};
 
@@ -373,6 +374,10 @@ struct CachedSite {
     /// request fingerprint check stays allocation-free.
     fingerprint: Arc<str>,
     context: Arc<SiteContext>,
+    /// Unix seconds of the last cache hit; feeds the host-cache TTL sweep
+    /// (`host_cache`), because wildcard/alternate domain matching lets
+    /// scanner-invented hosts cache a full compiled context.
+    last_used: AtomicU64,
 }
 
 /// Everything resolved for one request target.
@@ -1089,11 +1094,16 @@ const RATE_COUNTERS_GC_INTERVAL_SECS: u64 = 30;
 /// pressure matters more than the (still once-per-second) O(N) sweep.
 const RATE_COUNTERS_GC_PANIC_THRESHOLD: usize = 262_144;
 
+/// Below `RATE_COUNTERS_GC_THRESHOLD` the map still needs occasional pruning:
+/// keys that stop receiving traffic (one-off scanner IP/path combinations)
+/// would otherwise never expire and the map would only ever grow. The idle
+/// interval is deliberately much longer than the above-threshold cadence —
+/// at this size the map is cheap to keep, and the goal is bounded staleness,
+/// not per-request freshness.
+const RATE_COUNTERS_IDLE_GC_INTERVAL_SECS: u64 = 600;
+
 fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    crate::host_cache::unix_now()
 }
 
 /// All rate limit rules of one site in evaluation order.
@@ -1160,34 +1170,35 @@ impl RateLimitPolicy {
                 continue;
             }
             let key = rule.counter_key(request_data, host, asn);
-            if counters.len() > RATE_COUNTERS_GC_THRESHOLD {
-                // Throttled sweep: at most one retain per interval (one per
-                // second once the panic threshold is passed), instead of a
-                // full O(N) walk on every request once an attacker has pushed
-                // the map past the threshold. The compare-exchange picks a
-                // single racer to run it; the others proceed without the walk.
-                let interval =
-                    if counters.len() >= RATE_COUNTERS_GC_PANIC_THRESHOLD {
-                        1
-                    } else {
-                        RATE_COUNTERS_GC_INTERVAL_SECS
-                    };
-                let last = self
+            // Throttled sweep at every water level: above the threshold, at
+            // most one retain per interval (one per second once the panic
+            // threshold is passed) instead of a full O(N) walk on every
+            // request once an attacker has pushed the map past the threshold;
+            // below it, a slow idle interval still purges expired entries.
+            // The compare-exchange picks a single racer to run it; the
+            // others proceed without the walk.
+            let interval = if counters.len() >= RATE_COUNTERS_GC_PANIC_THRESHOLD {
+                1
+            } else if counters.len() > RATE_COUNTERS_GC_THRESHOLD {
+                RATE_COUNTERS_GC_INTERVAL_SECS
+            } else {
+                RATE_COUNTERS_IDLE_GC_INTERVAL_SECS
+            };
+            let last = self
+                .last_gc_sweep
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if now.saturating_sub(last) >= interval
+                && self
                     .last_gc_sweep
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                if now.saturating_sub(last) >= interval
-                    && self
-                        .last_gc_sweep
-                        .compare_exchange(
-                            last,
-                            now,
-                            std::sync::atomic::Ordering::Relaxed,
-                            std::sync::atomic::Ordering::Relaxed,
-                        )
-                        .is_ok()
-                {
-                    counters.retain(|_, entry| now < entry.expires_at);
-                }
+                    .compare_exchange(
+                        last,
+                        now,
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                    )
+                    .is_ok()
+            {
+                counters.retain(|_, entry| now < entry.expires_at);
             }
             let window = now / rule.period_secs;
             let mut entry = counters.entry(key).or_insert(RateCounter {
@@ -1917,6 +1928,8 @@ pub struct WafPlugin {
     hash_value: String,
     /// Per-domain engines built from agent rules, keyed by host.
     site_contexts: DashMap<String, CachedSite>,
+    /// Sweep gate for the `site_contexts` host cache (TTL + hard cap).
+    context_sweep: HostCacheSweep,
     /// Rate limit counters, keyed by rule id and characteristic values. Kept
     /// on the plugin so they survive per-site context rebuilds.
     rate_counters: DashMap<String, RateCounter>,
@@ -2126,12 +2139,18 @@ impl WafPlugin {
         if host.is_empty() {
             return fallback(String::new());
         }
+        let now = crate::host_cache::unix_now();
+        self.context_sweep
+            .prune(&self.site_contexts, now, |cached| {
+                cached.last_used.load(std::sync::atomic::Ordering::Relaxed)
+            });
         let Some(site_rules) = agent.get_rules_for_domain(host) else {
             return fallback(host.to_string());
         };
 
         let fingerprint = agent.config_hash();
         let cached = self.site_contexts.get(host).map(|cached| {
+            touch(&cached.last_used, now);
             (cached.fingerprint.clone(), Arc::clone(&cached.context))
         });
         let context = match cached {
@@ -2147,6 +2166,7 @@ impl WafPlugin {
                     CachedSite {
                         fingerprint,
                         context: Arc::clone(&context),
+                        last_used: std::sync::atomic::AtomicU64::new(now),
                     },
                 );
                 context
@@ -2618,6 +2638,7 @@ impl TryFrom<&PluginConf> for WafPlugin {
             pow_difficulty,
             hash_value,
             site_contexts: DashMap::new(),
+            context_sweep: HostCacheSweep::default(),
             rate_counters: DashMap::new(),
         })
     }
@@ -6165,6 +6186,135 @@ inspect_body = true"###,
             .store(0, std::sync::atomic::Ordering::Relaxed);
         evaluate(&counters);
         assert_eq!(counters.len(), 1);
+    }
+
+    /// Below the GC threshold expired entries are still purged, just at a
+    /// much slower cadence: keys that stop receiving traffic (one-off
+    /// scanner combinations) must not accumulate forever.
+    #[test]
+    fn rate_counters_expire_below_the_threshold() {
+        let policy = RateLimitPolicy {
+            rules: vec![CompiledRateRule {
+                id: "rl-idle".to_string(),
+                name: "idle".to_string(),
+                expression: None,
+                chars: vec![RateChar::Ip],
+                period_secs: 60,
+                threshold: 1_000_000,
+                mitigation_secs: 0,
+                action: RateAction::Block,
+            }],
+            last_gc_sweep: AtomicU64::new(0),
+        };
+        let counters: DashMap<String, RateCounter> = DashMap::new();
+
+        let request = RequestData::new("GET", "/");
+        let evaluate = |counters: &DashMap<String, RateCounter>| {
+            policy.evaluate(counters, &request, "example.com", false, None)
+        };
+        let stale = |i: usize| {
+            (
+                format!("stale-{i}"),
+                RateCounter {
+                    window: 0,
+                    count: 1,
+                    blocked_until: 0,
+                    expires_at: unix_now().saturating_sub(1),
+                },
+            )
+        };
+
+        // First evaluation wins the CAS (last sweep = 0) and purges the
+        // seeded expired entries; only the live counter this request
+        // creates survives.
+        for i in 0..3 {
+            let (k, v) = stale(i);
+            counters.insert(k, v);
+        }
+        evaluate(&counters);
+        assert_eq!(counters.len(), 1);
+
+        // Pin the last sweep to "now": within the idle interval repeated
+        // evaluations must not sweep the small map.
+        for i in 0..3 {
+            let (k, v) = stale(i);
+            counters.insert(k, v);
+        }
+        policy
+            .last_gc_sweep
+            .store(unix_now(), std::sync::atomic::Ordering::Relaxed);
+        for _ in 0..5 {
+            evaluate(&counters);
+        }
+        assert_eq!(counters.len(), 4);
+
+        // Once the idle interval has elapsed, the next evaluation purges
+        // the expired entries again.
+        policy.last_gc_sweep.store(
+            unix_now().saturating_sub(RATE_COUNTERS_IDLE_GC_INTERVAL_SECS),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        evaluate(&counters);
+        assert_eq!(counters.len(), 1);
+    }
+
+    /// Wildcard sites let scanner-invented hosts cache per-host contexts;
+    /// the host-cache sweep must drop entries idle beyond the TTL instead of
+    /// letting them accumulate forever.
+    #[tokio::test]
+    async fn site_contexts_are_ttl_pruned() {
+        let (_guard, agent, _dir) = install_test_agent().await;
+        // Give the site a wildcard domain: any subdomain resolves, so any
+        // Host header a scanner invents caches a full compiled context.
+        agent
+            .rule_cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![proto::Site {
+                    id: "site-1".to_string(),
+                    name: "example".to_string(),
+                    domain: "*.example.com".to_string(),
+                    alternate_domains: Vec::new(),
+                    status: 0,
+                    rules: Some(proto::RuleBundle {
+                        site_id: "site-1".to_string(),
+                        config_hash: "hash-1".to_string(),
+                        waf: Some(proto::WafConfig {
+                            enabled: true,
+                            mode: 2, // block
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    trust_proxy_headers: false,
+                    trusted_header: String::new(),
+                    trust_last_hop: false,
+                    trusted_proxy_ranges: Vec::new(),
+                }],
+                config_hash: "hash-1".to_string(),
+                updated_at: None,
+            })
+            .unwrap();
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        // First resolve caches the scanner host (the sweep gate arms here).
+        plugin.resolve_site("scanner.example.com");
+        assert!(plugin.site_contexts.contains_key("scanner.example.com"));
+
+        // Age the entry beyond the TTL and re-arm the sweep gate.
+        plugin.site_contexts.get_mut("scanner.example.com").unwrap()
+            .last_used = std::sync::atomic::AtomicU64::new(0);
+        plugin.context_sweep.reset();
+
+        // The next resolve prunes the idle entry and rebuilds it fresh.
+        plugin.resolve_site("scanner.example.com");
+        let cached = plugin.site_contexts.get("scanner.example.com").unwrap();
+        assert!(
+            cached.last_used.load(std::sync::atomic::Ordering::Relaxed) > 0,
+            "idle context must be pruned and re-stamped on the next resolve"
+        );
     }
 
     #[test]

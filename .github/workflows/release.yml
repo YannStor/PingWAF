@@ -76,6 +76,10 @@ jobs:
         run: |
           sudo apt-get update
           # SYNC: keep this list in lockstep with Dockerfile / ci.yml
+          # NOTE: these binaries enable mimalloc unconditionally (see
+          # src/main.rs). The Dockerfiles pin MIMALLOC_* defaults as ENV —
+          # if you change them there, mirror the change in the tarball README
+          # so bare-process deployments don't silently diverge.
           sudo apt-get install -y --no-install-recommends \
             protobuf-compiler \
             libprotobuf-dev \

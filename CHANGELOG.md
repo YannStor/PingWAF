@@ -10,6 +10,74 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Memory: freed pages now reach the OS on glibc too.** mimalloc was
+  previously only wired in for musl builds; glibc builds (including the
+  production Debian images) used the system allocator, whose multi-arena
+  behaviour could pin large arena segments and turn a startup peak into
+  permanent RSS (620 MB+ observed on the demo host, twice an OOM kill).
+  mimalloc is now the unconditional global allocator on every platform
+  (`mimalloc` moved to the regular `[dependencies]` of the root `Cargo.toml`).
+- **The container images ship a `MIMALLOC_PURGE_DELAY` default.** The runtime
+  stage of `Dockerfile`, `Dockerfile.perf` and `Dockerfile.runtime` sets
+  `MIMALLOC_PURGE_DELAY=1000` milliseconds (mimalloc v3's own default).
+  Deployments can override it; lower values return freed memory to the OS
+  sooner at a small CPU cost.
+- **Per-host compile caches no longer grow without bound.** The per-host caches
+  of the waf, challenge, error_page, rewrite and cache plugins now expire
+  entries idle for more than 600 seconds, evict the least-recently-used
+  entries beyond 1024 hosts (the bound converges within one 60-second sweep
+  interval rather than being enforced at insert time), and run a background
+  sweep at most once every 60 seconds
+  (new `host_cache` module in `pingap-plugin`). Previously a wildcard site
+  exposed to random scanner `Host` headers accumulated compiled artifacts for
+  every host seen.
+- **Rate-limit counters expire below the GC threshold too.** `rate_counters`
+  now also prunes idle entries when the map is under the 65,536-entry GC
+  threshold, once every 600 seconds. Keys that stop receiving traffic
+  (one-off scanner IP/path combinations) no longer stay resident forever.
+
+## [PingWAF 0.27.1] — 2026-10-15
+
+### Fixed
+
+- **The CPU dashboard no longer reports "at 1 Hz" when a capture is
+  empty.** The summary finisher took `report.timing.frequency` whenever it
+  was positive, but the pprof crate falls back to `1` for empty captures
+  — so a profiled-but-idle process rendered as "30s at 1 Hz" even though
+  the request was for 99 Hz. The reported frequency is now only trusted
+  when the capture has at least one sample; otherwise the default the
+  request asked for is used.
+- **WAF block / challenge pages no longer emit nested `<style><style>`
+  tags.** The shared `PW_STYLE` partial already starts with `<style>`,
+  and `brand_page` wrapped it in another — producing
+  `<style><style>...</style></style>` in every 401 / 403 / 429 / 503 /
+  fail-closed response. Browsers tolerated it; strict HTML validators
+  did not. The wrapper is removed.
+- **`/debug/pprof/cpu/dashboard.svg` opens in seconds, not 30.** The
+  default capture window is now 5 s (still wide enough to catch a busy
+  slice on a typical process), so the first response returns in roughly
+  the time a "now" tab in any monitoring tool would. Operators who want
+  a deeper profile can pass `?seconds=N` (clamped to `1..=120`).
+- **The control-plane API is no longer `Access-Control-Allow-Origin: *`
+  by default.** Same-origin deployments (the production layout) do not
+  need CORS at all — and an unguarded `*` on a credential-bearing API
+  is a footgun. With no `cors_origins` configured, the server now emits
+  no CORS headers, so cross-origin browsers will block the request
+  (same-origin still works unchanged). Split-origin deployments opt in
+  via the `cors_origins` list as before.
+- **The console HTML now ships with the standard hardening response
+  headers.** `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+  `Referrer-Policy: strict-origin-when-cross-origin`, and a CSP
+  (`default-src 'self'`, with explicit allowances for React's inline
+  `style={…}` props and a `data:` fallback for images / fonts;
+  `frame-ancestors 'none'`; `connect-src 'self'`; no `unsafe-eval`) are
+  now applied at the router level. The `dashboard.svg` endpoint opts
+  back into `script-src 'unsafe-inline'` for the opt-in self-refresh
+  path so the live readout keeps working when the file is opened
+  directly; the HTML console itself stays strict.
+
 ## [PingWAF 0.27.0] — 2026-10-15
 
 ### Fixed

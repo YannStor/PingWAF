@@ -1,0 +1,13 @@
+# The pingap history below the divider in CHANGELOG.md is inherited verbatim
+# and must not be edited, so upstream wording and commit-hash fragments are
+# mapped to themselves rather than "fixed".
+[default.extend-identifiers]
+ANDed = "ANDed"
+LIKEs = "LIKEs"
+
+[default.extend-words]
+abd = "abd"
+dbe = "dbe"
+ded = "ded"
+ede = "ede"
+realod = "realod"
