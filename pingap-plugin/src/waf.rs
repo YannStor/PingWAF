@@ -29,12 +29,12 @@ use super::{
     get_str_slice_conf,
 };
 use crate::bot_dns::{DnsVerdict, bot_dns_verifier, known_bot_family};
-use crate::host_cache::{HostCacheSweep, touch};
 use crate::challenge::{
     ChallengeKind, VERIFY_ENDPOINT, basic_auth_page, block_page,
     build_challenge_response, fail_closed_page, paused_page, rate_limit_page,
     resolve_cookie_secret,
 };
+use crate::host_cache::{HostCacheSweep, touch};
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
@@ -1177,7 +1177,8 @@ impl RateLimitPolicy {
             // below it, a slow idle interval still purges expired entries.
             // The compare-exchange picks a single racer to run it; the
             // others proceed without the walk.
-            let interval = if counters.len() >= RATE_COUNTERS_GC_PANIC_THRESHOLD {
+            let interval = if counters.len() >= RATE_COUNTERS_GC_PANIC_THRESHOLD
+            {
                 1
             } else if counters.len() > RATE_COUNTERS_GC_THRESHOLD {
                 RATE_COUNTERS_GC_INTERVAL_SECS
@@ -6304,7 +6305,10 @@ inspect_body = true"###,
         assert!(plugin.site_contexts.contains_key("scanner.example.com"));
 
         // Age the entry beyond the TTL and re-arm the sweep gate.
-        plugin.site_contexts.get_mut("scanner.example.com").unwrap()
+        plugin
+            .site_contexts
+            .get_mut("scanner.example.com")
+            .unwrap()
             .last_used = std::sync::atomic::AtomicU64::new(0);
         plugin.context_sweep.reset();
 

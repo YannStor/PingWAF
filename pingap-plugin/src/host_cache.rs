@@ -129,11 +129,9 @@ mod tests {
         assert_eq!(map.len(), 5);
 
         // After the interval the idle entry is dropped.
-        sweep.prune(
-            &map,
-            now + HOST_CACHE_SWEEP_INTERVAL_SECS,
-            |e| e.0.load(Ordering::Relaxed),
-        );
+        sweep.prune(&map, now + HOST_CACHE_SWEEP_INTERVAL_SECS, |e| {
+            e.0.load(Ordering::Relaxed)
+        });
         assert_eq!(map.len(), 4);
         assert!(!map.contains_key("stale"));
 
@@ -141,11 +139,9 @@ mod tests {
         for i in 0..HOST_CACHE_MAX_ENTRIES {
             map.insert(format!("cap-{i}"), Entry(AtomicU64::new(now)));
         }
-        sweep.prune(
-            &map,
-            now + 2 * HOST_CACHE_SWEEP_INTERVAL_SECS,
-            |e| e.0.load(Ordering::Relaxed),
-        );
+        sweep.prune(&map, now + 2 * HOST_CACHE_SWEEP_INTERVAL_SECS, |e| {
+            e.0.load(Ordering::Relaxed)
+        });
         assert!(map.len() <= HOST_CACHE_MAX_ENTRIES);
         assert!(!map.contains_key("host-3"));
         assert!(map.contains_key("cap-0"));
