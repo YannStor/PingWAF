@@ -326,7 +326,13 @@ pub(crate) fn summarize_report(
             }
         }
     }
-    let frequency = if report.timing.frequency > 0 {
+    // When no samples were collected the pprof report's `timing.frequency`
+    // falls back to `1` (a crate default for empty captures), which the
+    // dashboard would then render as "at 1 Hz" — misleading operators who
+    // asked for 99 Hz. The reported frequency is trustworthy only when we
+    // have at least one sample to derive a period from; otherwise fall
+    // back to the default the request actually asked for.
+    let frequency = if total_samples > 0 && report.timing.frequency > 0 {
         report.timing.frequency
     } else {
         crate::DEFAULT_FREQUENCY

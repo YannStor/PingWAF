@@ -33,15 +33,25 @@ use axum::Json;
 use axum::Router;
 use pingwaf_pprof::{
     start_session, DashboardSvgOpts, ProfileError, ProfilingSession,
-    DEFAULT_SECONDS, MAX_SECONDS,
+    MAX_SECONDS,
 };
 use serde::Deserialize;
 use std::time::Duration;
 
+/// Default capture window for a dashboard render.
+///
+/// Five seconds is enough to capture a representative busy slice on a
+/// reasonably busy process, and the dashboard returns in roughly the same
+/// time a user expects from a "now" tab in any monitoring tool. Operators
+/// who want a more precise profile can pass `?seconds=N` (clamped to
+/// `1..=MAX_SECONDS`) at the cost of a longer first response.
+const DEFAULT_CAPTURE_SECONDS: u64 = 5;
+
 /// Query parameters accepted by both capture endpoints.
 #[derive(Debug, Default, Deserialize)]
 pub struct ProfileQuery {
-    /// Capture window; clamped to `1..=MAX_SECONDS`, default 30.
+    /// Capture window; clamped to `1..=MAX_SECONDS`, default
+    /// [`DEFAULT_CAPTURE_SECONDS`].
     pub seconds: Option<u64>,
     /// Sampling frequency in Hz; clamped by the profiling crate, default 99.
     pub frequency: Option<i32>,
@@ -76,7 +86,7 @@ fn begin_session(query: &ProfileQuery) -> Result<ProfilingSession, ApiError> {
 fn capture_seconds(query: &ProfileQuery) -> u64 {
     query
         .seconds
-        .unwrap_or(DEFAULT_SECONDS)
+        .unwrap_or(DEFAULT_CAPTURE_SECONDS)
         .clamp(1, MAX_SECONDS)
 }
 
@@ -243,6 +253,16 @@ async fn cpu_dashboard(
                 HeaderValue::from_static("nosniff"),
             ),
             (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+            // The `?refresh=` path inlines a self-refreshing script; the
+            // global CSP only allows `script-src 'self'`, so this SVG
+            // needs to opt back into `unsafe-inline`. The token and the
+            // SVG itself are both admin-only and `no-store` — the trade
+            // is acceptable and narrower than letting the global CSP
+            // carry `unsafe-inline` for the whole console.
+            (
+                header::CONTENT_SECURITY_POLICY,
+                HeaderValue::from_static("script-src 'unsafe-inline'"),
+            ),
         ],
         svg,
     )

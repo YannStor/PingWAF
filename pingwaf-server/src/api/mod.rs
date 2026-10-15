@@ -53,7 +53,7 @@ use crate::tls::ConnInfo;
 use axum::extract::connect_info::ConnectInfo;
 use axum::extract::DefaultBodyLimit;
 use axum::extract::{Request, State};
-use axum::http::{HeaderValue, Method, StatusCode};
+use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -65,6 +65,7 @@ use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
 pub use error::{error_response, ApiError};
@@ -162,6 +163,46 @@ pub fn build_router(state: AppState) -> Router {
     // precedence as the inner, more specific bounds.
     .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT_BYTES))
     .layer(build_cors(&config.cors_origins))
+    // Global security headers. Applied as `if_not_present` so a handler
+    // that legitimately needs a different value (e.g. an `<iframe>`-able
+    // preview) can still override them.
+    //
+    // The CSP mirrors the only static assets the dashboard actually
+    // loads: `/favicon.svg` and the Vite bundle (both same-origin),
+    // inline `style={...}` props on React components, and a
+    // `data:` fallback for any future embedded images / webfonts.
+    // `connect-src 'self'` keeps XHR/fetch on the API origin only; if a
+    // split-origin deployment is ever configured, that will need to
+    // widen. The dashboard.svg `?refresh=` SVG embeds an inline script
+    // when the user opts in; the SVG response sets its own
+    // `Content-Security-Policy: script-src 'unsafe-inline'` for that
+    // one path.
+    .layer(SetResponseHeaderLayer::if_not_present(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    ))
+    .layer(SetResponseHeaderLayer::if_not_present(
+        HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
+    ))
+    .layer(SetResponseHeaderLayer::if_not_present(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("strict-origin-when-cross-origin"),
+    ))
+    .layer(SetResponseHeaderLayer::if_not_present(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(
+            "default-src 'self'; \
+             img-src 'self' data:; \
+             font-src 'self' data:; \
+             style-src 'self' 'unsafe-inline'; \
+             script-src 'self'; \
+             connect-src 'self'; \
+             frame-ancestors 'none'; \
+             base-uri 'self'; \
+             form-action 'self'",
+        ),
+    ))
     .layer(CompressionLayer::new())
     .layer(TraceLayer::new_for_http().make_span_with(
         |request: &axum::http::Request<_>| {
@@ -191,8 +232,12 @@ pub fn build_router(state: AppState) -> Router {
     .with_state(state)
 }
 
-/// Permissive by default (the dashboard is served from the same origin in
-/// production); an explicit `cors_origins` list restricts it.
+/// By default the dashboard is served from the same origin as the API
+/// (the production layout), so no `Access-Control-Allow-Origin` header is
+/// needed — and on a credential-bearing API, an unguarded `*` is a
+/// footgun. Operators with a split-origin deployment (control plane and
+/// API on different hosts) must opt in via the `cors_origins` config,
+/// which is honored as an explicit whitelist.
 fn build_cors(origins: &[String]) -> CorsLayer {
     let layer = CorsLayer::new()
         .allow_methods([
@@ -222,8 +267,11 @@ fn build_cors(origins: &[String]) -> CorsLayer {
         .collect();
 
     if parsed.is_empty() {
-        tracing::warn!("no CORS origins configured, allowing any origin");
-        layer.allow_origin(AllowOrigin::any())
+        // Same-origin: leave `allow_origin` unset so the layer emits no
+        // CORS headers at all. Cross-origin callers will then be
+        // rejected by the browser, which is what we want.
+        tracing::info!("no CORS origins configured; same-origin only");
+        layer
     } else {
         tracing::info!(origins = ?parsed, "CORS restricted to the configured origins");
         layer.allow_origin(AllowOrigin::list(parsed))
