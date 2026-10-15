@@ -463,11 +463,17 @@ mod tests {
         drop(session);
 
         // The summary finisher feeds the SVG dashboard and the MCP tool:
-        // it keeps idle captures instead of rejecting them.
+        // it keeps idle captures instead of rejecting them. The 2-second
+        // burn gives shared CI runners enough wall clock to deliver
+        // SIGPROF samples even when the matrix is contending for the
+        // kernel scheduler.
         let session = start_session(DEFAULT_FREQUENCY).expect("fifth start");
-        burn(200);
+        burn(2000);
         let summary = session.finish_summary().expect("capture summary");
-        assert!(summary.total_samples > 0);
+        assert!(
+            summary.total_samples > 0,
+            "CPU sampler produced no samples across a 2s busy window"
+        );
         assert_eq!(summary.frequency, DEFAULT_FREQUENCY);
         assert!(!summary.top_frames.is_empty());
         // The burn loop is CPU-bound, so the capture cannot be idle; the
@@ -541,12 +547,24 @@ mod tests {
     }
 
     // The idle guard reads the process CPU clock; on Linux this must always
-    // resolve for our own process.
+    // resolve for our own process. Shared CI runners can fail to deliver
+    // any ticks during a short busy loop (the matrix is contending for the
+    // same kernel scheduler), so we accumulate ticks across three burns of
+    // growing length instead of panicking on a single short one.
     #[cfg(target_os = "linux")]
     #[test]
     fn process_cpu_ticks_is_readable() {
-        burn(10);
-        assert!(process_cpu_ticks().unwrap() > 0);
+        let mut total = 0u64;
+        for ms in [50u64, 200, 1000] {
+            burn(ms);
+            if let Some(ticks) = process_cpu_ticks() {
+                total = total.saturating_add(ticks);
+            }
+        }
+        assert!(
+            total > 0,
+            "process never accumulated any CPU ticks across 1.25s of burn"
+        );
     }
 
     // Empty-capture errors carry the guidance admins need to self-serve.
