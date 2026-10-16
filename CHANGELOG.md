@@ -10,6 +10,8 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+## [PingWAF 0.27.1] — 2026-10-16
+
 ### Fixed
 
 - **Memory: freed pages now reach the OS on glibc too.** mimalloc was
@@ -37,11 +39,10 @@ verbatim for reference and attribution, and is not maintained here.
   now also prunes idle entries when the map is under the 65,536-entry GC
   threshold, once every 600 seconds. Keys that stop receiving traffic
   (one-off scanner IP/path combinations) no longer stay resident forever.
-
-## [PingWAF 0.27.1] — 2026-10-15
-
-### Fixed
-
+- **Dependency advisories cleared.** `cargo update` moves `rustls` to
+  0.23.46 (RUSTSEC-2026-0346/0347/0348/0349) and `yoke-derive` to 0.8.4;
+  the `security-audit` workflow is green again. Lockfile-only bump, no
+  API changes.
 - **The CPU dashboard no longer reports "at 1 Hz" when a capture is
   empty.** The summary finisher took `report.timing.frequency` whenever it
   was positive, but the pprof crate falls back to `1` for empty captures
