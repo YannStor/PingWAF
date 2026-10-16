@@ -700,7 +700,7 @@ one:
 | — | `PINGWAF_METRIC_RETENTION_DAYS` | `7` | Days of edge-metric samples kept |
 | — | `PINGWAF_CORS_ORIGINS` | `[]` (all) | Allowed CORS origins, comma-separated |
 | — | `PINGWAF_PASSKEY_ENABLED` / `_RP_NAME` / `_RP_ID` / `_ORIGIN` / `_TRUST_FORWARDED_PROTO` | see [deployment guide](./deployment.md#server-configuration-server) | Passkey (WebAuthn) settings |
-| — | `PINGWAF_PPROF_ENABLED` | enabled | Set to `0` (`false`/`off`/`no`, case-insensitive) to disable the CPU-capture endpoints and the MCP `profile_cpu` tool; the read-only memory/metrics snapshots stay available — see [Profiling](./profiling.md#capture-audit-and-the-enable-switch) |
+| — | `PINGWAF_PPROF_ENABLED` | enabled | Fallback for the debug-capture switch (honoured only when the `[basic] pprof_enabled` config key is unset, default `true`). Set to `0` (`false`/`off`/`no`, case-insensitive) to disable the CPU-capture endpoints, the heap endpoint and the MCP `profile_cpu` tool; the read-only memory/metrics snapshots stay available — see [Profiling](./profiling.md#capture-audit-and-the-enable-switch) |
 
 A dash means the setting has no counterpart in that column: the server rows
 with a dash are **environment-only** (no flag, so no file key either), while

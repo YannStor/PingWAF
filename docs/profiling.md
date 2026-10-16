@@ -1,13 +1,16 @@
 # PingWAF Profiling
 
-PingWAF ships built-in pprof-style profiling in every binary — no sidecar, no external collector, no cargo feature. It works like Go's `net/http/pprof`: hit an endpoint, get a profile.
+PingWAF ships built-in pprof-style profiling in every binary — no sidecar, no external collector, no cargo feature for CPU sampling. (The one exception is heap attribution, an opt-in `mem-prof` diagnostic build — see [Heap attribution](#heap-attribution-the-mem-prof-build-and-debugpprofheap).) It works like Go's `net/http/pprof`: hit an endpoint, get a profile.
 
 Both planes are covered:
 
 | Plane | Endpoints | Auth |
 | --- | --- | --- |
-| Control plane (`pingwaf-server`) | `GET /api/v1/debug/pprof/{profile,flamegraph,memory}` and `GET /api/v1/debug/pprof/cpu/{metrics,dashboard.svg}` | Admin JWT bearer token |
+| Control plane (`pingwaf-server`) | `GET /api/v1/debug/pprof/{profile,flamegraph,memory,heap}` and `GET /api/v1/debug/pprof/cpu/{metrics,dashboard.svg}` | Admin JWT bearer token |
 | Data plane (pingap admin plugin) | `GET {admin-path}/api/pprof/{profile,flamegraph,memory}` | Admin plugin credentials |
+
+`heap` exists only on the control plane and only in a `mem-prof` diagnostic
+build (`501` otherwise) — see [Heap attribution](#heap-attribution-the-mem-prof-build-and-debugpprofheap).
 
 In the console, administrators also find a **Performance diagnostics** card
 under **Settings → About** that downloads the same three artifacts (CPU
@@ -16,7 +19,7 @@ without constructing the URLs by hand.
 
 ## Endpoints
 
-- `profile` — gzip-compressed pprof protobuf, the exact wire format `go tool pprof` expects. Sampling takes `seconds` (1-60, default 15) at `frequency` Hz (1-250, default 99 — off-round so the sampler does not lock onto periodic work).
+- `profile` — gzip-compressed pprof protobuf, the exact wire format `go tool pprof` expects. Sampling takes `seconds` (1-5, default 5 — the default is also the hard ceiling, so the window cannot be enlarged via query parameters) at `frequency` Hz (1-250, default 99 — off-round so the sampler does not lock onto periodic work).
 - `flamegraph` — SVG flamegraph rendered by inferno; open it directly in a browser.
 - `cpu/dashboard.svg` — self-contained SVG **dashboard** for one capture: the process CPU share over the window, the task distribution (top functions by inclusive sample share), the key metrics and a color-coded status badge (`NORMAL` / `HIGH LOAD` / `IDLE` / `PLATFORM-LIMITED`). Unlike the raw capture endpoints this degrades off-Linux: there it renders the live readout with a `PLATFORM-LIMITED` badge instead of answering `501`. With `?refresh=<1-60>` the SVG embeds a script that polls `cpu/metrics` and refreshes the live strip while the file is open in a browser; because the metrics endpoint is Bearer-only, the caller's own token is inlined into that poll (opt-in via the `refresh` parameter, `no-store`, and the dashboard prints a do-not-share warning on itself).
 - `cpu/metrics` — cheap point-in-time CPU snapshot (process and host usage, core count) polled by the dashboard's refresh script; costs one sysinfo refresh, no sampling session. It also carries a `profiling` object (see [Capture audit and the enable switch](#capture-audit-and-the-enable-switch)).
@@ -26,12 +29,14 @@ Sampling is process-global: a second concurrent capture gets `409 Conflict`. Rep
 
 The sampler fires on **process CPU time** (`SIGPROF` / `ITIMER_PROF`), not wall clock. A capture of an idle process therefore yields no samples: instead of an empty profile the endpoints answer `409 Conflict` with guidance — retry under load, or use the `memory` snapshot. A session whose CPU time grew by less than 1% of its wall-clock window is rejected the same way.
 
+To profile an idle process anyway, append `?selfload=true` (accepted by `profile`, `flamegraph` and `cpu/dashboard.svg`; the console's Performance diagnostics card ships with the switch on). For exactly the capture window the server generates light in-process load — two tokio tasks doing short spin bursts between yields — so the time-based sampler has frames to catch. Keep expectations straight: a selfload profile shows the async runtime and this synthetic workload, **not** the site's business functions. It answers "does the capture pipeline work" and gives a runtime-level baseline; for *memory* attribution the right tool is the [heap endpoint](#heap-attribution-the-mem-prof-build-and-debugpprofheap), and for CPU attribution under real traffic, capture with traffic on.
+
 ## Capturing a profile
 
 Control plane:
 
 ```bash
-go tool pprof -http=: http://localhost:9080/api/v1/debug/pprof/profile?seconds=30
+go tool pprof -http=: http://localhost:9080/api/v1/debug/pprof/profile?seconds=5
 ```
 
 Data plane (profiling is served by the binary's own admin plugin, which is only
@@ -41,7 +46,7 @@ browser session for the plugin's auth):
 
 ```bash
 curl -u admin:password \
-  "http://<admin-addr>/<admin-path>/api/pprof/profile?seconds=30" -o pingwaf-cpu.pb.gz
+  "http://<admin-addr>/<admin-path>/api/pprof/profile?seconds=5" -o pingwaf-cpu.pb.gz
 go tool pprof -http=: pingwaf-cpu.pb.gz
 ```
 
@@ -49,7 +54,7 @@ Flamegraph without Go tooling:
 
 ```bash
 curl -u admin:password \
-  "http://<admin-addr>/<admin-path>/api/pprof/flamegraph?seconds=30" > flamegraph.svg
+  "http://<admin-addr>/<admin-path>/api/pprof/flamegraph?seconds=5" > flamegraph.svg
 open flamegraph.svg
 ```
 
@@ -58,7 +63,7 @@ to embed the live-refresh script, then open the file in a browser):
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:9080/api/v1/debug/pprof/cpu/dashboard.svg?seconds=10&refresh=5" \
+  "http://localhost:9080/api/v1/debug/pprof/cpu/dashboard.svg?seconds=5&refresh=5" \
   > cpu-dashboard.svg
 open cpu-dashboard.svg
 ```
@@ -86,6 +91,49 @@ gh workflow run release-perf.yml
 ```
 
 It builds `Dockerfile.perf` (the same multi-stage build, `--profile release-perf`) and publishes `ghcr.io/shuaizend/pingwaf:perf` (amd64). Deploy it in place of the regular tag, reproduce the load, capture the profile, then switch back — the image is 2-4× larger and never enters the version manifests.
+
+## Heap attribution: the `mem-prof` build and `/debug/pprof/heap`
+
+A CPU flame graph answers "where does CPU time go". For "which function
+allocates / retains memory" the tool is heap profiling, shipped as the
+`mem-prof` cargo feature:
+
+```bash
+cargo build --profile=release-perf --features=mem-prof
+```
+
+`mem-prof` swaps the global allocator from mimalloc to tikv-jemallocator
+(jemalloc with heap-profiling support). That changes allocator semantics
+relative to the shipped images, so it is a diagnostic build, not a production
+one — take the binary to the same environment when investigating, like
+`release-perf`. Start the process with `MALLOC_CONF=prof:true` (jemalloc heap
+profiling is sampled and off by default), then request the dump:
+
+```bash
+curl -k -H "Authorization: Bearer $TOKEN" \
+  "https://localhost:9080/api/v1/debug/pprof/heap" -o pingwaf-heap.prof
+```
+
+The endpoint triggers a jemalloc `prof.dump` and returns the jeprof-format
+dump as an attachment — every live allocation path with its retained byte
+count. Render it as a call graph with `jeprof` (ships with gperftools; any
+build of the same source revision works for symbolisation):
+
+```bash
+jeprof --svg <binary> pingwaf-heap.prof > heap.svg
+```
+
+Behaviour notes:
+
+- The endpoint is read-only like the `memory` snapshot — no sampling session,
+  it answers immediately — but it is gated by the
+  [debug-capture switch](#capture-audit-and-the-enable-switch): a deployment
+  that turned captures off answers `503` for heap dumps too.
+- On a build without `mem-prof` the endpoint answers `501 Not Implemented`,
+  pointing at the `memory` snapshot for aggregate usage instead.
+- The dump reflects the instant it was taken (`no-store`, no caching).
+- Control plane only: the data-plane admin plugin serves the three CPU
+  capture endpoints, not the heap dump.
 
 ## Reading the results
 
@@ -118,9 +166,23 @@ profiling capture finished endpoint=… outcome=… rss=…
 
 `rss` is the process RSS right after the capture, so memory spikes can be correlated with capture activity.
 
-Captures can be disabled per deployment with `PINGWAF_PPROF_ENABLED=0` (or `false`/`off`/`no`, case-insensitive). This turns off the three control-plane CPU capture endpoints (`profile`, `flamegraph`, `cpu/dashboard.svg` — they answer `503 Service Unavailable`) and the MCP `profile_cpu` tool. The read-only snapshots stay available — `memory` and `cpu/metrics` answer normally with captures off, which is exactly the view an operator needs when investigating without sampling. The switch defaults to enabled.
+Captures can be disabled per deployment with the `[basic] pprof_enabled`
+configuration key in `conf/basic.toml` — a boolean, default `true`
+(debug-capture mode on). The legacy `PINGWAF_PPROF_ENABLED=0` environment
+variable (or `false`/`off`/`no`, case-insensitive) still works, but only as a
+fallback honoured when the key is **not** set explicitly — the configuration
+file wins. Changes require a restart.
 
-**Measured capture overhead:** on a v0.27.2 (mimalloc) container, completing two 30 s captures at 99 Hz left the process VmHWM at only 79 MB — **on an idle process** pprof capture itself does not cause memory spikes. Under load the story is different (see [Load guard](#load-guard)). When investigating an OOM or memory spike, check the `profiling` field of `/debug/pprof/cpu/metrics` and the capture audit logs first to rule captures in or out before looking elsewhere.
+When the switch is off, every CPU capture entry point answers `503 Service
+Unavailable`: the three control-plane endpoints (`profile`, `flamegraph`,
+`cpu/dashboard.svg`), the same capture endpoints on the data-plane admin
+plugin, the MCP `profile_cpu` tool, and the
+[heap endpoint](#heap-attribution-the-mem-prof-build-and-debugpprofheap). The
+read-only snapshots stay available — `memory` and `cpu/metrics` answer
+normally with captures off, which is exactly the view an operator needs when
+investigating without sampling.
+
+**Measured capture overhead:** on a v0.27.2 (mimalloc) container, completing two 30 s captures at 99 Hz left the process VmHWM at only 79 MB — **on an idle process** pprof capture itself does not cause memory spikes. (Those windows predate the current 5-second hard cap; smaller windows only shrink the exposure.) Under load the story is different (see [Load guard](#load-guard)). When investigating an OOM or memory spike, check the `profiling` field of `/debug/pprof/cpu/metrics` and the capture audit logs first to rule captures in or out before looking elsewhere.
 
 ## Load guard
 
@@ -135,6 +197,9 @@ polls. Above 40% of one core the capture is refused:
 - The audit log records `outcome=load_guard`.
 - The read-only snapshots are **not** subject to the guard — `memory` and
   `cpu/metrics` keep answering normally on a busy process.
+- The `?selfload=true` workload starts only after the guard has passed and is
+  deliberately light (short spin bursts separated by sleeps), so opting in
+  cannot mask a busy process from the guard.
 
 The guard exists because the pprof-rs sampler allocates memory inside its
 `SIGPROF` signal handler (a known design limitation of the crate). On an idle
@@ -144,8 +209,9 @@ until the OOM killer strikes (observed twice on the demo instance on
 2026-10-16).
 
 > **Warning — profiling under load can OOM the process.** For production
-> instances, keep `PINGWAF_PPROF_ENABLED=0` and turn captures on temporarily,
-> at low load, only while investigating. On the host, prefer
+> instances, keep the debug-capture switch off (`[basic] pprof_enabled =
+> false`; legacy deployments `PINGWAF_PPROF_ENABLED=0`) and turn captures on
+> temporarily, at low load, only while investigating. On the host, prefer
 > `transparent_hugepage=madvise`; run the container with a memory limit
 > (`mem_limit`) so a bad capture cannot take down the host.
 

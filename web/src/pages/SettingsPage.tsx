@@ -2733,6 +2733,7 @@ function PerformanceDiagnosticsCard() {
   const toast = useToast()
   const [seconds, setSeconds] = useState(String(PPROF_DEFAULT_SECONDS))
   const [pending, setPending] = useState<'profile' | 'flamegraph' | 'memory' | null>(null)
+  const [selfload, setSelfload] = useState(true)
 
   // Live snapshot for the two-scope display below; silent on failure since it
   // is supplementary to the download buttons.
@@ -2749,8 +2750,8 @@ function PerformanceDiagnosticsCard() {
   const run = async (kind: 'profile' | 'flamegraph' | 'memory') => {
     setPending(kind)
     try {
-      if (kind === 'profile') await downloadCpuProfile(parsedSeconds)
-      else if (kind === 'flamegraph') await downloadFlamegraph(parsedSeconds)
+      if (kind === 'profile') await downloadCpuProfile(parsedSeconds, selfload)
+      else if (kind === 'flamegraph') await downloadFlamegraph(parsedSeconds, selfload)
       else await downloadMemorySnapshot()
       toast.success(t('pages.settings.pprofDownloaded'))
     } catch (error) {
@@ -2794,6 +2795,18 @@ function PerformanceDiagnosticsCard() {
           disabled={pending !== null}
           onChange={(event) => setSeconds(event.target.value)}
         />
+        <label
+          className="flex items-center gap-2 text-sm"
+          title={t('pages.settings.pprofSelfloadHint')}
+        >
+          <input
+            type="checkbox"
+            checked={selfload}
+            onChange={(e) => setSelfload(e.target.checked)}
+            disabled={pending !== null}
+          />
+          {t('pages.settings.pprofSelfload')}
+        </label>
         <div className="flex flex-wrap gap-2">
           <Button
             variant="secondary"

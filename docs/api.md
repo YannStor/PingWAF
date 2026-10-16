@@ -3078,7 +3078,7 @@ credentials).
 | `list_ip_groups` | | Shared IP groups with size and sync state. |
 | `query_control_plane_logs` | | The 9080 access log, including allowlist/WAF verdicts. |
 | `profile_memory` | | Memory snapshot of the control-plane process (process RSS) plus host-level totals, and container (cgroup) figures inside a memory-limited container — the numbers `docker stats` reports; scope notes included; cached for a few seconds. |
-| `profile_cpu` | | Capture a CPU profile of the control plane (`seconds` 1-30 default 10, `frequency` 1-199 default 99) and return a summary, a self-contained SVG dashboard and reading notes; status covers `normal`/`high_load`/`idle`. Linux-only sampling — other platforms get a live point-in-time readout (`platform_limited`); repeated calls within 60 seconds replay the cached capture. |
+| `profile_cpu` | | Capture a CPU profile of the control plane (`seconds` 1-5 default 5, `frequency` 1-199 default 99) and return a summary, a self-contained SVG dashboard and reading notes; status covers `normal`/`high_load`/`idle`. Linux-only sampling — other platforms get a live point-in-time readout (`platform_limited`); repeated calls within 60 seconds replay the cached capture. |
 | `set_observation_mode` | ✓ | Turn global observation mode on or off. |
 | `set_site_status` | ✓ | Activate or pause one site. |
 
@@ -3102,16 +3102,18 @@ Built-in pprof-style profiling of the control-plane process. All endpoints requi
 
 CPU sampling requires Linux (the only platform with a signal-safe unwinder for the sampling handler); on other platforms the capture endpoints return `501 Not Implemented`, while `/debug/pprof/memory` works everywhere.
 
+All CPU captures (and heap dumps) are gated by the `[basic] pprof_enabled` debug-capture switch (default on; legacy `PINGWAF_PPROF_ENABLED` env fallback, changes need a restart): when it is off, the capture endpoints and `/debug/pprof/heap` answer `503 Service Unavailable`, while the read-only snapshots keep working. See [Profiling](profiling.md#capture-audit-and-the-enable-switch).
+
 Symbols are resolved from the binary's symbol table. The default `release` profile strips symbols, so most frames read `Unknown` — profile a `release-perf` build (`make release-perf`) to get readable flame graphs.
 
 ### GET /debug/pprof/profile
 
 Capture CPU samples and return a gzip-compressed pprof protobuf consumable by `go tool pprof` and speedscope.
 
-**Query:** `?seconds=15&frequency=99` — capture window (1-60 s, default 15) and sampling frequency in Hz (1-250, default 99). Captures are refused with `503 Service Unavailable` when the process is using more than 40% of one core at start (see [Load guard](profiling.md#load-guard)).
+**Query:** `?seconds=5&frequency=99` — capture window (1-5 s, default 5; the default is also the hard ceiling) and sampling frequency in Hz (1-250, default 99). Appending `&selfload=true` generates light in-process load for exactly the window, so an idle process — whose time-based sampler would otherwise record nothing (the endpoints answer `409`) — still produces a profile; the profile then shows the runtime and the synthetic load, not site handlers. Captures are refused with `503 Service Unavailable` when the process is using more than 40% of one core at start (see [Load guard](profiling.md#load-guard)).
 
 ```bash
-go tool pprof -http=: -insecure https://localhost:9080/api/v1/debug/pprof/profile?seconds=30
+go tool pprof -http=: -insecure https://localhost:9080/api/v1/debug/pprof/profile?seconds=5
 ```
 
 ### GET /debug/pprof/flamegraph
@@ -3122,7 +3124,7 @@ inline content. Same query parameters as above.
 
 ```bash
 curl -k -H "Authorization: Bearer $TOKEN" \
-  "https://localhost:9080/api/v1/debug/pprof/flamegraph?seconds=30" > flamegraph.svg
+  "https://localhost:9080/api/v1/debug/pprof/flamegraph?seconds=5" > flamegraph.svg
 ```
 
 ### GET /debug/pprof/memory
@@ -3141,6 +3143,28 @@ JSON snapshot of process RSS and system memory (no sampling, returns immediately
   "used_memory": "9.0 GB",
   "collected_at_ms": 1727443200000
 }
+```
+
+### GET /debug/pprof/heap
+
+Jeprof-format heap profile (`mem-prof` diagnostic builds only; other builds
+answer `501 Not Implemented`). The endpoint triggers a jemalloc `prof.dump`
+and returns the dump as an attachment (`application/octet-stream`,
+`Content-Disposition: attachment; filename="pingwaf-heap.<pid>.prof"`,
+`no-store`) — every live allocation path with its retained byte count. This
+is the tool for "which function allocates / retains memory"; a CPU flame
+graph answers CPU attribution instead.
+
+Requirements: build with `--features mem-prof` (swaps the global allocator to
+tikv-jemallocator — diagnostic builds only, not for production images) and
+run with `MALLOC_CONF=prof:true`. Render with `jeprof --svg <binary> <dump>`.
+The endpoint is read-only (no sampling session) but gated by the
+`pprof_enabled` debug-capture switch: with captures off it answers `503`.
+Control plane only — the data-plane admin plugin does not expose it.
+
+```bash
+curl -k -H "Authorization: Bearer $TOKEN" \
+  "https://localhost:9080/api/v1/debug/pprof/heap" -o pingwaf-heap.prof
 ```
 
 The data plane (pingap) exposes the same three endpoints under its admin path: `GET {admin-path}/api/pprof/profile`, `.../flamegraph` and `.../memory`, authenticated by the admin plugin's credentials. See [Profiling](profiling.md).

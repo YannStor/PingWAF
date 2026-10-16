@@ -16,9 +16,9 @@ import type { MemorySnapshot } from './types'
  * - `403 Forbidden` — non-admin callers.
  */
 
-/** Must match `pingwaf_pprof::MAX_SECONDS` (currently 60); the server clamps to 1..=MAX. */
-export const PPROF_MAX_SECONDS = 60
-export const PPROF_DEFAULT_SECONDS = 15
+/** Must match `pingwaf_pprof::MAX_SECONDS` (currently 5); the server clamps to 1..=MAX. */
+export const PPROF_MAX_SECONDS = 5
+export const PPROF_DEFAULT_SECONDS = 5
 
 /** Shared request runner: auth header + single 401 token-refresh retry. */
 async function request(path: string, query?: Record<string, unknown>): Promise<Response> {
@@ -82,17 +82,25 @@ function saveBlob(blob: Blob, filename: string): void {
 }
 
 /** CPU profile (gzip pprof protobuf) — consumable by `go tool pprof`. */
-export async function downloadCpuProfile(seconds: number): Promise<void> {
+export async function downloadCpuProfile(
+  seconds: number,
+  selfload = false,
+): Promise<void> {
   const blob = await download('/debug/pprof/profile', {
     seconds: Math.min(PPROF_MAX_SECONDS, Math.max(1, seconds)),
+    selfload,
   })
   saveBlob(blob, 'pingwaf-cpu.pb.gz')
 }
 
 /** SVG flamegraph of the capture window. */
-export async function downloadFlamegraph(seconds: number): Promise<void> {
+export async function downloadFlamegraph(
+  seconds: number,
+  selfload = false,
+): Promise<void> {
   const blob = await download('/debug/pprof/flamegraph', {
     seconds: Math.min(PPROF_MAX_SECONDS, Math.max(1, seconds)),
+    selfload,
   })
   saveBlob(blob, 'pingwaf-flamegraph.svg')
 }

@@ -155,3 +155,6 @@
 # Increasing this value will allow more files to be cached but consume more memory. It is not limited for file cache.
 # Default `100MB`
 # cache_max_size = "100MB"
+
+# Debug-capture switch for the pprof endpoints and MCP tool (default: true).
+# pprof_enabled = true

@@ -110,6 +110,13 @@ kdl = { workspace = true }
 # Global allocator for every target (see src/main.rs): replaces musl's default
 # allocator and glibc malloc's un-trimmed per-thread arenas.
 mimalloc = "0.1.47"
+# Diagnostic build only (--features mem-prof): swaps the global allocator to
+# jemalloc with heap profiling, enabling /debug/pprof/heap to attribute
+# memory to call sites. Not for production images.
+tikv-jemalloc-sys = { version = "0.6", optional = true, features = [
+    "profiling",
+] }
+tikv-jemallocator = { version = "0.6", optional = true }
 
 [build-dependencies]
 vergen = { version = "10.0.3", features = ["build"] }
@@ -141,6 +148,14 @@ tls-rustls = [
 ]
 pyro = ["pingap-pyroscope"]
 imageoptim = ["pingap-imageoptim"]
+# Diagnostic heap profiling (see src/main.rs allocator comment): swaps the
+# global allocator to jemalloc with `profiling`, enabling /debug/pprof/heap.
+# Diagnostic builds only — never enabled in the shipped images.
+mem-prof = [
+    "dep:tikv-jemallocator",
+    "dep:tikv-jemalloc-sys",
+    "pingwaf-server/mem-prof",
+]
 geo = ["pingap-plugin/geo"]
 tracing = [
     "pingora/sentry",

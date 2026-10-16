@@ -31,7 +31,9 @@ verbatim for reference and attribution, and is not maintained here.
   `/flamegraph`, `/cpu/dashboard.svg` — they answer `503 Service
   Unavailable`) and the MCP `profile_cpu` tool. The read-only snapshots
   (`/debug/pprof/memory`, `/debug/pprof/cpu/metrics`) stay available.
-  Defaults to enabled.
+  Defaults to enabled. Within this release the switch has moved to the
+  `[basic] pprof_enabled` configuration key; the environment variable
+  remains as a fallback honoured only when the key is unset (see below).
 
 - **Profiling: load guard against captures under load.** Before any CPU
   capture starts (the HTTP capture endpoints and the MCP `profile_cpu`
@@ -45,13 +47,51 @@ verbatim for reference and attribution, and is not maintained here.
   and end in an OOM kill (observed twice on 2026-10-16); idle captures
   are harmless (measured VmHWM 79 MB).
 
+- **Profiling: `[basic] pprof_enabled` configuration switch.** The
+  debug-capture switch moves from env-only into the configuration file
+  (boolean, default `true` = captures on). The legacy
+  `PINGWAF_PPROF_ENABLED` environment variable is demoted to a fallback,
+  honoured only when the key is not set explicitly — the configuration
+  file wins; changes require a restart. When off, every CPU capture entry
+  point answers `503 Service Unavailable`: the three control-plane
+  endpoints, the same capture endpoints on the data-plane admin plugin,
+  the MCP `profile_cpu` tool and the new heap endpoint. The read-only
+  `memory` and `cpu/metrics` snapshots stay available.
+
+- **Profiling: heap attribution via `--features mem-prof` and
+  `GET /debug/pprof/heap`.** The diagnostic `mem-prof` feature swaps the
+  global allocator from mimalloc to tikv-jemallocator (heap-profiling
+  enabled) and adds the control-plane heap endpoint: it triggers a
+  jemalloc `prof.dump` and returns the jeprof-format dump as an
+  attachment — every live allocation path with its retained byte count.
+  This is the answer to "which function allocates / retains memory",
+  where a CPU flame graph answers "where does CPU time go". Requires the
+  process to run with `MALLOC_CONF=prof:true`; render with
+  `jeprof --svg <binary> <dump>`. Non-`mem-prof` builds answer `501`; the
+  endpoint is gated by the debug-capture switch (`503` when off).
+
+- **Profiling: `?selfload=true` for captures on an idle process.** The
+  CPU sampler is time-based and records nothing on a quiet process — the
+  root cause of `409 no samples`. The new query parameter (accepted by
+  the three control-plane capture endpoints, shipped enabled on the
+  console's Performance diagnostics card) generates bounded in-process
+  load for exactly the capture window — two tokio tasks doing short
+  spin-and-yield bursts — so a profile is produced without real traffic.
+  Honest limitation: the profile shows the async runtime and the
+  synthetic workload, not site business functions; it starts only after
+  the load guard has passed.
+
 ### Changed
 
-- **Profiling: capture parameters tightened.** `MAX_SECONDS` 120 → 60,
-  `MAX_FREQUENCY` 1000 → 250, `DEFAULT_SECONDS` 30 → 15 (the frontend
-  constants follow: `PPROF_MAX_SECONDS = 60`,
-  `PPROF_DEFAULT_SECONDS = 15`). The MCP `profile_cpu` tool caps (30 s /
-  199 Hz) are unchanged — already below the new limits.
+- **Profiling: capture parameters tightened.** `MAX_SECONDS` 120 → 5,
+  `MAX_FREQUENCY` 1000 → 250, `DEFAULT_SECONDS` 30 → 5 (the frontend
+  constants follow: `PPROF_MAX_SECONDS = 5`,
+  `PPROF_DEFAULT_SECONDS = 5`; the MCP `profile_cpu` tool caps follow:
+  seconds 30 → 5, default 10 → 5). The window equals the ceiling, so it
+  cannot be enlarged via query parameters — every extra second under load
+  widens the worst-case memory window (see the load guard above), while
+  five seconds at 99 Hz yields ~500 samples, ample for a flame graph. The
+  frequency limits (250 Hz REST / 199 Hz MCP) are unchanged.
 
 ## [PingWAF 0.27.2] — 2026-10-16
 

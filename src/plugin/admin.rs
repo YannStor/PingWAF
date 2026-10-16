@@ -619,7 +619,8 @@ async fn handle_pprof_request(
             .no_store()
             .body(
                 "CPU profiling captures are disabled on this deployment \
-                 (PINGWAF_PPROF_ENABLED=0)"
+                 (config [basic] pprof_enabled = false, or legacy env \
+                 PINGWAF_PPROF_ENABLED=0)"
                     .to_string(),
             )
             .finish();

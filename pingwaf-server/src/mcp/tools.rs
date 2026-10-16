@@ -176,7 +176,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "profile_cpu",
-            description: "Capture a CPU profile of the control-plane process and return a summary plus a self-contained SVG dashboard (usage over the window, task distribution, key metrics, status badge). The call blocks for the whole capture window (seconds, default 10, max 30). Sampling is Linux-only; on other platforms it degrades to a live point-in-time CPU readout. Repeated calls within 60 seconds return the cached last capture.",
+            description: "Capture a CPU profile of the control-plane process and return a summary plus a self-contained SVG dashboard (usage over the window, task distribution, key metrics, status badge). The call blocks for the whole capture window (seconds, default 5, max 5). Sampling is Linux-only; on other platforms it degrades to a live point-in-time CPU readout. Repeated calls within 60 seconds return the cached last capture.",
             write: false,
             schema: json!({
                 "type": "object",
@@ -361,7 +361,7 @@ async fn profile_memory() -> Result<Value, String> {
 /// endpoints: an LLM caller gets a shorter window and a lower sampling
 /// ceiling so a misbehaving loop cannot pin the sampler (and its ~2%-of-
 /// one-core overhead) for minutes.
-const CPU_CAPTURE_MAX_SECONDS: u64 = 30;
+const CPU_CAPTURE_MAX_SECONDS: u64 = 5;
 /// Sampling frequency ceiling for the tool; 199 Hz keeps the signal
 /// handler's overhead around one percent of a single core.
 const CPU_CAPTURE_MAX_FREQUENCY: i32 = 199;
@@ -411,7 +411,7 @@ fn cpu_capture_args(args: &Value) -> (u64, i32) {
     let seconds = args
         .get("seconds")
         .and_then(Value::as_u64)
-        .unwrap_or(10)
+        .unwrap_or(5)
         .clamp(1, CPU_CAPTURE_MAX_SECONDS);
     let frequency =
         args.get("frequency")
@@ -1239,7 +1239,7 @@ mod tests {
     /// caps before anything starts sampling.
     #[test]
     fn cpu_capture_args_are_clamped() {
-        assert_eq!(cpu_capture_args(&json!({})), (10, 99));
+        assert_eq!(cpu_capture_args(&json!({})), (5, 99));
         assert_eq!(cpu_capture_args(&json!({ "seconds": 0 })), (1, 99));
         assert_eq!(
             cpu_capture_args(&json!({ "seconds": 999 })),
@@ -1247,7 +1247,7 @@ mod tests {
         );
         assert_eq!(
             cpu_capture_args(&json!({ "frequency": 5000 })),
-            (10, CPU_CAPTURE_MAX_FREQUENCY)
+            (5, CPU_CAPTURE_MAX_FREQUENCY)
         );
         assert_eq!(
             cpu_capture_args(&json!({ "seconds": 5, "frequency": 50 })),

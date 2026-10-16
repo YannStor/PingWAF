@@ -286,7 +286,7 @@ PINGWAF_CONFIG=/etc/pingwaf/pingwaf.toml pingwaf all-in-one   # equivalent
 | `PINGWAF_HEARTBEAT_INTERVAL` | `15` | Heartbeat interval the control plane hands to agents at registration (seconds). The agent-side `--heartbeat-interval-secs` flag reads the same variable but falls back to `30`, and only applies when the control plane hands nothing down |
 | `PINGWAF_TLS_ENABLED` | `true` | Serve the REST API + dashboard over HTTPS (self-signed until replaced); `false` behind a TLS-terminating proxy |
 | `PINGWAF_TLS_SANS` | hostname, `localhost`, `127.0.0.1` | Comma-separated SANs of the generated self-signed certificate |
-| `PINGWAF_PPROF_ENABLED` | enabled | Set to `0` (`false`/`off`/`no`, case-insensitive) to disable the CPU-capture endpoints and the MCP `profile_cpu` tool; the read-only memory/metrics snapshots stay available — see [Profiling](./docs/profiling.md#capture-audit-and-the-enable-switch) |
+| `PINGWAF_PPROF_ENABLED` | enabled | Fallback for the debug-capture switch (honoured only when the `[basic] pprof_enabled` config key is unset, default `true`). Set to `0` (`false`/`off`/`no`, case-insensitive) to disable the CPU-capture endpoints, the heap endpoint and the MCP `profile_cpu` tool; the read-only memory/metrics snapshots stay available — see [Profiling](./docs/profiling.md#capture-audit-and-the-enable-switch) |
 | `PINGWAF_SERVER_URL` | `http://localhost:9090` | *(agent)* control-plane gRPC URL |
 | `PINGWAF_API_KEY` | *(empty)* | *(agent)* API key; empty = auto-register over loopback |
 | `PINGWAF_CACHE_DIR` | `./data/cache` | *(agent)* local rule cache directory |

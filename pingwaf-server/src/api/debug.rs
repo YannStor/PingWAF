@@ -58,6 +58,10 @@ pub struct ProfileQuery {
     /// Poll interval in seconds for the dashboard's embedded live-refresh
     /// script; clamped to `1..=60`. Absent renders a static dashboard.
     pub refresh: Option<u32>,
+    /// Generate light in-process load during the capture window. The CPU
+    /// sampler is time-based and records nothing on an idle process, so a
+    /// quiet instance needs this (or real traffic) to produce a profile.
+    pub selfload: Option<bool>,
 }
 
 /// Maps profiling finish errors: an empty capture is not a server fault —
@@ -124,6 +128,46 @@ fn capture_seconds(query: &ProfileQuery) -> u64 {
         .clamp(1, MAX_SECONDS)
 }
 
+/// Light in-process load for `?selfload=true` captures.
+///
+/// The CPU sampler is time-based (ITIMER_PROF) and records nothing on an
+/// idle process, so a quiet instance cannot produce a flame graph without
+/// traffic. Two tokio tasks doing short spin bursts between yields give the
+/// sampler frames to catch, at a bounded CPU cost, for exactly the capture
+/// window. Honest limitation: the profile shows the async runtime and this
+/// workload, not site handlers — for attribution of *memory* use the heap
+/// endpoint (`/debug/pprof/heap`, `mem-prof` builds) is the right tool.
+async fn run_selfload(seconds: u64) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
+    let task = |deadline: tokio::time::Instant| async move {
+        let mut acc = 0u64;
+        while tokio::time::Instant::now() < deadline {
+            for _ in 0..20_000 {
+                acc = acc.wrapping_add(std::hint::black_box(
+                    acc.count_ones() as u64
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let _ = std::hint::black_box(acc);
+    };
+    let (a, b) = tokio::join!(
+        tokio::spawn(task(deadline)),
+        tokio::spawn(task(deadline))
+    );
+    let _ = (a, b);
+}
+
+/// Spawns the selfload workload when the request opted in; the tasks stop
+/// themselves at the window deadline, so no abort plumbing is needed.
+fn maybe_start_selfload(query: &ProfileQuery) {
+    if query.selfload.unwrap_or(false) {
+        // +1s so the workload still covers the tail of the capture window
+        // under scheduler jitter; the tasks self-terminate at the deadline.
+        tokio::spawn(run_selfload(capture_seconds(query).saturating_add(1)));
+    }
+}
+
 /// Whether CPU-capture endpoints accept work — single source of truth in
 /// `pingwaf_pprof::captures_enabled`, shared with the data-plane admin
 /// plugin and the MCP tool.
@@ -134,7 +178,8 @@ fn capture_enabled() -> bool {
 fn capture_disabled_error() -> ApiError {
     ApiError::ServiceUnavailable(
         "CPU profiling captures are disabled on this deployment \
-         (PINGWAF_PPROF_ENABLED=0); the memory and live-metrics snapshots \
+         (config [basic] pprof_enabled = false, or legacy env \
+         PINGWAF_PPROF_ENABLED=0); the memory and live-metrics snapshots \
          remain available"
             .to_string(),
     )
@@ -169,6 +214,7 @@ async fn profile_cpu(
         return Err(capture_disabled_error());
     }
     let session = begin_session("profile", &query).await?;
+    maybe_start_selfload(&query);
     tokio::time::sleep(Duration::from_secs(capture_seconds(&query))).await;
     let bytes = tokio::task::spawn_blocking(move || session.finish_pprof())
         .await
@@ -212,6 +258,7 @@ async fn profile_flamegraph(
         return Err(capture_disabled_error());
     }
     let session = begin_session("flamegraph", &query).await?;
+    maybe_start_selfload(&query);
     tokio::time::sleep(Duration::from_secs(capture_seconds(&query))).await;
     let svg = tokio::task::spawn_blocking(move || session.finish_flamegraph())
         .await
@@ -286,6 +333,10 @@ async fn cpu_dashboard(
     }
     let summary = match begin_session("cpu-dashboard", &query).await {
         Ok(session) => {
+            // After begin_session: selfload only runs when the capture is
+            // actually happening (not on guard/409 refusals, and the
+            // off-Linux degrade below needs no synthetic load either).
+            maybe_start_selfload(&query);
             tokio::time::sleep(Duration::from_secs(capture_seconds(&query)))
                 .await;
             tokio::task::spawn_blocking(move || {
@@ -384,11 +435,99 @@ async fn memory(_admin: AdminUser) -> Result<Response, ApiError> {
         .into_response())
 }
 
+/// `GET /debug/pprof/heap` — jeprof-format heap profile (`mem-prof`
+/// diagnostic builds only; anything else answers `501`).
+///
+/// Triggers `prof.dump`, which writes every live allocation path with its
+/// retained byte count — the answer to "which function holds memory".
+/// Render with `jeprof --svg <binary> <dump>` (jeprof ships with gperftools;
+/// any build of the same revision works for symbolisation). Requires the
+/// process to run with `MALLOC_CONF` containing `prof:true` — heap
+/// profiling is sampled and off by default.
+///
+/// Read-only like the memory snapshot (no sampling session), but gated by
+/// the debug-capture switch: a deployment that turned captures off does not
+/// want heap dumps downloaded either.
+#[cfg(feature = "mem-prof")]
+async fn heap(_admin: AdminUser) -> Result<Response, ApiError> {
+    if !capture_enabled() {
+        return Err(capture_disabled_error());
+    }
+    // prof.dump walks the whole heap and writes the dump file — blocking
+    // work that must stay off the async executor (same discipline as the
+    // CPU-capture finishers above).
+    let bytes = tokio::task::spawn_blocking(|| -> Result<Vec<u8>, ApiError> {
+        // jemalloc IS the global allocator in mem-prof builds, and
+        // tikv_jemalloc_sys::mallctl is the prefix-aware binding to it —
+        // a hand-written extern "C" mallctl would fail to link because the
+        // tikv build exports `__rjem_mallctl`.
+        let dump_path = std::env::temp_dir()
+            .join(format!("pingwaf-heap.{}.prof", std::process::id()));
+        let cpath =
+            std::ffi::CString::new(dump_path.to_string_lossy().as_bytes())
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+        let rc = unsafe {
+            tikv_jemalloc_sys::mallctl(
+                b"prof.dump\0".as_ptr().cast(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                cpath.as_ptr() as *const core::ffi::c_char
+                    as *mut core::ffi::c_void,
+                cpath.as_bytes_with_nul().len(),
+            )
+        };
+        if rc != 0 {
+            return Err(ApiError::Internal(format!(
+                "prof.dump failed (rc {rc}, path {dump_path:?}) — heap \
+                 profiling must be active: run this diagnostic build with \
+                 MALLOC_CONF=prof:true"
+            )));
+        }
+        let bytes = std::fs::read(&dump_path)
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        let _ = std::fs::remove_file(&dump_path);
+        Ok(bytes)
+    })
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))??;
+
+    let disposition =
+        HeaderValue::from_str("attachment; filename=\"pingwaf-heap.prof\"")
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok((
+        StatusCode::OK,
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            ),
+            (header::CONTENT_DISPOSITION, disposition),
+            // A dump is only valid for the instant it was taken.
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+/// Off-`mem-prof` stub: the standard allocator cannot attribute heap usage.
+#[cfg(not(feature = "mem-prof"))]
+async fn heap(_admin: AdminUser) -> Result<Response, ApiError> {
+    Err(ApiError::NotImplemented(
+        "the heap profiler requires a mem-prof diagnostic build \
+         (cargo build --features mem-prof, run with MALLOC_CONF=prof:true); \
+         use /debug/pprof/memory for aggregate usage"
+            .to_string(),
+    ))
+}
+
 /// Routes contributed to `/api/v1`.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/debug/pprof/profile", get(profile_cpu))
         .route("/debug/pprof/flamegraph", get(profile_flamegraph))
+        .route("/debug/pprof/heap", get(heap))
         .route("/debug/pprof/cpu/metrics", get(cpu_metrics))
         .route("/debug/pprof/cpu/dashboard.svg", get(cpu_dashboard))
         .route("/debug/pprof/memory", get(memory))

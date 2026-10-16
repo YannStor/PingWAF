@@ -1846,6 +1846,8 @@
       "pprofFailed": "Profiling failed",
       "pprofUnsupportedPlatform": "CPU profiling is only available on Linux servers; the memory snapshot still works.",
       "pprofBusy": "A profiling session is already running — wait for it to finish.",
+      "pprofSelfload": "Generate light load while capturing (for idle instances)",
+      "pprofSelfloadHint": "The CPU sampler records nothing on an idle process; enable this to synthesize light in-process traffic during the capture window.",
       "pprofBusyProcess": "The process is busy right now — profiling under load can exhaust memory. Retry when the load drops."
     },
     "geo": {

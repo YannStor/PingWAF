@@ -62,13 +62,15 @@ pub const DEFAULT_FREQUENCY: i32 = 99;
 /// sampling overhead and the worst-case memory growth under load (see
 /// `GUARD_MAX_CPU_PERCENT`).
 pub const MAX_FREQUENCY: i32 = 250;
-/// Default capture window in seconds.
-pub const DEFAULT_SECONDS: u64 = 15;
-/// Upper bound accepted for the `seconds` query parameter — the capture
-/// window is the other axis of the worst-case memory growth. Keep short: a
-/// busy process profiled for a full minute has no diagnostic value that
-/// justifies the risk.
-pub const MAX_SECONDS: u64 = 60;
+/// Default capture window in seconds — also the hard ceiling: the sampler
+/// allocates inside its signal handler, and every extra second under load
+/// widens the worst-case memory window (2026-10-16: a 30s capture during a
+/// request storm grew RSS to 1GB and was OOM-killed). Five seconds at 99Hz
+/// yields ~500 samples, ample for a flame graph.
+pub const DEFAULT_SECONDS: u64 = 5;
+/// Hard ceiling on the capture window; equals [`DEFAULT_SECONDS`] so the
+/// window cannot be enlarged via query parameters.
+pub const MAX_SECONDS: u64 = 5;
 
 /// Process CPU usage (percent of one core) above which captures are
 /// refused outright.
@@ -91,19 +93,38 @@ pub fn capture_allowed_at(process_cpu_percent: f32) -> bool {
     process_cpu_percent <= GUARD_MAX_CPU_PERCENT
 }
 
-/// Whether CPU captures are enabled on this deployment:
-/// `PINGWAF_PPROF_ENABLED=0` (or `false`/`off`/`no`, case-insensitive)
-/// turns them off. The read-only memory and live-metrics snapshots are not
-/// affected — they are the diagnostic views needed precisely when captures
-/// are off. Single source of truth shared by the control-plane endpoints,
-/// the data-plane admin plugin and the MCP tool.
+/// Whether CPU captures are enabled on this deployment. The value is
+/// initialised once at startup from the configuration file
+/// (`[basic] pprof_enabled`, the debug-capture switch, default on) with the
+/// legacy `PINGWAF_PPROF_ENABLED` env var as a fallback, via
+/// [`set_captures_enabled`]. The read-only memory and live-metrics snapshots
+/// are not affected — they are the diagnostic views needed precisely when
+/// captures are off. Single source of truth shared by the control-plane
+/// endpoints, the data-plane admin plugin and the MCP tool.
+static CAPTURES_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// Sets the process-wide capture switch. Called once at startup; later
+/// configuration changes require a restart (documented).
+pub fn set_captures_enabled(enabled: bool) {
+    CAPTURES_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether CPU captures are enabled on this deployment.
 pub fn captures_enabled() -> bool {
-    match std::env::var("PINGWAF_PPROF_ENABLED") {
-        Ok(value) => !matches!(
+    CAPTURES_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Parses the legacy `PINGWAF_PPROF_ENABLED` env value: absent means "not
+/// set" (`None` from the caller), `0|false|off|no` case-insensitive means
+/// off, anything else means on.
+pub fn env_flag_enabled(raw: Option<&str>) -> bool {
+    match raw {
+        Some(value) => !matches!(
             value.to_ascii_lowercase().as_str(),
             "0" | "false" | "off" | "no"
         ),
-        Err(_) => true,
+        None => true,
     }
 }
 
@@ -777,6 +798,20 @@ mod tests {
         assert!(capture_allowed_at(GUARD_MAX_CPU_PERCENT));
         assert!(!capture_allowed_at(GUARD_MAX_CPU_PERCENT + 0.5));
         assert!(!capture_allowed_at(100.0));
+    }
+
+    /// The legacy env value is only a fallback for when the config key is
+    /// unset: absent = on, `0|false|off|no` (case-insensitive) = off.
+    #[test]
+    fn env_flag_parsing() {
+        assert!(env_flag_enabled(None));
+        assert!(env_flag_enabled(Some("1")));
+        assert!(env_flag_enabled(Some("true")));
+        assert!(env_flag_enabled(Some("")));
+        assert!(!env_flag_enabled(Some("0")));
+        assert!(!env_flag_enabled(Some("false")));
+        assert!(!env_flag_enabled(Some("OFF")));
+        assert!(!env_flag_enabled(Some("no")));
     }
 
     /// Capture stats reflect the recorded outcome. The stats mutex is held

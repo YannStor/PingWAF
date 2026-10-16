@@ -170,7 +170,7 @@ and therefore no file key:
 | `PINGWAF_PASSKEY_RP_ID` | derived from the request | Relying party ID, i.e. the effective domain |
 | `PINGWAF_PASSKEY_ORIGIN` | derived from the request | Origin the dashboard is served from |
 | `PINGWAF_PASSKEY_TRUST_FORWARDED_PROTO` | `false` | Believe `X-Forwarded-Proto` when deriving the origin |
-| `PINGWAF_PPROF_ENABLED` | enabled | Set to `0` (`false`/`off`/`no`, case-insensitive) to disable the CPU-capture endpoints and the MCP `profile_cpu` tool; the read-only memory/metrics snapshots stay available — see [Profiling](./profiling.md#capture-audit-and-the-enable-switch) |
+| `PINGWAF_PPROF_ENABLED` | enabled | Fallback for the debug-capture switch (honoured only when the `[basic] pprof_enabled` config key is unset, default `true`). Set to `0` (`false`/`off`/`no`, case-insensitive) to disable the CPU-capture endpoints, the heap endpoint and the MCP `profile_cpu` tool; the read-only memory/metrics snapshots stay available — see [Profiling](./profiling.md#capture-audit-and-the-enable-switch) |
 
 The refresh-token lifetime (30 days), the minimum pool size (`1`) and the
 server-side log batch size (`500`) are compiled-in constants with no override.
@@ -226,7 +226,7 @@ are listed against it below; the dash in a table entry means the setting has no
 | `PINGWAF_PASSKEY_RP_ID` | — |
 | `PINGWAF_PASSKEY_ORIGIN` | — |
 | `PINGWAF_PASSKEY_TRUST_FORWARDED_PROTO` | — |
-| `PINGWAF_PPROF_ENABLED` | — CPU capture switch, see [Profiling](./profiling.md) |
+| `PINGWAF_PPROF_ENABLED` | — CPU capture switch (fallback for `[basic] pprof_enabled`), see [Profiling](./profiling.md) |
 | `PINGWAF_MODE` | CLI mode (`all-in-one`, `server`, `agent`) |
 | `PINGWAF_SERVER_URL` | `agent.server_url` |
 | `PINGWAF_API_KEY` | `agent.api_key` |

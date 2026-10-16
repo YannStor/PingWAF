@@ -92,7 +92,7 @@ mod server_locations;
 mod upstreams;
 mod webhook;
 
-// Use mimalloc on every platform.
+// Default allocator: mimalloc on every platform.
 //
 // On musl this replaces the default allocator, which has lackluster
 // performance (https://nickb.dev/blog/default-musl-allocator-considered-harmful-to-performance).
@@ -101,6 +101,16 @@ mod webhook;
 // are never trimmed back to the OS, so the startup allocation peak stayed
 // resident as ~620 MB of RSS and eventually OOM-killed the process.
 // mimalloc purges freed pages eagerly, releasing that memory instead.
+//
+// The `mem-prof` feature swaps in tikv-jemalloc with heap-profiling support
+// instead: a diagnostic build used to answer "which function allocates /
+// retains memory" via /debug/pprof/heap (jeprof-format dumps). Not for
+// production — different allocator semantics from the shipped images.
+#[cfg(feature = "mem-prof")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(not(feature = "mem-prof"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -473,6 +483,13 @@ fn run_admin_node(args: Args) -> Result<(), Box<dyn Error>> {
     pingap_logger::logger_try_init(pingap_logger::LoggerParams {
         ..Default::default()
     })?;
+    // The `--cp --admin` node exposes the same debug endpoints, so the
+    // capture switch must be honoured here too. The full config is not
+    // loaded on this node, so only the legacy env fallback applies (the
+    // `[basic] pprof_enabled` path runs in `run()`, where the config lives).
+    pingwaf_pprof::set_captures_enabled(pingwaf_pprof::env_flag_enabled(
+        std::env::var("PINGWAF_PPROF_ENABLED").ok().as_deref(),
+    ));
     let (server_conf, name, proxy_plugin_info) =
         plugin::parse_admin_plugin(&args.admin.unwrap_or_default())?;
 
@@ -703,6 +720,19 @@ fn run() -> Result<(), Box<dyn Error>> {
     };
 
     config_manager.set_current_config(config.clone());
+
+    // Debug-capture switch ([basic] pprof_enabled, default on = debug
+    // capture mode). The config file wins; the legacy
+    // `PINGWAF_PPROF_ENABLED` env var is only honoured when the key is
+    // unset. Runs before any listener, so the switch is authoritative for
+    // every capture entry point that comes up afterwards.
+    let pprof_enabled = match config.basic.pprof_enabled {
+        Some(enabled) => enabled,
+        None => pingwaf_pprof::env_flag_enabled(
+            std::env::var("PINGWAF_PPROF_ENABLED").ok().as_deref(),
+        ),
+    };
+    pingwaf_pprof::set_captures_enabled(pprof_enabled);
 
     // Convert config to HCL and output
     if args.to_hcl {

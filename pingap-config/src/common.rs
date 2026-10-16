@@ -1204,6 +1204,13 @@ pub struct BasicConf {
     pub max_blocking_threads: Option<usize>,
     /// Enable work stealing between worker threads(default: true)
     pub work_stealing: Option<bool>,
+    /// Debug-capture switch for the built-in pprof endpoints and the MCP
+    /// `profile_cpu` tool (default: true). When false, CPU capture endpoints
+    /// answer 503 and the MCP tool errors; the read-only `/debug/pprof/memory`
+    /// and `/debug/pprof/cpu/metrics` snapshots stay available. Legacy env
+    /// override: `PINGWAF_PPROF_ENABLED` is only honoured when this key is
+    /// unset. Changes require a restart.
+    pub pprof_enabled: Option<bool>,
     /// Number of listener tasks to use per fd. This allows for parallel accepts.
     pub listener_tasks_per_fd: Option<usize>,
     /// Number of dedicated thread pools that run downstream TLS handshakes
