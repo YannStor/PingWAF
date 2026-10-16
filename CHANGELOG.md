@@ -8,6 +8,31 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+### Added
+
+- **Profiling: capture statistics exposed via `GET /debug/pprof/cpu/metrics`.**
+  The metrics snapshot now carries a `profiling` object — the cumulative
+  count of capture sessions started in this process lifetime
+  (`total_started`) and the most recent session record (`finished_at_ms`,
+  `duration_secs`, `outcome`: `ok` | `idle` | `no_samples` |
+  `report_error` | `abandoned` | `unsupported`) — so "who profiled, when,
+  and what came of it" is answerable from the live endpoint alone.
+
+- **Profiling: post-capture audit log.** Every capture emits one structured
+  INFO line when it ends (success, rejection or abandonment) with
+  `endpoint`, `outcome` and the process RSS right after the capture, so
+  memory spikes can be correlated with capture activity.
+
+- **Profiling: deployment switch `PINGWAF_PPROF_ENABLED`.** Setting it to
+  `0` (or `false`/`off`/`no`, case-insensitive) disables the three
+  control-plane CPU capture endpoints (`/debug/pprof/profile`,
+  `/flamegraph`, `/cpu/dashboard.svg` — they answer `503 Service
+  Unavailable`) and the MCP `profile_cpu` tool. The read-only snapshots
+  (`/debug/pprof/memory`, `/debug/pprof/cpu/metrics`) stay available.
+  Defaults to enabled.
+
 ## [PingWAF 0.27.2] — 2026-10-16
 
 ### Changed

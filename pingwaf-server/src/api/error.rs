@@ -44,6 +44,9 @@ pub enum ApiError {
     /// An upstream dependency (e.g. a subscription source) failed; the
     /// upstream's own error text is safe to show to the operator.
     BadGateway(String),
+    /// The endpoint is disabled on this deployment, e.g. profiling captures
+    /// turned off via `PINGWAF_PPROF_ENABLED=0`.
+    ServiceUnavailable(String),
     /// Unexpected failure; the message is logged in full and a generic text is
     /// returned to the client.
     Internal(String),
@@ -62,6 +65,7 @@ impl ApiError {
             ApiError::Unprocessable(_) => "unprocessable_entity",
             ApiError::NotImplemented(_) => "not_implemented",
             ApiError::BadGateway(_) => "bad_gateway",
+            ApiError::ServiceUnavailable(_) => "service_unavailable",
             ApiError::Internal(_) => "internal_error",
         }
     }
@@ -78,6 +82,7 @@ impl ApiError {
             ApiError::Unprocessable(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
             ApiError::BadGateway(_) => StatusCode::BAD_GATEWAY,
+            ApiError::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -107,6 +112,7 @@ impl std::fmt::Display for ApiError {
             | ApiError::Unprocessable(msg)
             | ApiError::NotImplemented(msg)
             | ApiError::BadGateway(msg)
+            | ApiError::ServiceUnavailable(msg)
             | ApiError::Internal(msg) => f.write_str(msg),
         }
     }

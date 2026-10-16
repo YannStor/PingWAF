@@ -69,6 +69,83 @@ pub const MAX_SECONDS: u64 = 120;
 #[cfg(target_os = "linux")]
 static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Cumulative count of sampling sessions started in this process.
+static TOTAL_SESSIONS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// The most recently finished (or abandoned) session.
+static LAST_CAPTURE: std::sync::Mutex<Option<CaptureRecord>> =
+    std::sync::Mutex::new(None);
+
+/// Outcome of one profiling capture, surfaced via [`capture_stats`].
+///
+/// This exists so operators can answer "who profiled, when, and what came of
+/// it" from the live endpoint alone — the historical record the demo needed
+/// when correlating memory spikes with capture activity.
+#[derive(Debug, Clone, Serialize)]
+pub struct CaptureRecord {
+    /// Unix epoch milliseconds when the capture ended.
+    pub finished_at_ms: u64,
+    /// Wall-clock duration of the capture window in seconds.
+    pub duration_secs: f64,
+    /// `"ok"` when a profile was produced; otherwise a short machine tag:
+    /// `"idle"`, `"no_samples"`, `"report_error"`, `"abandoned"` (session
+    /// dropped before finishing) or `"unsupported"`.
+    pub outcome: String,
+}
+
+/// Cumulative capture statistics for this process lifetime.
+#[derive(Debug, Clone, Serialize)]
+pub struct CaptureStats {
+    /// Sessions started since process start, including ones that later
+    /// failed or were abandoned.
+    pub total_started: u64,
+    /// The most recently finished (or abandoned) session, if any.
+    pub last: Option<CaptureRecord>,
+}
+
+/// Snapshot of [`TOTAL_SESSIONS`] and [`LAST_CAPTURE`].
+pub fn capture_stats() -> CaptureStats {
+    let last = LAST_CAPTURE
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or(None);
+    CaptureStats {
+        total_started: TOTAL_SESSIONS
+            .load(std::sync::atomic::Ordering::Relaxed),
+        last,
+    }
+}
+
+/// Records a finished capture, overwriting the previous `last` entry. A
+/// poisoned mutex is ignored: the stats are advisory, never load-bearing.
+fn record_capture(duration_secs: f64, outcome: &str) {
+    let record = CaptureRecord {
+        finished_at_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+        duration_secs,
+        outcome: outcome.to_string(),
+    };
+    if let Ok(mut last) = LAST_CAPTURE.lock() {
+        *last = Some(record);
+    }
+}
+
+/// Short machine tag for a failed capture, for [`CaptureRecord::outcome`].
+#[cfg(target_os = "linux")]
+fn error_tag(err: &ProfileError) -> &'static str {
+    match err {
+        ProfileError::AlreadyActive => "already_active",
+        ProfileError::UnsupportedPlatform => "unsupported",
+        ProfileError::Start(_) => "start_error",
+        ProfileError::NoSamples => "no_samples",
+        ProfileError::Idle => "idle",
+        ProfileError::Report(_) => "report_error",
+    }
+}
+
 /// Failures surfaced to the profiling endpoints.
 #[derive(Debug)]
 pub enum ProfileError {
@@ -139,6 +216,9 @@ fn report_err(err: pprof::Error) -> ProfileError {
 /// An in-flight CPU sampling session. Sampling runs until one of the
 /// `finish_*` methods consumes the session or it is dropped.
 pub struct ProfilingSession {
+    /// Whether a `finish_*` method already recorded this session's outcome
+    /// (a plain drop afterwards must not record `"abandoned"`).
+    finished: bool,
     #[cfg(target_os = "linux")]
     guard: Option<ProfilerGuard<'static>>,
     #[cfg(target_os = "linux")]
@@ -166,11 +246,15 @@ pub fn start_session(frequency: i32) -> Result<ProfilingSession, ProfileError> {
         .blocklist(&["libc", "libgcc", "pthread", "vdso"])
         .build();
     match started {
-        Ok(guard) => Ok(ProfilingSession {
-            guard: Some(guard),
-            started_at: Instant::now(),
-            start_cpu_ticks: process_cpu_ticks(),
-        }),
+        Ok(guard) => {
+            TOTAL_SESSIONS.fetch_add(1, Ordering::Relaxed);
+            Ok(ProfilingSession {
+                finished: false,
+                guard: Some(guard),
+                started_at: Instant::now(),
+                start_cpu_ticks: process_cpu_ticks(),
+            })
+        },
         Err(err) => {
             SESSION_ACTIVE.store(false, Ordering::SeqCst);
             Err(ProfileError::Start(err.to_string()))
@@ -193,6 +277,13 @@ impl ProfilingSession {
     /// protobuf - the same wire format `go tool pprof` accepts.
     #[cfg(target_os = "linux")]
     pub fn finish_pprof(mut self) -> Result<Vec<u8>, ProfileError> {
+        let result = self.finish_pprof_inner();
+        self.record(&result);
+        result
+    }
+
+    #[cfg(target_os = "linux")]
+    fn finish_pprof_inner(&mut self) -> Result<Vec<u8>, ProfileError> {
         let report = self.take_report()?;
         self.reject_idle(&report)?;
         let profile = report.pprof().map_err(report_err)?;
@@ -209,13 +300,21 @@ impl ProfilingSession {
 
     /// Unreachable off-Linux: `start_session` never hands out a session there.
     #[cfg(not(target_os = "linux"))]
-    pub fn finish_pprof(self) -> Result<Vec<u8>, ProfileError> {
+    pub fn finish_pprof(mut self) -> Result<Vec<u8>, ProfileError> {
+        self.record("unsupported");
         Err(ProfileError::UnsupportedPlatform)
     }
 
     /// Stops sampling and returns the samples as an inferno flamegraph SVG.
     #[cfg(target_os = "linux")]
     pub fn finish_flamegraph(mut self) -> Result<String, ProfileError> {
+        let result = self.finish_flamegraph_inner();
+        self.record(&result);
+        result
+    }
+
+    #[cfg(target_os = "linux")]
+    fn finish_flamegraph_inner(&mut self) -> Result<String, ProfileError> {
         let report = self.take_report()?;
         self.reject_idle(&report)?;
         let mut svg = Vec::new();
@@ -225,7 +324,8 @@ impl ProfilingSession {
 
     /// Unreachable off-Linux: `start_session` never hands out a session there.
     #[cfg(not(target_os = "linux"))]
-    pub fn finish_flamegraph(self) -> Result<String, ProfileError> {
+    pub fn finish_flamegraph(mut self) -> Result<String, ProfileError> {
+        self.record("unsupported");
         Err(ProfileError::UnsupportedPlatform)
     }
 
@@ -236,6 +336,15 @@ impl ProfilingSession {
     /// dashboard can annotate it instead of failing the request.
     #[cfg(target_os = "linux")]
     pub fn finish_summary(mut self) -> Result<CpuCaptureSummary, ProfileError> {
+        let result = self.finish_summary_inner();
+        self.record(&result);
+        result
+    }
+
+    #[cfg(target_os = "linux")]
+    fn finish_summary_inner(
+        &mut self,
+    ) -> Result<CpuCaptureSummary, ProfileError> {
         let report = self.take_report()?;
         let cpu_secs = match (self.start_cpu_ticks, process_cpu_ticks()) {
             (Some(start), Some(end)) => {
@@ -252,8 +361,28 @@ impl ProfilingSession {
     /// Unreachable off-Linux: `start_session` never hands out a session
     /// there.
     #[cfg(not(target_os = "linux"))]
-    pub fn finish_summary(self) -> Result<CpuCaptureSummary, ProfileError> {
+    pub fn finish_summary(mut self) -> Result<CpuCaptureSummary, ProfileError> {
+        self.record("unsupported");
         Err(ProfileError::UnsupportedPlatform)
+    }
+
+    /// Marks the session as recorded and appends its outcome to the
+    /// process-wide capture stats.
+    #[cfg(target_os = "linux")]
+    fn record<T>(&mut self, result: &Result<T, ProfileError>) {
+        self.finished = true;
+        let outcome = match result {
+            Ok(_) => "ok".to_string(),
+            Err(err) => error_tag(err).to_string(),
+        };
+        record_capture(self.started_at.elapsed().as_secs_f64(), &outcome);
+    }
+
+    /// Off-Linux sessions never carry a start time; record a zero duration.
+    #[cfg(not(target_os = "linux"))]
+    fn record(&mut self, outcome: &str) {
+        self.finished = true;
+        record_capture(0.0, outcome);
     }
 
     #[cfg(target_os = "linux")]
@@ -321,6 +450,15 @@ fn ticks_per_second() -> u64 {
 impl Drop for ProfilingSession {
     fn drop(&mut self) {
         self.guard = None;
+        if !self.finished {
+            // The request died before any finisher ran (client disconnect,
+            // panic in the handler): record that, so the stats show why a
+            // capture has no artifact.
+            record_capture(
+                self.started_at.elapsed().as_secs_f64(),
+                "abandoned",
+            );
+        }
         SESSION_ACTIVE.store(false, Ordering::SeqCst);
     }
 }
@@ -574,5 +712,41 @@ mod tests {
             .to_string()
             .contains("no samples were captured"));
         assert!(ProfileError::Idle.to_string().contains("almost no CPU"));
+    }
+
+    /// Capture stats reflect the recorded outcome. The stats mutex is held
+    /// across the whole assertion so the (Linux-only) sequential sampling
+    /// test cannot interleave and overwrite `last` mid-check.
+    #[test]
+    fn capture_stats_reflect_recorded_outcomes() {
+        {
+            let mut last = LAST_CAPTURE.lock().expect("stats lock");
+            *last = Some(CaptureRecord {
+                finished_at_ms: 42,
+                duration_secs: 0.25,
+                outcome: "idle".to_string(),
+            });
+            let stats = CaptureStats {
+                total_started: TOTAL_SESSIONS
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                last: last.clone(),
+            };
+            let recorded = stats.last.expect("last capture recorded");
+            assert_eq!(recorded.outcome, "idle");
+            assert!((recorded.duration_secs - 0.25).abs() < 1e-9);
+            assert_eq!(recorded.finished_at_ms, 42);
+            // Leave a clean slate for the sequential sampling test. The
+            // post-reset read below is intentionally folded into the same
+            // critical section: a parallel Linux sampling test could
+            // otherwise record between the reset and the re-lock and flake
+            // this assertion.
+            *last = None;
+            let stats = CaptureStats {
+                total_started: TOTAL_SESSIONS
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                last: last.clone(),
+            };
+            assert!(stats.last.is_none());
+        }
     }
 }

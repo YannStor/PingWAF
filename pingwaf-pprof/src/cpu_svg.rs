@@ -48,7 +48,7 @@ const PAD: f64 = 16.0;
 /// the persistent sampler below keeps that baseline alive across calls,
 /// so back-to-back calls are stretched to sysinfo's minimum interval for
 /// a meaningful delta.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CpuLiveStats {
     /// This process's CPU usage in percent of one core (multi-threaded
     /// work can exceed 100), as sysinfo reports it.
@@ -59,6 +59,9 @@ pub struct CpuLiveStats {
     pub cores: usize,
     /// Unix epoch milliseconds at which the snapshot was taken.
     pub collected_at_ms: u64,
+    /// Cumulative profiling capture statistics for this process: how many
+    /// sessions started and how the most recent one ended.
+    pub profiling: crate::CaptureStats,
 }
 
 /// Persistent sysinfo sampler. sysinfo computes CPU usage as a delta
@@ -109,6 +112,7 @@ pub fn cpu_snapshot() -> CpuLiveStats {
         host_cpu_percent: sys.global_cpu_usage(),
         cores: sys.cpus().len(),
         collected_at_ms: now_ms(),
+        profiling: crate::capture_stats(),
     };
     mark_refreshed();
     stats

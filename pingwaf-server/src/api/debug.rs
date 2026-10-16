@@ -72,14 +72,20 @@ fn finish_err(err: ProfileError) -> ApiError {
     }
 }
 
-fn begin_session(query: &ProfileQuery) -> Result<ProfilingSession, ApiError> {
+fn begin_session(
+    endpoint: &str,
+    query: &ProfileQuery,
+) -> Result<ProfilingSession, ApiError> {
     let frequency = query.frequency.unwrap_or_default();
-    start_session(frequency).map_err(|err| match err {
-        ProfileError::AlreadyActive => ApiError::Conflict(err.to_string()),
-        ProfileError::UnsupportedPlatform => {
-            ApiError::NotImplemented(err.to_string())
-        },
-        other => ApiError::Internal(other.to_string()),
+    start_session(frequency).map_err(|err| {
+        log_capture(endpoint, reject_tag(&err));
+        match err {
+            ProfileError::AlreadyActive => ApiError::Conflict(err.to_string()),
+            ProfileError::UnsupportedPlatform => {
+                ApiError::NotImplemented(err.to_string())
+            },
+            other => ApiError::Internal(other.to_string()),
+        }
     })
 }
 
@@ -90,17 +96,79 @@ fn capture_seconds(query: &ProfileQuery) -> u64 {
         .clamp(1, MAX_SECONDS)
 }
 
+/// Whether CPU-capture endpoints accept work: `PINGWAF_PPROF_ENABLED=0`
+/// (or `false`/`off`/`no`, case-insensitive) disables the three capture
+/// endpoints and the MCP `profile_cpu` tool. The memory and live-metrics
+/// snapshots stay available — they are the cheap, read-only views an
+/// operator needs precisely when captures are turned off.
+pub(crate) fn capture_enabled_from(raw: Option<&str>) -> bool {
+    match raw {
+        Some(value) => !matches!(
+            value.to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        None => true,
+    }
+}
+
+fn capture_enabled() -> bool {
+    capture_enabled_from(std::env::var("PINGWAF_PPROF_ENABLED").ok().as_deref())
+}
+
+/// Shared entry point for every caller that must honour the capture switch
+/// (HTTP endpoints and the MCP tool alike), so the env lookup cannot drift
+/// between them.
+pub(crate) fn captures_enabled() -> bool {
+    capture_enabled()
+}
+
+fn capture_disabled_error() -> ApiError {
+    ApiError::ServiceUnavailable(
+        "CPU profiling captures are disabled on this deployment \
+         (PINGWAF_PPROF_ENABLED=0); the memory and live-metrics snapshots \
+         remain available"
+            .to_string(),
+    )
+}
+
+/// Post-capture audit line: which endpoint ran, how it ended, and the RSS
+/// right afterwards. Manual captures are rare, so the snapshot cost is
+/// irrelevant next to the evidence value when correlating memory spikes
+/// with capture activity (demo OOM investigation, 2026-10-16).
+fn log_capture(endpoint: &str, outcome: &str) {
+    let rss = pingwaf_pprof::memory_snapshot().rss;
+    tracing::info!(endpoint, outcome, rss = %rss, "profiling capture finished");
+}
+
+/// Short tag for a rejected capture, mirroring `finish_err`'s mapping.
+fn reject_tag(err: &ProfileError) -> &'static str {
+    match err {
+        ProfileError::NoSamples => "no_samples",
+        ProfileError::Idle => "idle",
+        ProfileError::AlreadyActive => "already_active",
+        ProfileError::UnsupportedPlatform => "unsupported",
+        _ => "error",
+    }
+}
+
 /// `GET /api/v1/debug/pprof/profile`
 async fn profile_cpu(
     _admin: AdminUser,
     Query(query): Query<ProfileQuery>,
 ) -> Result<Response, ApiError> {
-    let session = begin_session(&query)?;
+    if !capture_enabled() {
+        return Err(capture_disabled_error());
+    }
+    let session = begin_session("profile", &query)?;
     tokio::time::sleep(Duration::from_secs(capture_seconds(&query))).await;
     let bytes = tokio::task::spawn_blocking(move || session.finish_pprof())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
-        .map_err(finish_err)?;
+        .map_err(|err| {
+            log_capture("profile", reject_tag(&err));
+            finish_err(err)
+        })?;
+    log_capture("profile", "ok");
 
     // The body is already gzip: `Content-Encoding` states that fact and
     // keeps the compression middleware from encoding it a second time.
@@ -131,12 +199,19 @@ async fn profile_flamegraph(
     _admin: AdminUser,
     Query(query): Query<ProfileQuery>,
 ) -> Result<Response, ApiError> {
-    let session = begin_session(&query)?;
+    if !capture_enabled() {
+        return Err(capture_disabled_error());
+    }
+    let session = begin_session("flamegraph", &query)?;
     tokio::time::sleep(Duration::from_secs(capture_seconds(&query))).await;
     let svg = tokio::task::spawn_blocking(move || session.finish_flamegraph())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
-        .map_err(finish_err)?;
+        .map_err(|err| {
+            log_capture("flamegraph", reject_tag(&err));
+            finish_err(err)
+        })?;
+    log_capture("flamegraph", "ok");
 
     Ok((
         StatusCode::OK,
@@ -197,14 +272,23 @@ async fn cpu_dashboard(
     headers: HeaderMap,
     Query(query): Query<ProfileQuery>,
 ) -> Result<Response, ApiError> {
-    let summary = match begin_session(&query) {
+    if !capture_enabled() {
+        return Err(capture_disabled_error());
+    }
+    let summary = match begin_session("cpu-dashboard", &query) {
         Ok(session) => {
             tokio::time::sleep(Duration::from_secs(capture_seconds(&query)))
                 .await;
-            tokio::task::spawn_blocking(move || session.finish_summary())
-                .await
-                .map_err(|e| ApiError::Internal(e.to_string()))?
-                .map_err(finish_err)?
+            tokio::task::spawn_blocking(move || {
+                let result = session.finish_summary();
+                match &result {
+                    Ok(_) => log_capture("cpu-dashboard", "ok"),
+                    Err(err) => log_capture("cpu-dashboard", reject_tag(err)),
+                }
+                result.map_err(finish_err)
+            })
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))??
         },
         // Off-Linux there is no signal-safe unwinder to sample with;
         // degrade to the live readout instead of failing the admin.
@@ -299,4 +383,23 @@ pub fn routes() -> Router<AppState> {
         .route("/debug/pprof/cpu/metrics", get(cpu_metrics))
         .route("/debug/pprof/cpu/dashboard.svg", get(cpu_dashboard))
         .route("/debug/pprof/memory", get(memory))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::capture_enabled_from;
+
+    /// The switch defaults to on and only an explicit off-value turns the
+    /// capture endpoints away.
+    #[test]
+    fn capture_toggle_parsing() {
+        assert!(capture_enabled_from(None));
+        assert!(capture_enabled_from(Some("1")));
+        assert!(capture_enabled_from(Some("true")));
+        assert!(capture_enabled_from(Some("")));
+        assert!(!capture_enabled_from(Some("0")));
+        assert!(!capture_enabled_from(Some("false")));
+        assert!(!capture_enabled_from(Some("OFF")));
+        assert!(!capture_enabled_from(Some("no")));
+    }
 }

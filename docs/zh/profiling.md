@@ -16,7 +16,7 @@ PingWAF 在每个二进制中都内置了 pprof 风格的性能剖析——无�
 - `profile` — gzip 压缩的 pprof protobuf，与 `go tool pprof` 期望的线格式完全一致。采样时长 `seconds`（1-120，默认 30），频率 `frequency` Hz（1-1000，默认 99——避开整数以防止采样器与周期性任务同步）。
 - `flamegraph` — 由 inferno 渲染的 SVG 火焰图，浏览器直接打开。
 - `cpu/dashboard.svg` — 一次采集的自包含 SVG **仪表盘**：窗口内进程 CPU 占比、任务分布（按包含性样本占比排序的热点函数）、关键指标，以及颜色编码的状态徽章（`NORMAL` / `HIGH LOAD` / `IDLE` / `PLATFORM-LIMITED`）。与原始采集端点不同，它在非 Linux 平台**降级**而非报 501：渲染实时读数并标注 `PLATFORM-LIMITED`。加 `?refresh=<1-60>` 后 SVG 会内嵌一段脚本，在浏览器打开文件期间轮询 `cpu/metrics` 刷新实时行；由于该端点是 Bearer 鉴权，而保存后的文件无法携带请求头，调用方本次请求的 token 会被内嵌进轮询脚本（由 `refresh` 参数显式开启、响应 `no-store`，且仪表盘自身印有"勿外传"警示）。
-- `cpu/metrics` — 轻量实时 CPU 快照（进程与主机占用、核心数），供仪表盘刷新脚本轮询；仅一次 sysinfo 刷新，不占用采样会话。
+- `cpu/metrics` — 轻量实时 CPU 快照（进程与主机占用、核心数），供仪表盘刷新脚本轮询；仅一次 sysinfo 刷新，不占用采样会话。它还携带 `profiling` 对象（见「采集审计与开关」）。
 - `memory` — 进程 RSS 与系统内存的 JSON 快照，立即返回。`rss_bytes` 是本进程占用；`total_memory_bytes`/`used_memory_bytes` 是**宿主机**内存（容器内即宿主总量，不是容器限额），由 `used_memory_scope: "system"` 与 `process_memory_scope: "process"` 标注。在设置了内存限额的容器内，快照还会附带 cgroup 口径的 `container_memory_used_bytes`/`container_memory_limit_bytes`（`container_memory_scope: "cgroup_v1" | "cgroup_v2"`），与 `docker stats` 显示一致——存在时应优先于宿主机口径引用。资源卡片应使用 `rss_bytes` 展示进程占用。
 
 采样是进程级单例：并发的第二个采集请求会收到 `409 Conflict`。报告符号化在异步运行时之外执行，因此一次采集的成本是一个睡眠中的请求加上采样器自身消耗的 CPU（99 Hz 约 1%）。
@@ -81,6 +81,32 @@ Docker 部署有按需产线：在 Actions 页运行 **Release (perf image)** �
 - 把负载下的采集与空闲时的采集对比，差值就是热点路径。
 
 如需持续在线剖析并上报服务器，参见 Pyroscope 集成（`pingap-pyroscope`，`--features=pyro`）。内置端点用于按需排查。
+
+## 采集审计与开关
+
+剖析采集是可审计的。`GET /debug/pprof/cpu/metrics` 的响应中包含一个 `profiling` 对象，记录本进程生命周期内的采集统计：
+
+```json
+"profiling": {
+  "total_started": 2,
+  "last": { "finished_at_ms": 1760000000000, "duration_secs": 30.0, "outcome": "ok" }
+}
+```
+
+- `total_started` — 进程启动以来开始的采样会话总数，含失败或中途放弃的会话。
+- `last` — 最近一次结束（或放弃）的会话：`finished_at_ms`（Unix 毫秒时间戳）、`duration_secs`（采集窗口墙钟时长）、`outcome`——产出剖析文件时为 `ok`，否则为 `idle`、`no_samples`、`report_error`、`abandoned` 或 `unsupported`。
+
+每次采集结束（成功、被拒绝或放弃）时都会输出一条结构化 INFO 审计日志：
+
+```text
+profiling capture finished endpoint=… outcome=… rss=…
+```
+
+`rss` 是采集刚结束时的进程 RSS，便于把内存毛刺与采集活动关联排查。
+
+可通过环境变量 `PINGWAF_PPROF_ENABLED=0`（或 `false`/`off`/`no`，大小写不敏感）在部署层面关闭采集。关闭后：控制面三个 CPU 采集端点（`profile`、`flamegraph`、`cpu/dashboard.svg`）返回 `503 Service Unavailable`，MCP `profile_cpu` 工具同时停用。只读快照端点不受影响——`memory` 与 `cpu/metrics` 在采集关闭时照常响应，这恰好是关闭采集后排障所需的视图。该开关默认开启。
+
+**采集开销实测：** 在 v0.27.2（mimalloc）容器上完成 2 次 30s @ 99 Hz 采集后，进程 VmHWM 仅 79 MB——pprof 采集本身不会造成内存毛刺。排查 OOM 或内存毛刺时，先看 `/debug/pprof/cpu/metrics` 的 `profiling` 字段与采集审计日志，排除（或确认）采集活动后再查其他方向。
 
 ## 平台支持
 

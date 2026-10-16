@@ -427,6 +427,16 @@ async fn profile_cpu_capture(
     seconds: u64,
     frequency: i32,
 ) -> Result<Value, String> {
+    // Same switch as the HTTP capture endpoints: an operator who turned
+    // captures off does not want the MCP tool quietly starting them again.
+    // The read-only memory/live snapshots stay available through their own
+    // MCP tools.
+    if !crate::api::debug::captures_enabled() {
+        return Err("CPU profiling captures are disabled on this deployment \
+             (PINGWAF_PPROF_ENABLED=0); the read-only memory and \
+             live-metrics snapshots remain available"
+            .to_string());
+    }
     match pingwaf_pprof::start_session(frequency) {
         Ok(session) => {
             tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
