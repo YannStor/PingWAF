@@ -3100,6 +3100,8 @@ audit — that clients can surface as one-click actions.
 
 Built-in pprof-style profiling of the control-plane process. All endpoints require an admin token. Sampling is process-global: while a capture is running, further requests return `409 Conflict`.
 
+When `PINGWAF_DEBUG_LISTEN_ADDR` is set, the same pprof endpoint set is additionally served on a loopback-only listener **without auth** (non-loopback bind addresses are rejected at startup; default off) — see [Profiling](profiling.md#loopback-diagnostics-listener).
+
 CPU sampling requires Linux (the only platform with a signal-safe unwinder for the sampling handler); on other platforms the capture endpoints return `501 Not Implemented`, while `/debug/pprof/memory` works everywhere.
 
 All CPU captures (and heap dumps) are gated by the `[basic] pprof_enabled` debug-capture switch (default on; legacy `PINGWAF_PPROF_ENABLED` env fallback, changes need a restart): when it is off, the capture endpoints and `/debug/pprof/heap` answer `503 Service Unavailable`, while the read-only snapshots keep working. See [Profiling](profiling.md#capture-audit-and-the-enable-switch).
@@ -3125,6 +3127,48 @@ inline content. Same query parameters as above.
 ```bash
 curl -k -H "Authorization: Bearer $TOKEN" \
   "https://localhost:9080/api/v1/debug/pprof/flamegraph?seconds=5" > flamegraph.svg
+```
+
+### GET /debug/pprof/cpu/summary
+
+Bounded aggregated readout consumed by the console's Performance diagnostics card and the MCP `profile_cpu` tool: one KB-scale JSON body with the live CPU snapshot plus the server-cached summary of the most recent capture. Without query parameters it costs one `cpu/metrics`-style snapshot and reads the cache — zero sampling overhead — and answers normally even with captures switched off.
+
+**Response (200):** `{ live, last_capture }`, where `live` is the same shape as `cpu/metrics` and `last_capture` is `null` until the first capture completes, then carries:
+
+```json
+{
+  "total_samples": 470,
+  "frequency": 99,
+  "window_secs": 5,
+  "cpu_secs": 0.9,
+  "process_cpu_fraction": 0.18,
+  "top_frames": [
+    { "name": "pingap_proxy::forward", "samples": 152, "share": 0.32 }
+  ],
+  "status": "normal",
+  "collected_at_ms": 1760000000000
+}
+```
+
+`top_frames` is capped at the 10 hottest functions (`name` / inclusive `samples` / `share` of the window); `status` is `normal` | `high_load` | `idle` | `platform_limited`. The cache holds only the latest summary and is refreshed by every finished capture (`profile`, `flamegraph`, `cpu/dashboard.svg`, and this endpoint's own capture).
+
+**Query:** `?capture=true` runs a fresh capture before answering (additional `seconds` / `frequency` / `selfload` accepted, `seconds` defaulting to 5 — the hard ceiling). The capture passes the 40% load guard (`503` on refusal, audited as `load_guard`); an idle window returns an `idle`-status summary instead of `409`. This capture path is a real sampling session and honours the `pprof_enabled` switch: when the switch is off it answers `503 service_unavailable` (see [Profiling](profiling.md#summary-endpoint-bounded-aggregated-readout)).
+
+### POST /debug/pprof/cpu/summary/import
+
+Decode a previously downloaded pprof protobuf body (the exact wire format `GET /debug/pprof/profile` exports) into the same bounded summary — no browser or external `go tool pprof` needed. Stateless: starts no capture and does not change the server's last-capture cache.
+
+**Request body:** raw pprof protobuf bytes (`application/octet-stream`).
+
+**Weight semantics:** pprof CPU profiles record per-sample values in CPU nanoseconds, so `total_samples` and per-frame `samples` weights are CPU nanoseconds (not sample counts); the proportional `share` values are unaffected, and `frequency` is reported as `0` (unrecoverable from the file).
+
+**Response (200):** a single `CpuCaptureSummary` object as above. Malformed bodies answer with the profiling error envelope and are audited like a failed capture.
+
+```bash
+curl -k -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @pingwaf-cpu.pb.gz \
+  "https://localhost:9080/api/v1/debug/pprof/cpu/summary/import"
 ```
 
 ### GET /debug/pprof/memory

@@ -24,6 +24,7 @@ import {
   ShieldCheck,
   Sparkle,
   UploadSimple,
+  Pulse,
   GithubLogo,
   ArrowSquareOut,
 } from '@phosphor-icons/react'
@@ -72,6 +73,7 @@ import {
   downloadCpuProfile,
   downloadFlamegraph,
   downloadMemorySnapshot,
+  fetchCpuSummary,
 } from '@/api/debug'
 import { debugApi, debugKeys } from '@/api/debug'
 import { ApiError } from '@/api/client'
@@ -2732,14 +2734,23 @@ function PerformanceDiagnosticsCard() {
   const { t } = useTranslation()
   const toast = useToast()
   const [seconds, setSeconds] = useState(String(PPROF_DEFAULT_SECONDS))
-  const [pending, setPending] = useState<'profile' | 'flamegraph' | 'memory' | null>(null)
+  const [pending, setPending] = useState<'profile' | 'flamegraph' | 'memory' | 'capture' | null>(null)
   const [selfload, setSelfload] = useState(true)
+  const queryClient = useQueryClient()
 
   // Live snapshot for the two-scope display below; silent on failure since it
   // is supplementary to the download buttons.
   const memory = useQuery({
     queryKey: debugKeys.memory(),
     queryFn: () => debugApi.memory(),
+    refetchInterval: 30_000,
+  })
+
+  // Server-side CPU summary, polled quietly — replaces "download and open"
+  // as the primary path for reading CPU hotspots.
+  const cpuSummary = useQuery({
+    queryKey: debugKeys.cpuSummary(),
+    queryFn: () => fetchCpuSummary(),
     refetchInterval: 30_000,
   })
 
@@ -2769,6 +2780,25 @@ function PerformanceDiagnosticsCard() {
         toast.error(
           error.message || t('pages.settings.pprofBusy'),
         )
+      } else {
+        handleApiError(error, { title: t('pages.settings.pprofFailed') })
+      }
+    } finally {
+      setPending(null)
+    }
+  }
+
+  // Blocking ~5s capture via the summary endpoint, then refresh the polled query.
+  const runCapture = async () => {
+    setPending('capture')
+    try {
+      await fetchCpuSummary({ capture: true, selfload })
+      await queryClient.invalidateQueries({ queryKey: debugKeys.cpuSummary() })
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 501) {
+        toast.error(t('pages.settings.pprofUnsupportedPlatform'))
+      } else if (error instanceof ApiError && (error.status === 409 || error.status === 503)) {
+        toast.error(error.message || t('pages.settings.pprofBusy'))
       } else {
         handleApiError(error, { title: t('pages.settings.pprofFailed') })
       }
@@ -2807,6 +2837,89 @@ function PerformanceDiagnosticsCard() {
           />
           {t('pages.settings.pprofSelfload')}
         </label>
+        {cpuSummary.data && (() => {
+          const s = cpuSummary.data
+          const capture = s.last_capture
+          const statusTone =
+            capture?.status === 'normal' ? 'success'
+            : capture?.status === 'high_load' || capture?.status === 'platform_limited' ? 'warning'
+            : 'neutral'
+          const statusLabel =
+            capture?.status === 'normal' ? t('pages.settings.pprofStatusNormal')
+            : capture?.status === 'high_load' ? t('pages.settings.pprofStatusHighLoad')
+            : capture?.status === 'idle' ? t('pages.settings.pprofStatusIdle')
+            : capture?.status === 'platform_limited' ? t('pages.settings.pprofStatusPlatformLimited')
+            : ''
+          return (
+            <div className="flex flex-col gap-2 rounded-lg bg-bg-subtle px-3 py-2 text-xs text-fg-subtle">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium text-fg-strong">
+                  {t('pages.settings.pprofSummaryTitle')}
+                </span>
+                {capture && <Badge tone={statusTone} size="sm">{statusLabel}</Badge>}
+              </div>
+              <div className="flex items-baseline gap-2">
+                <span className="text-2xl font-semibold text-fg-strong tabular-nums">
+                  {s.live.process_cpu_percent.toFixed(1)}%
+                </span>
+                <span>{t('pages.settings.pprofLiveProcessCpu')}</span>
+              </div>
+              <p className="flex items-baseline justify-between gap-2">
+                <span>{t('pages.settings.pprofLiveHostCpu')}</span>
+                <span className="font-medium text-fg-strong tabular-nums">
+                  {s.live.host_cpu_percent.toFixed(1)}% · {s.live.cores} cores
+                </span>
+              </p>
+              {capture ? (
+                <>
+                  <div className="mt-1 border-t border-line pt-2">
+                    <p className="mb-1 flex items-baseline justify-between gap-2">
+                      <span className="font-medium text-fg-strong">
+                        {t('pages.settings.pprofTopFrames')}
+                      </span>
+                      <span className="tabular-nums">
+                        {capture.total_samples} samples · {capture.window_secs}s
+                      </span>
+                    </p>
+                    {capture.top_frames.slice(0, 10).map((frame, i) => (
+                      <p
+                        key={`${frame.name}-${i}`}
+                        className="flex items-baseline justify-between gap-2 py-0.5"
+                        title={frame.name}
+                      >
+                        <span className="pw-mono truncate">{frame.name}</span>
+                        <span className="shrink-0 tabular-nums">
+                          {frame.samples} · {(frame.share * 100).toFixed(1)}%
+                        </span>
+                      </p>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-fg-subtle/70">
+                    {t('pages.dashboard.processResources.collectedAt', {
+                      time: formatDateTime(capture.collected_at_ms),
+                    })}
+                  </p>
+                </>
+              ) : (
+                <p className="text-[11px] text-fg-subtle/70">
+                  {t('pages.settings.pprofNoCapture')}
+                </p>
+              )}
+              <Button
+                size="sm"
+                variant="secondary"
+                loading={pending === 'capture'}
+                disabled={pending !== null}
+                icon={<Pulse weight="duotone" className="h-4 w-4" />}
+                onClick={() => void runCapture()}
+              >
+                {pending === 'capture'
+                  ? t('pages.settings.pprofCaptureRunning')
+                  : t('pages.settings.pprofCaptureNow')}
+              </Button>
+            </div>
+          )
+        })()}
         <div className="flex flex-wrap gap-2">
           <Button
             variant="secondary"

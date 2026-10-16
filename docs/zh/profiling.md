@@ -6,12 +6,12 @@ PingWAF 在每个二进制中都内置了 pprof 风格的性能剖析——无�
 
 | 平面 | 端点 | 鉴权 |
 | --- | --- | --- |
-| 控制面（`pingwaf-server`） | `GET /api/v1/debug/pprof/{profile,flamegraph,memory,heap}`、`GET /api/v1/debug/pprof/cpu/{metrics,dashboard.svg}` | 管理员 JWT Bearer token |
+| 控制面（`pingwaf-server`） | `GET /api/v1/debug/pprof/{profile,flamegraph,memory,heap}`、`GET /api/v1/debug/pprof/cpu/{metrics,dashboard.svg,summary}` 与 `POST /api/v1/debug/pprof/cpu/summary/import` | 管理员 JWT Bearer token |
 | 数据面（pingap admin 插件） | `GET {admin-path}/api/pprof/{profile,flamegraph,memory}` | admin 插件凭据 |
 
 `heap` 仅存在于控制面，且仅在 `mem-prof` 诊断构建中可用（其余构建返回 `501`）——见「[堆归因](#堆归因mem-prof-构建与-debugpprofheap)」。
 
-在控制台中，管理员也可以在「设置 → 关于」的**性能诊断**卡片里直接下载这三类文件（CPU 剖析、SVG 火焰图、内存快照），无需手工拼 URL。
+在控制台中，管理员也可以在「设置 → 关于」的**性能诊断**卡片里完成诊断。卡片以服务端聚合摘要（[`cpu/summary`](#摘要端点有界聚合直显)）为主视图——实时 CPU 读数加上最近一次采集的热点帧，以 KB 级 JSON 直接在卡片中展示，无需下载文件；完整产物文件（CPU 剖析、SVG 火焰图、内存快照）保留为显式导出路径。
 
 ## 端点
 
@@ -19,6 +19,8 @@ PingWAF 在每个二进制中都内置了 pprof 风格的性能剖析——无�
 - `flamegraph` — 由 inferno 渲染的 SVG 火焰图，浏览器直接打开。
 - `cpu/dashboard.svg` — 一次采集的自包含 SVG **仪表盘**：窗口内进程 CPU 占比、任务分布（按包含性样本占比排序的热点函数）、关键指标，以及颜色编码的状态徽章（`NORMAL` / `HIGH LOAD` / `IDLE` / `PLATFORM-LIMITED`）。与原始采集端点不同，它在非 Linux 平台**降级**而非报 501：渲染实时读数并标注 `PLATFORM-LIMITED`。加 `?refresh=<1-60>` 后 SVG 会内嵌一段脚本，在浏览器打开文件期间轮询 `cpu/metrics` 刷新实时行；由于该端点是 Bearer 鉴权，而保存后的文件无法携带请求头，调用方本次请求的 token 会被内嵌进轮询脚本（由 `refresh` 参数显式开启、响应 `no-store`，且仪表盘自身印有"勿外传"警示）。
 - `cpu/metrics` — 轻量实时 CPU 快照（进程与主机占用、核心数），供仪表盘刷新脚本轮询；仅一次 sysinfo 刷新，不占用采样会话。它还携带 `profiling` 对象（见「采集审计与开关」）。
+- `cpu/summary` — 控制台与 MCP 消费的有界聚合直显端点：一个实时 CPU 快照加上服务端缓存的最近一次采集摘要，单个 KB 级 JSON 响应，零采样开销。见「[摘要端点](#摘要端点有界聚合直显)」。
+- `cpu/summary/import` — `POST` 一份此前下载的 pprof protobuf（`profile` 的线格式），解码为同一有界摘要。见「[旧文件导入](#旧文件导入)」。
 - `memory` — 进程 RSS 与系统内存的 JSON 快照，立即返回。`rss_bytes` 是本进程占用；`total_memory_bytes`/`used_memory_bytes` 是**宿主机**内存（容器内即宿主总量，不是容器限额），由 `used_memory_scope: "system"` 与 `process_memory_scope: "process"` 标注。在设置了内存限额的容器内，快照还会附带 cgroup 口径的 `container_memory_used_bytes`/`container_memory_limit_bytes`（`container_memory_scope: "cgroup_v1" | "cgroup_v2"`），与 `docker stats` 显示一致——存在时应优先于宿主机口径引用。资源卡片应使用 `rss_bytes` 展示进程占用。
 
 采样是进程级单例：并发的第二个采集请求会收到 `409 Conflict`。报告符号化在异步运行时之外执行，因此一次采集的成本是一个睡眠中的请求加上采样器自身消耗的 CPU（99 Hz 约 1%）。
@@ -62,7 +64,76 @@ curl -H "Authorization: Bearer $TOKEN" \
 open cpu-dashboard.svg
 ```
 
-MCP `profile_cpu` 工具返回同一仪表盘（JSON 结果的 `svg` 字段），连同摘要与解读说明；60 秒内的重复调用会重放缓存的上次采集。
+MCP `profile_cpu` 工具返回同一仪表盘（JSON 结果的 `svg` 字段），连同摘要与解读说明；60 秒内的重复调用会重放缓存的上次采集，而 `cached=true` 直接返回最近一次摘要、完全不启动采集。
+
+## 摘要端点：有界聚合直显
+
+`GET /api/v1/debug/pprof/cpu/summary` 是性能诊断的一等读数入口——控制台的「性能诊断」卡片与 MCP 工具都消费它，任何管理员客户端同样可用：
+
+```json
+{
+  "live": {
+    "process_cpu_percent": 12.5,
+    "host_cpu_percent": 8.1,
+    "cores": 4,
+    "collected_at_ms": 1760000000000,
+    "profiling": { "total_started": 2, "last": { "…": "…" } }
+  },
+  "last_capture": {
+    "total_samples": 470,
+    "frequency": 99,
+    "window_secs": 5,
+    "cpu_secs": 0.9,
+    "process_cpu_fraction": 0.18,
+    "top_frames": [
+      { "name": "pingap_proxy::forward", "samples": 152, "share": 0.32 }
+    ],
+    "status": "normal",
+    "collected_at_ms": 1760000000000
+  }
+}
+```
+
+（数值仅为示意；结构即服务端返回的形状。）
+
+- `live` — 与 `cpu/metrics` 相同的实时 CPU 快照，含 `profiling` 采集统计。
+- `last_capture` — 服务端缓存的最近一次采集摘要；进程启动以来尚无任何采集完成时为 `null`。缓存**仅保留最近一次**：任何一次完成的采集都会把结果写入——`profile`、`flamegraph`、`cpu/dashboard.svg` 与 `cpu/summary?capture=true` 均如此——空闲采集也不例外，其摘要携带 `idle` 状态而非报错。摘要天然有界：`top_frames` 表只保留最热的 10 个函数（`name` / `samples` / 窗口内的包含性占比 `share`），`status` 为 `normal` | `high_load` | `idle` | `platform_limited`，整个响应是 KB 级 JSON。「现在哪里最热」从一次多 MB、浏览器打不开的 SVG 变成一次廉价的 JSON 读取。
+
+不带查询参数时，该端点只做一次 `cpu/metrics` 级别的快照并读缓存——零采样开销——即便部署已关闭采集也照常响应，与其他只读快照一致。
+
+`?capture=true` 会先运行一次真实采集再返回新摘要（接受常规的 `seconds` / `frequency` / `selfload` 参数，`seconds` 默认 5 秒硬上限）。这是真实采集，因此同样经过[负载守卫](#负载守卫)——被拒时返回 `503` 并以 `load_guard` 计入审计——空闲窗口则返回 `idle` 状态摘要，而不是原始采集端点的 `409`。该采集同样受 `pprof_enabled` 开关管控：开关关闭时 `capture=true` 返回 `503`（与其他采集端点一致的"部署已禁用"提示，并计入审计）；无 `capture` 的只读路径保持可用。下文的回环监听也提供同一端点。
+
+## 回环诊断监听
+
+为配合 `go tool pprof` / `jeprof` 工作流，服务端可以在一个仅回环地址的监听上提供整套 pprof 端点，**免 Bearer 鉴权**。设置控制面环境变量 `PINGWAF_DEBUG_LISTEN_ADDR`（例如 `127.0.0.1:9091`）并重启后，与 `/api/v1/debug/pprof/*` 相同的端点集即在该地址的 `/debug/pprof/...` 下可用：
+
+```bash
+go tool pprof -http=: http://127.0.0.1:9091/debug/pprof/profile?seconds=5
+```
+
+安全边界（启动时强制执行）：
+
+- **仅回环。** 非回环地址会被拒绝——服务端宁可拒绝启动，也不会把免鉴权的调试端点暴露出去（绑定点只接受 `127.0.0.1` 或 `::1`；回环接口即信任边界）。
+- **该监听无 Bearer token。** 其上可达的是整个调试端点集（`profile`、`flamegraph`、`heap`、`cpu/metrics`、`cpu/dashboard.svg`、`cpu/summary`、`cpu/summary/import`、`memory`）；仅在主机上所有本地进程都可信时才启用，且绝不将其路由或暴露到主机之外。默认**关闭**：不设置该变量则不监听。
+- 主 API 监听对 `/api/v1/debug/pprof/*` 仍要求管理员 token；该监听是额外的，不替代前者。
+
+## 旧文件导入
+
+此前下载的剖析文件在产品内仍可分析：
+
+```bash
+curl -k -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @pingwaf-cpu.pb.gz \
+  "https://localhost:9080/api/v1/debug/pprof/cpu/summary/import"
+```
+
+`POST /api/v1/debug/pprof/cpu/summary/import` 把 pprof protobuf 请求体——`GET /debug/pprof/profile` 导出的线格式——解码为同一有界摘要，无需浏览器或外部 `go tool pprof`。它是无状态解码：既不启动采集，也不改变服务端的最近采集缓存。权重语义与实时采集不同，因为 pprof CPU 文件的每样本值为 CPU 纳秒：
+
+- `total_samples` 与逐帧 `samples` 权重是 **CPU 纳秒**，不是样本计数；比例化的 `share` 值——控制台实际渲染的量——不受影响。
+- `frequency` 报告为 `0`（未知），无法从文件中恢复。
+
+非法请求体按剖析错误格式返回，并像失败的采集一样计入审计。
 
 ## 符号：用 `release-perf` 构建
 
@@ -138,13 +209,13 @@ profiling capture finished endpoint=… outcome=… rss=…
 
 可在部署层面通过 `conf/basic.toml` 的 `[basic] pprof_enabled` 配置键关闭采集——布尔值，默认 `true`（调试采集模式开启）。旧的环境变量 `PINGWAF_PPROF_ENABLED=0`（或 `false`/`off`/`no`，大小写不敏感）仍然有效，但仅作为回退：**仅当该配置键未显式设置时生效**，配置文件优先。修改后需重启进程生效。
 
-开关关闭时，所有 CPU 采集入口都返回 `503 Service Unavailable`：控制面三个端点（`profile`、`flamegraph`、`cpu/dashboard.svg`）、数据面 admin 插件上的同一批采集端点、MCP `profile_cpu` 工具，以及[堆端点](#堆归因mem-prof-构建与-debugpprofheap)。只读快照端点不受影响——`memory` 与 `cpu/metrics` 在采集关闭时照常响应，这恰好是关闭采集后排障所需的视图。
+开关关闭时，所有 CPU 采集入口都返回 `503 Service Unavailable`：控制面三个端点（`profile`、`flamegraph`、`cpu/dashboard.svg`）、数据面 admin 插件上的同一批采集端点、MCP `profile_cpu` 工具，以及[堆端点](#堆归因mem-prof-构建与-debugpprofheap)。只读快照端点不受影响——`memory`、`cpu/metrics` 与 `cpu/summary`（不带 `?capture=true`）在采集关闭时照常响应，这恰好是关闭采集后排障所需的视图。
 
 **采集开销实测：** 在 v0.27.2（mimalloc）容器上完成 2 次 30s @ 99 Hz 采集后，进程 VmHWM 仅 79 MB——**在空闲进程上** pprof 采集本身不会造成内存毛刺。（当时的采集窗口早于现行 5 秒硬上限；窗口更小只会进一步缩小暴露面。）负载下的情况则完全不同（见「[负载守卫](#负载守卫)」）。排查 OOM 或内存毛刺时，先看 `/debug/pprof/cpu/metrics` 的 `profiling` 字段与采集审计日志，排除（或确认）采集活动后再查其他方向。
 
 ## 负载守卫
 
-CPU 采集启动前（`profile`、`flamegraph`、`cpu/dashboard.svg` 三个端点与 MCP `profile_cpu` 工具均如此）会先检查进程 CPU 占用——即仪表盘轮询的实时快照中的单核百分比。超过单核 40% 时采集被直接拒绝：
+CPU 采集启动前（`profile`、`flamegraph`、`cpu/dashboard.svg` 三个端点、`cpu/summary?capture=true` 与 MCP `profile_cpu` 工具均如此）会先检查进程 CPU 占用——即仪表盘轮询的实时快照中的单核百分比。超过单核 40% 时采集被直接拒绝：
 
 - HTTP 端点返回 `503 Service Unavailable`，message 携带实测值与上限：`the process is busy (CPU N% of one core, limit 40%); profiling under load risks an out-of-memory kill — retry when the load drops`。
 - MCP `profile_cpu` 工具返回等义错误文本。

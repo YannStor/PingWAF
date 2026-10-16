@@ -30,6 +30,37 @@ use sysinfo::{
 
 /// How many of the hottest functions the task-distribution panel shows.
 const TOP_FRAMES: usize = 10;
+
+// ─────────────────────────────────────────────────────────────
+// Last-capture summary cache (feeds /cpu/summary and MCP)
+// ─────────────────────────────────────────────────────────────
+
+/// The most recent capture summary, kept so that the `/cpu/summary`
+/// endpoint and the MCP tools can answer "what did the last capture show"
+/// without re-running a capture. Only the latest one is retained — the
+/// cache is a single `Option`, bounded at one summary (KB-scale).
+static LAST_SUMMARY: Mutex<Option<CpuCaptureSummary>> = Mutex::new(None);
+
+/// Returns the most recent capture summary, if any capture has completed
+/// (successfully or as an idle capture) since process start.
+pub fn cached_summary() -> Option<CpuCaptureSummary> {
+    LAST_SUMMARY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+/// Stores (or replaces) the last capture summary. A poisoned lock is
+/// recovered the same way as the sampler above: the cache carries no
+/// invariants beyond "some instance". Only compiled where captures can
+/// actually store one (Linux; plus tests, which exercise it on every
+/// platform) — elsewhere nothing ever calls it.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn store_summary(summary: CpuCaptureSummary) {
+    *LAST_SUMMARY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(summary);
+}
 /// Process CPU share of the capture window at which the badge flips from
 /// `NORMAL` to `HIGH LOAD`. One busy core of the control plane is already
 /// an anomaly worth flagging.
@@ -918,5 +949,44 @@ mod tests {
         assert_eq!(iso8601(1_760_486_400_123), "2025-10-15T00:00:00.123Z");
         // Leap-year boundary: 2024-02-29T12:00:00Z = 1709208000s.
         assert_eq!(iso8601(1_709_208_000_000), "2024-02-29T12:00:00.000Z");
+    }
+
+    /// The last-capture cache stores and replaces atomically; reading back
+    /// through `cached_summary` must reflect the newest entry. The mutex is
+    /// held across the assertions so a parallel capture test cannot
+    /// interleave (the sampling test only writes via take_report on Linux).
+    #[test]
+    fn summary_cache_stores_and_replaces() {
+        {
+            let mut last = LAST_SUMMARY.lock().expect("summary cache lock");
+            let mut first = sample_summary();
+            first.collected_at_ms = 1;
+            store_summary(first);
+            assert_eq!(cached_summary().expect("stored").collected_at_ms, 1);
+
+            let mut second = sample_summary();
+            second.collected_at_ms = 2;
+            store_summary(second);
+            assert_eq!(cached_summary().expect("replaced").collected_at_ms, 2);
+
+            // Leave a clean slate for other tests.
+            *last = None;
+        }
+        assert!(cached_summary().is_none());
+    }
+
+    /// Top-frame selection is bounded by the panel budget: extra frames
+    /// below the cut are folded away, keeping the summary KB-scale.
+    #[test]
+    fn from_counts_is_bounded_to_the_panel_budget() {
+        let mut per_frame = HashMap::new();
+        for index in 0..(TOP_FRAMES * 10) {
+            per_frame.insert(format!("f{index}"), 100 - index as u64);
+        }
+        let summary =
+            CpuCaptureSummary::from_counts(10_000, per_frame, 1.0, 0.0, 99);
+        assert_eq!(summary.top_frames.len(), TOP_FRAMES);
+        // Sorted hottest-first.
+        assert!(summary.top_frames[0].samples >= summary.top_frames[1].samples);
     }
 }

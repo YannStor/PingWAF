@@ -36,8 +36,8 @@ pub mod cgroup;
 pub mod cpu_svg;
 
 pub use cpu_svg::{
-    cpu_snapshot, render_cpu_dashboard_svg, CpuCaptureSummary, CpuLiveStats,
-    CpuStatus, DashboardSvgOpts, TopFrame,
+    cached_summary, cpu_snapshot, render_cpu_dashboard_svg, CpuCaptureSummary,
+    CpuLiveStats, CpuStatus, DashboardSvgOpts, TopFrame,
 };
 
 #[cfg(target_os = "linux")]
@@ -470,6 +470,19 @@ impl ProfilingSession {
         let report = guard.report().build().map_err(report_err)?;
         // Sampling stops here; symbolising and encoding below is idle time.
         self.guard = None;
+        // Fold the report into the last-capture cache so /cpu/summary and
+        // the MCP tools can read the result without re-capturing. The
+        // aggregate is bounded (top-N folded, KB-scale) by from_counts.
+        let wall_secs = self.started_at.elapsed().as_secs_f64();
+        let cpu_secs = match (self.start_cpu_ticks, process_cpu_ticks()) {
+            (Some(start), Some(end)) => {
+                end.saturating_sub(start) as f64 / ticks_per_second() as f64
+            },
+            _ => 0.0,
+        };
+        crate::cpu_svg::store_summary(crate::cpu_svg::summarize_report(
+            &report, wall_secs, cpu_secs,
+        ));
         Ok(report)
     }
 
@@ -536,6 +549,83 @@ impl Drop for ProfilingSession {
         }
         SESSION_ACTIVE.store(false, Ordering::SeqCst);
     }
+}
+
+/// Builds a [`cpu_svg::CpuCaptureSummary`] from an existing pprof
+/// protobuf file's bytes (the same format `/debug/pprof/profile` exports).
+///
+/// This is the legacy-import path: previously downloaded profiling files
+/// stay analysable without a browser or an external `go tool pprof`.
+/// Platform-independent — decoding needs no sampler.
+///
+/// Weights: pprof CPU profiles record per-sample values in nanoseconds of
+/// CPU time, so the summary's per-frame weights are CPU nanoseconds (not
+/// sample counts). Shares stay proportional, which is what the UI renders;
+/// `frequency` is reported as `0` ("unknown") because it cannot be
+/// recovered from the file.
+pub fn summary_from_pprof_bytes(
+    bytes: &[u8],
+    window_secs: f64,
+) -> Result<cpu_svg::CpuCaptureSummary, ProfileError> {
+    use pprof::protos::{Message, Profile};
+    use std::collections::HashMap;
+
+    let profile = Profile::decode(bytes)
+        .map_err(|e| ProfileError::Report(e.to_string()))?;
+
+    let strings: Vec<&str> =
+        profile.string_table.iter().map(String::as_str).collect();
+    let name_of =
+        |id: i64| -> &str { strings.get(id as usize).copied().unwrap_or("") };
+
+    // function_id -> function name; location_id -> inclusive line names.
+    let mut function_name: HashMap<u64, &str> = HashMap::new();
+    for function in &profile.function {
+        function_name.insert(function.id, name_of(function.name));
+    }
+    let mut location_lines: HashMap<u64, Vec<&str>> = HashMap::new();
+    for location in &profile.location {
+        let names: Vec<&str> = location
+            .line
+            .iter()
+            .filter_map(|line| function_name.get(&line.function_id).copied())
+            .collect();
+        location_lines.insert(location.id, names);
+    }
+
+    let mut total_ns = 0_u64;
+    let mut per_frame: HashMap<&str, u64> = HashMap::new();
+    for sample in &profile.sample {
+        // CPU profiles carry one value per sample: CPU nanoseconds.
+        let weight = sample.value.first().copied().unwrap_or(0).max(0) as u64;
+        if weight == 0 {
+            continue;
+        }
+        total_ns += weight;
+        let mut seen = std::collections::HashSet::new();
+        for location_id in &sample.location_id {
+            if let Some(names) = location_lines.get(location_id) {
+                for name in names {
+                    if name.is_empty() || !seen.insert(*name) {
+                        continue;
+                    }
+                    *per_frame.entry(name).or_insert(0) += weight;
+                }
+            }
+        }
+    }
+
+    let per_frame: HashMap<String, u64> = per_frame
+        .into_iter()
+        .map(|(name, ns)| (name.to_string(), ns))
+        .collect();
+    Ok(cpu_svg::CpuCaptureSummary::from_counts(
+        total_ns,
+        per_frame,
+        window_secs,
+        total_ns as f64 / 1e9,
+        0,
+    ))
 }
 
 /// Point-in-time memory usage of this process and the machine, for the

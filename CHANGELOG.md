@@ -8,6 +8,54 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+### Added
+
+- **Profiling: `GET /debug/pprof/cpu/summary` — the bounded server-side
+  aggregate becomes the first-class readout.** The endpoint returns
+  `{ live, last_capture }`: a live CPU snapshot plus the server-cached
+  summary of the most recent capture — a TopN hottest-frames table
+  (`name` / `samples` / inclusive `share`, capped at 10 rows),
+  `status` (`normal` | `high_load` | `idle` | `platform_limited`), window
+  / frequency / capture time — as KB-scale JSON with zero sampling
+  overhead. The cache holds only the latest summary and is refreshed by
+  every finished capture (`profile`, `flamegraph`, `cpu/dashboard.svg` and
+  this endpoint's own capture). With `?capture=true` it runs a fresh
+  capture first (same 5-second ceiling, 40% load guard and idle-summary
+  behaviour as the other capture endpoints; whether the `pprof_enabled`
+  switch is enforced on this path). Consumed by
+  the console's Performance diagnostics card and the MCP `profile_cpu`
+  tool (`cached=true` returns the last summary without sampling).
+
+- **Profiling: loopback diagnostics listener (`PINGWAF_DEBUG_LISTEN_ADDR`).**
+  When the control-plane environment variable is set (e.g.
+  `127.0.0.1:9091`), the whole pprof endpoint set is additionally served on
+  that address without Bearer auth, so `go tool pprof` / `jeprof` connect
+  with zero token exchange. Non-loopback bind addresses are rejected at
+  startup (the loopback interface is the trust boundary); default is off.
+
+- **Profiling: `POST /debug/pprof/cpu/summary/import` for legacy profiling
+  files.** A previously downloaded pprof protobuf (the `profile` wire
+  format) is decoded into the same bounded summary, so historical files
+  stay analysable in the console and via MCP without external tools.
+  Weight semantics: pprof CPU profiles carry per-sample values in CPU
+  nanoseconds, so per-frame weights are CPU nanoseconds (proportional
+  `share` unaffected) and `frequency` is reported as `0` (unrecoverable).
+  Stateless — starts no capture and does not change the last-capture
+  cache.
+
+### Changed
+
+- **Profiling: the diagnostics card leads with the aggregated summary
+  instead of file downloads.** The console's Performance diagnostics card
+  now renders the live snapshot and the last capture's TopN frames
+  directly (KB-scale JSON via `/debug/pprof/cpu/summary`), which removes
+  the "giant SVG fails to open" failure mode from the product's artifact
+  shape; the full artifacts (CPU profile, SVG flamegraph, memory snapshot)
+  remain available as an explicit export path. Aggregated output is
+  bounded (TopN capped at 10 frames, one cached summary at a time).
+
 ## [PingWAF 0.27.4] — 2026-10-16
 
 ### Added

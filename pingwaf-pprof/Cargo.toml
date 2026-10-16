@@ -10,10 +10,9 @@ bytesize = { workspace = true }
 memory-stats = { workspace = true }
 serde = { workspace = true }
 sysinfo = { workspace = true }
-
-# Sampling is Linux-only (see src/lib.rs), so the profiler stack is not even
-# built on other platforms.
-[target.'cfg(target_os = "linux")'.dependencies]
+# The protobuf codec is needed on every platform: the legacy-import path
+# (POST /debug/pprof/cpu/summary/import) decodes existing pprof files on
+# the control plane, which also runs on macOS dev machines.
 flate2 = { workspace = true }
 # default-features = false drops the C++ demangler; only Rust symbols are
 # needed. large-depth raises the per-sample stack limit from 128 to 1024
@@ -28,6 +27,9 @@ pprof = { version = "0.15", default-features = false, features = [
     "prost-codec",
     "large-depth",
 ] }
+
+# Sampling itself is Linux-only (see src/lib.rs): the signal handler and
+# unwinder are not built on other platforms.
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

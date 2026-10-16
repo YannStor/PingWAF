@@ -176,13 +176,14 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "profile_cpu",
-            description: "Capture a CPU profile of the control-plane process and return a summary plus a self-contained SVG dashboard (usage over the window, task distribution, key metrics, status badge). The call blocks for the whole capture window (seconds, default 5, max 5). Sampling is Linux-only; on other platforms it degrades to a live point-in-time CPU readout. Repeated calls within 60 seconds return the cached last capture.",
+            description: "Capture a CPU profile of the control-plane process and return a summary plus a self-contained SVG dashboard (usage over the window, task distribution, key metrics, status badge). The call blocks for the whole capture window (seconds, default 5, max 5). Sampling is Linux-only; on other platforms it degrades to a live point-in-time CPU readout. Repeated calls within 60 seconds return the cached last capture. With cached=true the last capture summary is returned without sampling.",
             write: false,
             schema: json!({
                 "type": "object",
                 "properties": {
-                    "seconds": { "type": "integer", "minimum": 1, "maximum": 30, "description": "Capture window (default 10)" },
-                    "frequency": { "type": "integer", "minimum": 1, "maximum": 199, "description": "Sampling frequency in Hz (default 99; capped at 199 so the sampler stays under ~2% of one core)" }
+                    "seconds": { "type": "integer", "minimum": 1, "maximum": 5, "description": "Capture window (default 5)" },
+                    "frequency": { "type": "integer", "minimum": 1, "maximum": 199, "description": "Sampling frequency in Hz (default 99; capped at 199 so the sampler stays under ~2% of one core)" },
+                    "cached": { "type": "boolean", "description": "Return the last capture summary without sampling (no capture is started)" }
                 },
                 "additionalProperties": false
             }),
@@ -396,8 +397,10 @@ async fn profile_cpu(args: &Value) -> Result<Value, String> {
         }
     }
 
+    let cached_only =
+        args.get("cached").and_then(Value::as_bool).unwrap_or(false);
     let (seconds, frequency) = cpu_capture_args(args);
-    let value = profile_cpu_capture(seconds, frequency).await?;
+    let value = profile_cpu_capture(seconds, frequency, cached_only).await?;
     let mut cache = CPU_CAPTURE_CACHE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -426,7 +429,25 @@ fn cpu_capture_args(args: &Value) -> (u64, i32) {
 async fn profile_cpu_capture(
     seconds: u64,
     frequency: i32,
+    cached_only: bool,
 ) -> Result<Value, String> {
+    // cached=true answers from the last-capture cache: read-only, so it is
+    // allowed even when captures are switched off — same policy as the
+    // /debug/pprof/cpu/summary endpoint.
+    if cached_only {
+        return match pingwaf_pprof::cached_summary() {
+            Some(summary) => Ok(cpu_capture_json(
+                &summary,
+                None,
+                vec![
+                    "served from the last-capture cache",
+                    "pass cached=false (or omit it) to run a fresh capture",
+                ],
+            )),
+            None => Err("no capture has completed since process start;                           run one with cached=false"
+                .to_string()),
+        };
+    }
     // Same switch as the HTTP capture endpoints: an operator who turned
     // captures off does not want the MCP tool quietly starting them again.
     // The read-only memory/live snapshots stay available through their own
@@ -438,7 +459,8 @@ async fn profile_cpu_capture(
             "profiling capture rejected"
         );
         return Err("CPU profiling captures are disabled on this deployment \
-             (PINGWAF_PPROF_ENABLED=0); the read-only memory and \
+             (config [basic] pprof_enabled = false, or legacy env \
+             PINGWAF_PPROF_ENABLED=0); the read-only memory and \
              live-metrics snapshots remain available"
             .to_string());
     }
@@ -1239,15 +1261,16 @@ mod tests {
     /// caps before anything starts sampling.
     #[test]
     fn cpu_capture_args_are_clamped() {
-        assert_eq!(cpu_capture_args(&json!({})), (5, 99));
-        assert_eq!(cpu_capture_args(&json!({ "seconds": 0 })), (1, 99));
+        assert_eq!(cpu_capture_args(&json!({})).0, 5);
+        assert_eq!(cpu_capture_args(&json!({})).1, 99);
+        assert_eq!(cpu_capture_args(&json!({ "seconds": 0 })).0, 1);
         assert_eq!(
-            cpu_capture_args(&json!({ "seconds": 999 })),
-            (CPU_CAPTURE_MAX_SECONDS, 99)
+            cpu_capture_args(&json!({ "seconds": 999 })).0,
+            CPU_CAPTURE_MAX_SECONDS
         );
         assert_eq!(
-            cpu_capture_args(&json!({ "frequency": 5000 })),
-            (5, CPU_CAPTURE_MAX_FREQUENCY)
+            cpu_capture_args(&json!({ "frequency": 5000 })).1,
+            CPU_CAPTURE_MAX_FREQUENCY
         );
         assert_eq!(
             cpu_capture_args(&json!({ "seconds": 5, "frequency": 50 })),

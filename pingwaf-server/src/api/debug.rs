@@ -28,7 +28,7 @@ use crate::auth::AdminUser;
 use axum::extract::Query;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
 use pingwaf_pprof::{
@@ -207,7 +207,14 @@ fn reject_tag(err: &ProfileError) -> &'static str {
 
 /// `GET /api/v1/debug/pprof/profile`
 async fn profile_cpu(
-    _admin: AdminUser,
+    admin: AdminUser,
+    Query(query): Query<ProfileQuery>,
+) -> Result<Response, ApiError> {
+    let _ = admin;
+    profile_cpu_impl(axum::extract::Query(query)).await
+}
+
+pub(crate) async fn profile_cpu_impl(
     Query(query): Query<ProfileQuery>,
 ) -> Result<Response, ApiError> {
     if !capture_enabled() {
@@ -251,7 +258,14 @@ async fn profile_cpu(
 
 /// `GET /api/v1/debug/pprof/flamegraph`
 async fn profile_flamegraph(
-    _admin: AdminUser,
+    admin: AdminUser,
+    Query(query): Query<ProfileQuery>,
+) -> Result<Response, ApiError> {
+    let _ = admin;
+    profile_flamegraph_impl(axum::extract::Query(query)).await
+}
+
+pub(crate) async fn profile_flamegraph_impl(
     Query(query): Query<ProfileQuery>,
 ) -> Result<Response, ApiError> {
     if !capture_enabled() {
@@ -300,7 +314,13 @@ async fn profile_flamegraph(
 /// dashboard's embedded refresh script polls. Sampling sysinfo may sleep
 /// out its minimum interval, so it stays off the executor thread.
 async fn cpu_metrics(
-    _admin: AdminUser,
+    admin: AdminUser,
+) -> Result<Json<pingwaf_pprof::CpuLiveStats>, ApiError> {
+    let _ = admin;
+    cpu_metrics_impl().await
+}
+
+pub(crate) async fn cpu_metrics_impl(
 ) -> Result<Json<pingwaf_pprof::CpuLiveStats>, ApiError> {
     let stats = tokio::task::spawn_blocking(pingwaf_pprof::cpu_snapshot)
         .await
@@ -324,7 +344,15 @@ async fn cpu_metrics(
 /// opt-in, returned only to the caller, `no-store`, and flagged with a
 /// warning printed on the dashboard itself.
 async fn cpu_dashboard(
-    _admin: AdminUser,
+    admin: AdminUser,
+    headers: HeaderMap,
+    Query(query): Query<ProfileQuery>,
+) -> Result<Response, ApiError> {
+    let _ = admin;
+    cpu_dashboard_impl(headers, axum::extract::Query(query)).await
+}
+
+pub(crate) async fn cpu_dashboard_impl(
     headers: HeaderMap,
     Query(query): Query<ProfileQuery>,
 ) -> Result<Response, ApiError> {
@@ -427,7 +455,12 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
 }
 
 /// `GET /api/v1/debug/pprof/memory`
-async fn memory(_admin: AdminUser) -> Result<Response, ApiError> {
+async fn memory(admin: AdminUser) -> Result<Response, ApiError> {
+    let _ = admin;
+    memory_impl().await
+}
+
+pub(crate) async fn memory_impl() -> Result<Response, ApiError> {
     Ok((
         [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
         Json(pingwaf_pprof::memory_snapshot()),
@@ -449,7 +482,13 @@ async fn memory(_admin: AdminUser) -> Result<Response, ApiError> {
 /// the debug-capture switch: a deployment that turned captures off does not
 /// want heap dumps downloaded either.
 #[cfg(feature = "mem-prof")]
-async fn heap(_admin: AdminUser) -> Result<Response, ApiError> {
+async fn heap(admin: AdminUser) -> Result<Response, ApiError> {
+    let _ = admin;
+    heap_impl().await
+}
+
+#[cfg(feature = "mem-prof")]
+pub(crate) async fn heap_impl() -> Result<Response, ApiError> {
     if !capture_enabled() {
         return Err(capture_disabled_error());
     }
@@ -513,13 +552,133 @@ async fn heap(_admin: AdminUser) -> Result<Response, ApiError> {
 
 /// Off-`mem-prof` stub: the standard allocator cannot attribute heap usage.
 #[cfg(not(feature = "mem-prof"))]
-async fn heap(_admin: AdminUser) -> Result<Response, ApiError> {
+async fn heap(admin: AdminUser) -> Result<Response, ApiError> {
+    let _ = admin;
+    heap_impl().await
+}
+
+#[cfg(not(feature = "mem-prof"))]
+pub(crate) async fn heap_impl() -> Result<Response, ApiError> {
     Err(ApiError::NotImplemented(
         "the heap profiler requires a mem-prof diagnostic build \
          (cargo build --features mem-prof, run with MALLOC_CONF=prof:true); \
          use /debug/pprof/memory for aggregate usage"
             .to_string(),
     ))
+}
+
+/// `GET /debug/pprof/cpu/summary` — the bounded profiling summary the
+/// console and MCP consume: the live CPU/memory snapshot plus the most
+/// recent capture's TopN frames (KB-scale JSON, no file downloads).
+///
+/// `?capture=true` runs a fresh capture first (subject to the switch, the
+/// 40% load guard and the audit trail, exactly like every capture);
+/// without it the endpoint answers from the last-capture cache — zero
+/// sampling cost, and the natural "what's happening right now" view.
+#[derive(Debug, Default, Deserialize)]
+pub struct SummaryQuery {
+    /// Run a fresh capture instead of returning the cached summary.
+    pub capture: Option<bool>,
+    /// Generate light in-process load during a `capture=true` window.
+    pub selfload: Option<bool>,
+    /// Capture window seconds for `capture=true`.
+    pub seconds: Option<u64>,
+    /// Sampling frequency for `capture=true`.
+    pub frequency: Option<i32>,
+}
+
+/// Live snapshot plus the last capture's bounded summary.
+#[derive(serde::Serialize)]
+pub struct ProfilingSnapshot {
+    pub live: pingwaf_pprof::CpuLiveStats,
+    pub last_capture: Option<pingwaf_pprof::CpuCaptureSummary>,
+}
+
+async fn cpu_summary(
+    admin: AdminUser,
+    Query(query): Query<SummaryQuery>,
+) -> Result<Json<ProfilingSnapshot>, ApiError> {
+    let _ = admin;
+    cpu_summary_impl(axum::extract::Query(query)).await
+}
+
+pub(crate) async fn cpu_summary_impl(
+    Query(query): Query<SummaryQuery>,
+) -> Result<Json<ProfilingSnapshot>, ApiError> {
+    let last_capture = if query.capture.unwrap_or(false) {
+        // Same debug-mode gate as every capture entry point: a deployment
+        // with the switch off must not be able to start a sampling session
+        // through this endpoint either.
+        if !capture_enabled() {
+            return Err(capture_disabled_error());
+        }
+        let profile_query = ProfileQuery {
+            seconds: query.seconds,
+            frequency: query.frequency,
+            refresh: None,
+            selfload: query.selfload,
+        };
+        let session = begin_session("summary", &profile_query).await?;
+        maybe_start_selfload(&profile_query);
+        tokio::time::sleep(Duration::from_secs(capture_seconds(
+            &profile_query,
+        )))
+        .await;
+        let summary =
+            tokio::task::spawn_blocking(move || session.finish_summary())
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?
+                .map_err(finish_err)?;
+        log_capture("summary", "ok");
+        Some(summary)
+    } else {
+        pingwaf_pprof::cached_summary()
+    };
+    let live = tokio::task::spawn_blocking(pingwaf_pprof::cpu_snapshot)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(ProfilingSnapshot { live, last_capture }))
+}
+
+/// `POST /debug/pprof/cpu/summary/import` — decodes an existing pprof
+/// protobuf body (the format `/debug/pprof/profile` exports) into the same
+/// bounded summary, so previously downloaded profiling files stay
+/// analysable in the console and via MCP without external tools.
+async fn import_summary(
+    admin: AdminUser,
+    body: axum::body::Bytes,
+) -> Result<Json<pingwaf_pprof::CpuCaptureSummary>, ApiError> {
+    let _ = admin;
+    import_summary_impl(body).await
+}
+
+pub(crate) async fn import_summary_impl(
+    body: axum::body::Bytes,
+) -> Result<Json<pingwaf_pprof::CpuCaptureSummary>, ApiError> {
+    // The window is unknown for legacy files; use 1s so the CPU-fraction
+    // panel stays neutral and per-frame shares remain proportional.
+    let summary =
+        pingwaf_pprof::summary_from_pprof_bytes(&body, 1.0).map_err(|err| {
+            log_capture("summary-import", reject_tag(&err));
+            finish_err(err)
+        })?;
+    Ok(Json(summary))
+}
+
+/// Loopback-only diagnostic routes: the same handlers **without** the
+/// AdminUser requirement. Only ever mounted on a 127.0.0.1-bound listener
+/// (the loopback interface is the trust boundary), so `go tool pprof` /
+/// `jeprof` can consume the endpoints without exchanging a Bearer token.
+pub fn loopback_routes() -> Router<AppState> {
+    Router::new()
+        .route("/debug/pprof/profile", get(profile_cpu_impl))
+        .route("/debug/pprof/flamegraph", get(profile_flamegraph_impl))
+        .route("/debug/pprof/heap", get(heap_impl))
+        .route("/debug/pprof/cpu/metrics", get(cpu_metrics_impl))
+        .route("/debug/pprof/cpu/dashboard.svg", get(cpu_dashboard_impl))
+        .route("/debug/pprof/cpu/summary", get(cpu_summary_impl))
+        .route("/debug/pprof/cpu/summary/import", post(import_summary_impl))
+        .route("/debug/pprof/memory", get(memory_impl))
 }
 
 /// Routes contributed to `/api/v1`.
@@ -530,6 +689,8 @@ pub fn routes() -> Router<AppState> {
         .route("/debug/pprof/heap", get(heap))
         .route("/debug/pprof/cpu/metrics", get(cpu_metrics))
         .route("/debug/pprof/cpu/dashboard.svg", get(cpu_dashboard))
+        .route("/debug/pprof/cpu/summary", get(cpu_summary))
+        .route("/debug/pprof/cpu/summary/import", post(import_summary))
         .route("/debug/pprof/memory", get(memory))
 }
 

@@ -122,9 +122,68 @@ export async function fetchMemorySnapshot(): Promise<MemorySnapshot> {
   return (await response.json()) as MemorySnapshot
 }
 
+/* ── CPU summary ─────────────────────────────────────────────────────── */
+
+/** One hot frame from the last CPU capture (backend truncates names to 52 chars). */
+export interface CpuTopFrame {
+  name: string
+  samples: number
+  /** Fraction of total samples, 0..1. */
+  share: number
+}
+
+export type CpuCaptureStatus = 'normal' | 'high_load' | 'idle' | 'platform_limited'
+
+/** `last_capture` — null before the first capture on this boot. */
+export interface CpuCaptureSummaryInfo {
+  total_samples: number
+  frequency: number
+  window_secs: number
+  cpu_secs: number
+  /** Process CPU usage across the window, 0..1. */
+  process_cpu_fraction: number
+  status: CpuCaptureStatus
+  top_frames: CpuTopFrame[]
+  collected_at_ms: number
+}
+
+export interface CpuProfilingSummary {
+  live: {
+    process_cpu_percent: number
+    host_cpu_percent: number
+    cores: number
+    collected_at_ms: number
+    profiling: {
+      total_started: number
+      last: {
+        finished_at_ms: number
+        duration_secs: number
+        outcome: string
+      } | null
+    } | null
+  }
+  last_capture: CpuCaptureSummaryInfo | null
+}
+
+/**
+ * Server-side CPU summary — `GET /debug/pprof/cpu/summary` (admin only).
+ * Pass `capture: true` to run a blocking ~5s capture first; the response then
+ * includes the fresh `last_capture` (this also respects `selfload`).
+ */
+export async function fetchCpuSummary(
+  opts?: { capture?: boolean; selfload?: boolean },
+): Promise<CpuProfilingSummary> {
+  const response = await request('/debug/pprof/cpu/summary', {
+    capture: opts?.capture ? 'true' : undefined,
+    selfload: opts?.selfload ? 'true' : undefined,
+  })
+  return (await response.json()) as CpuProfilingSummary
+}
+
 export const debugKeys = {
   all: ['debug'] as const,
   memory: () => [...debugKeys.all, 'memory'] as const,
+  cpuSummary: () => [...debugKeys.all, 'cpuSummary'] as const,
 }
 
 /** Convenience alias used by pages. */
