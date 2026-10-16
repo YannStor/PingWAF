@@ -8,7 +8,7 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
-## [Unreleased]
+## [PingWAF 0.27.2] — 2026-10-16
 
 ### Changed
 
@@ -19,6 +19,21 @@ verbatim for reference and attribution, and is not maintained here.
   serialized every request behind the accept queue on multi-core hosts
   (measured 4s tail latency at 30 concurrent requests on a 2-vCPU instance).
   Explicit configuration and `--threads` still win.
+
+### Fixed
+
+- **API: code-level findings from the demo E2E pass.**
+  - The block page no longer leaks the internal rule UUID: the
+    visitor-facing reason names the rule; the id stays in the event record.
+  - `GET /logs/access` returns metadata-only summary rows (~4.7KB per row
+    down to ~0.9KB; a full page was 919KB). Headers and bodies move to
+    `GET /logs/access/{id}`, and lists accept `?full=true` for evidence
+    exports and the security-event raw replay. The dashboard fetches the
+    full record when the detail drawer opens.
+  - The login rate-limit body now carries the wait ("retry in Ns"),
+    matching the `Retry-After` header.
+  - Malformed JSON bodies answer with the standard error envelope instead
+    of axum's plain-text rejection (public auth endpoints).
 
 ## [PingWAF 0.27.1] — 2026-10-16
 
