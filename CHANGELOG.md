@@ -8,7 +8,7 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
-## [PingWAF 0.27.3] — 2026-10-16
+## [PingWAF 0.27.4] — 2026-10-16
 
 ### Added
 
