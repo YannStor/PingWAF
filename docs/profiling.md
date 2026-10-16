@@ -16,7 +16,7 @@ without constructing the URLs by hand.
 
 ## Endpoints
 
-- `profile` — gzip-compressed pprof protobuf, the exact wire format `go tool pprof` expects. Sampling takes `seconds` (1-120, default 30) at `frequency` Hz (1-1000, default 99 — off-round so the sampler does not lock onto periodic work).
+- `profile` — gzip-compressed pprof protobuf, the exact wire format `go tool pprof` expects. Sampling takes `seconds` (1-60, default 15) at `frequency` Hz (1-250, default 99 — off-round so the sampler does not lock onto periodic work).
 - `flamegraph` — SVG flamegraph rendered by inferno; open it directly in a browser.
 - `cpu/dashboard.svg` — self-contained SVG **dashboard** for one capture: the process CPU share over the window, the task distribution (top functions by inclusive sample share), the key metrics and a color-coded status badge (`NORMAL` / `HIGH LOAD` / `IDLE` / `PLATFORM-LIMITED`). Unlike the raw capture endpoints this degrades off-Linux: there it renders the live readout with a `PLATFORM-LIMITED` badge instead of answering `501`. With `?refresh=<1-60>` the SVG embeds a script that polls `cpu/metrics` and refreshes the live strip while the file is open in a browser; because the metrics endpoint is Bearer-only, the caller's own token is inlined into that poll (opt-in via the `refresh` parameter, `no-store`, and the dashboard prints a do-not-share warning on itself).
 - `cpu/metrics` — cheap point-in-time CPU snapshot (process and host usage, core count) polled by the dashboard's refresh script; costs one sysinfo refresh, no sampling session. It also carries a `profiling` object (see [Capture audit and the enable switch](#capture-audit-and-the-enable-switch)).
@@ -108,7 +108,7 @@ Profiling captures are auditable. `GET /debug/pprof/cpu/metrics` includes a
 ```
 
 - `total_started` — sampling sessions started since process start, including ones that failed or were abandoned.
-- `last` — the most recently finished (or abandoned) session: `finished_at_ms` (Unix epoch ms), `duration_secs` (wall-clock window), and `outcome` — `ok` when a profile was produced, otherwise `idle`, `no_samples`, `report_error`, `abandoned` or `unsupported`.
+- `last` — the most recently finished (or abandoned) session: `finished_at_ms` (Unix epoch ms), `duration_secs` (wall-clock window), and `outcome` — `ok` when a profile was produced, otherwise `idle`, `no_samples`, `report_error`, `abandoned`, `load_guard` (refused by the [load guard](#load-guard)) or `unsupported`.
 
 Every capture also emits one structured INFO audit log line when it ends (success, rejection or abandonment):
 
@@ -120,7 +120,34 @@ profiling capture finished endpoint=… outcome=… rss=…
 
 Captures can be disabled per deployment with `PINGWAF_PPROF_ENABLED=0` (or `false`/`off`/`no`, case-insensitive). This turns off the three control-plane CPU capture endpoints (`profile`, `flamegraph`, `cpu/dashboard.svg` — they answer `503 Service Unavailable`) and the MCP `profile_cpu` tool. The read-only snapshots stay available — `memory` and `cpu/metrics` answer normally with captures off, which is exactly the view an operator needs when investigating without sampling. The switch defaults to enabled.
 
-**Measured capture overhead:** on a v0.27.2 (mimalloc) container, completing two 30 s captures at 99 Hz left the process VmHWM at only 79 MB — pprof capture itself does not cause memory spikes. When investigating an OOM or memory spike, check the `profiling` field of `/debug/pprof/cpu/metrics` and the capture audit logs first to rule captures in or out before looking elsewhere.
+**Measured capture overhead:** on a v0.27.2 (mimalloc) container, completing two 30 s captures at 99 Hz left the process VmHWM at only 79 MB — **on an idle process** pprof capture itself does not cause memory spikes. Under load the story is different (see [Load guard](#load-guard)). When investigating an OOM or memory spike, check the `profiling` field of `/debug/pprof/cpu/metrics` and the capture audit logs first to rule captures in or out before looking elsewhere.
+
+## Load guard
+
+Before a CPU capture starts (the `profile`, `flamegraph` and `cpu/dashboard.svg`
+endpoints and the MCP `profile_cpu` tool alike), the process CPU usage is
+checked — the single-core percentage from the same live snapshot the dashboard
+polls. Above 40% of one core the capture is refused:
+
+- The HTTP endpoints answer `503 Service Unavailable` with the measured value
+  and the limit: `the process is busy (CPU N% of one core, limit 40%); profiling under load risks an out-of-memory kill — retry when the load drops`.
+- The MCP `profile_cpu` tool returns the equivalent error text.
+- The audit log records `outcome=load_guard`.
+- The read-only snapshots are **not** subject to the guard — `memory` and
+  `cpu/metrics` keep answering normally on a busy process.
+
+The guard exists because the pprof-rs sampler allocates memory inside its
+`SIGPROF` signal handler (a known design limitation of the crate). On an idle
+process a capture is harmless (measured VmHWM 79 MB), but sampling a busy
+process can inflate RSS from tens of MB to over 1 GB within 30-90 seconds
+until the OOM killer strikes (observed twice on the demo instance on
+2026-10-16).
+
+> **Warning — profiling under load can OOM the process.** For production
+> instances, keep `PINGWAF_PPROF_ENABLED=0` and turn captures on temporarily,
+> at low load, only while investigating. On the host, prefer
+> `transparent_hugepage=madvise`; run the container with a memory limit
+> (`mem_limit`) so a bad capture cannot take down the host.
 
 ## Platform support
 

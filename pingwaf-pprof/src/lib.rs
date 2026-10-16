@@ -56,12 +56,64 @@ use pprof::ProfilerGuard;
 /// than a round 100 so the sampler does not synchronise with periodically
 /// scheduled work.
 pub const DEFAULT_FREQUENCY: i32 = 99;
-/// Upper bound accepted for the `frequency` query parameter.
-pub const MAX_FREQUENCY: i32 = 1000;
+/// Upper bound accepted for the `frequency` query parameter. The sampler
+/// allocates inside its signal handler (a known pprof-rs design limit), so
+/// the ceiling is deliberately modest: frequency multiplies both the
+/// sampling overhead and the worst-case memory growth under load (see
+/// `GUARD_MAX_CPU_PERCENT`).
+pub const MAX_FREQUENCY: i32 = 250;
 /// Default capture window in seconds.
-pub const DEFAULT_SECONDS: u64 = 30;
-/// Upper bound accepted for the `seconds` query parameter.
-pub const MAX_SECONDS: u64 = 120;
+pub const DEFAULT_SECONDS: u64 = 15;
+/// Upper bound accepted for the `seconds` query parameter — the capture
+/// window is the other axis of the worst-case memory growth. Keep short: a
+/// busy process profiled for a full minute has no diagnostic value that
+/// justifies the risk.
+pub const MAX_SECONDS: u64 = 60;
+
+/// Process CPU usage (percent of one core) above which captures are
+/// refused outright.
+///
+/// The sampler's SIGPROF handler allocates from the global allocator while
+/// every thread is being unwound — a known pprof-rs design limit that is
+/// harmless on an idle process but catastrophic under load: on the demo
+/// instance, a 30s capture started during a request storm grew RSS from
+/// 122MB to 1GB+ within 90 seconds and was OOM-killed (2026-10-16). Idle
+/// captures measured a peak of only 79MB, hence a threshold well above the
+/// idle band (~1-2%) yet far below saturation. `capture_allowed_at` is the
+/// single decision point so HTTP and MCP callers cannot drift.
+pub const GUARD_MAX_CPU_PERCENT: f32 = 40.0;
+
+/// Whether a CPU capture may start at the given process CPU usage (percent
+/// of one core, as `CpuLiveStats::process_cpu_percent` reports). The percent
+/// is the average over the sampler's refresh interval, not an instantaneous
+/// value — a momentary spike between refreshes is not seen by the guard.
+pub fn capture_allowed_at(process_cpu_percent: f32) -> bool {
+    process_cpu_percent <= GUARD_MAX_CPU_PERCENT
+}
+
+/// Whether CPU captures are enabled on this deployment:
+/// `PINGWAF_PPROF_ENABLED=0` (or `false`/`off`/`no`, case-insensitive)
+/// turns them off. The read-only memory and live-metrics snapshots are not
+/// affected — they are the diagnostic views needed precisely when captures
+/// are off. Single source of truth shared by the control-plane endpoints,
+/// the data-plane admin plugin and the MCP tool.
+pub fn captures_enabled() -> bool {
+    match std::env::var("PINGWAF_PPROF_ENABLED") {
+        Ok(value) => !matches!(
+            value.to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        Err(_) => true,
+    }
+}
+
+/// Records a capture that was refused **before** a session started (load
+/// guard or deployment switch). These never increment `total_started` — no
+/// session began — but appear as `last.outcome` so the live endpoint can
+/// answer "why is my capture not running?".
+pub fn record_prestart_outcome(outcome: &str) {
+    record_capture(0.0, outcome);
+}
 
 /// The profiler is a process-global singleton, so only one sampling session
 /// may exist at a time. `pprof` itself would fail the second start anyway;
@@ -90,7 +142,9 @@ pub struct CaptureRecord {
     pub duration_secs: f64,
     /// `"ok"` when a profile was produced; otherwise a short machine tag:
     /// `"idle"`, `"no_samples"`, `"report_error"`, `"abandoned"` (session
-    /// dropped before finishing) or `"unsupported"`.
+    /// dropped before finishing), `"unsupported"`, or — for captures
+    /// refused before a session started — `"load_guard"` (busy process) or
+    /// `"switch_off"` (PINGWAF_PPROF_ENABLED=0).
     pub outcome: String,
 }
 
@@ -712,6 +766,17 @@ mod tests {
             .to_string()
             .contains("no samples were captured"));
         assert!(ProfileError::Idle.to_string().contains("almost no CPU"));
+    }
+
+    /// The load guard admits idle processes and refuses busy ones at the
+    /// documented threshold; the boundary itself is inclusive.
+    #[test]
+    fn capture_guard_threshold() {
+        assert!(capture_allowed_at(0.0));
+        assert!(capture_allowed_at(1.5), "idle band must be admitted");
+        assert!(capture_allowed_at(GUARD_MAX_CPU_PERCENT));
+        assert!(!capture_allowed_at(GUARD_MAX_CPU_PERCENT + 0.5));
+        assert!(!capture_allowed_at(100.0));
     }
 
     /// Capture stats reflect the recorded outcome. The stats mutex is held

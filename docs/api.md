@@ -3108,7 +3108,7 @@ Symbols are resolved from the binary's symbol table. The default `release` profi
 
 Capture CPU samples and return a gzip-compressed pprof protobuf consumable by `go tool pprof` and speedscope.
 
-**Query:** `?seconds=30&frequency=99` — capture window (1-120 s, default 30) and sampling frequency in Hz (1-1000, default 99).
+**Query:** `?seconds=15&frequency=99` — capture window (1-60 s, default 15) and sampling frequency in Hz (1-250, default 99). Captures are refused with `503 Service Unavailable` when the process is using more than 40% of one core at start (see [Load guard](profiling.md#load-guard)).
 
 ```bash
 go tool pprof -http=: -insecure https://localhost:9080/api/v1/debug/pprof/profile?seconds=30

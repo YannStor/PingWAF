@@ -33,6 +33,26 @@ verbatim for reference and attribution, and is not maintained here.
   (`/debug/pprof/memory`, `/debug/pprof/cpu/metrics`) stay available.
   Defaults to enabled.
 
+- **Profiling: load guard against captures under load.** Before any CPU
+  capture starts (the HTTP capture endpoints and the MCP `profile_cpu`
+  tool alike), the process CPU usage is checked; above 40% of one core
+  (`GUARD_MAX_CPU_PERCENT`) the capture is refused — the HTTP endpoints
+  answer `503 Service Unavailable` with the measured value and the limit,
+  and the audit log records `outcome=load_guard`. The read-only `memory`
+  and `cpu/metrics` snapshots are not subject to the guard. Motivation:
+  the pprof-rs sampler allocates inside its `SIGPROF` handler, so
+  profiling a busy process can inflate RSS to 1 GB+ within 30-90 seconds
+  and end in an OOM kill (observed twice on 2026-10-16); idle captures
+  are harmless (measured VmHWM 79 MB).
+
+### Changed
+
+- **Profiling: capture parameters tightened.** `MAX_SECONDS` 120 → 60,
+  `MAX_FREQUENCY` 1000 → 250, `DEFAULT_SECONDS` 30 → 15 (the frontend
+  constants follow: `PPROF_MAX_SECONDS = 60`,
+  `PPROF_DEFAULT_SECONDS = 15`). The MCP `profile_cpu` tool caps (30 s /
+  199 Hz) are unchanged — already below the new limits.
+
 ## [PingWAF 0.27.2] — 2026-10-16
 
 ### Changed

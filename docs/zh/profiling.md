@@ -13,7 +13,7 @@ PingWAF 在每个二进制中都内置了 pprof 风格的性能剖析——无�
 
 ## 端点
 
-- `profile` — gzip 压缩的 pprof protobuf，与 `go tool pprof` 期望的线格式完全一致。采样时长 `seconds`（1-120，默认 30），频率 `frequency` Hz（1-1000，默认 99——避开整数以防止采样器与周期性任务同步）。
+- `profile` — gzip 压缩的 pprof protobuf，与 `go tool pprof` 期望的线格式完全一致。采样时长 `seconds`（1-60，默认 15），频率 `frequency` Hz（1-250，默认 99——避开整数以防止采样器与周期性任务同步）。
 - `flamegraph` — 由 inferno 渲染的 SVG 火焰图，浏览器直接打开。
 - `cpu/dashboard.svg` — 一次采集的自包含 SVG **仪表盘**：窗口内进程 CPU 占比、任务分布（按包含性样本占比排序的热点函数）、关键指标，以及颜色编码的状态徽章（`NORMAL` / `HIGH LOAD` / `IDLE` / `PLATFORM-LIMITED`）。与原始采集端点不同，它在非 Linux 平台**降级**而非报 501：渲染实时读数并标注 `PLATFORM-LIMITED`。加 `?refresh=<1-60>` 后 SVG 会内嵌一段脚本，在浏览器打开文件期间轮询 `cpu/metrics` 刷新实时行；由于该端点是 Bearer 鉴权，而保存后的文件无法携带请求头，调用方本次请求的 token 会被内嵌进轮询脚本（由 `refresh` 参数显式开启、响应 `no-store`，且仪表盘自身印有"勿外传"警示）。
 - `cpu/metrics` — 轻量实时 CPU 快照（进程与主机占用、核心数），供仪表盘刷新脚本轮询；仅一次 sysinfo 刷新，不占用采样会话。它还携带 `profiling` 对象（见「采集审计与开关」）。
@@ -94,7 +94,7 @@ Docker 部署有按需产线：在 Actions 页运行 **Release (perf image)** �
 ```
 
 - `total_started` — 进程启动以来开始的采样会话总数，含失败或中途放弃的会话。
-- `last` — 最近一次结束（或放弃）的会话：`finished_at_ms`（Unix 毫秒时间戳）、`duration_secs`（采集窗口墙钟时长）、`outcome`——产出剖析文件时为 `ok`，否则为 `idle`、`no_samples`、`report_error`、`abandoned` 或 `unsupported`。
+- `last` — 最近一次结束（或放弃）的会话：`finished_at_ms`（Unix 毫秒时间戳）、`duration_secs`（采集窗口墙钟时长）、`outcome`——产出剖析文件时为 `ok`，否则为 `idle`、`no_samples`、`report_error`、`abandoned`、`load_guard`（被[负载守卫](#负载守卫)拒绝）或 `unsupported`。
 
 每次采集结束（成功、被拒绝或放弃）时都会输出一条结构化 INFO 审计日志：
 
@@ -106,7 +106,20 @@ profiling capture finished endpoint=… outcome=… rss=…
 
 可通过环境变量 `PINGWAF_PPROF_ENABLED=0`（或 `false`/`off`/`no`，大小写不敏感）在部署层面关闭采集。关闭后：控制面三个 CPU 采集端点（`profile`、`flamegraph`、`cpu/dashboard.svg`）返回 `503 Service Unavailable`，MCP `profile_cpu` 工具同时停用。只读快照端点不受影响——`memory` 与 `cpu/metrics` 在采集关闭时照常响应，这恰好是关闭采集后排障所需的视图。该开关默认开启。
 
-**采集开销实测：** 在 v0.27.2（mimalloc）容器上完成 2 次 30s @ 99 Hz 采集后，进程 VmHWM 仅 79 MB——pprof 采集本身不会造成内存毛刺。排查 OOM 或内存毛刺时，先看 `/debug/pprof/cpu/metrics` 的 `profiling` 字段与采集审计日志，排除（或确认）采集活动后再查其他方向。
+**采集开销实测：** 在 v0.27.2（mimalloc）容器上完成 2 次 30s @ 99 Hz 采集后，进程 VmHWM 仅 79 MB——**在空闲进程上** pprof 采集本身不会造成内存毛刺。负载下的情况则完全不同（见「[负载守卫](#负载守卫)」）。排查 OOM 或内存毛刺时，先看 `/debug/pprof/cpu/metrics` 的 `profiling` 字段与采集审计日志，排除（或确认）采集活动后再查其他方向。
+
+## 负载守卫
+
+CPU 采集启动前（`profile`、`flamegraph`、`cpu/dashboard.svg` 三个端点与 MCP `profile_cpu` 工具均如此）会先检查进程 CPU 占用——即仪表盘轮询的实时快照中的单核百分比。超过单核 40% 时采集被直接拒绝：
+
+- HTTP 端点返回 `503 Service Unavailable`，message 携带实测值与上限：`the process is busy (CPU N% of one core, limit 40%); profiling under load risks an out-of-memory kill — retry when the load drops`。
+- MCP `profile_cpu` 工具返回等义错误文本。
+- 审计日志记录 `outcome=load_guard`。
+- 只读快照端点**不受守卫影响**——进程繁忙时 `memory` 与 `cpu/metrics` 照常响应。
+
+守卫的由来：pprof-rs 采样器在其 `SIGPROF` 信号处理器内分配内存（该 crate 的已知设计限制）。空闲进程上采集无害（实测 VmHWM 79 MB），但采样繁忙进程可在 30-90 秒内使 RSS 从几十 MB 冲至 1GB 以上，直至被 OOM killer 击杀（2026-10-16 在演示实例上实测发生两次）。
+
+> **警告——负载下采集可致进程 OOM。** 生产实例建议保持 `PINGWAF_PPROF_ENABLED=0`，仅在排查问题时于低峰期临时开启。宿主机建议 `transparent_hugepage=madvise`；容器建议配置内存限额（`mem_limit`），避免一次不当采集拖垮整机。
 
 ## 平台支持
 

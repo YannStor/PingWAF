@@ -72,10 +72,38 @@ fn finish_err(err: ProfileError) -> ApiError {
     }
 }
 
-fn begin_session(
+/// The 503 returned when the load guard refuses a capture. Self-serving on
+/// purpose: measured value, limit, and the expected action in one message.
+fn load_guard_error(process_cpu_percent: f32) -> ApiError {
+    ApiError::ServiceUnavailable(format!(
+        "the process is busy (CPU {:.0}% of one core, limit {:.0}%); \
+         profiling under load risks an out-of-memory kill — retry when \
+         the load drops",
+        process_cpu_percent,
+        pingwaf_pprof::GUARD_MAX_CPU_PERCENT
+    ))
+}
+
+async fn begin_session(
     endpoint: &str,
     query: &ProfileQuery,
 ) -> Result<ProfilingSession, ApiError> {
+    // Load guard first: the sampler allocates inside its signal handler,
+    // which is harmless on an idle process but can balloon RSS to an OOM
+    // kill within the capture window when the process is busy (measured:
+    // 122MB -> 1GB in 90s on the demo instance). cpu_snapshot sleeps out a
+    // minimum refresh interval, so it stays off the executor thread.
+    let live = tokio::task::spawn_blocking(pingwaf_pprof::cpu_snapshot)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    if !pingwaf_pprof::capture_allowed_at(live.process_cpu_percent) {
+        // Recorded into the capture stats too: the metrics endpoint must be
+        // able to answer "why is my capture not running?" without grepping
+        // logs. No session started, so total_started stays untouched.
+        pingwaf_pprof::record_prestart_outcome("load_guard");
+        log_capture(endpoint, "load_guard");
+        return Err(load_guard_error(live.process_cpu_percent));
+    }
     let frequency = query.frequency.unwrap_or_default();
     start_session(frequency).map_err(|err| {
         log_capture(endpoint, reject_tag(&err));
@@ -96,30 +124,11 @@ fn capture_seconds(query: &ProfileQuery) -> u64 {
         .clamp(1, MAX_SECONDS)
 }
 
-/// Whether CPU-capture endpoints accept work: `PINGWAF_PPROF_ENABLED=0`
-/// (or `false`/`off`/`no`, case-insensitive) disables the three capture
-/// endpoints and the MCP `profile_cpu` tool. The memory and live-metrics
-/// snapshots stay available — they are the cheap, read-only views an
-/// operator needs precisely when captures are turned off.
-pub(crate) fn capture_enabled_from(raw: Option<&str>) -> bool {
-    match raw {
-        Some(value) => !matches!(
-            value.to_ascii_lowercase().as_str(),
-            "0" | "false" | "off" | "no"
-        ),
-        None => true,
-    }
-}
-
+/// Whether CPU-capture endpoints accept work — single source of truth in
+/// `pingwaf_pprof::captures_enabled`, shared with the data-plane admin
+/// plugin and the MCP tool.
 fn capture_enabled() -> bool {
-    capture_enabled_from(std::env::var("PINGWAF_PPROF_ENABLED").ok().as_deref())
-}
-
-/// Shared entry point for every caller that must honour the capture switch
-/// (HTTP endpoints and the MCP tool alike), so the env lookup cannot drift
-/// between them.
-pub(crate) fn captures_enabled() -> bool {
-    capture_enabled()
+    pingwaf_pprof::captures_enabled()
 }
 
 fn capture_disabled_error() -> ApiError {
@@ -159,7 +168,7 @@ async fn profile_cpu(
     if !capture_enabled() {
         return Err(capture_disabled_error());
     }
-    let session = begin_session("profile", &query)?;
+    let session = begin_session("profile", &query).await?;
     tokio::time::sleep(Duration::from_secs(capture_seconds(&query))).await;
     let bytes = tokio::task::spawn_blocking(move || session.finish_pprof())
         .await
@@ -202,7 +211,7 @@ async fn profile_flamegraph(
     if !capture_enabled() {
         return Err(capture_disabled_error());
     }
-    let session = begin_session("flamegraph", &query)?;
+    let session = begin_session("flamegraph", &query).await?;
     tokio::time::sleep(Duration::from_secs(capture_seconds(&query))).await;
     let svg = tokio::task::spawn_blocking(move || session.finish_flamegraph())
         .await
@@ -275,7 +284,7 @@ async fn cpu_dashboard(
     if !capture_enabled() {
         return Err(capture_disabled_error());
     }
-    let summary = match begin_session("cpu-dashboard", &query) {
+    let summary = match begin_session("cpu-dashboard", &query).await {
         Ok(session) => {
             tokio::time::sleep(Duration::from_secs(capture_seconds(&query)))
                 .await;
@@ -387,19 +396,25 @@ pub fn routes() -> Router<AppState> {
 
 #[cfg(test)]
 mod tests {
-    use super::capture_enabled_from;
+    use super::{capture_enabled, load_guard_error};
 
-    /// The switch defaults to on and only an explicit off-value turns the
-    /// capture endpoints away.
+    /// The deployment switch honours the shared parser in pingwaf-pprof;
+    /// with no env var set (the case in tests) captures stay enabled.
     #[test]
-    fn capture_toggle_parsing() {
-        assert!(capture_enabled_from(None));
-        assert!(capture_enabled_from(Some("1")));
-        assert!(capture_enabled_from(Some("true")));
-        assert!(capture_enabled_from(Some("")));
-        assert!(!capture_enabled_from(Some("0")));
-        assert!(!capture_enabled_from(Some("false")));
-        assert!(!capture_enabled_from(Some("OFF")));
-        assert!(!capture_enabled_from(Some("no")));
+    fn capture_switch_defaults_to_on() {
+        assert!(capture_enabled());
+    }
+
+    /// The load-guard 503 tells the operator the measured CPU value, the
+    /// limit and that a retry is expected — enough to self-serve.
+    #[test]
+    fn load_guard_error_is_self_serving() {
+        let err = load_guard_error(73.4);
+        assert_eq!(err.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        let message = err.to_string();
+        assert!(message.contains("of one core"));
+        assert!(message.contains("73%"));
+        assert!(message.contains("40%"));
+        assert!(message.contains("retry when the load drops"));
     }
 }

@@ -605,6 +605,58 @@ async fn handle_pprof_request(
     }
 
     let query = pprof_query(session);
+    // Same switch and load guard as the control-plane capture endpoints:
+    // this is the same process and the same sampler, so a busy-process
+    // capture carries the identical OOM risk (see GUARD_MAX_CPU_PERCENT).
+    // The read-only memory snapshot above stays available either way.
+    if !pingwaf_pprof::captures_enabled() {
+        tracing::info!(
+            endpoint,
+            outcome = "switch_off",
+            "profiling capture rejected"
+        );
+        return HttpResponse::builder(StatusCode::SERVICE_UNAVAILABLE)
+            .no_store()
+            .body(
+                "CPU profiling captures are disabled on this deployment \
+                 (PINGWAF_PPROF_ENABLED=0)"
+                    .to_string(),
+            )
+            .finish();
+    }
+    let live =
+        match tokio::task::spawn_blocking(pingwaf_pprof::cpu_snapshot).await {
+            Ok(live) => live,
+            Err(err) => {
+                tracing::error!(
+                    endpoint,
+                    error = %err,
+                    "cpu snapshot task failed for pprof capture"
+                );
+                return HttpResponse::unknown_error("cpu snapshot task failed");
+            },
+        };
+    if !pingwaf_pprof::capture_allowed_at(live.process_cpu_percent) {
+        pingwaf_pprof::record_prestart_outcome("load_guard");
+        tracing::info!(
+            endpoint,
+            outcome = "load_guard",
+            cpu_percent = live.process_cpu_percent,
+            "profiling capture rejected"
+        );
+        return HttpResponse::builder(StatusCode::SERVICE_UNAVAILABLE)
+            .no_store()
+            .body(
+                format!(
+                    "the process is busy (CPU {:.0}% of one core, limit \
+                     {:.0}%); retry when the load drops",
+                    live.process_cpu_percent,
+                    pingwaf_pprof::GUARD_MAX_CPU_PERCENT
+                )
+                .into_bytes(),
+            )
+            .finish();
+    }
     let profiling =
         match pingwaf_pprof::start_session(query.frequency.unwrap_or_default())
         {

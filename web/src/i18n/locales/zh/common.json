@@ -1845,7 +1845,8 @@
       "pprofDownloaded": "已开始下载",
       "pprofFailed": "性能诊断失败",
       "pprofUnsupportedPlatform": "CPU 采集仅支持 Linux 服务器；内存快照仍可使用。",
-      "pprofBusy": "已有采集会话进行中，请等待其结束后再试。"
+      "pprofBusy": "已有采集会话进行中，请等待其结束后再试。",
+      "pprofBusyProcess": "进程当前负载较高——高负载下采集可能耗尽内存，请待负载下降后再试。"
     },
     "geo": {
       "title": "地域限制",

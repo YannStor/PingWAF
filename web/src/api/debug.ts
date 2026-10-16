@@ -16,9 +16,9 @@ import type { MemorySnapshot } from './types'
  * - `403 Forbidden` — non-admin callers.
  */
 
-/** Must match `pingwaf_pprof::MAX_SECONDS` (currently 120); the server clamps to 1..=MAX. */
-export const PPROF_MAX_SECONDS = 120
-export const PPROF_DEFAULT_SECONDS = 30
+/** Must match `pingwaf_pprof::MAX_SECONDS` (currently 60); the server clamps to 1..=MAX. */
+export const PPROF_MAX_SECONDS = 60
+export const PPROF_DEFAULT_SECONDS = 15
 
 /** Shared request runner: auth header + single 401 token-refresh retry. */
 async function request(path: string, query?: Record<string, unknown>): Promise<Response> {

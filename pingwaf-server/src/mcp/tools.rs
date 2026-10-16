@@ -431,11 +431,36 @@ async fn profile_cpu_capture(
     // captures off does not want the MCP tool quietly starting them again.
     // The read-only memory/live snapshots stay available through their own
     // MCP tools.
-    if !crate::api::debug::captures_enabled() {
+    if !pingwaf_pprof::captures_enabled() {
+        tracing::info!(
+            tool = "profile_cpu",
+            outcome = "switch_off",
+            "profiling capture rejected"
+        );
         return Err("CPU profiling captures are disabled on this deployment \
              (PINGWAF_PPROF_ENABLED=0); the read-only memory and \
              live-metrics snapshots remain available"
             .to_string());
+    }
+    // Same load guard as the HTTP capture endpoints: sampling a busy
+    // process allocates inside the signal handler and can OOM the host.
+    let live = tokio::task::spawn_blocking(pingwaf_pprof::cpu_snapshot)
+        .await
+        .map_err(|e| format!("the live snapshot task failed: {e}"))?;
+    if !pingwaf_pprof::capture_allowed_at(live.process_cpu_percent) {
+        pingwaf_pprof::record_prestart_outcome("load_guard");
+        tracing::info!(
+            tool = "profile_cpu",
+            outcome = "load_guard",
+            cpu_percent = live.process_cpu_percent,
+            "profiling capture rejected"
+        );
+        return Err(format!(
+            "the process is busy (CPU {:.0}% of one core, limit {:.0}%); \
+             retry the capture when the load drops",
+            live.process_cpu_percent,
+            pingwaf_pprof::GUARD_MAX_CPU_PERCENT
+        ));
     }
     match pingwaf_pprof::start_session(frequency) {
         Ok(session) => {

@@ -2756,6 +2756,12 @@ function PerformanceDiagnosticsCard() {
     } catch (error) {
       if (error instanceof ApiError && error.status === 501) {
         toast.error(t('pages.settings.pprofUnsupportedPlatform'))
+      } else if (error instanceof ApiError && error.status === 503) {
+        // 503 covers two distinct refusals — the deployment switch
+        // (PINGWAF_PPROF_ENABLED=0) and the load guard refusing a busy
+        // process — so surface the backend message verbatim: the guard
+        // variant carries the measured CPU value and the limit.
+        toast.error(error.message || t('pages.settings.pprofBusyProcess'))
       } else if (error instanceof ApiError && error.status === 409) {
         // 409 now covers both "another session is active" and "no samples /
         // idle process" — prefer the backend's own guidance when present.
