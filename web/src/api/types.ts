@@ -719,8 +719,8 @@ export interface SecurityEvent {
   created_at: string
 }
 
-/** `models::security_events::access_log::Model` */
-export interface AccessLog {
+/** `api::logs::AccessLogSummary` — the metadata-only list row. */
+export interface AccessLogSummary {
   id: number
   site_id: string | null
   agent_id: string | null
@@ -741,16 +741,25 @@ export interface AccessLog {
   referer: string | null
   country_code: string | null
   tls_version: string | null
-  request_headers: Record<string, string> | null
-  request_body: string | null
   request_body_size: number | null
   request_body_truncated: boolean | null
   scheme: string | null
   protocol: string | null
-  response_headers: Record<string, string> | null
-  response_body: string | null
   response_body_size: number | null
   response_body_truncated: boolean | null
+}
+
+/**
+ * `models::security_events::access_log::Model` — the full record served by
+ * `GET /logs/access/{id}` (and by `GET /logs/access?full=true`). The list
+ * endpoint returns [`AccessLogSummary`] rows; the four heavy fields are
+ * absent there and optional here so both rows satisfy this type.
+ */
+export interface AccessLog extends AccessLogSummary {
+  request_headers?: Record<string, string> | null
+  request_body?: string | null
+  response_headers?: Record<string, string> | null
+  response_body?: string | null
 }
 
 /** `api::logs::SecurityQuery` */
@@ -792,7 +801,11 @@ export interface AccessLogQuery extends PaginationQuery {
 }
 
 /** Convenience alias used by the logs page. */
-export type LogQueryParams = SecurityLogQuery & AccessLogQuery
+export type LogQueryParams = SecurityLogQuery &
+  AccessLogQuery & {
+    /** Access-log lists only: fetch full rows (headers + bodies). */
+    full?: boolean
+  }
 
 /** `api::logs::PurgeResult` */
 export interface PurgeResult {

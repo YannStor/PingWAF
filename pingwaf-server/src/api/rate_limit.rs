@@ -202,7 +202,10 @@ pub(crate) async fn auth_rate_limit(request: Request, next: Next) -> Response {
             let mut response = error_response(
                 StatusCode::TOO_MANY_REQUESTS,
                 "too_many_requests",
-                "too many attempts; retry later",
+                // The body carries the same wait the header does: clients
+                // that surface only the JSON message still tell the user
+                // how long the cooldown lasts.
+                &format!("too many attempts; retry in {retry_after} seconds"),
             );
             response
                 .headers_mut()

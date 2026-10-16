@@ -15,7 +15,7 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::api::common::non_empty;
+use crate::api::common::{non_empty, AppJson};
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::auth::middleware::AuthUser;
@@ -162,7 +162,7 @@ async fn login(
     State(state): State<AppState>,
     connect_info: Option<axum::Extension<crate::tls::ConnInfo>>,
     headers: axum::http::HeaderMap,
-    Json(payload): Json<LoginRequest>,
+    AppJson(payload): AppJson<LoginRequest>,
 ) -> Result<Response, ApiError> {
     let email = normalise_email(&payload.email)?;
     if payload.password.is_empty() {
@@ -225,7 +225,7 @@ const REGISTER_ADVISORY_LOCK_KEY: i64 = 0x5069_6E67_5741_4601;
 /// `POST /api/v1/auth/register`
 async fn register(
     State(state): State<AppState>,
-    Json(payload): Json<RegisterRequest>,
+    AppJson(payload): AppJson<RegisterRequest>,
 ) -> Result<Response, ApiError> {
     let email = normalise_email(&payload.email)?;
     validate_password(&payload.password)
@@ -298,7 +298,7 @@ async fn register(
 /// `POST /api/v1/auth/refresh`
 async fn refresh(
     State(state): State<AppState>,
-    Json(payload): Json<RefreshRequest>,
+    AppJson(payload): AppJson<RefreshRequest>,
 ) -> Result<Json<TokenResponse>, ApiError> {
     let claims =
         verify_refresh_token(&payload.refresh_token, state.jwt_secret())
@@ -354,7 +354,7 @@ async fn me(
 async fn update_profile(
     State(state): State<AppState>,
     current: AuthUser,
-    Json(payload): Json<UpdateProfileRequest>,
+    AppJson(payload): AppJson<UpdateProfileRequest>,
 ) -> Result<Json<UserResponse>, ApiError> {
     let account = user::Entity::find_by_id(current.id)
         .one(&state.db)

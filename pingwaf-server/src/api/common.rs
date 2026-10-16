@@ -13,6 +13,34 @@ use crate::api::error::ApiError;
 use crate::auth::AuthUser;
 use crate::models::{acme_challenge, site};
 
+/// [`axum::Json`] with API-consistent rejection bodies.
+///
+/// A malformed request body answers with the standard
+/// `{"error":{"code":…,"message":…}}` envelope instead of axum's
+/// plain-text rejection text, so every 4xx a client can see shares one
+/// shape. Adopt it on public, unauthenticated endpoints first (login and
+/// friends — the surface scanners probe); authenticated handlers can
+/// migrate opportunistically.
+pub struct AppJson<T>(pub T);
+
+impl<T, S> axum::extract::FromRequest<S> for AppJson<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(
+        req: axum::extract::Request,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        match axum::Json::<T>::from_request(req, state).await {
+            Ok(axum::Json(value)) => Ok(Self(value)),
+            Err(rejection) => Err(ApiError::BadRequest(rejection.body_text())),
+        }
+    }
+}
+
 /// Default number of rows returned by a list endpoint.
 pub const DEFAULT_PAGE_SIZE: u64 = 50;
 /// Upper bound accepted from clients, to keep queries predictable.

@@ -198,7 +198,7 @@ function prettyJson(source: string): string {
 }
 
 /** Body lines: JSON is reindented and colored, anything else stays verbatim. */
-function bodyLines(body: string | null, emptyLabel: string): RawLine[] {
+function bodyLines(body: string | null | undefined, emptyLabel: string): RawLine[] {
   if (!body) return [[{ text: emptyLabel, tone: 'text-fg-subtle' }]]
   if (isJson(body)) {
     return prettyJson(body).split('\n').map(highlightJsonLine)

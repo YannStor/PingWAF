@@ -1,6 +1,7 @@
 import { apiClient } from './client'
 import type {
   AccessLog,
+  AccessLogSummary,
   LogQueryParams,
   Page,
   PurgeResult,
@@ -13,13 +14,20 @@ import type {
  * Backed by PostgreSQL for recent events and Elasticsearch for the long tail;
  * the API hides which one answered. `from`/`to` are RFC 3339, defaulting to the
  * trailing 24h with a hard cap of 90 days.
+ *
+ * Access-log lists return metadata-only rows (`AccessLogSummary`); pass
+ * `full: true` — or fetch one record via `accessLogDetail` — when the raw
+ * request/response replay is needed.
  */
 export const logsApi = {
   securityEvents: (params: LogQueryParams = {}) =>
     apiClient.get<Page<SecurityEvent>>('/logs/security', { query: params }),
 
   accessLogs: (params: LogQueryParams = {}) =>
-    apiClient.get<Page<AccessLog>>('/logs/access', { query: params }),
+    apiClient.get<Page<AccessLogSummary>>('/logs/access', { query: params }),
+
+  accessLogDetail: (id: number) =>
+    apiClient.get<AccessLog>(`/logs/access/${id}`),
 
   purge: (params: { site_id?: string; older_than_days?: number } = {}) =>
     apiClient.delete<PurgeResult>('/logs/purge', { query: params }),

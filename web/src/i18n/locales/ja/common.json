@@ -1189,6 +1189,7 @@
       "resultCount": "{{total}} 件の結果",
       "export": "JSON エクスポート",
       "exportEmpty": "エクスポートするデータがありません — 行が読み込まれていません",
+      "exportFailed": "エクスポートに失敗しました — 完全な行を取得できませんでした",
       "exported": "ログをエクスポートしました",
       "purge": "古いログをパージ",
       "purgeTitle": "ログをパージ",

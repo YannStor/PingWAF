@@ -1189,6 +1189,7 @@
       "resultCount": "{{total}} 条结果",
       "export": "导出 JSON",
       "exportEmpty": "无可导出数据 — 尚未加载任何行",
+      "exportFailed": "导出失败 — 无法获取完整行",
       "exported": "日志已导出",
       "purge": "清理旧日志",
       "purgeTitle": "清理日志",

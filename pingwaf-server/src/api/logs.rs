@@ -7,8 +7,8 @@ use axum::Router;
 use chrono::{DateTime, Duration, Utc};
 use sea_orm::sea_query::{Alias, Expr, PostgresQueryBuilder};
 use sea_orm::{
-    ColumnTrait, Condition, DatabaseConnection, EntityTrait, QueryFilter,
-    QueryOrder, QuerySelect, QueryTrait,
+    ColumnTrait, Condition, DatabaseConnection, EntityTrait, FromQueryResult,
+    QueryFilter, QueryOrder, QuerySelect, QueryTrait,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -135,6 +135,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/logs/security", get(list_security))
         .route("/logs/access", get(list_access))
+        .route("/logs/access/{id}", get(get_access))
         .route("/logs/purge", axum::routing::delete(purge))
 }
 
@@ -393,12 +394,81 @@ async fn list_security(
     )))
 }
 
+/// Metadata-only access-log row served by the list endpoint.
+///
+/// The four heavy columns — request/response headers and bodies — are
+/// excluded so a full page stays in the low-hundreds-of-kilobytes range;
+/// clients that need them fetch one record via [`get_access`].
+#[derive(Serialize, FromQueryResult)]
+#[serde(rename_all = "snake_case")]
+pub struct AccessLogSummary {
+    pub id: i64,
+    pub site_id: Option<Uuid>,
+    pub agent_id: Option<Uuid>,
+    pub request_id: Option<String>,
+    pub timestamp: DateTime<Utc>,
+    pub client_ip: String,
+    pub method: String,
+    pub host: Option<String>,
+    pub path: Option<String>,
+    pub query_string: Option<String>,
+    pub status_code: Option<i32>,
+    pub response_size: Option<i64>,
+    pub upstream_addr: Option<String>,
+    pub upstream_latency_ms: Option<i64>,
+    pub total_latency_ms: Option<i64>,
+    pub cache_status: Option<String>,
+    pub user_agent: Option<String>,
+    pub referer: Option<String>,
+    pub country_code: Option<String>,
+    pub tls_version: Option<String>,
+    pub request_body_size: Option<i64>,
+    pub request_body_truncated: Option<bool>,
+    pub scheme: Option<String>,
+    pub protocol: Option<String>,
+    pub response_body_size: Option<i64>,
+    pub response_body_truncated: Option<bool>,
+}
+
+/// Columns backing [`AccessLogSummary`], kept next to the struct so the two
+/// cannot drift: the summary is exactly these fields.
+fn summary_columns() -> [access_log::Column; 26] {
+    [
+        access_log::Column::Id,
+        access_log::Column::SiteId,
+        access_log::Column::AgentId,
+        access_log::Column::RequestId,
+        access_log::Column::Timestamp,
+        access_log::Column::ClientIp,
+        access_log::Column::Method,
+        access_log::Column::Host,
+        access_log::Column::Path,
+        access_log::Column::QueryString,
+        access_log::Column::StatusCode,
+        access_log::Column::ResponseSize,
+        access_log::Column::UpstreamAddr,
+        access_log::Column::UpstreamLatencyMs,
+        access_log::Column::TotalLatencyMs,
+        access_log::Column::CacheStatus,
+        access_log::Column::UserAgent,
+        access_log::Column::Referer,
+        access_log::Column::CountryCode,
+        access_log::Column::TlsVersion,
+        access_log::Column::RequestBodySize,
+        access_log::Column::RequestBodyTruncated,
+        access_log::Column::Scheme,
+        access_log::Column::Protocol,
+        access_log::Column::ResponseBodySize,
+        access_log::Column::ResponseBodyTruncated,
+    ]
+}
+
 /// `GET /api/v1/logs/access`
 async fn list_access(
     State(state): State<AppState>,
     current: AuthUser,
     Query(query): Query<AccessQuery>,
-) -> Result<Json<Page<access_log::Model>>, ApiError> {
+) -> Result<Json<Page<AccessLogSummary>>, ApiError> {
     let scope = resolve_scope(&state.db, &query.site_id, &current).await?;
     let (from, to) = resolve_window(&query.from, &query.to)?;
     let pagination = query.pagination.normalise();
@@ -484,9 +554,12 @@ async fn list_access(
 
     let rows = access_log::Entity::find()
         .filter(condition)
+        .select_only()
+        .columns(summary_columns())
         .order_by_desc(access_log::Column::Timestamp)
         .offset(pagination.offset())
         .limit(pagination.limit())
+        .into_model::<AccessLogSummary>()
         .all(&state.db)
         .await?;
     Ok(Json(Page::new_capped(
@@ -495,6 +568,45 @@ async fn list_access(
         pagination,
         total_truncated,
     )))
+}
+
+/// `GET /api/v1/logs/access/{id}` — one full access-log record.
+///
+/// The list endpoint returns [`AccessLogSummary`] rows; the detail view
+/// (raw HTTP replay, curl export) fetches headers and bodies here.
+async fn get_access(
+    State(state): State<AppState>,
+    current: AuthUser,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> Result<Json<access_log::Model>, ApiError> {
+    let row = access_log::Entity::find_by_id(id)
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("access log not found".into()))?;
+
+    // Same visibility as the list endpoint: administrators see everything;
+    // everyone else only rows belonging to sites they own, and "unassigned"
+    // rows are an administrator-only concern.
+    if !current.is_admin() {
+        match row.site_id {
+            Some(site_id) => {
+                let owned = site::Entity::find()
+                    .filter(site::Column::UserId.eq(current.id))
+                    .filter(site::Column::Id.eq(site_id))
+                    .one(&state.db)
+                    .await?;
+                if owned.is_none() {
+                    return Err(ApiError::NotFound(
+                        "access log not found".into(),
+                    ));
+                }
+            },
+            None => {
+                return Err(ApiError::NotFound("access log not found".into()))
+            },
+        }
+    }
+    Ok(Json(row))
 }
 
 /// Rows deleted per statement by [`purge_logs`].

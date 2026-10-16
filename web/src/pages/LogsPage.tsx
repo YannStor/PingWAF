@@ -518,6 +518,7 @@ export function LogsPage() {
       from: params.from,
       to: params.to,
       page_size: 1,
+      full: true,
     }),
     queryFn: () =>
       logsApi.accessLogs({
@@ -525,15 +526,42 @@ export function LogsPage() {
         from: params.from,
         to: params.to,
         page_size: 1,
+        full: true,
       }),
     enabled: Boolean(selectedEvent?.request_id),
   })
   const rawRequest = rawRequestQuery.data?.items[0] ?? null
 
-  const exportJson = () => {
+  // The access-log drawer shows headers and bodies, which the slim list
+  // rows do not carry; fetch the full record for the open row and fall
+  // back to the row itself while loading (metadata renders immediately).
+  const fullLogQuery = useQuery({
+    queryKey: ['access-log-detail', selectedLog?.id],
+    queryFn: () => logsApi.accessLogDetail(selectedLog!.id),
+    enabled: selectedLog !== null,
+  })
+  const selectedFull: AccessLog | null = fullLogQuery.data ?? selectedLog
+
+  const exportJson = async () => {
     if (rows.length === 0) {
       toast.warning(t('pages.logs.exportEmpty'))
       return
+    }
+    // The list view carries summary rows; evidence exports should include
+    // headers and bodies, so refetch the same window with full rows.
+    let items: unknown = rows
+    if (tab === 'access') {
+      try {
+        const full = await logsApi.accessLogs({
+          ...params,
+          page_size: params.page_size ?? rows.length,
+          full: true,
+        })
+        items = full.items
+      } catch {
+        toast.error(t('pages.logs.exportFailed'))
+        return
+      }
     }
     const name = `pingwaf-${tab}-${fileTimestamp()}`
     downloadJson(name, {
@@ -542,7 +570,7 @@ export function LogsPage() {
       filters: params,
       total,
       count: rows.length,
-      items: rows,
+      items,
     })
     toast.success(t('pages.logs.exported'), `${rows.length} → ${name}.json`)
   }
@@ -1352,67 +1380,67 @@ export function LogsPage() {
             <Button
               variant="secondary"
               icon={<Terminal weight="duotone" className="h-4 w-4" />}
-              onClick={() => selectedLog && copyCurl(selectedLog)}
+              onClick={() => selectedFull && copyCurl(selectedFull)}
             >
               {t('pages.logs.copyCurl')}
             </Button>
           </div>
         }
       >
-        {selectedLog && (
+        {selectedFull && (
           <div className="flex flex-col gap-4">
-            {(selectedLog.cache_status || selectedLog.tls_version) && (
+            {(selectedFull.cache_status || selectedFull.tls_version) && (
               <div className="flex flex-wrap items-center gap-2">
-                {selectedLog.cache_status && (
-                  <Badge tone={selectedLog.cache_status === 'hit' ? 'success' : 'neutral'}>
-                    {selectedLog.cache_status}
+                {selectedFull.cache_status && (
+                  <Badge tone={selectedFull.cache_status === 'hit' ? 'success' : 'neutral'}>
+                    {selectedFull.cache_status}
                   </Badge>
                 )}
-                {selectedLog.tls_version && <Badge tone="info">{selectedLog.tls_version}</Badge>}
+                {selectedFull.tls_version && <Badge tone="info">{selectedFull.tls_version}</Badge>}
               </div>
             )}
             <DefinitionGrid
               rows={[
-                [t('pages.logs.time'), formatDateTime(selectedLog.timestamp)],
+                [t('pages.logs.time'), formatDateTime(selectedFull.timestamp)],
                 [
                   t('pages.logs.clientIp'),
-                  selectedLog.country_code
-                    ? `${countryFlag(selectedLog.country_code)} ${selectedLog.client_ip}`
-                    : selectedLog.client_ip,
+                  selectedFull.country_code
+                    ? `${countryFlag(selectedFull.country_code)} ${selectedFull.client_ip}`
+                    : selectedFull.client_ip,
                 ],
-                [t('pages.logs.host'), selectedLog.host],
-                [t('pages.logs.size'), selectedLog.response_size != null ? formatSize(selectedLog.response_size) : undefined],
-                [t('pages.logs.upstream'), selectedLog.upstream_addr],
+                [t('pages.logs.host'), selectedFull.host],
+                [t('pages.logs.size'), selectedFull.response_size != null ? formatSize(selectedFull.response_size) : undefined],
+                [t('pages.logs.upstream'), selectedFull.upstream_addr],
                 [
                   t('pages.logs.upstreamLatency'),
-                  selectedLog.upstream_latency_ms != null
-                    ? formatLatency(selectedLog.upstream_latency_ms)
+                  selectedFull.upstream_latency_ms != null
+                    ? formatLatency(selectedFull.upstream_latency_ms)
                     : undefined,
                 ],
                 [
                   t('pages.logs.latency'),
-                  selectedLog.total_latency_ms != null
-                    ? formatLatency(selectedLog.total_latency_ms)
+                  selectedFull.total_latency_ms != null
+                    ? formatLatency(selectedFull.total_latency_ms)
                     : undefined,
                 ],
-                [t('pages.logs.cacheStatus'), selectedLog.cache_status],
-                [t('pages.logs.requestId'), selectedLog.request_id],
+                [t('pages.logs.cacheStatus'), selectedFull.cache_status],
+                [t('pages.logs.requestId'), selectedFull.request_id],
               ]}
             />
             <RawSection
               title={t('pages.logs.request')}
-              truncated={selectedLog.request_body_truncated}
-              lines={requestLines(selectedLog, t('pages.logs.noRequestBody'))}
+              truncated={selectedFull.request_body_truncated}
+              lines={requestLines(selectedFull, t('pages.logs.noRequestBody'))}
             />
             <RawSection
               title={t('pages.logs.response')}
               size={
-                selectedLog.response_body_size != null
-                  ? formatSize(selectedLog.response_body_size)
+                selectedFull.response_body_size != null
+                  ? formatSize(selectedFull.response_body_size)
                   : null
               }
-              truncated={selectedLog.response_body_truncated}
-              lines={responseLines(selectedLog, t('pages.logs.noResponseBody'))}
+              truncated={selectedFull.response_body_truncated}
+              lines={responseLines(selectedFull, t('pages.logs.noResponseBody'))}
             />
           </div>
         )}

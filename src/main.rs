@@ -237,6 +237,34 @@ fn upgrade_sock_path(basic_conf: &pingap_config::BasicConf) -> String {
         .unwrap_or_else(|| DEFAULT_UPGRADE_SOCK.to_string())
 }
 
+/// Resolves the worker-thread count for pingora services.
+///
+/// Precedence: `--threads` wins, then `basic.threads`. With neither set (or
+/// `threads = 0`, the documented "auto"), the count scales with the host:
+/// **two worker threads per CPU core, minimum two**. The proxy does blocking
+/// work per request — WAF rule evaluation, TLS offload, upstream I/O — and
+/// the historical default of one worker serialized every request behind the
+/// accept queue on multi-core hosts (measured 4s tail latency at 30
+/// concurrent requests on a 2-vCPU instance).
+fn resolve_threads(
+    arg: Option<usize>,
+    configured: Option<usize>,
+    cpu_cores: usize,
+) -> usize {
+    let adaptive = (cpu_cores.max(1) * 2).max(2);
+    if let Some(threads) = arg {
+        threads.max(1)
+    } else if let Some(threads) = configured {
+        if threads == 0 {
+            adaptive
+        } else {
+            threads.max(1)
+        }
+    } else {
+        adaptive
+    }
+}
+
 fn new_server_config(
     args: &Args,
     conf: &PingapConfig,
@@ -265,12 +293,13 @@ fn new_server_config(
     {
         server_conf.upstream_keepalive_pool_size = upstream_keepalive_pool_size;
     }
-    if let Some(threads) = basic_conf.threads {
-        server_conf.threads = threads.max(1);
-    }
-    if let Some(threads) = args.threads {
-        server_conf.threads = threads.max(1);
-    }
+    server_conf.threads = resolve_threads(
+        args.threads,
+        basic_conf.threads,
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1),
+    );
     if let Some(max_blocking_threads) = basic_conf.max_blocking_threads {
         server_conf.max_blocking_threads = Some(max_blocking_threads);
     }
@@ -780,7 +809,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         // Only on the command line: it overrides `basic.threads`, so leaving it
         // out silently drops the replacement process back to the configured
-        // value, or to one thread.
+        // value, or to the adaptive per-core default.
         if let Some(threads) = args.threads {
             new_args.push(format!("--threads={threads}"));
         }
@@ -1176,5 +1205,41 @@ fn main() {
         // reloaded anyway, and a supervisor could not tell a failed start from
         // a clean shutdown.
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod threads_tests {
+    use super::resolve_threads;
+
+    /// Unset configuration and flag: the adaptive default of two threads
+    /// per core (minimum two) replaces the historical single worker.
+    #[test]
+    fn adaptive_when_unset() {
+        assert_eq!(resolve_threads(None, None, 1), 2);
+        assert_eq!(resolve_threads(None, None, 2), 4);
+        assert_eq!(resolve_threads(None, None, 8), 16);
+    }
+
+    /// `threads = 0` is the documented "auto": same adaptive default.
+    #[test]
+    fn zero_means_adaptive() {
+        assert_eq!(resolve_threads(None, Some(0), 2), 4);
+        assert_eq!(resolve_threads(None, Some(0), 4), 8);
+    }
+
+    /// Explicit configuration wins; the command line wins over the file.
+    #[test]
+    fn explicit_configuration_wins() {
+        assert_eq!(resolve_threads(None, Some(1), 8), 1);
+        assert_eq!(resolve_threads(Some(6), Some(1), 8), 6);
+        assert_eq!(resolve_threads(Some(2), Some(0), 8), 2);
+    }
+
+    /// A nonsensical 0 from the command line still yields at least one
+    /// worker rather than zero.
+    #[test]
+    fn never_below_one() {
+        assert_eq!(resolve_threads(Some(0), Some(4), 4), 1);
     }
 }

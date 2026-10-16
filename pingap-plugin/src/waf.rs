@@ -544,9 +544,12 @@ impl AccessPolicy {
                     IpRuleAction::Block => PolicyOutcome::Denied(Denial {
                         rule_id: rule.id.clone(),
                         rule_name: rule.name.clone(),
+                        // The reason reaches the visitor's block page, so it
+                        // names the rule (what the site operator recognises);
+                        // the opaque id stays in the event/log record only.
                         detail: format!(
-                            "client ip {ip} matched block rule {}",
-                            rule.id
+                            "client ip {ip} matched block rule '{}'",
+                            rule.name
                         ),
                         challenge: false,
                         basic_auth: false,
@@ -555,8 +558,8 @@ impl AccessPolicy {
                         rule_id: rule.id.clone(),
                         rule_name: rule.name.clone(),
                         detail: format!(
-                            "client ip {ip} matched challenge rule {}",
-                            rule.id
+                            "client ip {ip} matched challenge rule '{}'",
+                            rule.name
                         ),
                         challenge: true,
                         basic_auth: false,
@@ -565,8 +568,8 @@ impl AccessPolicy {
                         rule_id: rule.id.clone(),
                         rule_name: rule.name.clone(),
                         detail: format!(
-                            "client ip {ip} matched basic auth rule {}",
-                            rule.id
+                            "client ip {ip} matched basic auth rule '{}'",
+                            rule.name
                         ),
                         challenge: false,
                         basic_auth: true,

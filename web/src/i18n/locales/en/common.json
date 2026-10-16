@@ -1189,6 +1189,7 @@
       "resultCount": "{{total}} results",
       "export": "Export JSON",
       "exportEmpty": "Nothing to export — no rows loaded",
+      "exportFailed": "Export failed — could not fetch full rows",
       "exported": "Logs exported",
       "purge": "Purge old logs",
       "purgeTitle": "Purge logs",
