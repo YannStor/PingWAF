@@ -41,8 +41,9 @@
 # Similar to `user`, the group this process should switch to. Default `none`
 # group = ""
 
-# Set the number of threads per server. If set to 0 (or left unset), it adapts to the
-# host: two worker threads per CPU core, minimum two. Default: adaptive
+# Set the number of threads per server. If set to 0 (or left unset), it matches the
+# CPUs actually available to the process (honours cgroup CPU quotas in
+# containers). Default: adaptive
 # threads = 1
 
 # Upper bound of each worker runtime's blocking thread pool, which serves

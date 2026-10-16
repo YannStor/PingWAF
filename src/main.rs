@@ -240,18 +240,23 @@ fn upgrade_sock_path(basic_conf: &pingap_config::BasicConf) -> String {
 /// Resolves the worker-thread count for pingora services.
 ///
 /// Precedence: `--threads` wins, then `basic.threads`. With neither set (or
-/// `threads = 0`, the documented "auto"), the count scales with the host:
-/// **two worker threads per CPU core, minimum two**. The proxy does blocking
-/// work per request — WAF rule evaluation, TLS offload, upstream I/O — and
-/// the historical default of one worker serialized every request behind the
-/// accept queue on multi-core hosts (measured 4s tail latency at 30
-/// concurrent requests on a 2-vCPU instance).
+/// `threads = 0`, the documented "auto"), the count matches the CPUs actually
+/// available to the process. Callers pass
+/// [`std::thread::available_parallelism`], which on Linux honours cgroup CPU
+/// quotas — so a container pinned to a slice of the host's cores gets that
+/// slice, not the host total. The historical default of one worker
+/// serialized every request behind the accept queue on multi-core hosts
+/// (measured 4s tail latency at 30 concurrent requests on a 2-vCPU
+/// instance); a multiplier beyond one core was rejected as oversubscription
+/// — the tokio runtime interleaves blocking work (WAF evaluation, TLS
+/// offload) on the same pool, so extra workers mostly add context-switch
+/// pressure.
 fn resolve_threads(
     arg: Option<usize>,
     configured: Option<usize>,
     cpu_cores: usize,
 ) -> usize {
-    let adaptive = (cpu_cores.max(1) * 2).max(2);
+    let adaptive = cpu_cores.max(1);
     if let Some(threads) = arg {
         threads.max(1)
     } else if let Some(threads) = configured {
@@ -1212,20 +1217,19 @@ fn main() {
 mod threads_tests {
     use super::resolve_threads;
 
-    /// Unset configuration and flag: the adaptive default of two threads
-    /// per core (minimum two) replaces the historical single worker.
+    /// Unset configuration and flag: one worker per actually available CPU.
     #[test]
     fn adaptive_when_unset() {
-        assert_eq!(resolve_threads(None, None, 1), 2);
-        assert_eq!(resolve_threads(None, None, 2), 4);
-        assert_eq!(resolve_threads(None, None, 8), 16);
+        assert_eq!(resolve_threads(None, None, 1), 1);
+        assert_eq!(resolve_threads(None, None, 2), 2);
+        assert_eq!(resolve_threads(None, None, 8), 8);
     }
 
     /// `threads = 0` is the documented "auto": same adaptive default.
     #[test]
     fn zero_means_adaptive() {
-        assert_eq!(resolve_threads(None, Some(0), 2), 4);
-        assert_eq!(resolve_threads(None, Some(0), 4), 8);
+        assert_eq!(resolve_threads(None, Some(0), 2), 2);
+        assert_eq!(resolve_threads(None, Some(0), 4), 4);
     }
 
     /// Explicit configuration wins; the command line wins over the file.

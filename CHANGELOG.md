@@ -10,6 +10,16 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Worker threads adapt to the available CPUs.** When `basic.threads` is
+  unset (or `0`), each server now runs one worker thread per CPU actually
+  available to the process — `available_parallelism()`, which honours cgroup
+  CPU quotas in containers — instead of the historical single worker, which
+  serialized every request behind the accept queue on multi-core hosts
+  (measured 4s tail latency at 30 concurrent requests on a 2-vCPU instance).
+  Explicit configuration and `--threads` still win.
+
 ## [PingWAF 0.27.1] — 2026-10-16
 
 ### Fixed
