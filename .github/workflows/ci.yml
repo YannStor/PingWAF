@@ -97,9 +97,38 @@ jobs:
         if: matrix.toolchain == 'stable'
         run: cargo clippy --all-targets --features full -- -D warnings
 
+      # Release build feeds the :main Docker image (see the docker job below).
+      # PRs skip it entirely: clippy + test already cover compile correctness,
+      # and release-profile risk is exercised by every main push + release.yml.
+      # The binary must embed the REAL dashboard (rust-embed reads ../web/dist
+      # at compile time), so the frontend is built here on main pushes —
+      # feature parity with the old Dockerfile source build (--features full).
+      - name: Setup Node (release binary dashboard)
+        if: matrix.toolchain == 'stable' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build frontend (release binary dashboard)
+        if: matrix.toolchain == 'stable' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
       - name: Build (release, pingwaf, full)
-        if: matrix.toolchain == 'stable'
+        if: matrix.toolchain == 'stable' && github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: cargo build --release --bin pingwaf --features full
+
+      - name: Upload release binary for :main image
+        if: matrix.toolchain == 'stable' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pingwaf-main-binary
+          path: target/release/pingwaf
+          retention-days: 1
 
       - name: Test (workspace)
         run: cargo test --workspace --features full --no-fail-fast
@@ -205,21 +234,36 @@ jobs:
       - name: Check docs & agent prompts
         run: ./scripts/check-docs-prompts.sh
 
-  # Verifies the multi-stage Dockerfile still builds and pushes the amd64
-  # :main snapshot to GHCR. Only on main: a PR run would burn a lot of minutes
-  # for little signal. The :latest tag belongs to the release pipeline, which
-  # publishes a multi-arch manifest — tagging it here would clobber that.
+  # Packs the :main snapshot image from the release binary built by the
+  # `rust` job's stable leg (Dockerfile.runtime, same pattern as release.yml)
+  # instead of rebuilding everything from source in-container — that rebuild
+  # was the push-main critical path (~800s on its own). Only on main: a PR
+  # run would burn a lot of minutes for little signal. The :latest tag
+  # belongs to the release pipeline, which publishes a multi-arch manifest —
+  # tagging it here would clobber that.
   docker:
     name: Docker build & push :main
+    needs: rust
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Download release binary
+        uses: actions/download-artifact@v4
+        with:
+          name: pingwaf-main-binary
+          path: docker-context/
+
+      - name: Prepare build context
+        run: |
+          chmod +x docker-context/pingwaf
+          cp pingwaf.toml docker-context/
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -240,8 +284,8 @@ jobs:
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: ./Dockerfile
+          context: docker-context/
+          file: ./Dockerfile.runtime
           platforms: linux/amd64
           push: true
           tags: ghcr.io/shuaizend/pingwaf:main
