@@ -664,6 +664,18 @@ async fn handle_pprof_request(
             Ok(profiling) => profiling,
             Err(err) => return pprof_error_response(err),
         };
+    // Mid-window memory watchdog (same policy as the control plane).
+    let watchdog_abort = profiling.abort_handle();
+    let watchdog_window = Duration::from_secs(
+        query
+            .seconds
+            .unwrap_or(pingwaf_pprof::DEFAULT_SECONDS)
+            .clamp(1, pingwaf_pprof::MAX_SECONDS)
+            .saturating_add(1),
+    );
+    std::thread::spawn(move || {
+        pingwaf_pprof::spawn_memory_watchdog(watchdog_abort, watchdog_window)
+    });
     let seconds = query
         .seconds
         .unwrap_or(pingwaf_pprof::DEFAULT_SECONDS)

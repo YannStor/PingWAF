@@ -156,5 +156,7 @@
 # Default `100MB`
 # cache_max_size = "100MB"
 
-# Debug-capture switch for the pprof endpoints and MCP tool (default: true).
+# Debug-capture switch for the pprof endpoints and MCP tool (default: false).
+# CPU sampling runs a signal handler that allocates and the encode phase
+# spikes RSS — enable explicitly only for diagnostics on a box with headroom.
 # pprof_enabled = true

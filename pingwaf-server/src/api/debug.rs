@@ -72,6 +72,10 @@ fn finish_err(err: ProfileError) -> ApiError {
         ProfileError::NoSamples | ProfileError::Idle => {
             ApiError::Conflict(err.to_string())
         },
+        // The watchdog aborted the sampler mid-window.
+        ProfileError::MemoryPressure => {
+            ApiError::ServiceUnavailable(err.to_string())
+        },
         other => ApiError::Internal(other.to_string()),
     }
 }
@@ -109,17 +113,42 @@ async fn begin_session(
         return Err(load_guard_error(live.process_cpu_percent));
     }
     let frequency = query.frequency.unwrap_or_default();
-    start_session(frequency).map_err(|err| {
-        log_capture(endpoint, reject_tag(&err));
-        match err {
-            ProfileError::AlreadyActive => ApiError::Conflict(err.to_string()),
-            ProfileError::UnsupportedPlatform => {
-                ApiError::NotImplemented(err.to_string())
-            },
-            other => ApiError::Internal(other.to_string()),
-        }
-    })
+    start_session(frequency)
+        .map_err(|err| {
+            log_capture(endpoint, reject_tag(&err));
+            match err {
+                ProfileError::AlreadyActive => {
+                    ApiError::Conflict(err.to_string())
+                },
+                ProfileError::UnsupportedPlatform => {
+                    ApiError::NotImplemented(err.to_string())
+                },
+                // Admission/watchdog: host memory below the floor — the
+                // encode phase would push the box into an OOM kill.
+                ProfileError::MemoryPressure => {
+                    ApiError::ServiceUnavailable(err.to_string())
+                },
+                other => ApiError::Internal(other.to_string()),
+            }
+        })
+        .inspect(|session| {
+            spawn_watchdog(session, capture_seconds(query));
+        })
 }
+
+/// Spawns the mid-window memory watchdog for a freshly started capture:
+/// if available memory crosses the soft floor while sampling, the sampler
+/// is aborted and the pending `finish_*` answers with `MemoryPressure`.
+#[cfg(target_os = "linux")]
+fn spawn_watchdog(session: &ProfilingSession, seconds: u64) {
+    pingwaf_pprof::spawn_memory_watchdog(
+        session.abort_handle(),
+        std::time::Duration::from_secs(seconds.saturating_add(1)),
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn spawn_watchdog(_session: &ProfilingSession, _seconds: u64) {}
 
 fn capture_seconds(query: &ProfileQuery) -> u64 {
     query
@@ -699,10 +728,11 @@ mod tests {
     use super::{capture_enabled, load_guard_error};
 
     /// The deployment switch honours the shared parser in pingwaf-pprof;
-    /// with no env var set (the case in tests) captures stay enabled.
+    /// with no configuration and no env var (the case in tests) captures
+    /// default to OFF.
     #[test]
-    fn capture_switch_defaults_to_on() {
-        assert!(capture_enabled());
+    fn capture_switch_defaults_to_off() {
+        assert!(!capture_enabled());
     }
 
     /// The load-guard 503 tells the operator the measured CPU value, the

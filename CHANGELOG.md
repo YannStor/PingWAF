@@ -8,6 +8,44 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+### Changed
+
+- **CPU profiling now defaults to OFF** (behavior change). The built-in
+  sampler runs a SIGPROF handler that allocates in signal context, and the
+  encode phase after the window spikes RSS — on a 2GB box every capture
+  OOM-killed the container (2026-10-17, 4/4 reproductions). Enable
+  explicitly for diagnostics: `[basic] pprof_enabled = true` or env
+  `PINGWAF_PPROF_ENABLED=1`. Unconfigured deployments answer `503` on the
+  capture endpoints; the read-only `memory`/`cpu/metrics`/`cpu/summary`
+  views stay available.
+
+### Added
+
+- **Memory admission guard for captures.** Before any capture starts (all
+  entry points: control plane, MCP, data-plane admin route), available
+  memory is checked (cgroup v2 `memory.max`-`memory.current`, then v1,
+  then host `MemAvailable`); below `MIN_AVAILABLE_BYTES` (400 MB) the
+  capture is refused with `503 memory_pressure` and audited. Not
+  detectable → allowed.
+- **Mid-window memory watchdog.** While a capture samples, available
+  memory is polled every 250 ms; two consecutive readings below the floor
+  abort the sampler early and the pending `finish_*` answers
+  `503 memory_pressure` (audit outcome `memory_pressure`).
+- **Heap dump guardrails (mem-prof builds).** `GET /debug/pprof/heap`
+  applies the same memory admission before dumping, refuses dumps over
+  256 MB, and reads the file with a bounded read instead of pulling it
+  into memory unbounded.
+
+### Fixed
+
+- **CPU snapshot rate-limit race.** Concurrent callers of
+  `cpu/metrics`/the load guard could both sleep to the same refresh
+  deadline, the second refresh observing a ~zero delta and reporting a
+  false idle. The stretch-then-refresh sequence is now serialized under
+  the sampler lock, so every caller gets one meaningful delta.
+
 ## [PingWAF 0.27.5] — 2026-10-17
 
 ### Added

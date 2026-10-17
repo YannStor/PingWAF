@@ -1,0 +1,88 @@
+/// A handle that lets a watchdog stop an in-flight sampler from another
+/// thread (see [`spawn_memory_watchdog`]).
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub struct SessionAbort {
+    guard_slot: std::sync::Arc<
+        std::sync::Mutex<Option<ProfilerGuard<'static>>>,
+    >,
+    aborted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(target_os = "linux")]
+impl SessionAbort {
+    /// Stops the sampler immediately and marks the session aborted; the
+    /// pending `finish_*` call then answers with `MemoryPressure`.
+    pub fn abort(&self) {
+        self.aborted.store(true, Ordering::SeqCst);
+        if let Some(guard) = self
+            .guard_slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            drop(guard);
+        }
+    }
+
+    /// Whether the watchdog (or anyone) already aborted this session.
+    pub fn aborted(&self) -> bool {
+        self.aborted.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl ProfilingSession {
+    /// Returns the abort handle for this session; spawn
+    /// [`spawn_memory_watchdog`] with it to get mid-window RSS protection.
+    pub fn abort_handle(&self) -> SessionAbort {
+        SessionAbort {
+            guard_slot: self.guard_slot.clone(),
+            aborted: self.aborted.clone(),
+        }
+    }
+}
+
+/// Watches available memory while a capture is in flight and aborts the
+/// sampler as soon as the soft floor ([`MIN_AVAILABLE_BYTES`]) is crossed
+/// twice in a row (to ride out transient dips). Self-terminates shortly
+/// after `window` elapses.
+#[cfg(target_os = "linux")]
+pub fn spawn_memory_watchdog(
+    abort: SessionAbort,
+    window: std::time::Duration,
+) {
+    std::thread::spawn(move || {
+        let deadline =
+            Instant::now() + window + std::time::Duration::from_secs(2);
+        let mut breaches = 0_u32;
+        while Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            if abort.aborted() {
+                return; // finished normally elsewhere
+            }
+            if memory_guard::memory_pressure_now() {
+                breaches += 1;
+                if breaches >= 2 {
+                    tracing_hint();
+                    abort.abort();
+                    return;
+                }
+            } else {
+                breaches = 0;
+            }
+        }
+    });
+}
+
+/// The watchdog writes to stderr directly: this crate stays
+/// dependency-free on `tracing` (the binaries wire it in).
+#[cfg(target_os = "linux")]
+fn tracing_hint() {
+    eprintln!(
+        "pingwaf-pprof: capture aborted — available memory fell below \
+         {} bytes",
+        MIN_AVAILABLE_BYTES
+    );
+}
+

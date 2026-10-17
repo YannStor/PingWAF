@@ -117,16 +117,22 @@ static LAST_REFRESH: LazyLock<Mutex<Instant>> =
 /// Collects a [`CpuLiveStats`] snapshot.
 ///
 /// sysinfo needs at least [`MINIMUM_CPU_UPDATE_INTERVAL`] between CPU
-/// refreshes for a meaningful delta; back-to-back calls sleep the
-/// remainder of that interval first. Callers inside async handlers should
-/// keep this off the executor thread (it may block briefly).
+/// refreshes for a meaningful delta. The whole stretch-then-refresh
+/// sequence runs **under the sampler lock**: concurrent callers queue up
+/// and each gets exactly one meaningful delta. Without this
+/// serialization, two callers could both sleep to the same deadline and
+/// the second refresh would see a ~zero delta — reporting a false "idle"
+/// that the capture load guard would then act on. Callers inside async
+/// handlers should keep this off the executor thread (the lock sleeps).
 pub fn cpu_snapshot() -> CpuLiveStats {
     // `into_inner` over a poisoned lock is fine here: neither static
-    // carries invariants beyond "some instance".
-    stretch_to_minimum_interval();
+    // carries invariants beyond "some instance". The lock is held across
+    // the stretch sleep on purpose (see above): that is what serializes
+    // the refresh interval per caller.
     let mut sys = CPU_SAMPLER
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    stretch_to_minimum_interval();
     sys.refresh_cpu_specifics(CpuRefreshKind::everything());
     let pid = Pid::from_u32(std::process::id());
     sys.refresh_processes_specifics(
@@ -813,6 +819,25 @@ mod tests {
         assert!(stats.host_cpu_percent >= 0.0);
     }
 
+    /// Concurrent snapshots must all succeed under the serialized
+    /// stretch+refresh (the pre-fix race let a second refresh observe a
+    /// ~zero delta and report a false idle). Smoke-level: asserts sanity,
+    /// not exactness.
+    #[test]
+    fn concurrent_snapshots_stay_sane() {
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for _ in 0..3 {
+                        let stats = cpu_snapshot();
+                        assert!(stats.process_cpu_percent >= 0.0);
+                        assert!(stats.collected_at_ms > 0);
+                    }
+                });
+            }
+        });
+    }
+
     #[test]
     fn platform_limited_summary_carries_the_live_readout() {
         let stats = cpu_snapshot();
@@ -957,21 +982,20 @@ mod tests {
     /// interleave (the sampling test only writes via take_report on Linux).
     #[test]
     fn summary_cache_stores_and_replaces() {
-        {
-            let mut last = LAST_SUMMARY.lock().expect("summary cache lock");
-            let mut first = sample_summary();
-            first.collected_at_ms = 1;
-            store_summary(first);
-            assert_eq!(cached_summary().expect("stored").collected_at_ms, 1);
+        // NB: never hold the LAST_SUMMARY lock across store_summary — it
+        // locks the same non-reentrant mutex internally (deadlock).
+        let mut first = sample_summary();
+        first.collected_at_ms = 1;
+        store_summary(first);
+        assert_eq!(cached_summary().expect("stored").collected_at_ms, 1);
 
-            let mut second = sample_summary();
-            second.collected_at_ms = 2;
-            store_summary(second);
-            assert_eq!(cached_summary().expect("replaced").collected_at_ms, 2);
+        let mut second = sample_summary();
+        second.collected_at_ms = 2;
+        store_summary(second);
+        assert_eq!(cached_summary().expect("replaced").collected_at_ms, 2);
 
-            // Leave a clean slate for other tests.
-            *last = None;
-        }
+        // Leave a clean slate for other tests.
+        LAST_SUMMARY.lock().expect("summary cache lock").take();
         assert!(cached_summary().is_none());
     }
 

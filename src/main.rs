@@ -721,11 +721,15 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     config_manager.set_current_config(config.clone());
 
-    // Debug-capture switch ([basic] pprof_enabled, default on = debug
-    // capture mode). The config file wins; the legacy
-    // `PINGWAF_PPROF_ENABLED` env var is only honoured when the key is
-    // unset. Runs before any listener, so the switch is authoritative for
-    // every capture entry point that comes up afterwards.
+    // Debug-capture switch ([basic] pprof_enabled). **Defaults to OFF**:
+    // CPU sampling runs a SIGPROF handler that allocates in signal context
+    // (pprof-rs design limit), and the encode phase after the window spikes
+    // RSS hard — on a 2GB box every capture OOM-killed the container
+    // (2026-10-17). Production must opt in explicitly. Precedence: config
+    // file wins; the legacy `PINGWAF_PPROF_ENABLED` env var is only
+    // honoured when the key is unset. Runs before any listener, so the
+    // switch is authoritative for every capture entry point that comes up
+    // afterwards.
     let pprof_enabled = match config.basic.pprof_enabled {
         Some(enabled) => enabled,
         None => pingwaf_pprof::env_flag_enabled(

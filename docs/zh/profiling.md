@@ -207,7 +207,7 @@ profiling capture finished endpoint=… outcome=… rss=…
 
 `rss` 是采集刚结束时的进程 RSS，便于把内存毛刺与采集活动关联排查。
 
-可在部署层面通过 `conf/basic.toml` 的 `[basic] pprof_enabled` 配置键关闭采集——布尔值，默认 `true`（调试采集模式开启）。旧的环境变量 `PINGWAF_PPROF_ENABLED=0`（或 `false`/`off`/`no`，大小写不敏感）仍然有效，但仅作为回退：**仅当该配置键未显式设置时生效**，配置文件优先。修改后需重启进程生效。
+可在部署层面通过 `conf/basic.toml` 的 `[basic] pprof_enabled` 配置键管控采集——布尔值，**默认 `false`（关闭）**。CPU 采样在信号上下文中分配内存，且采集窗口结束后的编码阶段会使 RSS 剧烈飙升并可能在小型主机上触发 OOM——仅在内存有余量的机器上为诊断目的显式开启（设为 `true`，或环境变量 `PINGWAF_PPROF_ENABLED=1`）。修改后需重启进程生效。未配置时采集端点返回 `503`；只读快照（`memory`/`cpu/metrics`/`cpu/summary`）保持可用。
 
 开关关闭时，所有 CPU 采集入口都返回 `503 Service Unavailable`：控制面三个端点（`profile`、`flamegraph`、`cpu/dashboard.svg`）、数据面 admin 插件上的同一批采集端点、MCP `profile_cpu` 工具，以及[堆端点](#堆归因mem-prof-构建与-debugpprofheap)。只读快照端点不受影响——`memory`、`cpu/metrics` 与 `cpu/summary`（不带 `?capture=true`）在采集关闭时照常响应，这恰好是关闭采集后排障所需的视图。
 
@@ -224,6 +224,12 @@ CPU 采集启动前（`profile`、`flamegraph`、`cpu/dashboard.svg` 三个端�
 - `?selfload=true` 的合成负载只在守卫通过之后才启动，且刻意保持轻量（短促自旋、间歇让出），因此开启它不会让繁忙进程绕过守卫。
 
 守卫的由来：pprof-rs 采样器在其 `SIGPROF` 信号处理器内分配内存（该 crate 的已知设计限制）。空闲进程上采集无害（实测 VmHWM 79 MB），但采样繁忙进程可在 30-90 秒内使 RSS 从几十 MB 冲至 1GB 以上，直至被 OOM killer 击杀（2026-10-16 在演示实例上实测发生两次）。
+
+### 内存准入与看门狗
+
+- **启动前准入**：任一采集入口（控制面端点、`summary?capture=true`、MCP 工具、数据面 admin 路由）启动采样前都会检查可用内存（cgroup v2 `memory.max`-`memory.current` → v1 → 宿主 `MemAvailable`），低于 **400 MB**（`MIN_AVAILABLE_BYTES`）即拒绝，返回 `503` 且审计 outcome 为 `memory_pressure`。无法探测内存（无 cgroup 且 sysinfo 失败）时放行。
+- **窗口内看门狗**：采样进行中每 250 ms 检查一次可用内存；连续两次低于软阈值即**提前中止采样器**，待处理的 `finish_*` 返回 `503 memory_pressure`，审计同样记录。窗口正常结束则看门狗自动退出。
+- **heap dump 防护（mem-prof 构建）**：dump 前同准入检查；dump 文件超过 256 MB 拒绝下载（提示改为在机器上直接用 jeprof）；读取为有界读取，不再把整个文件一次性读入内存。
 
 > **警告——负载下采集可致进程 OOM。** 生产实例建议保持调试采集开关关闭（`[basic] pprof_enabled = false`；旧部署可用 `PINGWAF_PPROF_ENABLED=0`），仅在排查问题时于低峰期临时开启。宿主机建议 `transparent_hugepage=madvise`；容器建议配置内存限额（`mem_limit`），避免一次不当采集拖垮整机。
 

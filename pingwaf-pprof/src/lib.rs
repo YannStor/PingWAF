@@ -35,9 +35,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub mod cgroup;
 pub mod cpu_svg;
 
+pub mod memory_guard;
+
 pub use cpu_svg::{
     cached_summary, cpu_snapshot, render_cpu_dashboard_svg, CpuCaptureSummary,
     CpuLiveStats, CpuStatus, DashboardSvgOpts, TopFrame,
+};
+pub use memory_guard::{
+    available_bytes, ensure_admission, memory_pressure_now, MIN_AVAILABLE_BYTES,
 };
 
 #[cfg(target_os = "linux")]
@@ -95,14 +100,15 @@ pub fn capture_allowed_at(process_cpu_percent: f32) -> bool {
 
 /// Whether CPU captures are enabled on this deployment. The value is
 /// initialised once at startup from the configuration file
-/// (`[basic] pprof_enabled`, the debug-capture switch, default on) with the
-/// legacy `PINGWAF_PPROF_ENABLED` env var as a fallback, via
-/// [`set_captures_enabled`]. The read-only memory and live-metrics snapshots
-/// are not affected — they are the diagnostic views needed precisely when
-/// captures are off. Single source of truth shared by the control-plane
-/// endpoints, the data-plane admin plugin and the MCP tool.
+/// (`[basic] pprof_enabled`), with the legacy `PINGWAF_PPROF_ENABLED` env
+/// var as a fallback, via [`set_captures_enabled`]. **The initial value is
+/// off** — an entry point reached before initialization (or a deployment
+/// that never configured the switch) refuses captures; production must opt
+/// in explicitly. The read-only memory and live-metrics snapshots are not
+/// affected. Single source of truth shared by the control-plane endpoints,
+/// the data-plane admin plugin and the MCP tool.
 static CAPTURES_ENABLED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(true);
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Sets the process-wide capture switch. Called once at startup; later
 /// configuration changes require a restart (documented).
@@ -115,16 +121,17 @@ pub fn captures_enabled() -> bool {
     CAPTURES_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Parses the legacy `PINGWAF_PPROF_ENABLED` env value: absent means "not
-/// set" (`None` from the caller), `0|false|off|no` case-insensitive means
-/// off, anything else means on.
+/// Parses the legacy `PINGWAF_PPROF_ENABLED` env value. The default is
+/// **off** (captures must be explicitly opted into): only an explicit
+/// on-value (`1|true|on|yes`, case-insensitive) turns captures on; absent
+/// or an off-value (`0|false|off|no`) keeps them off.
 pub fn env_flag_enabled(raw: Option<&str>) -> bool {
     match raw {
-        Some(value) => !matches!(
+        Some(value) => matches!(
             value.to_ascii_lowercase().as_str(),
-            "0" | "false" | "off" | "no"
+            "1" | "true" | "on" | "yes"
         ),
-        None => true,
+        None => false,
     }
 }
 
@@ -218,6 +225,7 @@ fn error_tag(err: &ProfileError) -> &'static str {
         ProfileError::NoSamples => "no_samples",
         ProfileError::Idle => "idle",
         ProfileError::Report(_) => "report_error",
+        ProfileError::MemoryPressure => "memory_pressure",
     }
 }
 
@@ -241,6 +249,10 @@ pub enum ProfileError {
     Idle,
     /// Collecting, symbolising or encoding the report failed.
     Report(String),
+    /// The capture was aborted (or refused) because host memory dropped
+    /// below the admission floor (`memory_guard::MIN_AVAILABLE_BYTES`)
+    /// while sampling was in flight (HTTP 503).
+    MemoryPressure,
 }
 
 /// Wall-clock fraction below which a session counts as idle. This must stay
@@ -279,6 +291,9 @@ impl std::fmt::Display for ProfileError {
             ProfileError::Report(msg) => {
                 write!(f, "failed to build profile report: {msg}")
             },
+            ProfileError::MemoryPressure => f.write_str(
+                "capture aborted: available memory fell below the capture floor",
+            ),
         }
     }
 }
@@ -294,8 +309,14 @@ pub struct ProfilingSession {
     /// Whether a `finish_*` method already recorded this session's outcome
     /// (a plain drop afterwards must not record `"abandoned"`).
     finished: bool,
+    /// The live sampler, in a shared slot so the memory watchdog can stop
+    /// it from another thread mid-window (see `spawn_memory_watchdog`).
     #[cfg(target_os = "linux")]
-    guard: Option<ProfilerGuard<'static>>,
+    guard_slot:
+        std::sync::Arc<std::sync::Mutex<Option<ProfilerGuard<'static>>>>,
+    /// Set by the watchdog when it aborted the sampler early.
+    #[cfg(target_os = "linux")]
+    aborted: std::sync::Arc<std::sync::atomic::AtomicBool>,
     #[cfg(target_os = "linux")]
     started_at: Instant,
     #[cfg(target_os = "linux")]
@@ -310,6 +331,10 @@ pub struct ProfilingSession {
 /// [`ProfilingSession::finish_flamegraph`].
 #[cfg(target_os = "linux")]
 pub fn start_session(frequency: i32) -> Result<ProfilingSession, ProfileError> {
+    // Memory admission first: below the floor the encode phase after the
+    // window would push the host into an OOM kill (2026-10-17: 4/4
+    // captures on a 2GB box died exactly there).
+    memory_guard::ensure_admission()?;
     if SESSION_ACTIVE.swap(true, Ordering::SeqCst) {
         return Err(ProfileError::AlreadyActive);
     }
@@ -325,7 +350,12 @@ pub fn start_session(frequency: i32) -> Result<ProfilingSession, ProfileError> {
             TOTAL_SESSIONS.fetch_add(1, Ordering::Relaxed);
             Ok(ProfilingSession {
                 finished: false,
-                guard: Some(guard),
+                guard_slot: std::sync::Arc::new(std::sync::Mutex::new(Some(
+                    guard,
+                ))),
+                aborted: std::sync::Arc::new(
+                    std::sync::atomic::AtomicBool::new(false),
+                ),
                 started_at: Instant::now(),
                 start_cpu_ticks: process_cpu_ticks(),
             })
@@ -462,14 +492,21 @@ impl ProfilingSession {
 
     #[cfg(target_os = "linux")]
     fn take_report(&mut self) -> Result<pprof::Report, ProfileError> {
-        let Some(guard) = self.guard.as_ref() else {
-            return Err(ProfileError::Report(
-                "profiling session already finished".to_string(),
-            ));
-        };
+        if self.aborted.load(Ordering::SeqCst) {
+            return Err(ProfileError::MemoryPressure);
+        }
+        let guard = self
+            .guard_slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .ok_or_else(|| {
+                ProfileError::Report(
+                    "profiling session already finished".to_string(),
+                )
+            })?;
         let report = guard.report().build().map_err(report_err)?;
         // Sampling stops here; symbolising and encoding below is idle time.
-        self.guard = None;
         // Fold the report into the last-capture cache so /cpu/summary and
         // the MCP tools can read the result without re-capturing. The
         // aggregate is bounded (top-N folded, KB-scale) by from_counts.
@@ -535,9 +572,130 @@ fn ticks_per_second() -> u64 {
 }
 
 #[cfg(target_os = "linux")]
+/// A handle that lets a watchdog stop an in-flight sampler from another
+/// thread (see [`spawn_memory_watchdog`]).
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub struct SessionAbort {
+    guard_slot:
+        std::sync::Arc<std::sync::Mutex<Option<ProfilerGuard<'static>>>>,
+    aborted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(target_os = "linux")]
+impl SessionAbort {
+    /// Stops the sampler immediately and marks the session aborted; the
+    /// pending `finish_*` call then answers with `MemoryPressure`.
+    pub fn abort(&self) {
+        self.aborted.store(true, Ordering::SeqCst);
+        if let Some(guard) = self
+            .guard_slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            drop(guard);
+        }
+    }
+
+    /// Whether the watchdog (or anyone) already aborted this session.
+    pub fn aborted(&self) -> bool {
+        self.aborted.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl ProfilingSession {
+    /// Returns the abort handle for this session; spawn
+    /// [`spawn_memory_watchdog`] with it to get mid-window RSS protection.
+    pub fn abort_handle(&self) -> SessionAbort {
+        SessionAbort {
+            guard_slot: self.guard_slot.clone(),
+            aborted: self.aborted.clone(),
+        }
+    }
+}
+
+/// Watches available memory while a capture is in flight and aborts the
+/// sampler as soon as the soft floor ([`MIN_AVAILABLE_BYTES`]) is crossed
+/// twice in a row (to ride out transient dips). Self-terminates shortly
+/// after `window` elapses.
+#[cfg(target_os = "linux")]
+pub fn spawn_memory_watchdog(abort: SessionAbort, window: std::time::Duration) {
+    std::thread::spawn(move || {
+        let deadline =
+            Instant::now() + window + std::time::Duration::from_secs(2);
+        let mut breaches = 0_u32;
+        while Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            if abort.aborted() {
+                return; // finished normally elsewhere
+            }
+            if memory_guard::memory_pressure_now() {
+                breaches += 1;
+                if breaches >= 2 {
+                    tracing_hint();
+                    abort.abort();
+                    return;
+                }
+            } else {
+                breaches = 0;
+            }
+        }
+    });
+}
+
+/// The watchdog writes to stderr directly: this crate stays
+/// dependency-free on `tracing` (the binaries wire it in).
+#[cfg(target_os = "linux")]
+fn tracing_hint() {
+    eprintln!(
+        "pingwaf-pprof: capture aborted — available memory fell below \
+         {} bytes",
+        MIN_AVAILABLE_BYTES
+    );
+}
+
+// ── Non-Linux stubs: no sampler exists, so there is nothing to abort.
+// The call sites stay cfg-free.
+
+#[cfg(not(target_os = "linux"))]
+#[derive(Clone, Default)]
+pub struct SessionAbort;
+
+#[cfg(not(target_os = "linux"))]
+impl SessionAbort {
+    pub fn abort(&self) {}
+    pub fn aborted(&self) -> bool {
+        false
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+impl ProfilingSession {
+    pub fn abort_handle(&self) -> SessionAbort {
+        SessionAbort
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn spawn_memory_watchdog(
+    _abort: SessionAbort,
+    _window: std::time::Duration,
+) {
+}
+
+#[cfg(target_os = "linux")]
 impl Drop for ProfilingSession {
     fn drop(&mut self) {
-        self.guard = None;
+        if let Some(guard) = self
+            .guard_slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            drop(guard);
+        }
         if !self.finished {
             // The request died before any finisher ran (client disconnect,
             // panic in the handler): record that, so the stats show why a
@@ -894,10 +1052,13 @@ mod tests {
     /// unset: absent = on, `0|false|off|no` (case-insensitive) = off.
     #[test]
     fn env_flag_parsing() {
-        assert!(env_flag_enabled(None));
+        // Default is OFF: captures must be explicitly opted into.
+        assert!(!env_flag_enabled(None));
         assert!(env_flag_enabled(Some("1")));
         assert!(env_flag_enabled(Some("true")));
-        assert!(env_flag_enabled(Some("")));
+        assert!(env_flag_enabled(Some("on")));
+        assert!(env_flag_enabled(Some("yes")));
+        assert!(!env_flag_enabled(Some("")));
         assert!(!env_flag_enabled(Some("0")));
         assert!(!env_flag_enabled(Some("false")));
         assert!(!env_flag_enabled(Some("OFF")));

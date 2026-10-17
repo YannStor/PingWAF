@@ -287,9 +287,12 @@ profiling capture finished endpoint=… outcome=… rss=…
 
 `rss` is the process RSS right after the capture, so memory spikes can be correlated with capture activity.
 
-Captures can be disabled per deployment with the `[basic] pprof_enabled`
-configuration key in `conf/basic.toml` — a boolean, default `true`
-(debug-capture mode on). The legacy `PINGWAF_PPROF_ENABLED=0` environment
+Captures can be controlled per deployment with the `[basic] pprof_enabled`
+configuration key in `conf/basic.toml` — a boolean, **default `false`**
+(off). CPU sampling runs a SIGPROF handler that allocates in signal
+context, and the encode phase after the window spikes RSS hard enough to
+OOM-kill small hosts — enable explicitly only for diagnostics on a box
+with memory headroom. The legacy `PINGWAF_PPROF_ENABLED=0` environment
 variable (or `false`/`off`/`no`, case-insensitive) still works, but only as a
 fallback honoured when the key is **not** set explicitly — the configuration
 file wins. Changes require a restart.
@@ -330,6 +333,24 @@ process a capture is harmless (measured VmHWM 79 MB), but sampling a busy
 process can inflate RSS from tens of MB to over 1 GB within 30-90 seconds
 until the OOM killer strikes (observed twice on the demo instance on
 2026-10-16).
+
+### Memory admission and watchdog
+
+- **Pre-start admission**: every capture entry point (control-plane
+  endpoints, `summary?capture=true`, the MCP tool, the data-plane admin
+  route) checks available memory before sampling (cgroup v2
+  `memory.max`-`memory.current` → v1 → host `MemAvailable`); below
+  **400 MB** (`MIN_AVAILABLE_BYTES`) the capture is refused with
+  `503`, audited as `memory_pressure`. Undetectable memory → allowed.
+- **Mid-window watchdog**: while sampling, available memory is polled
+  every 250 ms; two consecutive readings below the floor abort the
+  sampler early and the pending `finish_*` answers `503
+  memory_pressure` (same audit outcome). Normal window end retires the
+  watchdog automatically.
+- **Heap dump guardrails (mem-prof builds)**: the same admission runs
+  before a dump; dumps over 256 MB are refused (use jeprof on the box
+  instead); the file is read with a bounded read rather than pulled
+  into memory whole.
 
 > **Warning — profiling under load can OOM the process.** For production
 > instances, keep the debug-capture switch off (`[basic] pprof_enabled =

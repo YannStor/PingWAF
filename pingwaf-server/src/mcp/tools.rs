@@ -486,12 +486,34 @@ async fn profile_cpu_capture(
     }
     match pingwaf_pprof::start_session(frequency) {
         Ok(session) => {
+            // Mid-window memory watchdog: abort the sampler when the host
+            // crosses the soft floor instead of letting the encode phase
+            // finish the job (see memory_guard).
+            let watchdog_abort = session.abort_handle();
+            let watchdog_window =
+                std::time::Duration::from_secs(seconds.saturating_add(1));
+            std::thread::spawn(move || {
+                pingwaf_pprof::spawn_memory_watchdog(
+                    watchdog_abort,
+                    watchdog_window,
+                )
+            });
             tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
             let summary =
                 tokio::task::spawn_blocking(move || session.finish_summary())
                     .await
                     .map_err(|e| format!("the capture task failed: {e}"))?
-                    .map_err(|err| err.to_string())?;
+                    .map_err(|err| {
+                        if matches!(
+                            err,
+                            pingwaf_pprof::ProfileError::MemoryPressure
+                        ) {
+                            "capture aborted: available memory fell below                              the floor"
+                                .to_string()
+                        } else {
+                            err.to_string()
+                        }
+                    })?;
             Ok(cpu_capture_json(&summary, None, cpu_capture_notes(false)))
         },
         // No signal-safe unwinder on this platform (macOS in particular);
@@ -1285,6 +1307,10 @@ mod tests {
     /// produce a status, notes and a dashboard.
     #[tokio::test]
     async fn profile_cpu_is_read_only_and_cooled_down() {
+        // The default is OFF (captures must be opted into); this test
+        // exercises the capture path, so flip the switch on for its
+        // duration and restore afterwards.
+        pingwaf_pprof::set_captures_enabled(true);
         let spec = specs()
             .into_iter()
             .find(|s| s.name == "profile_cpu")
@@ -1303,9 +1329,28 @@ mod tests {
             "read-only callers must see profile_cpu"
         );
 
-        let first = profile_cpu(&json!({ "seconds": 1 }))
-            .await
-            .expect("first capture");
+        // Under a parallel test run the process CPU can exceed the 40%
+        // load guard (the guard is doing its job); retry until a quiet
+        // window lets the capture through.
+        let first = {
+            let mut captured = None;
+            for _ in 0..10 {
+                match profile_cpu(&json!({ "seconds": 1 })).await {
+                    Ok(value) => {
+                        captured = Some(value);
+                        break;
+                    },
+                    Err(err) if err.contains("the process is busy") => {
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            1500,
+                        ))
+                        .await;
+                    },
+                    Err(err) => panic!("first capture: {err}"),
+                }
+            }
+            captured.expect("first capture never succeeded within retries")
+        };
         let second = profile_cpu(&json!({ "seconds": 1 }))
             .await
             .expect("cooldown replay");
