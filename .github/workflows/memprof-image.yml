@@ -80,6 +80,14 @@ jobs:
           cache-from: type=gha,scope=memprof
           cache-to: type=gha,scope=memprof,mode=max
           tags: ghcr.io/shuaizend/pingwaf:${{ inputs.tag || 'mem-prof' }}
+
+      - name: Upload diagnostic binary (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: pingwaf-memprof-binary
+          path: target/release-perf/pingwaf
+          retention-days: 7
+          if-no-files-found: error
           labels: |
             org.opencontainers.image.title=PingWAF (mem-prof, heap attribution)
             org.opencontainers.image.description=On-demand heap-attribution diagnostic build (jemalloc). Not a production artifact.
