@@ -81,11 +81,17 @@ jobs:
           cache-to: type=gha,scope=memprof,mode=max
           tags: ghcr.io/shuaizend/pingwaf:${{ inputs.tag || 'mem-prof' }}
 
+      - name: Extract binary from image
+        run: |
+          docker create --name extract ghcr.io/shuaizend/pingwaf:${{ inputs.tag || 'mem-prof' }} true
+          docker cp extract:/usr/local/bin/pingwaf pingwaf-memprof
+          docker rm extract
+
       - name: Upload diagnostic binary (artifact)
         uses: actions/upload-artifact@v4
         with:
           name: pingwaf-memprof-binary
-          path: target/release-perf/pingwaf
+          path: pingwaf-memprof
           retention-days: 7
           if-no-files-found: error
           labels: |
