@@ -304,7 +304,7 @@ members = [
     "pingwaf-agent",
 ]
 [workspace.package]
-version = "0.27.5"
+version = "0.27.6"
 
 [workspace.dependencies]
 aes-gcm-siv = { version = "0.12.1", default-features = false, features = [
@@ -388,26 +388,26 @@ opentelemetry_sdk = { version = "0.33.0", features = [
     "trace",
 ], default-features = false }
 path-absolutize = "4.0.1"
-pingap-acme = { version = "0.27.5", path = "pingap-acme", default-features = false }
-pingap-cache = { version = "0.27.5", path = "pingap-cache" }
-pingap-certificate = { version = "0.27.5", path = "pingap-certificate", default-features = false }
-pingap-config = { version = "0.27.5", path = "pingap-config" }
-pingap-core = { version = "0.27.5", path = "pingap-core" }
-pingap-discovery = { version = "0.27.5", path = "pingap-discovery" }
-pingap-health = { version = "0.27.5", path = "pingap-health" }
-pingap-imageoptim = { version = "0.27.5", path = "pingap-imageoptim", default-features = false }
-pingap-location = { version = "0.27.5", path = "pingap-location" }
-pingap-logger = { version = "0.27.5", path = "pingap-logger" }
-pingap-otel = { version = "0.27.5", path = "pingap-otel" }
-pingap-performance = { version = "0.27.5", path = "pingap-performance", default-features = false }
-pingap-plugin = { version = "0.27.5", path = "pingap-plugin", default-features = false }
-pingap-proxy = { version = "0.27.5", path = "pingap-proxy", default-features = false }
-pingap-pyroscope = { version = "0.27.5", path = "pingap-pyroscope" }
-pingap-sentry = { version = "0.27.5", path = "pingap-sentry" }
-pingap-upstream = { version = "0.27.5", path = "pingap-upstream", default-features = false }
-pingap-util = { version = "0.27.5", path = "pingap-util" }
-pingap-webhook = { version = "0.27.5", path = "pingap-webhook" }
-pingwaf-pprof = { version = "0.27.5", path = "pingwaf-pprof" }
+pingap-acme = { version = "0.27.6", path = "pingap-acme", default-features = false }
+pingap-cache = { version = "0.27.6", path = "pingap-cache" }
+pingap-certificate = { version = "0.27.6", path = "pingap-certificate", default-features = false }
+pingap-config = { version = "0.27.6", path = "pingap-config" }
+pingap-core = { version = "0.27.6", path = "pingap-core" }
+pingap-discovery = { version = "0.27.6", path = "pingap-discovery" }
+pingap-health = { version = "0.27.6", path = "pingap-health" }
+pingap-imageoptim = { version = "0.27.6", path = "pingap-imageoptim", default-features = false }
+pingap-location = { version = "0.27.6", path = "pingap-location" }
+pingap-logger = { version = "0.27.6", path = "pingap-logger" }
+pingap-otel = { version = "0.27.6", path = "pingap-otel" }
+pingap-performance = { version = "0.27.6", path = "pingap-performance", default-features = false }
+pingap-plugin = { version = "0.27.6", path = "pingap-plugin", default-features = false }
+pingap-proxy = { version = "0.27.6", path = "pingap-proxy", default-features = false }
+pingap-pyroscope = { version = "0.27.6", path = "pingap-pyroscope" }
+pingap-sentry = { version = "0.27.6", path = "pingap-sentry" }
+pingap-upstream = { version = "0.27.6", path = "pingap-upstream", default-features = false }
+pingap-util = { version = "0.27.6", path = "pingap-util" }
+pingap-webhook = { version = "0.27.6", path = "pingap-webhook" }
+pingwaf-pprof = { version = "0.27.6", path = "pingwaf-pprof" }
 # Released crates.io versions; all three must stay on the same version so cargo
 # resolves one copy of pingora-core.
 # The TLS backend (`openssl` or `rustls`) is chosen by the top-level
