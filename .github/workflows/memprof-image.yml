@@ -39,7 +39,7 @@ env:
 
 jobs:
   perf-image:
-    Docker mem-prof image (amd64)
+    name: Docker mem-prof image (amd64)
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
