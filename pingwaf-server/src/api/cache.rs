@@ -47,7 +47,6 @@ fn default_browser_ttl() -> i32 {
     300
 }
 
-
 fn default_true() -> bool {
     true
 }

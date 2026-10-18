@@ -76,7 +76,8 @@ mod tests {
             "every module is present even before instrumentation runs"
         );
         assert!(
-            snapshot.methods.len() <= pingwaf_profiler::ProfileSnapshot::MAX_METHODS
+            snapshot.methods.len()
+                <= pingwaf_profiler::ProfileSnapshot::MAX_METHODS
         );
         assert!(snapshot.collected_at_ms > 0);
     }
