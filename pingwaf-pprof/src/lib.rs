@@ -917,7 +917,10 @@ mod tests {
             start_session(DEFAULT_FREQUENCY),
             Err(ProfileError::AlreadyActive)
         ));
-        burn(200);
+        // 1.5s (not 200ms): a shared CI runner can lose the SIGPROF window
+        // to scheduler contention and answer NoSamples — the same reason the
+        // summary finisher below burns 2s (2026-10-18 rustls job flake).
+        burn(1500);
         let svg = session.finish_flamegraph().expect("flamegraph svg");
         assert!(svg.contains("<svg"));
 

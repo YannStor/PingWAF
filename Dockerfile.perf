@@ -15,7 +15,7 @@
 # cargo profile (and the resulting target path) differ.
 
 # ─── Stage 1: Frontend ───────────────────────────────────────────────────────
-FROM public.ecr.aws/docker/library/node:22-alpine AS frontend-builder
+FROM mirror.gcr.io/library/node:22-alpine AS frontend-builder
 
 WORKDIR /app/web
 
@@ -28,7 +28,7 @@ COPY web/ ./
 RUN npm run build
 
 # ─── Stage 2: Rust Builder (release-perf profile) ────────────────────────────
-FROM public.ecr.aws/docker/library/rust:1.98.1-bookworm AS builder
+FROM mirror.gcr.io/library/rust:1.98.1-bookworm AS builder
 
 # SYNC: keep this list in lockstep with Dockerfile / ci.yml / release.yml
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -137,7 +137,7 @@ RUN find . -path ./target -prune -o -name '*.rs' -print0 | xargs -0 --no-run-if-
 # ─── Stage 3: Runtime ────────────────────────────────────────────────────────
 # Same base and behavior contract as the regular image; only the binary
 # differs (unstripped, carries line tables).
-FROM public.ecr.aws/docker/library/debian:trixie-slim AS runtime
+FROM mirror.gcr.io/library/debian:trixie-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \

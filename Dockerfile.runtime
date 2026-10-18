@@ -3,9 +3,9 @@
 # 完整源码构建请使用 Dockerfile
 # Must use trixie (glibc 2.40) because binaries job compiles on
 # ubuntu-latest (glibc 2.39); bookworm (glibc 2.36) is too old.
-# public.ecr.aws = AWS's official mirror of the same Docker Hub image;
+# mirror.gcr.io = Google's mirror of the same Docker Hub image;
 # GHA runners hit Docker Hub's anonymous pull limit (429) intermittently.
-FROM public.ecr.aws/docker/library/debian:trixie-slim
+FROM mirror.gcr.io/library/debian:trixie-slim
 
 # SYNC: keep in lockstep with Dockerfile / ci.yml / release.yml
 RUN apt-get update && apt-get install -y --no-install-recommends \
