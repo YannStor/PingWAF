@@ -534,51 +534,26 @@ pub(crate) async fn heap_impl() -> Result<Response, ApiError> {
         let cpath =
             std::ffi::CString::new(dump_path.to_string_lossy().as_bytes())
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
+        // `prof.dump` is a write-only mallctl (man: `prof.dump (const
+        // char *) r-`): the path travels through `oldp` as a
+        // `const char *`, not through `newp` — passing it as newp answers
+        // EINVAL (rc 22).
+        let mut path_ptr: *mut core::ffi::c_void =
+            cpath.as_ptr() as *mut core::ffi::c_void;
         let rc = unsafe {
             tikv_jemalloc_sys::mallctl(
                 b"prof.dump\0".as_ptr().cast(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                cpath.as_ptr() as *const core::ffi::c_char
+                &mut path_ptr as *mut *mut core::ffi::c_void
                     as *mut core::ffi::c_void,
-                cpath.as_bytes_with_nul().len(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
             )
         };
         if rc != 0 {
-            // Probe why: opt.prof tells whether jemalloc initialised with
-            // profiling, version tells whether this heap is jemalloc at all
-            // (ENOENT on both = the global allocator is not jemalloc).
-            let mut prof: bool = false;
-            let mut prof_len = std::mem::size_of::<bool>();
-            let prof_rc = unsafe {
-                tikv_jemalloc_sys::mallctl(
-                    b"opt.prof\0".as_ptr().cast(),
-                    &mut prof as *mut bool as *mut core::ffi::c_void,
-                    &mut prof_len,
-                    std::ptr::null_mut(),
-                    0,
-                )
-            };
-            let mut ver_len = 64_usize;
-            let mut ver = [0_i8; 64];
-            let ver_rc = unsafe {
-                tikv_jemalloc_sys::mallctl(
-                    b"version\0".as_ptr().cast(),
-                    ver.as_mut_ptr().cast(),
-                    &mut ver_len,
-                    std::ptr::null_mut(),
-                    0,
-                )
-            };
-            let ver_str = unsafe {
-                std::ffi::CStr::from_ptr(ver.as_ptr().cast())
-                    .to_string_lossy()
-                    .into_owned()
-            };
             return Err(ApiError::Internal(format!(
-                "prof.dump failed (rc {rc}, path {dump_path:?}) — \
-                 opt.prof rc={prof_rc} val={prof}, version rc={ver_rc} \
-                 val={ver_str:?}"
+                "prof.dump failed (rc {rc}, path {dump_path:?}) — heap \
+                 profiling must be active (opt.prof must be true)"
             )));
         }
         let bytes = std::fs::read(&dump_path)
