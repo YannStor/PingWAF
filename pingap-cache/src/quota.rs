@@ -755,7 +755,13 @@ impl DiskQuotaManager {
                     .single()
                     .unwrap_or_else(Utc::now);
                 let entry = CacheEntry::new(size, created, Some(rel_path));
-                entry.last_accessed.store(accessed, Ordering::Relaxed);
+                // A failed atime lookup (noatime mounts, UNIX_EPOCH) yields 0;
+                // storing it made every restored entry look like the oldest
+                // candidate and inverted the LRU order after a restart
+                // (2026-10-18 audit). Keep the entry's creation time instead.
+                if accessed > 0 {
+                    entry.last_accessed.store(accessed, Ordering::Relaxed);
+                }
                 usage.entries.insert(key, entry);
                 usage.add_bytes(size);
                 usage.item_count.fetch_add(1, Ordering::Relaxed);

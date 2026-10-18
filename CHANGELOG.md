@@ -77,6 +77,23 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Fixed
 
+- **Audit follow-ups, second batch (2026-10-18).** Low: image optimisation
+  and `sub_filter` pass oversized bodies through instead of buffering them
+  (16 MiB / 8 MiB caps, checked against the declared length before any
+  bytes are withheld); unmatched-SNI handshakes log at debug instead of
+  error (scanner log flood); the restart counter is a `u32` (the `u8`
+  wrapped on the 256th restart); the challenge verify body is truncated
+  before copying (the old order copied a whole chunk past the limit); the
+  config-observer ticker uses `MissedTickBehavior::Delay` (no burst of
+  compensating ticks after a slow round). Medium: the cache ledger keeps
+  the entry's creation time when a restored file has no usable atime
+  (noatime mounts inverted the LRU order after a restart); least-connections
+  selection takes one counter snapshot instead of one locked lookup and one
+  String allocation per candidate; `SiteContext` compilation is
+  single-flight per host (concurrent cold requests no longer compile and
+  overwrite each other); transparent upstreams cache hostname lookups for
+  30 s (bounded at 4096 entries, failures not cached) instead of resolving
+  per request.
 - **Audit follow-ups (2026-10-18 performance/stability review).**
   High: rule `expression` is now parsed at the API boundary (a rule whose
   expression the data plane cannot compile used to be stored as "enabled"

@@ -665,9 +665,25 @@ fn host_name(host: &str) -> &str {
     split_host_port(host, 0).0
 }
 
+/// Transparent-host DNS cache: `name:port:ipv4_only` → resolved address and
+/// expiry. A transparent upstream derives the target from the client's Host
+/// header, so without a cache every request performed its own lookup and the
+/// resolver sat on the request latency path (2026-10-18 audit). Failures are
+/// not cached; the TTL keeps DNS changes visible within half a minute.
+static RESOLVE_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, (SocketAddr, Instant)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// How long a resolved transparent host stays cached.
+const RESOLVE_TTL: Duration = Duration::from_secs(30);
+
+/// Ceiling on the DNS cache, so random Host values cannot grow it forever.
+const RESOLVE_CACHE_MAX: usize = 4096;
+
 /// Resolves a `Host` value to a socket address. An IP literal is parsed;
 /// a name is looked up on tokio's blocking pool, taking the first address
-/// (the first IPv4 one with `ipv4_only`). `None` when it does not resolve.
+/// (the first IPv4 one with `ipv4_only`). Successful lookups are cached for
+/// [`RESOLVE_TTL`]. `None` when it does not resolve.
 async fn resolve_host(
     host: &str,
     default_port: u16,
@@ -677,7 +693,17 @@ async fn resolve_host(
     if let Ok(ip) = name.parse::<IpAddr>() {
         return Some(SocketAddr::new(ip, port));
     }
-    match tokio::net::lookup_host((name, port)).await {
+    let key = format!("{name}:{port}:{ipv4_only}");
+    if let Some((addr, deadline)) = RESOLVE_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+        .copied()
+        && deadline > Instant::now()
+    {
+        return Some(addr);
+    }
+    let resolved = match tokio::net::lookup_host((name, port)).await {
         Ok(mut addrs) => addrs.find(|addr| !ipv4_only || addr.is_ipv4()),
         Err(e) => {
             debug!(
@@ -688,7 +714,17 @@ async fn resolve_host(
             );
             None
         },
+    };
+    if let Some(addr) = resolved {
+        let mut cache = RESOLVE_CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cache.len() >= RESOLVE_CACHE_MAX {
+            cache.retain(|_, (_, deadline)| *deadline > Instant::now());
+        }
+        cache.insert(key, (addr, Instant::now() + RESOLVE_TTL));
     }
+    resolved
 }
 
 impl Upstream {

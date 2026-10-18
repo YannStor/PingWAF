@@ -2179,26 +2179,34 @@ impl WafPlugin {
         };
 
         let fingerprint = agent.config_hash();
-        let cached = self.site_contexts.get(host).map(|cached| {
-            touch(&cached.last_used, now);
-            (cached.fingerprint.clone(), Arc::clone(&cached.context))
-        });
-        let context = match cached {
-            Some((cached_fingerprint, context))
-                if cached_fingerprint == fingerprint =>
-            {
-                context
-            },
-            _ => {
-                let context = Arc::new(SiteContext::build(&site_rules));
-                self.site_contexts.insert(
-                    host.to_string(),
-                    CachedSite {
+        // Build under the shard entry lock (single-flight): concurrent first
+        // requests for the same host used to each compile a full SiteContext
+        // (including the Aho-Corasick automaton) and then overwrite each
+        // other — wasteful at exactly the moment the cache is cold
+        // (2026-10-18 audit). Compiling inside the entry serialises those
+        // callers on this shard for the duration of one build.
+        let context = match self.site_contexts.entry(host.to_string()) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                if entry.get().fingerprint == fingerprint {
+                    touch(&entry.get().last_used, now);
+                    Arc::clone(&entry.get().context)
+                } else {
+                    let context = Arc::new(SiteContext::build(&site_rules));
+                    entry.insert(CachedSite {
                         fingerprint,
                         context: Arc::clone(&context),
                         last_used: std::sync::atomic::AtomicU64::new(now),
-                    },
-                );
+                    });
+                    context
+                }
+            },
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let context = Arc::new(SiteContext::build(&site_rules));
+                entry.insert(CachedSite {
+                    fingerprint,
+                    context: Arc::clone(&context),
+                    last_used: std::sync::atomic::AtomicU64::new(now),
+                });
                 context
             },
         };

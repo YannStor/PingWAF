@@ -777,8 +777,16 @@ impl ChallengePlugin {
     ) -> pingora::Result<RequestPluginResult> {
         let mut buf = BytesMut::with_capacity(4096);
         while let Some(chunk) = session.read_request_body().await? {
-            buf.put(chunk.as_ref());
-            if buf.len() > MAX_VERIFY_BODY {
+            // Cap before copying: the old order copied the whole chunk and
+            // only then checked, so the buffer could exceed the limit by a
+            // full chunk and still be parsed (2026-10-18 audit).
+            if buf.len() >= MAX_VERIFY_BODY {
+                break;
+            }
+            let room = MAX_VERIFY_BODY - buf.len();
+            let take = room.min(chunk.len());
+            buf.put(&chunk[..take]);
+            if take < chunk.len() {
                 break;
             }
         }

@@ -586,6 +586,9 @@ impl BackgroundService for ConfigObserverService {
             "background service is running",
         );
         let mut period = interval(self.interval);
+        // Delay (not the default Burst): a slow diff/reload round must not
+        // be followed by a burst of compensating ticks (2026-10-18 audit).
+        period.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         let mut observer = match self.config_manager.observe().await {
             Ok(observer) => observer,

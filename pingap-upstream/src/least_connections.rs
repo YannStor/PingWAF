@@ -60,6 +60,9 @@ impl InflightCounters {
         }
     }
 
+    /// Reads one counter; only the tests need the per-key form now that
+    /// selection goes through [`snapshot`].
+    #[cfg(test)]
     fn load(&self, addr: &str) -> i64 {
         self.counts
             .lock()
@@ -68,10 +71,25 @@ impl InflightCounters {
             .copied()
             .unwrap_or(0)
     }
+
+    /// One-lock snapshot of every counter. Selecting a backend used to take
+    /// the same global lock once per candidate (and allocate a String per
+    /// lock); cloning the (small) map once per selection replaces N lock
+    /// acquisitions with one and removes the per-candidate allocation
+    /// (2026-10-18 audit).
+    fn snapshot(&self) -> HashMap<String, i64> {
+        self.counts
+            .lock()
+            .expect("inflight counters poisoned")
+            .clone()
+    }
 }
 
 /// Selects the backend with the fewest in-flight requests.
 pub struct LeastConnections {
+    /// Address strings of `backends`, computed once so a selection does not
+    /// allocate one String per candidate.
+    addrs: Box<[String]>,
     backends: Box<[Backend]>,
     inflight: Arc<InflightCounters>,
     /// Breaks ties between equally loaded backends so repeated selections
@@ -95,6 +113,10 @@ impl BackendSelection for LeastConnections {
         inflight: &Self::Config,
     ) -> Self {
         Self {
+            addrs: backends
+                .iter()
+                .map(|backend| backend.addr.to_string())
+                .collect(),
             backends: Vec::from_iter(backends.iter().cloned())
                 .into_boxed_slice(),
             inflight: Arc::clone(inflight),
@@ -113,12 +135,13 @@ impl BackendSelection for LeastConnections {
             self.offset.fetch_add(1, Ordering::Relaxed) % len
         };
         // Sort once per selection: ascending in-flight count, ties walking
-        // the backends starting from the rotating offset.
+        // the backends starting from the rotating offset. One snapshot (one
+        // lock) and no per-candidate String allocation.
+        let counts = self.inflight.snapshot();
         let mut order: Vec<usize> = (0..len).collect();
         order.sort_by_key(|&i| {
             (
-                self.inflight
-                    .load(self.backends[i].addr.to_string().as_str()),
+                counts.get(&self.addrs[i]).copied().unwrap_or(0),
                 (i + len - offset) % len,
             )
         });

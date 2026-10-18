@@ -20,7 +20,7 @@ use std::process;
 use std::process::{Command, Stdio};
 use std::sync::LazyLock;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 use tracing::{error, info, warn};
 
@@ -116,8 +116,8 @@ pub fn set_restart_process_command(data: RestartProcessCommand) {
     CMD.get_or_init(|| data);
 }
 
-static PROCESS_RESTAR_COUNT: LazyLock<AtomicU8> =
-    LazyLock::new(|| AtomicU8::new(0));
+static PROCESS_RESTAR_COUNT: LazyLock<AtomicU32> =
+    LazyLock::new(|| AtomicU32::new(0));
 static PROCESS_RESTARTING: LazyLock<AtomicBool> =
     LazyLock::new(|| AtomicBool::new(false));
 

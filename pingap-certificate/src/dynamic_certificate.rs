@@ -188,7 +188,9 @@ impl GlobalCertificate {
         // 3. Fall back to default certificate (DEFAULT_SERVER_NAME)
         // 4. Handle special case for CA certificates (self-signed)
         let Some(d) = self.provider.get(sni) else {
-            error!(target: LOG_TARGET, sni, "no match certificate");
+            // debug, not error: scanners probe random SNI names, and an error
+            // per handshake is a log-flood lever (2026-10-18 audit).
+            debug!(target: LOG_TARGET, sni, "no match certificate");
             return None;
         };
         if d.is_ca {

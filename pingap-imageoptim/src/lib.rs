@@ -39,6 +39,11 @@ mod optimizer;
 
 const PLUGIN_ID: &str = "_image_optimize_";
 
+/// Images up to this size are buffered for re-encoding; larger ones are
+/// passed through (the buffer plus the decoded RGBA image would otherwise be
+/// several times the payload).
+const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+
 type Result<T, E = Error> = std::result::Result<T, E>;
 
 struct ImageOptimizer {
@@ -231,7 +236,17 @@ impl Plugin for ImageOptim {
             && let Ok(size) =
                 value.to_str().unwrap_or_default().parse::<usize>()
         {
-            capacity = size;
+            // Oversized images are passed through untouched: buffering them
+            // would cost the full body plus an RGBA decode (~4x pixels), and
+            // the declared length is attacker-controlled (2026-10-18 audit).
+            if size > MAX_IMAGE_BYTES {
+                debug!(
+                    target: PLUGIN_ID,
+                    size, "image exceeds the optimization cap; passing through"
+                );
+                return Ok(ResponsePluginResult::Unchanged);
+            }
+            capacity = size.min(MAX_IMAGE_BYTES);
         }
         // Switch to chunked transfer encoding
         let _ = upstream_response.insert_header(

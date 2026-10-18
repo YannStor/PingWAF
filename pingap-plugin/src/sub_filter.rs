@@ -27,6 +27,7 @@ use regex::Regex;
 use regex::bytes::RegexBuilder;
 use std::borrow::Cow;
 use std::sync::LazyLock;
+use tracing::debug;
 
 const PLUGIN_ID: &str = "_sub_filter_";
 
@@ -127,6 +128,12 @@ fn parse_subs_filter(rule: &str) -> Option<SubFilterParams> {
 }
 
 /// Handles the actual content replacement logic for both regex and literal string replacements
+/// Responses up to this size are buffered for replacement; larger ones are
+/// passed through untouched. The replacer holds the whole body in memory and
+/// makes one full copy per rule, so an unbounded body is a direct memory
+/// lever (2026-10-18 audit).
+const MAX_SUB_FILTER_BYTES: usize = 8 * 1024 * 1024;
+
 #[derive(Debug, Default, Clone)]
 struct SubFilterReplacer {
     filters: Vec<SubFilterParams>,
@@ -292,6 +299,20 @@ impl Plugin for SubFilter {
         }
 
         if is_matched {
+            // Oversized responses are passed through: the replacer buffers
+            // the whole body and copies it once per rule.
+            if let Some(value) =
+                upstream_response.headers.get(http::header::CONTENT_LENGTH)
+                && let Ok(size) =
+                    value.to_str().unwrap_or_default().parse::<usize>()
+                && size > MAX_SUB_FILTER_BYTES
+            {
+                debug!(
+                    target: PLUGIN_ID,
+                    size, "response exceeds the sub-filter cap; passing through"
+                );
+                return Ok(ResponsePluginResult::Unchanged);
+            }
             // Remove content-length since we're modifying the body
             upstream_response.remove_header(&http::header::CONTENT_LENGTH);
             // Switch to chunked transfer encoding
