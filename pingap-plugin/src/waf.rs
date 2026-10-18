@@ -2698,6 +2698,9 @@ impl Plugin for WafPlugin {
         if step != self.plugin_step {
             return Ok(RequestPluginResult::Skipped);
         }
+        let _profile = pingwaf_profiler::timed(pingwaf_profiler::Module::Waf);
+        let _profile_method =
+            pingwaf_profiler::timed_method("waf::handle_request");
 
         // ── Extract immutable request facts (all borrowed data is cloned) ──
         let req_header = session.req_header();

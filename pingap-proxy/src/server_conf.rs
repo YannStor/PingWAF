@@ -119,6 +119,9 @@ pub struct ServerConf {
 
     // downstream write timeout
     pub downstream_write_timeout: Option<Duration>,
+
+    // Maximum requests on one downstream keep-alive connection
+    pub keepalive_request_limit: Option<u32>,
 }
 
 impl fmt::Display for ServerConf {
@@ -313,8 +316,18 @@ pub fn parse_from_conf(conf: PingapConfig) -> Vec<ServerConf> {
             modules: item.modules.clone(),
             enable_server_timing: item.enable_server_timing.unwrap_or_default(),
             error_template,
-            downstream_read_timeout: item.downstream_read_timeout,
+            // The connection/handshake timeout bounds the first read (pingora
+            // has no separate handshake knob); a shorter read timeout wins.
+            downstream_read_timeout: match (
+                item.downstream_connection_timeout,
+                item.downstream_read_timeout,
+            ) {
+                (Some(connect), Some(read)) => Some(connect.min(read)),
+                (Some(connect), None) => Some(connect),
+                (None, read) => read,
+            },
             downstream_write_timeout: item.downstream_write_timeout,
+            keepalive_request_limit: item.keepalive_request_limit,
         });
     }
 

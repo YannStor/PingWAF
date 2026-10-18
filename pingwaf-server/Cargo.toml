@@ -5,23 +5,14 @@ edition = "2021"
 description = "PingWAF control plane: REST API for the dashboard, gRPC control plane for agents"
 license = "Apache-2.0"
 
-[features]
-# cfg switch mirrored from the root crate's `mem-prof`: compiles the
-# /debug/pprof/heap endpoint (jeprof dump via the jemalloc allocator).
-# The root crate's mem-prof feature is the single user-facing entry point.
-mem-prof = ["dep:tikv-jemalloc-sys"]
-
 [dependencies]
-tikv-jemalloc-sys = { version = "0.6", optional = true, features = [
-    "profiling",
-] }
 regex = { workspace = true, features = ["std", "unicode-case", "unicode-perl"] }
 pingwaf-proto = { path = "../pingwaf-proto" }
 # The control plane validates the built-in rule expressions with the same
 # parser the data plane evaluates them with.
 pingwaf-waf = { path = "../pingwaf-waf" }
-# Built-in pprof-style profiling endpoints (/api/v1/debug/...).
-pingwaf-pprof = { path = "../pingwaf-pprof" }
+pingwaf-system = { path = "../pingwaf-system" }
+pingwaf-profiler = { path = "../pingwaf-profiler" }
 anyhow = { workspace = true }
 # Lock-free policy swap for the control plane's self-protection middlewares,
 # which reload their settings without blocking the request path.

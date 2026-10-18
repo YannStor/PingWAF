@@ -199,8 +199,8 @@ pub struct CreateSiteRequest {
     /// Origin the site proxies to — a CDN/WAF hostname or the application
     /// itself. Required: a site without an origin cannot serve traffic.
     pub upstream_address: String,
-    #[serde(default)]
-    pub upstream_name: Option<String>,
+    // `upstream_name` was removed with the node-name API change; unknown
+    // fields are ignored, so existing clients keep working.
     #[serde(default)]
     pub upstream_tls: Option<bool>,
     #[serde(default)]
@@ -253,7 +253,10 @@ pub struct UpdateSiteRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateUpstreamRequest {
-    pub name: String,
+    /// Removed from the API (2026-10-19): the node name is not part of
+    /// forwarding, load balancing or health checking, and a future
+    /// "node group" feature owns node identity. Unknown fields are ignored,
+    /// so old clients keep working.
     pub address: String,
     #[serde(default = "default_weight")]
     pub weight: i32,
@@ -270,8 +273,6 @@ fn default_weight() -> i32 {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct UpdateUpstreamRequest {
-    #[serde(default)]
-    pub name: Option<String>,
     #[serde(default)]
     pub address: Option<String>,
     #[serde(default)]
@@ -907,10 +908,8 @@ async fn create(
     all_domains.extend(alternate_domains.iter().cloned());
     ensure_domains_available(&state.db, &all_domains, None).await?;
 
-    let upstream_name = non_empty(&payload.upstream_name)
-        .unwrap_or_else(|| "origin".to_string());
     let upstream_address = normalize_origin_address(&payload.upstream_address)?;
-    validate_upstream(&upstream_name, &upstream_address, default_weight())?;
+    validate_upstream(&upstream_address, default_weight())?;
 
     // New sites are live immediately; the dashboard toggles them between
     // active and paused afterwards.
@@ -992,7 +991,8 @@ async fn create(
         id: Set(Uuid::new_v4()),
         site_id: Set(id),
         pool_id: Set(pool.id),
-        name: Set(upstream_name),
+        // Kept for the upcoming node-group feature; mirrors the address.
+        name: Set(upstream_address.clone()),
         address: Set(upstream_address.clone()),
         weight: Set(default_weight()),
         tls: Set(payload.upstream_tls.unwrap_or(false)),
@@ -1273,16 +1273,17 @@ async fn create_upstream(
     let id = parse_uuid(&site_id, "site id")?;
     load_site_write(&state.db, id, &current).await?;
 
-    let name = payload.name.trim().to_string();
     let address = normalize_origin_address(&payload.address)?;
-    validate_upstream(&name, &address, payload.weight)?;
+    validate_upstream(&address, payload.weight)?;
     let pool_id = resolve_pool(&state, id, payload.pool_id.as_ref()).await?;
 
     let model = site_upstreams::ActiveModel {
         id: Set(Uuid::new_v4()),
         site_id: Set(id),
         pool_id: Set(pool_id),
-        name: Set(name),
+        // The column is kept for the upcoming node-group feature; nothing
+        // reads it today, so it mirrors the address instead of an input.
+        name: Set(address.clone()),
         address: Set(address),
         weight: Set(payload.weight),
         tls: Set(payload.tls),
@@ -1319,9 +1320,6 @@ async fn update_upstream(
         })?;
 
     let mut active: site_upstreams::ActiveModel = row.into();
-    if let Some(name) = non_empty(&payload.name) {
-        active.name = Set(name);
-    }
     if let Some(address) = non_empty(&payload.address) {
         active.address = Set(normalize_origin_address(&address)?);
     }
@@ -1345,7 +1343,7 @@ async fn update_upstream(
     }
 
     let updated = active.update(&state.db).await?;
-    validate_upstream(&updated.name, &updated.address, updated.weight)?;
+    validate_upstream(&updated.address, updated.weight)?;
 
     tracing::info!(site_id = %id, upstream = %target, "upstream updated");
     touch_site(&state, id).await?;
@@ -1991,16 +1989,7 @@ fn split_origin_host_port(address: &str) -> Option<(&str, Option<&str>)> {
 ///
 /// The address is expected to be canonical already — write paths run it
 /// through [`normalize_origin_address`] first.
-fn validate_upstream(
-    name: &str,
-    address: &str,
-    weight: i32,
-) -> Result<(), ApiError> {
-    if name.is_empty() || name.len() > 100 {
-        return Err(ApiError::BadRequest(
-            "upstream name must be 1-100 characters".to_string(),
-        ));
-    }
+fn validate_upstream(address: &str, weight: i32) -> Result<(), ApiError> {
     if address.is_empty() || address.len() > 255 {
         return Err(ApiError::BadRequest(
             "upstream address must be 1-255 characters".to_string(),

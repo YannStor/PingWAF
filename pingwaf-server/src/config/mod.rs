@@ -268,13 +268,6 @@ pub struct ServerConfig {
     /// front of the control plane should be trusted to forward accurately.
     #[serde(default)]
     pub public_host: Option<String>,
-    /// Optional loopback-only diagnostics listener (e.g.
-    /// `127.0.0.1:9091`). When set, the pprof endpoints are served on this
-    /// address **without Bearer auth** — the loopback interface is the
-    /// trust boundary, so `go tool pprof` / `jeprof` work without a token.
-    /// Non-loopback addresses are rejected at startup. Default: disabled.
-    #[serde(default)]
-    pub debug_listen_addr: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -308,7 +301,6 @@ impl Default for ServerConfig {
             tls_enabled: true,
             tls_sans: default_tls_sans(),
             public_host: None,
-            debug_listen_addr: None,
         }
     }
 }
@@ -349,9 +341,6 @@ impl ServerConfig {
         }
         if let Ok(value) = std::env::var("PINGWAF_PUBLIC_HOST") {
             config.public_host = non_empty_env(&value);
-        }
-        if let Ok(value) = std::env::var("PINGWAF_DEBUG_LISTEN_ADDR") {
-            config.debug_listen_addr = non_empty_env(&value);
         }
         if let Ok(value) = std::env::var("PINGWAF_JWT_SECRET") {
             config.jwt_secret = value;

@@ -1,190 +1,106 @@
-import { BASE_URL, ApiError, refreshAccessToken } from './client'
-import { getAuthToken, useAuthStore } from '@/stores/authStore'
-import type { MemorySnapshot } from './types'
+import { apiClient } from './client'
 
 /**
- * Debug / performance diagnostics — `/api/v1/debug/pprof/*` (admin only).
+ * System observability — `/api/v1/system/metrics` 与 `/api/v1/system/profile`（仅 Admin）。
  *
- * The CPU profile and flamegraph endpoints capture while you wait: the server
- * holds the connection open for `seconds` and then streams the artifact back
- * (Content-Disposition attachment for the profile, `image/svg+xml` for the
- * flamegraph), so callers download the body as a Blob.
- *
- * Error cases mirrored from `pingwaf-server/src/api/debug.rs`:
- * - `501 Not Implemented` — CPU capture needs Linux (memory snapshot works).
- * - `409 Conflict` — another profiling session is already running.
- * - `403 Forbidden` — non-admin callers.
+ * - metrics：进程/主机 CPU、内存占用（含容器 cgroup 数值，非容器环境为 null）。
+ * - profile：按模块归因的 CPU/内存分布（固定 7 行）与热点方法（最多 40 行，按 cpu_ms 降序）。
  */
 
-/** Must match `pingwaf_pprof::MAX_SECONDS` (currently 5); the server clamps to 1..=MAX. */
-export const PPROF_MAX_SECONDS = 5
-export const PPROF_DEFAULT_SECONDS = 5
-
-/** Shared request runner: auth header + single 401 token-refresh retry. */
-async function request(path: string, query?: Record<string, unknown>): Promise<Response> {
-  let token = getAuthToken()
-  let response: Response
-  for (let attempt = 0; ; attempt++) {
-    try {
-      response = await fetch(`${BASE_URL}${path}${query ? `?${new URLSearchParams(
-        Object.entries(query)
-          .filter(([, v]) => v !== undefined && v !== null && v !== '')
-          .map(([k, v]) => [k, String(v)]),
-      )}` : ''}`, {
-        headers: token ? { Authorization: `Bearer ${token}`, Accept: '*/*' } : { Accept: '*/*' },
-      })
-    } catch (err) {
-      throw new ApiError(
-        err instanceof Error ? err.message : 'Network request failed',
-        0,
-        'network_error',
-        true,
-      )
-    }
-    if (response.status === 401 && attempt === 0) {
-      const fresh = await refreshAccessToken()
-      if (fresh) {
-        token = fresh
-        continue
-      }
-      useAuthStore.getState().logout()
-    }
-    break
-  }
-  if (!response.ok) {
-    let message = `Request failed (${response.status})`
-    try {
-      const body = (await response.json()) as { error?: { message?: string } }
-      if (body.error?.message) message = body.error.message
-    } catch {
-      /* non-JSON body — keep the generic message */
-    }
-    throw new ApiError(message, response.status)
-  }
-  return response
-}
-
-async function download(path: string, query?: Record<string, unknown>): Promise<Blob> {
-  const response = await request(path, query)
-  return response.blob()
-}
-
-/** Triggers a browser download for a Blob using its Content-Disposition filename. */
-function saveBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  URL.revokeObjectURL(url)
-}
-
-/** CPU profile (gzip pprof protobuf) — consumable by `go tool pprof`. */
-export async function downloadCpuProfile(
-  seconds: number,
-  selfload = false,
-): Promise<void> {
-  const blob = await download('/debug/pprof/profile', {
-    seconds: Math.min(PPROF_MAX_SECONDS, Math.max(1, seconds)),
-    selfload,
-  })
-  saveBlob(blob, 'pingwaf-cpu.pb.gz')
-}
-
-/** SVG flamegraph of the capture window. */
-export async function downloadFlamegraph(
-  seconds: number,
-  selfload = false,
-): Promise<void> {
-  const blob = await download('/debug/pprof/flamegraph', {
-    seconds: Math.min(PPROF_MAX_SECONDS, Math.max(1, seconds)),
-    selfload,
-  })
-  saveBlob(blob, 'pingwaf-flamegraph.svg')
-}
-
-/** JSON memory snapshot — no capture window, answers immediately. */
-export async function downloadMemorySnapshot(): Promise<void> {
-  const blob = await download('/debug/pprof/memory')
-  saveBlob(blob, 'pingwaf-memory.json')
-}
-
-/**
- * JSON memory snapshot as a parsed object (mirror of `downloadMemorySnapshot`).
- * Field scopes: `rss_bytes`/`virtual_bytes` are this process's own footprint
- * (`process_memory_scope: "process"`); `used_memory_bytes`/`total_memory_bytes`
- * are the **host's** RAM (`used_memory_scope: "system"`).
- */
-export async function fetchMemorySnapshot(): Promise<MemorySnapshot> {
-  const response = await request('/debug/pprof/memory')
-  return (await response.json()) as MemorySnapshot
-}
-
-/* ── CPU summary ─────────────────────────────────────────────────────── */
-
-/** One hot frame from the last CPU capture (backend truncates names to 52 chars). */
-export interface CpuTopFrame {
-  name: string
-  samples: number
-  /** Fraction of total samples, 0..1. */
-  share: number
-}
-
-export type CpuCaptureStatus = 'normal' | 'high_load' | 'idle' | 'platform_limited'
-
-/** `last_capture` — null before the first capture on this boot. */
-export interface CpuCaptureSummaryInfo {
-  total_samples: number
-  frequency: number
-  window_secs: number
-  cpu_secs: number
-  /** Process CPU usage across the window, 0..1. */
-  process_cpu_fraction: number
-  status: CpuCaptureStatus
-  top_frames: CpuTopFrame[]
+/** 进程/主机 CPU 快照。 */
+export interface SystemCpuMetrics {
+  /** 本进程 CPU 使用率（百分比，0-100）。 */
+  process_cpu_percent: number
+  /** 整机 CPU 使用率（百分比，0-100）。 */
+  host_cpu_percent: number
+  /** 逻辑核心数。 */
+  cores: number
+  /** 采样时间（Unix 毫秒）。 */
   collected_at_ms: number
 }
 
-export interface CpuProfilingSummary {
-  live: {
-    process_cpu_percent: number
-    host_cpu_percent: number
-    cores: number
-    collected_at_ms: number
-    profiling: {
-      total_started: number
-      last: {
-        finished_at_ms: number
-        duration_secs: number
-        outcome: string
-      } | null
-    } | null
-  }
-  last_capture: CpuCaptureSummaryInfo | null
+/** 内存快照 — `rss_bytes`/`virtual_bytes` 为进程自身占用，`used_memory_bytes` 为主机内存。 */
+export interface SystemMemoryMetrics {
+  /** 进程 RSS（字节）。 */
+  rss_bytes: number
+  /** 进程虚拟内存（字节）。 */
+  virtual_bytes: number
+  /** 主机物理内存总量（字节）。 */
+  total_memory_bytes: number
+  /** 主机已用内存（字节）。 */
+  used_memory_bytes: number
+  /** `rss_bytes` 的人类可读形式，如 "110.0 MiB"。 */
+  rss: string
+  /** `total_memory_bytes` 的人类可读形式。 */
+  total_memory: string
+  /** `used_memory_bytes` 的人类可读形式。 */
+  used_memory: string
+  /** 采样时间（Unix 毫秒）。 */
+  collected_at_ms: number
+  /** `used_memory_*` 的口径标识，恒为 `"system"`（主机内存）。 */
+  used_memory_scope: string
+  /** `rss_bytes`/`virtual_bytes` 的口径标识，恒为 `"process"`（进程自身）。 */
+  process_memory_scope: string
+  /** 容器内存用量（cgroup v2 `memory.current` / v1 `usage_in_bytes`）；非受限容器为 null。 */
+  container_memory_used_bytes?: number | null
+  /** 容器内存上限；cgroup 未设限时为 null。 */
+  container_memory_limit_bytes?: number | null
+  /** `container_memory_used_bytes` 的人类可读形式。 */
+  container_memory_used?: string | null
+  /** `container_memory_limit_bytes` 的人类可读形式。 */
+  container_memory_limit?: string | null
+  /** `"cgroup_v1" | "cgroup_v2"`；容器外为 null。 */
+  container_memory_scope?: string | null
 }
 
-/**
- * Server-side CPU summary — `GET /debug/pprof/cpu/summary` (admin only).
- * Pass `capture: true` to run a blocking ~5s capture first; the response then
- * includes the fresh `last_capture` (this also respects `selfload`).
- */
-export async function fetchCpuSummary(
-  opts?: { capture?: boolean; selfload?: boolean },
-): Promise<CpuProfilingSummary> {
-  const response = await request('/debug/pprof/cpu/summary', {
-    capture: opts?.capture ? 'true' : undefined,
-    selfload: opts?.selfload ? 'true' : undefined,
-  })
-  return (await response.json()) as CpuProfilingSummary
+/** `GET /api/v1/system/metrics` 响应。 */
+export interface SystemMetrics {
+  cpu: SystemCpuMetrics
+  memory: SystemMemoryMetrics
+}
+
+/** 模块归因行 — 固定 7 行：proxy/waf/cache/plugin/db/control/other。 */
+export interface SystemProfileModule {
+  module: string
+  cpu_ms: number
+  /** 占总 CPU 的比例（0-100）。 */
+  cpu_share: number
+  mem_bytes: number
+  /** 占总内存的比例（0-100）。 */
+  mem_share: number
+  calls: number
+  /** 平均单次调用耗时（微秒）。 */
+  avg_us: number
+}
+
+/** 热点方法行 — 最多 40 行，按 `cpu_ms` 降序。 */
+export interface SystemProfileMethod {
+  method: string
+  cpu_ms: number
+  calls: number
+  avg_us: number
+}
+
+/** `GET /api/v1/system/profile` 响应。 */
+export interface SystemProfile {
+  collected_at_ms: number
+  total_cpu_ms: number
+  modules: SystemProfileModule[]
+  methods: SystemProfileMethod[]
+}
+
+/** `GET /api/v1/system/metrics`（AdminUser）。 */
+export function fetchSystemMetrics(): Promise<SystemMetrics> {
+  return apiClient.get<SystemMetrics>('/system/metrics')
+}
+
+/** `GET /api/v1/system/profile`（AdminUser）。 */
+export function fetchSystemProfile(): Promise<SystemProfile> {
+  return apiClient.get<SystemProfile>('/system/profile')
 }
 
 export const debugKeys = {
-  all: ['debug'] as const,
-  memory: () => [...debugKeys.all, 'memory'] as const,
-  cpuSummary: () => [...debugKeys.all, 'cpuSummary'] as const,
+  all: ['system'] as const,
+  metrics: () => [...debugKeys.all, 'metrics'] as const,
+  profile: () => [...debugKeys.all, 'profile'] as const,
 }
-
-/** Convenience alias used by pages. */
-export const debugApi = { memory: fetchMemorySnapshot }

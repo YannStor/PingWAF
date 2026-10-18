@@ -788,6 +788,12 @@ pub struct LocationConf {
     /// Host/domain name to match requests against
     pub host: Option<String>,
 
+    /// Host header sent to the upstream. `None` (the default) keeps the
+    /// client's Host, matching the historic behaviour. A value here
+    /// overrides both the client header and any `proxy_set_headers` Host
+    /// entry, so "which virtual host the origin sees" has one obvious knob.
+    pub upstream_host: Option<String>,
+
     /// Optional request match conditions ("name:value" for an exact value, or
     /// "name" for presence) on headers / query params / cookies respectively.
     /// The location matches only when path/host match AND every listed
@@ -854,6 +860,22 @@ impl LocationConf {
         &self,
         upstream_names: Option<&[String]>,
     ) -> Result<()> {
+        if let Some(host) = &self.upstream_host {
+            let host = host.trim();
+            if host.is_empty()
+                || host.len() > 253
+                || host.contains('/')
+                || host.contains(' ')
+                || host.contains("://")
+            {
+                return Err(Error::Invalid {
+                    message: format!(
+                        "upstream_host '{host}' must be a bare host name \
+                         (no scheme, path or spaces)"
+                    ),
+                });
+            }
+        }
         // The same parse the proxy applies when it builds the location, so
         // what validates here is what loads there.
         let validate = |headers: &Option<Vec<String>>| -> Result<()> {
@@ -1017,6 +1039,22 @@ pub struct ServerConf {
     #[serde(default)]
     #[serde(with = "humantime_serde")]
     pub h2_idle_timeout: Option<Duration>,
+
+    /// Connection-phase (TCP accept + TLS handshake + request-head read)
+    /// timeout. pingora has no separate knob for the handshake, so this is
+    /// applied as a floor on the downstream read timeout: the shorter of
+    /// the two governs the first read, which is where a stalled handshake
+    /// is detected. Unset keeps the read timeout alone.
+    #[serde(default)]
+    #[serde(with = "humantime_serde")]
+    pub downstream_connection_timeout: Option<Duration>,
+
+    /// Maximum requests served on one downstream keep-alive connection
+    /// before pingora closes it. Unset keeps pingora's default (no limit),
+    /// which lets a client pin a worker connection indefinitely; a finite
+    /// value bounds connection age and is the supported way to cap HTTP/1.1
+    /// keep-alive lifetime on pingora 0.9 (it has no h1 idle timeout).
+    pub keepalive_request_limit: Option<u32>,
 
     /// Serve HTTP/1.1 pipelined requests sequentially on one keep-alive
     /// connection (RFC 9112 §9.3.2). Off by default: pingora then answers
@@ -1210,13 +1248,6 @@ pub struct BasicConf {
     pub max_blocking_threads: Option<usize>,
     /// Enable work stealing between worker threads(default: true)
     pub work_stealing: Option<bool>,
-    /// Debug-capture switch for the built-in pprof endpoints and the MCP
-    /// `profile_cpu` tool (default: true). When false, CPU capture endpoints
-    /// answer 503 and the MCP tool errors; the read-only `/debug/pprof/memory`
-    /// and `/debug/pprof/cpu/metrics` snapshots stay available. Legacy env
-    /// override: `PINGWAF_PPROF_ENABLED` is only honoured when this key is
-    /// unset. Changes require a restart.
-    pub pprof_enabled: Option<bool>,
     /// Number of listener tasks to use per fd. This allows for parallel accepts.
     pub listener_tasks_per_fd: Option<usize>,
     /// Number of dedicated thread pools that run downstream TLS handshakes

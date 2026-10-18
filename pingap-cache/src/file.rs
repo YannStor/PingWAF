@@ -681,6 +681,11 @@ impl HttpCacheStorage for FileCache {
         self.write_time.observe(elapsed_second(start));
         result.map_err(|e| Error::Io { source: e })?;
         self.track_written(old_len, new_len);
+        // Report the backend's held bytes to the module attribution tables.
+        pingwaf_profiler::set_memory(
+            pingwaf_profiler::Module::Cache,
+            self.current_size.load(Ordering::Relaxed),
+        );
         // Per-domain quota accounting. Eviction touches the disk, so it is
         // never done inline on the request path; the manager serialises one
         // pass per domain and a losing race is a no-op.

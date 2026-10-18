@@ -34,6 +34,7 @@ unwrap_used = "deny"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+pingwaf-system = { path = "pingwaf-system" }
 ahash = { workspace = true }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
@@ -81,7 +82,6 @@ pingwaf-server = { path = "pingwaf-server" }
 # rustls build — the two pingora backends are mutually exclusive and
 # unify into a compile error if both end up on.
 pingwaf-agent = { path = "pingwaf-agent", default-features = false }
-pingwaf-pprof = { workspace = true }
 anyhow = { workspace = true }
 pingora = { workspace = true }
 regex = { workspace = true }
@@ -110,13 +110,6 @@ kdl = { workspace = true }
 # Global allocator for every target (see src/main.rs): replaces musl's default
 # allocator and glibc malloc's un-trimmed per-thread arenas.
 mimalloc = "0.1.47"
-# Diagnostic build only (--features mem-prof): swaps the global allocator to
-# jemalloc with heap profiling, enabling /debug/pprof/heap to attribute
-# memory to call sites. Not for production images.
-tikv-jemalloc-sys = { version = "0.6", optional = true, features = [
-    "profiling",
-] }
-tikv-jemallocator = { version = "0.6", optional = true }
 
 [build-dependencies]
 vergen = { version = "10.0.3", features = ["build"] }
@@ -148,14 +141,6 @@ tls-rustls = [
 ]
 pyro = ["pingap-pyroscope"]
 imageoptim = ["pingap-imageoptim"]
-# Diagnostic heap profiling (see src/main.rs allocator comment): swaps the
-# global allocator to jemalloc with `profiling`, enabling /debug/pprof/heap.
-# Diagnostic builds only — never enabled in the shipped images.
-mem-prof = [
-    "dep:tikv-jemallocator",
-    "dep:tikv-jemalloc-sys",
-    "pingwaf-server/mem-prof",
-]
 geo = ["pingap-plugin/geo"]
 tracing = [
     "pingora/sentry",
@@ -298,7 +283,8 @@ members = [
     "pingap-webhook",
     "pingwaf-server",
     "pingwaf-proto",
-    "pingwaf-pprof",
+    "pingwaf-system",
+    "pingwaf-profiler",
     "pingwaf-waf",
     "pingwaf-challenge",
     "pingwaf-agent",
@@ -407,7 +393,6 @@ pingap-sentry = { version = "0.27.7", path = "pingap-sentry" }
 pingap-upstream = { version = "0.27.7", path = "pingap-upstream", default-features = false }
 pingap-util = { version = "0.27.7", path = "pingap-util" }
 pingap-webhook = { version = "0.27.7", path = "pingap-webhook" }
-pingwaf-pprof = { version = "0.27.7", path = "pingwaf-pprof" }
 # Released crates.io versions; all three must stay on the same version so cargo
 # resolves one copy of pingora-core.
 # The TLS backend (`openssl` or `rustls`) is chosen by the top-level

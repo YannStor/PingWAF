@@ -17,7 +17,6 @@ pub mod cache_settings;
 pub mod challenge;
 pub mod common;
 pub mod config_versions;
-pub mod debug;
 pub mod defense;
 pub mod error;
 pub mod error_pages;
@@ -44,6 +43,7 @@ pub mod site_failover;
 pub mod sites;
 pub mod ssl;
 pub mod state;
+pub mod system;
 pub mod system_tls;
 pub mod users;
 pub mod waf_settings;
@@ -85,6 +85,14 @@ pub const API_PREFIX: &str = "/api/v1";
 /// ~2 MiB, certificate PEM bundles) with room to spare.
 pub const DEFAULT_BODY_LIMIT_BYTES: usize = 10 * 1024 * 1024;
 
+/// Attributes one control-plane request to the `control` module. The timer
+/// is a relaxed atomic add on drop, so the middleware costs nanoseconds.
+async fn record_control_module(request: Request, next: Next) -> Response {
+    let _profile = pingwaf_profiler::timed(pingwaf_profiler::Module::Control);
+    let _profile_method = pingwaf_profiler::timed_method("control::http");
+    next.run(request).await
+}
+
 /// Builds the complete HTTP router, including CORS, compression and tracing.
 pub fn build_router(state: AppState) -> Router {
     let config = state.config.clone();
@@ -116,7 +124,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(site_failover::routes())
         .merge(rewrite::routes())
         .merge(error_pages::routes())
-        .merge(debug::routes())
+        .merge(system::routes())
         .merge(system_tls::routes())
         .merge(defense::routes())
         .merge(cache_settings::routes())
@@ -161,6 +169,7 @@ pub fn build_router(state: AppState) -> Router {
     // nested `/api/v1` router, the MCP routes and the frontend fallback —
     // while route-level `DefaultBodyLimit`s (MCP, GeoIP upload) still take
     // precedence as the inner, more specific bounds.
+    .layer(middleware::from_fn(record_control_module))
     .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT_BYTES))
     .layer(build_cors(&config.cors_origins))
     // Global security headers. Applied as `if_not_present` so a handler

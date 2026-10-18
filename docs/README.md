@@ -16,7 +16,7 @@ centrally-controlled Web Application Firewall built on
 | [user-guide.md](./user-guide.md) | Dashboard walkthrough — sites, rules, policies, IP access, rate limiting |
 | [http-lifecycle.md](./http-lifecycle.md) | Where every feature acts in the request pipeline — the WAF check order, caching, error pages, and how to debug with it |
 | [api.md](./api.md) | REST API reference (base URL `https://<host>:9080/api/v1`) |
-| [profiling.md](./profiling.md) | Built-in profiling: `go tool pprof` captures, SVG flame graphs, memory snapshots |
+| [profiling.md](./profiling.md) | System observation and attribution: `/system/metrics` CPU/memory snapshots, `/system/profile` module/method attribution |
 
 ## 🧭 Project & community
 
@@ -56,7 +56,8 @@ PingWAF adds six WAF-specific crates on top of the `pingap` proxy foundation.
 | [pingwaf-agent](../pingwaf-agent) | Data-plane agent: connects to the control plane, caches rules with disk persistence, ships logs/metrics, receives commands |
 | [pingwaf-waf](../pingwaf-waf) | Detection engine: normalize → signatures → expression → anomaly score |
 | [pingwaf-challenge](../pingwaf-challenge) | Dynamic challenges: JS 5-second shield, interactive challenge, PoW, fingerprinting, HMAC clearance cookies |
-| [pingwaf-pprof](../pingwaf-pprof) | Built-in profiling: `go tool pprof` CPU profiles, SVG flame graphs, memory snapshots (CPU sampling is Linux-only) |
+| `pingwaf-profiler` (no README) | Module/method CPU and memory attribution tables served at `/api/v1/system/profile` |
+| `pingwaf-system` (no README) | Process/host CPU snapshots and memory/cgroup accounting served at `/api/v1/system/metrics` |
 
 **Proxy foundation (`pingap-*`) — each crate has its own README** describing what
 it owns, how it is configured and where it sits in the dependency graph:

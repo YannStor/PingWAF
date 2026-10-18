@@ -860,6 +860,9 @@ async fn persist_heartbeat(
     message: &AgentHeartbeat,
     registry: &AgentRegistry,
 ) {
+    let _profile = pingwaf_profiler::timed(pingwaf_profiler::Module::Db);
+    let _profile_method =
+        pingwaf_profiler::timed_method("db::persist_heartbeat");
     // Server time, not the agent's clock: liveness thresholds compare
     // `last_heartbeat` against Utc::now(), so trusting the reported timestamp
     // would let a skewed client clock mark healthy agents offline.

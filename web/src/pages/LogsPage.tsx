@@ -1288,17 +1288,20 @@ export function LogsPage() {
               <span className="text-xs text-fg-subtle">
                 {t('pages.logs.quickActions')}
               </span>
+              {/* Quick actions：纯图标按钮，语义通过 title + aria-label 提供 */}
               <Button
-                size="sm"
+                size="icon"
                 variant="ghost"
+                aria-label={t('pages.logs.searchThisIp')}
+                title={t('pages.logs.searchThisIp')}
                 icon={<MagnifyingGlass weight="duotone" className="h-4 w-4" />}
                 onClick={() => searchValue('client_ip', selectedEvent.client_ip)}
-              >
-                {t('pages.logs.searchThisIp')}
-              </Button>
+              />
               <Button
-                size="sm"
+                size="icon"
                 variant="secondary"
+                aria-label={t('pages.logs.blockIp')}
+                title={t('pages.logs.blockIp')}
                 icon={<Prohibit weight="duotone" className="h-4 w-4" />}
                 disabled={!selectedEvent.site_id || !canWrite}
                 onClick={() => {
@@ -1308,18 +1311,16 @@ export function LogsPage() {
                     siteId: selectedEvent.site_id ?? '',
                   })
                 }}
-              >
-                {t('pages.logs.blockIp')}
-              </Button>
+              />
               <Button
-                size="sm"
+                size="icon"
                 variant="secondary"
+                aria-label={t('pages.logs.addToIpGroup')}
+                title={t('pages.logs.addToIpGroup')}
                 icon={<Users weight="duotone" className="h-4 w-4" />}
                 disabled={!canWrite}
                 onClick={() => setIpGroupTarget(selectedEvent.client_ip)}
-              >
-                {t('pages.logs.addToIpGroup')}
-              </Button>
+              />
               {!selectedEvent.site_id && (
                 <span className="text-xs text-fg-warning">
                   {t('pages.logs.unassignedBlockHint')}

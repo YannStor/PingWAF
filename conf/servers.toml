@@ -99,6 +99,21 @@ locations = ["lo"]
 # Default `false`
 # h1_pipelining = true
 
+# Connection-phase (TCP accept + TLS handshake + request-head read) timeout.
+# pingora has no separate handshake knob, so this is applied by taking the
+# shorter of it and `downstream_read_timeout` — the first read is where a
+# stalled handshake is detected. Unset keeps the read timeout alone.
+# Default `none`
+# downstream_connection_timeout = "10s"
+
+# Maximum requests served on one downstream keep-alive connection before
+# pingora closes it. Unset keeps pingora's default (no limit), which lets a
+# client pin a worker connection indefinitely; a finite value bounds
+# connection age and is the supported way to cap HTTP/1.1 keep-alive
+# lifetime on pingora 0.9 (it has no h1 idle timeout).
+# Default `none`
+# keepalive_request_limit = 1000
+
 # TCP Keep-alive idle time:
 # Controls how long a connection must be idle before TCP starts sending keep-alive probes
 # Default `none`

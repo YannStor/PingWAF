@@ -810,6 +810,9 @@ impl Plugin for Cache {
         if step != self.plugin_step {
             return Ok(RequestPluginResult::Skipped);
         }
+        let _profile = pingwaf_profiler::timed(pingwaf_profiler::Module::Cache);
+        let _profile_method =
+            pingwaf_profiler::timed_method("cache::handle_request");
 
         // Cache operations only support GET/HEAD for retrieval and PURGE for invalidation
         let req_header = session.req_header();

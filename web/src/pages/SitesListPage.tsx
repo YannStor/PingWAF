@@ -50,7 +50,6 @@ interface SiteFormState {
   domain: string
   alternateDomains: string[]
   upstreamAddress: string
-  upstreamName: string
   upstreamTls: boolean
 }
 
@@ -59,7 +58,6 @@ const emptyForm: SiteFormState = {
   domain: '',
   alternateDomains: [],
   upstreamAddress: '',
-  upstreamName: '',
   upstreamTls: false,
 }
 
@@ -357,8 +355,6 @@ export function SitesListPage() {
       alternate_domains: alternateDomains,
       upstream_address: upstreamAddress,
     }
-    const upstreamName = form.upstreamName.trim()
-    if (upstreamName) payload.upstream_name = upstreamName
     if (form.upstreamTls) payload.upstream_tls = true
     createSite.mutate(payload)
   }
@@ -745,12 +741,6 @@ export function SitesListPage() {
                 required
               />
               <div className="grid grid-cols-2 gap-3">
-                <Input
-                  label={t('pages.sites.upstreamName')}
-                  value={form.upstreamName}
-                  placeholder="origin-1"
-                  onChange={(e) => setForm((f) => ({ ...f, upstreamName: e.target.value }))}
-                />
                 <div className="flex items-end pb-1">
                   <Switch
                     checked={form.upstreamTls}

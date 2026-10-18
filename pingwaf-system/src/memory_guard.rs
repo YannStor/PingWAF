@@ -1,10 +1,11 @@
-//! Memory admission gate for captures.
+//! Memory admission floor.
 //!
-//! The 2026-10-17 incident showed that on a 2GB box a single capture's
-//! encode phase could spike RSS past what the host could bear and get the
-//! container OOM-killed — the 40% CPU guard never sees memory. This module
-//! refuses to start (or continues) a capture when the available-memory
-//! floor is crossed.
+//! Best-effort available-memory estimation callers can gate work on: the
+//! 2026-10-17 incident showed that on a 2GB box an expensive in-process
+//! operation could spike RSS past what the host could bear and get the
+//! container OOM-killed. [`ensure_admission`] refuses start when the floor
+//! is already crossed; [`memory_pressure_now`] answers the same question for
+//! long-running callers that want to bail out mid-way.
 //!
 //! Detection order: cgroup v2 (`memory.max` / `memory.current` — the
 //! container's own limit), then cgroup v1, then the host's `MemAvailable`
@@ -98,14 +99,35 @@ pub fn memory_pressure_now() -> bool {
 
 /// Admission check for starting a capture: below the floor the encode
 /// phase after the window would push the host into an OOM kill.
-pub fn ensure_admission() -> Result<(), crate::ProfileError> {
+pub fn ensure_admission() -> Result<(), Error> {
     match available_bytes() {
         Some(available) if available < MIN_AVAILABLE_BYTES => {
-            Err(crate::ProfileError::MemoryPressure)
+            Err(Error::MemoryPressure)
         },
         _ => Ok(()),
     }
 }
+
+/// Admission refusal. Deliberately a value type: callers map it onto their
+/// own response shape (HTTP 503, a plugin error string, a log line).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Error {
+    /// Available memory is below [`MIN_AVAILABLE_BYTES`].
+    MemoryPressure,
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::MemoryPressure => write!(
+                f,
+                "memory pressure: available memory is below the admission floor"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 #[cfg(test)]
 mod tests {

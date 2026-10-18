@@ -40,7 +40,7 @@ import { ErrorState } from '@/components/ErrorState'
 import { Skeleton, SkeletonRows } from '@/components/ui/Skeleton'
 import { analyticsApi, analyticsKeys } from '@/api/analytics'
 import { agentsApi, agentKeys } from '@/api/agents'
-import { debugApi, debugKeys } from '@/api/debug'
+import { fetchSystemMetrics, debugKeys } from '@/api/debug'
 import { useAuthStore } from '@/stores/authStore'
 import { useSitesList } from '@/hooks'
 import { cn } from '@/lib/utils'
@@ -49,7 +49,6 @@ import {
   formatBucket,
   formatCompactNumber,
   formatLatency,
-  formatDateTime,
   formatNumber,
   formatPercent,
   formatSize,
@@ -510,7 +509,7 @@ export function DashboardPage() {
               </Card>
             )
           })}
-          {isAdmin && <ProcessResourcesCard />}
+          {isAdmin && <SystemCpuCard />}
         </div>
       )}
 
@@ -845,27 +844,23 @@ export function DashboardPage() {
 }
 
 /**
- * Admin-only "process resources" stat card fed by `/debug/pprof/memory`.
- * The headline is the single most useful number — the pingwaf process's
- * own RSS. Everything else (virtual memory, host RAM, container figures
- * and their scope explanations) is folded into a details panel that only
- * expands while the card is hovered or focused, keeping the dashboard
- * clean while the full breakdown stays one gesture away.
+ * Admin-only「System 观测」CPU 卡片，数据来自 `/api/v1/system/metrics`（15s 轮询，
+ * 静默失败）。大字显示进程 CPU%，辅以主机 CPU%、cores 与 RSS 小字。
  */
-function ProcessResourcesCard() {
+function SystemCpuCard() {
   const { t } = useTranslation()
-  const memory = useQuery({
-    queryKey: debugKeys.memory(),
-    queryFn: () => debugApi.memory(),
-    refetchInterval: REFRESH_MS,
+  const metrics = useQuery({
+    queryKey: debugKeys.metrics(),
+    queryFn: fetchSystemMetrics,
+    refetchInterval: 15_000,
+    retry: false,
   })
 
-  if (memory.isError) {
-    return <ErrorState variant="inline" error={memory.error} onRetry={() => memory.refetch()} retrying={memory.isFetching} />
+  if (metrics.isError) {
+    return <ErrorState variant="inline" error={metrics.error} onRetry={() => metrics.refetch()} retrying={metrics.isFetching} />
   }
 
-  const snap = memory.data
-  const container = snap?.container_memory_scope != null && snap.container_memory_used_bytes != null
+  const snap = metrics.data
   return (
     <Card className="group relative overflow-hidden p-4 transition-shadow group-hover:shadow-md">
       <div className="flex items-start justify-between">
@@ -886,46 +881,18 @@ function ProcessResourcesCard() {
       ) : (
         <>
           <p className="mt-3 text-2xl font-semibold tracking-tight text-fg-strong tabular-nums">
-            {formatSize(snap.rss_bytes)}
+            {snap.cpu.process_cpu_percent.toFixed(1)}%
           </p>
-          <p className="mt-0.5 text-[13px] text-fg-subtle">
-            {t('pages.dashboard.processResources.processRss')}
-            <span className="ml-2 text-xs text-fg-subtle/70">
-              {t('pages.dashboard.processResources.collectedAt', {
-                time: formatDateTime(snap.collected_at_ms),
-              })}
-            </span>
+          <p className="mt-0.5 text-[13px] text-fg-subtle">{t('pages.dashboard.cpuCard.processCpu')}</p>
+          <p className="mt-1 text-xs text-fg-subtle/80 tabular-nums">
+            {t('pages.dashboard.cpuCard.hostCpu')}:{' '}
+            <span className="font-medium text-fg">{snap.cpu.host_cpu_percent.toFixed(1)}%</span>
+            <span className="mx-2 text-fg-subtle/40">·</span>
+            {t('pages.dashboard.cpuCard.cores')}: {snap.cpu.cores}
           </p>
-          {container && (
-            <p className="mt-1 text-xs text-fg-subtle/80 tabular-nums">
-              {t('pages.dashboard.processResources.containerMemory')}:{' '}
-              {formatSize(snap.container_memory_used_bytes ?? 0)} / {formatSize(snap.container_memory_limit_bytes ?? 0)}
-            </p>
-          )}
-          <div
-            className="pointer-events-none absolute inset-x-0 bottom-0 translate-y-full border-t border-line bg-elevated/95 p-4 opacity-0 shadow-[0_-4px_12px_rgba(0,0,0,0.08)] backdrop-blur transition-all duration-200 ease-out group-focus-within:pointer-events-auto group-focus-within:translate-y-0 group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100"
-            tabIndex={-1}
-          >
-            <p className="text-xs text-fg-subtle/80 tabular-nums">
-              {t('pages.dashboard.processResources.processVirtual')}: {formatSize(snap.virtual_bytes)}
-            </p>
-            {container && (
-              <p className="mt-0.5 text-xs text-fg-subtle/80 tabular-nums">
-                {t('pages.dashboard.processResources.containerMemoryScope', {
-                  scope: snap.container_memory_scope,
-                })}
-                : {formatSize(snap.container_memory_used_bytes ?? 0)} /{' '}
-                {formatSize(snap.container_memory_limit_bytes ?? 0)}
-              </p>
-            )}
-            <p className="mt-0.5 text-xs text-fg-subtle/80 tabular-nums">
-              {t('pages.dashboard.processResources.hostMemory')}:{' '}
-              {formatSize(snap.used_memory_bytes)} / {formatSize(snap.total_memory_bytes)}
-            </p>
-            <p className="mt-2 text-xs leading-relaxed text-fg-subtle/70">
-              {t('pages.dashboard.processResources.hint')}
-            </p>
-          </div>
+          <p className="mt-0.5 text-xs text-fg-subtle/70 tabular-nums">
+            {t('pages.dashboard.cpuCard.rss')}: {snap.memory.rss}
+          </p>
         </>
       )}
     </Card>

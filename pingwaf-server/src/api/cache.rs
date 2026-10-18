@@ -47,9 +47,6 @@ fn default_browser_ttl() -> i32 {
     300
 }
 
-fn default_disk_quota() -> i32 {
-    1024
-}
 
 fn default_true() -> bool {
     true
@@ -70,8 +67,9 @@ pub struct CreateRequest {
     pub edge_ttl_seconds: i32,
     #[serde(default = "default_browser_ttl")]
     pub browser_ttl_seconds: i32,
-    #[serde(default = "default_disk_quota")]
-    pub disk_quota_mb: i32,
+    // `disk_quota_mb` was removed from the rule model: disk budget is a
+    // site/global concern (cache-settings), not a per-rule one. Unknown
+    // fields are ignored so older clients keep working.
     #[serde(default = "default_true")]
     pub cache_eligible: bool,
     #[serde(default = "default_true")]
@@ -90,8 +88,6 @@ pub struct UpdateRequest {
     pub edge_ttl_seconds: Option<i32>,
     #[serde(default)]
     pub browser_ttl_seconds: Option<i32>,
-    #[serde(default)]
-    pub disk_quota_mb: Option<i32>,
     #[serde(default)]
     pub cache_eligible: Option<bool>,
     #[serde(default)]
@@ -130,7 +126,6 @@ fn validate(
     name: &str,
     edge_ttl: i32,
     browser_ttl: i32,
-    disk_quota_mb: i32,
 ) -> Result<(), ApiError> {
     if name.trim().is_empty() || name.len() > 200 {
         return Err(ApiError::BadRequest(
@@ -145,11 +140,6 @@ fn validate(
     if !(0..=MAX_TTL_SECONDS).contains(&browser_ttl) {
         return Err(ApiError::BadRequest(format!(
             "browser_ttl_seconds must be between 0 and {MAX_TTL_SECONDS}"
-        )));
-    }
-    if !(0..=MAX_DISK_QUOTA_MB).contains(&disk_quota_mb) {
-        return Err(ApiError::BadRequest(format!(
-            "disk_quota_mb must be between 0 and {MAX_DISK_QUOTA_MB}"
         )));
     }
     Ok(())
@@ -190,7 +180,6 @@ async fn create(
         &payload.name,
         payload.edge_ttl_seconds,
         payload.browser_ttl_seconds,
-        payload.disk_quota_mb,
     )?;
 
     let model = cache_rules::ActiveModel {
@@ -200,7 +189,9 @@ async fn create(
         match_expression: Set(payload.match_expression),
         edge_ttl_seconds: Set(payload.edge_ttl_seconds),
         browser_ttl_seconds: Set(payload.browser_ttl_seconds),
-        disk_quota_mb: Set(payload.disk_quota_mb),
+        // Kept as a column for compatibility; the budget lives in
+        // cache-settings now.
+        disk_quota_mb: Set(0),
         cache_eligible: Set(payload.cache_eligible),
         respect_origin: Set(payload.respect_origin),
         enabled: Set(payload.enabled),
@@ -256,14 +247,6 @@ async fn update(
             )));
         }
         active.browser_ttl_seconds = Set(browser_ttl);
-    }
-    if let Some(quota) = payload.disk_quota_mb {
-        if !(0..=MAX_DISK_QUOTA_MB).contains(&quota) {
-            return Err(ApiError::BadRequest(format!(
-                "disk_quota_mb must be between 0 and {MAX_DISK_QUOTA_MB}"
-            )));
-        }
-        active.disk_quota_mb = Set(quota);
     }
     if let Some(eligible) = payload.cache_eligible {
         active.cache_eligible = Set(eligible);
@@ -1077,18 +1060,16 @@ mod tests {
 
     #[test]
     fn bounds_are_enforced() {
-        assert!(validate("static", 3600, 300, 1024).is_ok());
-        assert!(validate("static", -1, 300, 1024).is_err());
-        assert!(validate("static", 3600, MAX_TTL_SECONDS + 1, 1024).is_err());
-        assert!(validate("static", 3600, 300, MAX_DISK_QUOTA_MB + 1).is_err());
-        assert!(validate("   ", 3600, 300, 1024).is_err());
+        assert!(validate("static", 3600, 300).is_ok());
+        assert!(validate("static", -1, 300).is_err());
+        assert!(validate("static", 3600, MAX_TTL_SECONDS + 1).is_err());
+        assert!(validate("   ", 3600, 300).is_err());
     }
 
     #[test]
     fn defaults_match_the_schema() {
         assert_eq!(default_edge_ttl(), 3600);
         assert_eq!(default_browser_ttl(), 300);
-        assert_eq!(default_disk_quota(), 1024);
         assert!(default_true());
     }
 

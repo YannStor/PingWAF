@@ -161,7 +161,6 @@ export interface Upstream {
   id: string
   site_id: string
   pool_id: string
-  name: string
   address: string
   weight: number
   tls: boolean
@@ -252,7 +251,6 @@ export interface CreateSiteRequest {
    * Required: a site without an origin cannot serve traffic.
    */
   upstream_address: string
-  upstream_name?: string
   upstream_tls?: boolean
   status?: string
   plan?: string
@@ -284,7 +282,6 @@ export interface UpdateSiteRequest {
 }
 
 export interface CreateUpstreamRequest {
-  name: string
   address: string
   weight?: number
   tls?: boolean
@@ -293,7 +290,6 @@ export interface CreateUpstreamRequest {
 }
 
 export interface UpdateUpstreamRequest {
-  name?: string
   address?: string
   weight?: number
   tls?: boolean
@@ -686,7 +682,6 @@ export interface CacheRule {
   match_expression: string
   edge_ttl_seconds: number
   browser_ttl_seconds: number
-  disk_quota_mb: number
   cache_eligible: boolean
   respect_origin: boolean
   enabled: boolean
@@ -1550,7 +1545,6 @@ export interface CreateCacheRuleRequest {
   match_expression?: string
   edge_ttl_seconds?: number
   browser_ttl_seconds?: number
-  disk_quota_mb?: number
   cache_eligible?: boolean
   respect_origin?: boolean
   enabled?: boolean
@@ -2235,42 +2229,4 @@ export interface McpStatus {
   resources: number
 }
 
-/* ── Debug / memory snapshot ───────────────────────────────────────── */
 
-/** `pingwaf_pprof::MemorySnapshot` — `GET /debug/pprof/memory` (admin only). */
-export interface MemorySnapshot {
-  /** Resident set size of this process in bytes (the process footprint). */
-  rss_bytes: number
-  /** Virtual memory size of this process in bytes. */
-  virtual_bytes: number
-  /** Total physical RAM of the host machine in bytes. */
-  total_memory_bytes: number
-  /** Host RAM in use across the machine in bytes. */
-  used_memory_bytes: number
-  /** `rss_bytes` rendered human-readable, e.g. "120.3 MB". */
-  rss: string
-  /** `total_memory_bytes` rendered human-readable. */
-  total_memory: string
-  /** `used_memory_bytes` rendered human-readable. */
-  used_memory: string
-  /** Unix epoch milliseconds at which the snapshot was taken. */
-  collected_at_ms: number
-  /** Always `"system"` — host RAM, not the container/process limit. */
-  used_memory_scope: string
-  /** Always `"process"` — this process's own footprint. */
-  process_memory_scope: string
-  /**
-   * Container memory in use (cgroup v2 `memory.current`, v1
-   * `memory.usage_in_bytes`) — the figure `docker stats` reports. Present
-   * only inside a memory-limited container.
-   */
-  container_memory_used_bytes?: number | null
-  /** Container memory limit; `null` when the cgroup has no limit. */
-  container_memory_limit_bytes?: number | null
-  /** `container_memory_used_bytes` rendered human-readable. */
-  container_memory_used?: string | null
-  /** `container_memory_limit_bytes` rendered human-readable. */
-  container_memory_limit?: string | null
-  /** `"cgroup_v1" | "cgroup_v2"`, or `null` outside a memory-limited container. */
-  container_memory_scope?: string | null
-}

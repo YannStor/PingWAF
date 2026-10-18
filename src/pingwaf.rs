@@ -1568,15 +1568,6 @@ pub fn main() {
     // uses. `install_default` returns Err when already installed; ignore it.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    // Debug-capture switch ([basic] pprof_enabled via the legacy env
-    // fallback; **default off**). The all-in-one entry point bypasses
-    // main.rs's run() initialization, so the switch must be set here too —
-    // otherwise the atomic stays at its initial "off" forever and the
-    // configured deployment can never enable captures (2026-10-17).
-    pingwaf_pprof::set_captures_enabled(pingwaf_pprof::env_flag_enabled(
-        std::env::var("PINGWAF_PPROF_ENABLED").ok().as_deref(),
-    ));
-
     // Allocator retention policy (adaptive by memory ceiling, overridable
     // via env). This entry point bypasses main.rs, so apply it here too.
     crate::allocator_tune::apply();

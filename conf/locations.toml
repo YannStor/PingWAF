@@ -27,6 +27,12 @@ upstream = "charts"
 # Example: ["X-Real-IP:$remote_addr", "X-Forwarded-For:$proxy_add_x_forwarded_for"]
 # proxy_set_headers = ["name:value"]
 
+# Host header sent to the upstream: a bare host name (no scheme, path or
+# spaces). Unset keeps the client's Host (historic behaviour); an explicit
+# value wins over any Host entry in `proxy_set_headers`.
+# Default `none`
+# upstream_host = "origin.example.com"
+
 # Headers to add to the proxied request before sending to upstream.
 # Each entry should be in "header_name:header_value" format.
 # Example: ["X-Request-ID:$request_id", "X-Custom-Header:value"]

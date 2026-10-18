@@ -127,12 +127,6 @@ export function OriginPoolsSection({
       ),
     },
     {
-      key: 'name',
-      header: t('common.name'),
-      accessor: (n) => n.name,
-      cell: (n) => <span className="text-[13px] text-fg-subtle">{n.name}</span>,
-    },
-    {
       key: 'weight',
       header: t('pages.basic.nodeWeight'),
       align: 'right',
@@ -412,7 +406,6 @@ export function OriginPoolsSection({
             <p className="pw-mono text-[13px] font-medium text-fg-strong">
               {pendingDeleteNode.address}
             </p>
-            <p className="mt-0.5 text-xs text-fg-subtle">{pendingDeleteNode.name}</p>
           </div>
         </ConfirmDialog>
       )}

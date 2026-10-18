@@ -445,6 +445,8 @@ pub struct Location {
 
     /// Headers to set or append on proxied requests
     pub headers: Option<Vec<(HeaderName, HeaderValue, bool)>>,
+    /// Host header sent to the upstream; `None` keeps the client's Host.
+    upstream_host: Option<HeaderValue>,
 
     /// Additional headers to append to proxied requests
     /// These are added without removing existing headers
@@ -612,6 +614,18 @@ impl Location {
                 None
             } else {
                 Some(headers)
+            },
+            upstream_host: match conf.upstream_host.as_deref() {
+                Some(value) if !value.trim().is_empty() => {
+                    Some(HeaderValue::from_str(value.trim()).map_err(|e| {
+                        Error::Invalid {
+                            message: format!(
+                                "invalid upstream_host '{value}': {e}"
+                            ),
+                        }
+                    })?)
+                },
+                _ => None,
             },
             // proxy_add_headers: format_headers(&conf.proxy_add_headers)?,
             // proxy_set_headers: format_headers(&conf.proxy_set_headers)?,
@@ -810,6 +824,10 @@ impl Location {
 }
 
 impl LocationInstance for Location {
+    fn upstream_host(&self) -> Option<&HeaderValue> {
+        self.upstream_host.as_ref()
+    }
+
     fn name(&self) -> &str {
         self.name.as_ref()
     }

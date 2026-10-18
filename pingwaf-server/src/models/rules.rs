@@ -172,6 +172,9 @@ pub mod cache_rules {
         pub match_expression: String,
         pub edge_ttl_seconds: i32,
         pub browser_ttl_seconds: i32,
+        /// Kept for compatibility; the disk budget moved to cache-settings
+        /// (a rule must not own a site-wide resource).
+        #[serde(skip_serializing)]
         pub disk_quota_mb: i32,
         pub cache_eligible: bool,
         pub respect_origin: bool,

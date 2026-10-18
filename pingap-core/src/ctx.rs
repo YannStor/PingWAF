@@ -230,6 +230,11 @@ pub trait LocationInstance: Send + Sync {
     ) -> bool;
     /// Returns the proxy header to upstream
     fn headers(&self) -> Option<&Vec<(HeaderName, HeaderValue, bool)>>;
+    /// Host header to send upstream. `None` (the default) keeps the client's
+    /// Host, matching the historic behaviour.
+    fn upstream_host(&self) -> Option<&HeaderValue> {
+        None
+    }
     /// Returns the client body size limit
     fn client_body_size_limit(&self) -> usize;
     /// Called when the request is received from the client

@@ -45,7 +45,7 @@ pub enum ApiError {
     /// upstream's own error text is safe to show to the operator.
     BadGateway(String),
     /// The endpoint is disabled on this deployment, e.g. profiling captures
-    /// turned off via `PINGWAF_PPROF_ENABLED=0`.
+    /// turned off via the deployment switch.
     ServiceUnavailable(String),
     /// Unexpected failure; the message is logged in full and a generic text is
     /// returned to the client.

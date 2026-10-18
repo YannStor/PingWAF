@@ -10,12 +10,67 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+### Breaking
+
+- **pprof removed entirely.** Gone: the control-plane endpoints
+  (`/api/v1/debug/pprof/{profile,flamegraph,memory,heap}`,
+  `.../cpu/{metrics,dashboard.svg,summary}`, `POST .../cpu/summary/import`),
+  the data-plane admin routes (`{admin-path}/api/pprof/*`), the MCP tools
+  `profile_cpu` / `profile_memory`, the `PINGWAF_DEBUG_LISTEN_ADDR` loopback
+  listener (`ServerConfig.debug_listen_addr`), the `mem-prof` cargo feature
+  with `Dockerfile.memprof` and its image workflow, and the
+  `[basic] pprof_enabled` configuration key / `PINGWAF_PPROF_ENABLED`
+  environment variable. Deployments that set any of these must drop the
+  setting on upgrade; the observation half is replaced by the read-only
+  `GET /api/v1/system/metrics` and `GET /api/v1/system/profile` (see
+  [Profiling](./docs/profiling.md#what-changed-vs-pprof)).
+- **Cache rules: `disk_quota_mb` removed.** The field is ignored in requests
+  and no longer returned in responses (the DB column is kept but no longer
+  participates in any calculation). Disk budgets live only in the site-level
+  `cache-settings.quota_mb` and the global `/settings/cache.max_space_mb` —
+  see the boundary table in
+  [docs/zh/crates/cache.md](./docs/zh/crates/cache.md#缓存策略与规则的边界).
+- **Upstream node name removed from the API and UI.** `site_upstreams.name`
+  is no longer accepted in requests nor returned in responses (the DB column
+  remains, reserved for the upcoming node-group feature; the write path
+  mirrors the address).
+
 ### Added
 
 - `[basic] client_max_body_size`: a global request-body cap that locations
   inherit when they do not set their own (size string, e.g. `"16MB"`).
   Absent keeps the historic "unlimited" behaviour, so existing configs are
   unchanged.
+- `GET /api/v1/system/metrics` (admin): read-only process/host CPU and
+  memory snapshot — `cpu` (process and host percent, cores) and `memory`
+  (process RSS / virtual, host totals, and cgroup container accounting when
+  a memory limit applies).
+- `GET /api/v1/system/profile` (admin): module and method CPU/memory
+  attribution — 7 module rows (`proxy`, `waf`, `cache`, `plugin`, `db`,
+  `control`, `other`) plus up to 40 hottest method rows, computed from
+  in-process accounting counters.
+- `upstream_host` on locations: optional bare host name that overrides the
+  `Host` header the proxy sends to the origin. Unset keeps the client's
+  `Host`; an explicit value wins over a `Host` entry in
+  `proxy_set_headers`.
+- `downstream_connection_timeout` (per-listener, `[servers.*]` tables): connection-phase (TCP accept +
+  TLS handshake + request-head read) timeout, applied by taking the shorter
+  of it and `downstream_read_timeout` — pingora 0.9 has no separate
+  handshake knob.
+- `keepalive_request_limit` (per-listener, `[servers.*]` tables): maximum requests served on one
+  downstream keep-alive connection before pingora closes it — the supported
+  way to bound HTTP/1.1 keep-alive lifetime on pingora 0.9 (it has no h1
+  idle timeout).
+
+### Changed
+
+- **CPU/memory attribution is now in-process instrumentation instead of
+  sampling.** The profiler records module-level atomic counters
+  (`cpu_ns` / `mem_bytes` / `calls`) and times named hot paths with
+  `timed_method`: no sampling, no stack unwinding, no allocator hooks, no
+  external tool or image; it works on every platform and in every build, at
+  the cost of one relaxed atomic add per recording point. See
+  [Profiling](./docs/profiling.md).
 
 ### Fixed
 

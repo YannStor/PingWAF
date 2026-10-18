@@ -153,7 +153,7 @@ graph TB
 | [`pingwaf-agent`](./pingwaf-agent) | 数据面 Agent：连接控制面、规则缓存 + 磁盘持久化、回传日志/指标、接收命令 |
 | [`pingwaf-waf`](./pingwaf-waf) | 检测引擎：归一化 → 签名 → 表达式 → 异常评分 |
 | [`pingwaf-challenge`](./pingwaf-challenge) | 动态挑战子系统：JS 5 秒盾、交互式挑战、PoW、浏览器指纹、HMAC 签名 clearance cookie |
-| [`pingwaf-pprof`](./pingwaf-pprof) | 内置剖析：`go tool pprof` CPU 剖析、SVG 火焰图、内存快照（CPU 采样仅限 Linux） |
+| `pingwaf-profiler` / `pingwaf-system`（无 README） | 进程内 CPU/内存归因与快照，经 `/api/v1/system/profile` 与 `/api/v1/system/metrics` 提供 |
 
 ---
 

@@ -170,7 +170,6 @@ and therefore no file key:
 | `PINGWAF_PASSKEY_RP_ID` | derived from the request | Relying party ID, i.e. the effective domain |
 | `PINGWAF_PASSKEY_ORIGIN` | derived from the request | Origin the dashboard is served from |
 | `PINGWAF_PASSKEY_TRUST_FORWARDED_PROTO` | `false` | Believe `X-Forwarded-Proto` when deriving the origin |
-| `PINGWAF_PPROF_ENABLED` | enabled | Fallback for the debug-capture switch (honoured only when the `[basic] pprof_enabled` config key is unset, default `true`). Set to `0` (`false`/`off`/`no`, case-insensitive) to disable the CPU-capture endpoints, the heap endpoint and the MCP `profile_cpu` tool; the read-only memory/metrics snapshots stay available — see [Profiling](./profiling.md#capture-audit-and-the-enable-switch) |
 | `PINGWAF_MALLOC_PURGE_DELAY_MS` | derived from memory ceiling | Allocator purge delay in **milliseconds** (mimalloc `mi_option_purge_delay`). Overrides the automatic bucketing (<1 GB → 0, 1-4 GB → 250, 4-16 GB → 500, >16 GB → 1000); `-1` disables purging. The standard `MIMALLOC_PURGE_DELAY` is honoured as a fallback |
 
 The refresh-token lifetime (30 days), the minimum pool size (`1`) and the
@@ -227,7 +226,6 @@ are listed against it below; the dash in a table entry means the setting has no
 | `PINGWAF_PASSKEY_RP_ID` | — |
 | `PINGWAF_PASSKEY_ORIGIN` | — |
 | `PINGWAF_PASSKEY_TRUST_FORWARDED_PROTO` | — |
-| `PINGWAF_PPROF_ENABLED` | — CPU capture switch (fallback for `[basic] pprof_enabled`), see [Profiling](./profiling.md) |
 | `PINGWAF_MODE` | CLI mode (`all-in-one`, `server`, `agent`) |
 | `PINGWAF_SERVER_URL` | `agent.server_url` |
 | `PINGWAF_API_KEY` | `agent.api_key` |
@@ -276,6 +274,63 @@ deployments, upgrade the control plane first, then the agents** (see
 [Rolling Upgrade](#rolling-upgrade-distributed)): a new server rejects shipping
 streams that carry no token, while an old server simply ignores the metadata.
 
+## Downstream Timeouts & Keep-Alive
+
+These are per-listener settings in the `[servers.<name>]` tables of the data
+plane's configuration file (the `conf/servers.toml` shipped with the repo
+documents every key; `h2_idle_timeout` and the `tcp_*` keys sit in the same
+table). They govern the client-facing side of the proxy:
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `downstream_read_timeout` | unset | Max gap between reads from the client. Unset, a slow client can hold a connection open indefinitely — the startup log warns when it is missing |
+| `downstream_write_timeout` | unset | Max gap between writes to the client |
+| `downstream_connection_timeout` | unset | Connection-phase (TCP accept + TLS handshake + request-head read) timeout. Pingora has no separate handshake knob, so it is applied by taking the **shorter** of it and `downstream_read_timeout` as the read timeout — the first read is where a stalled handshake is detected |
+| `keepalive_request_limit` | unset (pingora default: no limit) | Maximum requests served on one downstream keep-alive connection before pingora closes it |
+| `h2_idle_timeout` | unset (never) | Close an idle HTTP/2 client connection after this long |
+| `tcp_idle` / `tcp_interval` / `tcp_probe_count` | unset | TCP keepalive probes on client connections |
+
+`downstream_connection_timeout` and `keepalive_request_limit` exist because
+pingora 0.9 has no independent HTTP/1.1 idle timeout: without them, a client
+that opens a connection, completes the handshake and then goes quiet holds a
+worker connection for as long as the read timeout (or forever, if read timeout
+is unset).
+
+Recommendations (starting points, not defaults):
+
+- Set `downstream_read_timeout` (e.g. `60s`) and
+  `downstream_write_timeout` (e.g. `60s`) unless a workload genuinely needs
+  longer gaps.
+- Set `downstream_connection_timeout` well below the read timeout — most
+  legitimate TLS handshakes finish in well under a second even on mobile
+  networks, so `5s`–`10s` comfortably separates stalled handshakes from slow
+  clients. Note the effective first-read timeout is the **shorter** of the
+  two, so a connection timeout larger than the read timeout has no effect.
+- Set `keepalive_request_limit` to a finite value (e.g. `1000`) to bound
+  connection age; behind a load balancer that reuses connections
+  aggressively, a lower value spreads traffic across workers more evenly.
+
+## Upstream Host Override
+
+By default the proxy forwards the client's `Host` header to the origin
+unchanged. A location can override which virtual host the origin sees with
+`upstream_host` on the location (`LocationConf.upstream_host`, configurable
+through the location form / `PUT /api/v1/sites/{site_id}` locations):
+
+- Value is a **bare host name** — no scheme, no path, no spaces (validation
+  rejects `http://…`, `/…` and anything over 253 characters). A port is not
+  part of the Host the origin needs for virtual-host selection either; the
+  upstream address determines where to connect, `upstream_host` only rewrites
+  the header.
+- Unset (the default) keeps the client's `Host` — historic behaviour.
+- An explicit value **wins over** any `Host` entry in the location's
+  `proxy_set_headers`, so "which virtual host the origin sees" has one
+  obvious knob instead of competing header rewrites.
+
+Typical use: a pool of origins behind one address that route by
+`Host` (virtual hosts, multi-tenant origins) — set `upstream_host` to the
+name the origin expects instead of asking every client to send it.
+
 ## Small-Memory Instances
 
 On instances with less than 2 GiB of RAM (especially all-in-one deployments
@@ -320,9 +375,10 @@ that share the box with PostgreSQL):
   but a sudden burst allocates faster than the kernel can swap out, so the OOM
   killer still fires first — keep the memory cap.
 
-To observe actual memory usage, use the built-in memory snapshot endpoints —
-see [Profiling](./profiling.md) for the process RSS / cgroup figures the
-dashboard reads.
+To observe actual memory usage, call `GET /api/v1/system/metrics` — the
+`memory` object carries the process RSS, the host totals and the cgroup
+figures the dashboard reads; see
+[System observation](./profiling.md#get-apiv1systemmetrics).
 
 ## SSL/TLS Configuration
 
@@ -640,9 +696,9 @@ psql "postgres://pingwaf:password@localhost:5432/pingwaf" -c "SELECT 1"
 - Reduce `db_max_connections`
 - Lower `log_batch_size`
 - Check if cache disk quota is configured
-- Read the memory snapshot endpoints
-  ([Profiling](./profiling.md)) to see whether it is process RSS or the
-  host that is under pressure
+- Call `GET /api/v1/system/metrics`
+  ([System observation](./profiling.md#get-apiv1systemmetrics)) to see whether
+  it is process RSS or the host that is under pressure
 
 ### Health check endpoint
 

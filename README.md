@@ -153,7 +153,7 @@ The control plane and the data plane talk over the `ControlPlane` gRPC service (
 | [`pingwaf-agent`](./pingwaf-agent) | Data-plane agent: connects to the control plane, caches rules with disk persistence, ships logs/metrics, receives commands |
 | [`pingwaf-waf`](./pingwaf-waf) | Detection engine: normalize → signatures → expression → anomaly score |
 | [`pingwaf-challenge`](./pingwaf-challenge) | Dynamic challenges: JS 5-second shield, interactive challenge, PoW, fingerprinting, HMAC clearance cookies |
-| [`pingwaf-pprof`](./pingwaf-pprof) | Built-in profiling: `go tool pprof` CPU profiles, SVG flame graphs, memory snapshots (CPU sampling is Linux-only) |
+| `pingwaf-profiler` / `pingwaf-system` (no README) | In-process CPU/memory attribution and snapshots served at `/api/v1/system/profile` and `/api/v1/system/metrics` |
 
 ---
 

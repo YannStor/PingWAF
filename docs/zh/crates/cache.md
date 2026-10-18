@@ -82,6 +82,20 @@ TinyUFO 是 S3-FIFO 风格缓存，扫描抵抗好且无全局锁，比 LRU 更�
 
 注意：仅当后端报告非零最大尺寸时才接线 LRU 淘汰，文件后端没有——文件缓存回收靠 `inactive` 清扫。
 
+## 缓存策略与规则的边界
+
+（WAF 站点缓存的配置模型；与上文的 pingap 存储后端是两层东西。）职责按
+`.codebuddy/reports/cache-config-unification.md` 统一：
+
+| | **缓存策略**（`cache-settings`，站点级） | **缓存规则**（`cache-rules`，路径级） |
+|---|---|---|
+| 回答的问题 | 「这个站点的缓存**能力与预算**是多少」 | 「**这一类请求**该怎么缓存」 |
+| 字段 | `master_enabled`、`max_file_size_mb`、`quota_mb`（站点磁盘预算）、`default_edge_ttl_seconds` | `name`、`match_expression`、`edge_ttl_seconds`、`browser_ttl_seconds`、`cache_eligible`、`respect_origin`、`enabled` |
+
+判定规则：任何「资源/预算/总开关」属性的字段只属于策略；「匹配条件 + 该匹配的缓存行为」只属于规则，两者不共享字段。
+
+**磁盘预算只有两个来源**：站点级 `cache-settings.quota_mb`（缺省继承全局 `/settings/cache.max_space_mb`）。缓存规则**没有**规则级磁盘配额——`disk_quota_mb` 已从 API 请求/响应中移除（DB 列保留但不参与计算）；旧客户端传入该字段会被忽略。
+
 ## 许可证
 
 Apache-2.0。

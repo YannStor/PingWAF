@@ -23,7 +23,7 @@ The dashboard provides:
 - **Logs**: Security events and access logs
 - **Account**: Profile, password, personal API keys and (for
   administrators) user management
-- **Settings**: Elasticsearch, global preferences, origin certificate verification, control-plane HTTPS, and (for administrators) a performance diagnostics card under **About** that downloads a CPU profile, SVG flamegraph or memory snapshot from the control plane's `/debug/pprof/*` endpoints (see `docs/profiling.md`). Administrator-only pages (**Config versions**, **Lifecycle**) redirect other roles to the dashboard.
+- **Settings**: Elasticsearch, global preferences, origin certificate verification, control-plane HTTPS, and (for administrators) a system observation view under **About** that reads the control plane's `/system/metrics` and `/system/profile` endpoints (see `docs/profiling.md`). Administrator-only pages (**Config versions**, **Lifecycle**) redirect other roles to the dashboard.
 - **Config versions**: every configuration snapshot, with per-table diff and rollback
 
 ## Adding a Website

@@ -85,6 +85,8 @@ urlencoding = { workspace = true }
 uuid = { workspace = true }
 
 
+pingwaf-profiler = { path = "../pingwaf-profiler" }
+
 [dev-dependencies]
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }

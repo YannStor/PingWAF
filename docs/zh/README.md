@@ -14,7 +14,7 @@
 | [user-guide.md](../user-guide.md) | 控制台使用：站点、规则、策略、IP 访问控制、限流 |
 | [http-lifecycle.md](./http-lifecycle.md) | 请求生命周期中各功能的作用阶段——WAF 检查顺序、缓存、错误页，以及如何据此排查问题 |
 | [api.md](../api.md) | REST API 参考（基址 `https://<host>:9080/api/v1`） |
-| [profiling.md](./profiling.md) | 内置剖析：`go tool pprof` 采集、SVG 火焰图、内存快照 |
+| [profiling.md](./profiling.md) | 系统观测与归因：`/system/metrics` CPU/内存快照、`/system/profile` 模块/方法归因 |
 
 ## 🧭 项目与社区
 
@@ -54,7 +54,8 @@ PingWAF 在 `pingap` 代理基础之上新增了 **6 个 WAF 专属 crate**。
 | [pingwaf-agent](../../pingwaf-agent) | 数据面 Agent：连接控制面、规则缓存 + 磁盘持久化、回传日志/指标、接收命令 |
 | [pingwaf-waf](../../pingwaf-waf) | 检测引擎：归一化 → 签名 → 表达式 → 异常评分 |
 | [pingwaf-challenge](../../pingwaf-challenge) | 动态挑战：JS 5 秒盾、交互式挑战、PoW、浏览器指纹、HMAC clearance cookie |
-| [pingwaf-pprof](../../pingwaf-pprof) | 内置剖析：`go tool pprof` CPU 剖析、SVG 火焰图、内存快照（CPU 采样仅限 Linux） |
+| `pingwaf-profiler`（无 README） | 模块/方法 CPU 与内存归因表，经 `/api/v1/system/profile` 提供 |
+| `pingwaf-system`（无 README） | 进程/主机 CPU 快照与内存/cgroup 核算，经 `/api/v1/system/metrics` 提供 |
 
 **代理基础（`pingap-*`）——每个 crate 都有自己的 README**，说明其职责边界、配置方式
 与在依赖图中的位置：

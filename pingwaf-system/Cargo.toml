@@ -1,0 +1,15 @@
+[package]
+name = "pingwaf-system"
+version.workspace = true
+edition = "2021"
+license = "Apache-2.0"
+description = "Read-only process/host CPU and memory snapshots plus the memory admission floor. This is the observation half of the old profiling crate: no sampling, no stack unwinding, no external profiling tool."
+
+[dependencies]
+bytesize = { workspace = true }
+memory-stats = { workspace = true }
+serde = { workspace = true }
+sysinfo = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

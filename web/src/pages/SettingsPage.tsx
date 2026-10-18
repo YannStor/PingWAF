@@ -24,7 +24,6 @@ import {
   ShieldCheck,
   Sparkle,
   UploadSimple,
-  Pulse,
   GithubLogo,
   ArrowSquareOut,
 } from '@phosphor-icons/react'
@@ -67,15 +66,7 @@ import { aiApi, aiKeys } from '@/api/ai'
 import { mcpApi, mcpKeys } from '@/api/mcp'
 import { ipGroupKeys, ipGroupsApi } from '@/api/ipGroups'
 import { systemApi } from '@/api/system'
-import {
-  PPROF_DEFAULT_SECONDS,
-  PPROF_MAX_SECONDS,
-  downloadCpuProfile,
-  downloadFlamegraph,
-  downloadMemorySnapshot,
-  fetchCpuSummary,
-} from '@/api/debug'
-import { debugApi, debugKeys } from '@/api/debug'
+import { fetchSystemMetrics, fetchSystemProfile, debugKeys } from '@/api/debug'
 import { ApiError } from '@/api/client'
 import { errorMessage, handleApiError } from '@/api/errors'
 import { useAuthStore } from '@/stores/authStore'
@@ -207,7 +198,7 @@ export function SettingsPage() {
           </section>
           <section id="about" className="scroll-mt-6 flex flex-col gap-4">
             <AboutCard />
-            {isAdmin && <PerformanceDiagnosticsCard />}
+            {isAdmin && <SystemObservabilityCard />}
           </section>
         </div>
       </div>
@@ -2723,267 +2714,156 @@ function AboutCard() {
   )
 }
 
-/* ── Performance diagnostics (pprof) ────────────────────────────────── */
+/* ── System 观测（metrics + profile） ───────────────────────────────── */
 
 /**
- * Admin-only profiling downloads against `/debug/pprof/*`. CPU capture blocks
- * for the requested window, so each button carries its own pending state;
- * `501` (non-Linux) and `409` (session already running) get explicit hints.
+ * Admin-only System 观测卡片，聚合两个只读端点：
+ * - `/api/v1/system/metrics`：进程/主机 CPU、cores、RSS 与容器内存（有则显示）。
+ * - `/api/v1/system/profile`：模块归因（固定 7 行）与热点方法 Top 10。
+ * 两者均 30s 轮询且静默失败——诊断数据缺失不应打扰设置页。
  */
-function PerformanceDiagnosticsCard() {
+function SystemObservabilityCard() {
   const { t } = useTranslation()
-  const toast = useToast()
-  const [seconds, setSeconds] = useState(String(PPROF_DEFAULT_SECONDS))
-  const [pending, setPending] = useState<'profile' | 'flamegraph' | 'memory' | 'capture' | null>(null)
-  const [selfload, setSelfload] = useState(true)
-  const queryClient = useQueryClient()
-
-  // Live snapshot for the two-scope display below; silent on failure since it
-  // is supplementary to the download buttons.
-  const memory = useQuery({
-    queryKey: debugKeys.memory(),
-    queryFn: () => debugApi.memory(),
+  const metrics = useQuery({
+    queryKey: debugKeys.metrics(),
+    queryFn: fetchSystemMetrics,
     refetchInterval: 30_000,
+    retry: false,
+  })
+  const profile = useQuery({
+    queryKey: debugKeys.profile(),
+    queryFn: fetchSystemProfile,
+    refetchInterval: 30_000,
+    retry: false,
   })
 
-  // Server-side CPU summary, polled quietly — replaces "download and open"
-  // as the primary path for reading CPU hotspots.
-  const cpuSummary = useQuery({
-    queryKey: debugKeys.cpuSummary(),
-    queryFn: () => fetchCpuSummary(),
-    refetchInterval: 30_000,
-  })
-
-  const parsedSeconds = Number(seconds)
-  const secondsValid =
-    Number.isInteger(parsedSeconds) && parsedSeconds >= 1 && parsedSeconds <= PPROF_MAX_SECONDS
-
-  const run = async (kind: 'profile' | 'flamegraph' | 'memory') => {
-    setPending(kind)
-    try {
-      if (kind === 'profile') await downloadCpuProfile(parsedSeconds, selfload)
-      else if (kind === 'flamegraph') await downloadFlamegraph(parsedSeconds, selfload)
-      else await downloadMemorySnapshot()
-      toast.success(t('pages.settings.pprofDownloaded'))
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 501) {
-        toast.error(t('pages.settings.pprofUnsupportedPlatform'))
-      } else if (error instanceof ApiError && error.status === 503) {
-        // 503 covers two distinct refusals — the deployment switch
-        // (PINGWAF_PPROF_ENABLED=0) and the load guard refusing a busy
-        // process — so surface the backend message verbatim: the guard
-        // variant carries the measured CPU value and the limit.
-        toast.error(error.message || t('pages.settings.pprofBusyProcess'))
-      } else if (error instanceof ApiError && error.status === 409) {
-        // 409 now covers both "another session is active" and "no samples /
-        // idle process" — prefer the backend's own guidance when present.
-        toast.error(
-          error.message || t('pages.settings.pprofBusy'),
-        )
-      } else {
-        handleApiError(error, { title: t('pages.settings.pprofFailed') })
-      }
-    } finally {
-      setPending(null)
-    }
-  }
-
-  // Blocking ~5s capture via the summary endpoint, then refresh the polled query.
-  const runCapture = async () => {
-    setPending('capture')
-    try {
-      await fetchCpuSummary({ capture: true, selfload })
-      await queryClient.invalidateQueries({ queryKey: debugKeys.cpuSummary() })
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 501) {
-        toast.error(t('pages.settings.pprofUnsupportedPlatform'))
-      } else if (error instanceof ApiError && (error.status === 409 || error.status === 503)) {
-        toast.error(error.message || t('pages.settings.pprofBusy'))
-      } else {
-        handleApiError(error, { title: t('pages.settings.pprofFailed') })
-      }
-    } finally {
-      setPending(null)
-    }
-  }
+  const mem = metrics.data?.memory
+  const cpu = metrics.data?.cpu
+  const container = mem?.container_memory_scope != null && mem.container_memory_used_bytes != null
 
   return (
     <Card>
       <CardHeader
-        title={t('pages.settings.pprof')}
-        description={t('pages.settings.pprofDescription')}
+        title={t('pages.settings.systemObs.title')}
+        description={t('pages.settings.systemObs.description')}
       />
       <CardBody className="flex flex-col gap-4">
-        <Input
-          type="number"
-          min={1}
-          max={PPROF_MAX_SECONDS}
-          label={t('pages.settings.pprofSeconds')}
-          hint={t('pages.settings.pprofSecondsHint', { max: PPROF_MAX_SECONDS })}
-          value={seconds}
-          error={seconds !== '' && !secondsValid ? t('pages.settings.pprofSecondsInvalid', { max: PPROF_MAX_SECONDS }) : undefined}
-          disabled={pending !== null}
-          onChange={(event) => setSeconds(event.target.value)}
-        />
-        <label
-          className="flex items-center gap-2 text-sm"
-          title={t('pages.settings.pprofSelfloadHint')}
-        >
-          <input
-            type="checkbox"
-            checked={selfload}
-            onChange={(e) => setSelfload(e.target.checked)}
-            disabled={pending !== null}
-          />
-          {t('pages.settings.pprofSelfload')}
-        </label>
-        {cpuSummary.data && (() => {
-          const s = cpuSummary.data
-          const capture = s.last_capture
-          const statusTone =
-            capture?.status === 'normal' ? 'success'
-            : capture?.status === 'high_load' || capture?.status === 'platform_limited' ? 'warning'
-            : 'neutral'
-          const statusLabel =
-            capture?.status === 'normal' ? t('pages.settings.pprofStatusNormal')
-            : capture?.status === 'high_load' ? t('pages.settings.pprofStatusHighLoad')
-            : capture?.status === 'idle' ? t('pages.settings.pprofStatusIdle')
-            : capture?.status === 'platform_limited' ? t('pages.settings.pprofStatusPlatformLimited')
-            : ''
-          return (
-            <div className="flex flex-col gap-2 rounded-lg bg-bg-subtle px-3 py-2 text-xs text-fg-subtle">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-medium text-fg-strong">
-                  {t('pages.settings.pprofSummaryTitle')}
-                </span>
-                {capture && <Badge tone={statusTone} size="sm">{statusLabel}</Badge>}
-              </div>
-              <div className="flex items-baseline gap-2">
-                <span className="text-2xl font-semibold text-fg-strong tabular-nums">
-                  {s.live.process_cpu_percent.toFixed(1)}%
-                </span>
-                <span>{t('pages.settings.pprofLiveProcessCpu')}</span>
-              </div>
-              <p className="flex items-baseline justify-between gap-2">
-                <span>{t('pages.settings.pprofLiveHostCpu')}</span>
-                <span className="font-medium text-fg-strong tabular-nums">
-                  {s.live.host_cpu_percent.toFixed(1)}% · {s.live.cores} cores
-                </span>
-              </p>
-              {capture ? (
-                <>
-                  <div className="mt-1 border-t border-line pt-2">
-                    <p className="mb-1 flex items-baseline justify-between gap-2">
-                      <span className="font-medium text-fg-strong">
-                        {t('pages.settings.pprofTopFrames')}
-                      </span>
-                      <span className="tabular-nums">
-                        {capture.total_samples} samples · {capture.window_secs}s
-                      </span>
-                    </p>
-                    {capture.top_frames.slice(0, 10).map((frame, i) => (
-                      <p
-                        key={`${frame.name}-${i}`}
-                        className="flex items-baseline justify-between gap-2 py-0.5"
-                        title={frame.name}
-                      >
-                        <span className="pw-mono truncate">{frame.name}</span>
-                        <span className="shrink-0 tabular-nums">
-                          {frame.samples} · {(frame.share * 100).toFixed(1)}%
-                        </span>
-                      </p>
-                    ))}
-                  </div>
-                  <p className="text-[11px] text-fg-subtle/70">
-                    {t('pages.dashboard.processResources.collectedAt', {
-                      time: formatDateTime(capture.collected_at_ms),
-                    })}
-                  </p>
-                </>
-              ) : (
-                <p className="text-[11px] text-fg-subtle/70">
-                  {t('pages.settings.pprofNoCapture')}
-                </p>
-              )}
-              <Button
-                size="sm"
-                variant="secondary"
-                loading={pending === 'capture'}
-                disabled={pending !== null}
-                icon={<Pulse weight="duotone" className="h-4 w-4" />}
-                onClick={() => void runCapture()}
-              >
-                {pending === 'capture'
-                  ? t('pages.settings.pprofCaptureRunning')
-                  : t('pages.settings.pprofCaptureNow')}
-              </Button>
-            </div>
-          )
-        })()}
-        <div className="flex flex-wrap gap-2">
-          <Button
-            variant="secondary"
-            loading={pending === 'profile'}
-            disabled={pending !== null || !secondsValid}
-            icon={<DownloadSimple weight="duotone" className="h-4 w-4" />}
-            onClick={() => void run('profile')}
-          >
-            {t('pages.settings.pprofCpuProfile')}
-          </Button>
-          <Button
-            variant="secondary"
-            loading={pending === 'flamegraph'}
-            disabled={pending !== null || !secondsValid}
-            icon={<DownloadSimple weight="duotone" className="h-4 w-4" />}
-            onClick={() => void run('flamegraph')}
-          >
-            {t('pages.settings.pprofFlamegraph')}
-          </Button>
-          <Button
-            variant="secondary"
-            loading={pending === 'memory'}
-            disabled={pending !== null}
-            icon={<DownloadSimple weight="duotone" className="h-4 w-4" />}
-            onClick={() => void run('memory')}
-          >
-            {t('pages.settings.pprofMemory')}
-          </Button>
-        </div>
-        {memory.data && (
-          <div className="rounded-lg bg-bg-subtle px-3 py-2 text-xs text-fg-subtle tabular-nums">
-            <p className="flex items-baseline justify-between gap-2">
-              <span>{t('pages.dashboard.processResources.processRss')}</span>
-              <span className="font-medium text-fg-strong">{formatSize(memory.data.rss_bytes)}</span>
-            </p>
-            {memory.data.container_memory_scope != null && (
-              <p className="mt-1 flex items-baseline justify-between gap-2">
-                <span>
-                  {t('pages.dashboard.processResources.containerMemoryScope', {
-                    scope: memory.data.container_memory_scope,
-                  })}
-                </span>
-                <span className="font-medium text-fg-strong">
-                  {formatSize(memory.data.container_memory_used_bytes ?? 0)} /{' '}
-                  {formatSize(memory.data.container_memory_limit_bytes ?? 0)}
-                </span>
-              </p>
-            )}
-            <p className="mt-1 flex items-baseline justify-between gap-2">
-              <span>{t('pages.dashboard.processResources.hostMemorySystem')}</span>
-              <span className="font-medium text-fg-strong">
-                {formatSize(memory.data.used_memory_bytes)} / {formatSize(memory.data.total_memory_bytes)}
-              </span>
-            </p>
-            <p className="mt-1 text-[11px] text-fg-subtle/70">
-              {t('pages.dashboard.processResources.collectedAt', {
-                time: formatDateTime(memory.data.collected_at_ms),
-              })}
+        {/* CPU / 内存速览 */}
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <div className="rounded-lg bg-bg-subtle px-3 py-2">
+            <p className="text-[11px] text-fg-subtle">{t('pages.settings.systemObs.processCpu')}</p>
+            <p className="text-lg font-semibold text-fg-strong tabular-nums">
+              {cpu ? `${cpu.process_cpu_percent.toFixed(1)}%` : '—'}
             </p>
           </div>
+          <div className="rounded-lg bg-bg-subtle px-3 py-2">
+            <p className="text-[11px] text-fg-subtle">{t('pages.settings.systemObs.hostCpu')}</p>
+            <p className="text-lg font-semibold text-fg-strong tabular-nums">
+              {cpu ? `${cpu.host_cpu_percent.toFixed(1)}%` : '—'}
+            </p>
+          </div>
+          <div className="rounded-lg bg-bg-subtle px-3 py-2">
+            <p className="text-[11px] text-fg-subtle">{t('pages.settings.systemObs.cores')}</p>
+            <p className="text-lg font-semibold text-fg-strong tabular-nums">{cpu?.cores ?? '—'}</p>
+          </div>
+          <div className="rounded-lg bg-bg-subtle px-3 py-2">
+            <p className="text-[11px] text-fg-subtle">{t('pages.settings.systemObs.rss')}</p>
+            <p className="text-lg font-semibold text-fg-strong tabular-nums">{mem?.rss ?? '—'}</p>
+          </div>
+        </div>
+        {container && (
+          <p className="rounded-lg bg-bg-subtle px-3 py-2 text-xs text-fg-subtle tabular-nums">
+            {t('pages.settings.systemObs.containerMemory', { scope: mem?.container_memory_scope })}:{' '}
+            <span className="font-medium text-fg-strong">
+              {mem?.container_memory_used} / {mem?.container_memory_limit}
+            </span>
+          </p>
         )}
+
+        {/* 模块归因表：固定 7 行 proxy/waf/cache/plugin/db/control/other */}
+        <div>
+          <p className="mb-2 text-[13px] font-medium text-fg-strong">
+            {t('pages.settings.systemObs.modules')}
+            {profile.data && (
+              <span className="ml-2 text-xs font-normal text-fg-subtle tabular-nums">
+                {t('pages.settings.systemObs.totalCpuMs', { value: profile.data.total_cpu_ms })}
+              </span>
+            )}
+          </p>
+          <div className="overflow-hidden rounded-lg border border-line">
+            <table className="w-full text-[13px]">
+              <thead>
+                <tr className="border-b border-line bg-bg-subtle text-left text-xs text-fg-subtle">
+                  <th className="px-3 py-1.5 font-medium">{t('pages.settings.systemObs.module')}</th>
+                  <th className="px-3 py-1.5 text-right font-medium">{t('pages.settings.systemObs.cpuMs')}</th>
+                  <th className="px-3 py-1.5 text-right font-medium">{t('pages.settings.systemObs.cpuShare')}</th>
+                  <th className="px-3 py-1.5 text-right font-medium">{t('pages.settings.systemObs.memBytes')}</th>
+                  <th className="px-3 py-1.5 text-right font-medium">{t('pages.settings.systemObs.calls')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(profile.data?.modules ?? []).slice(0, 7).map((m) => (
+                  <tr key={m.module} className="border-b border-line/60 last:border-0">
+                    <td className="px-3 py-1.5 font-medium text-fg">{m.module}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{m.cpu_ms.toFixed(1)}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{m.cpu_share.toFixed(1)}%</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{formatSize(m.mem_bytes)}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{m.calls}</td>
+                  </tr>
+                ))}
+                {profile.data && profile.data.modules.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="px-3 py-3 text-center text-xs text-fg-subtle">
+                      {t('pages.settings.systemObs.noData')}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Top 方法表：最多 10 行，按 cpu_ms 降序 */}
+        <div>
+          <p className="mb-2 text-[13px] font-medium text-fg-strong">
+            {t('pages.settings.systemObs.topMethods')}
+          </p>
+          <div className="overflow-hidden rounded-lg border border-line">
+            <table className="w-full text-[13px]">
+              <thead>
+                <tr className="border-b border-line bg-bg-subtle text-left text-xs text-fg-subtle">
+                  <th className="px-3 py-1.5 font-medium">{t('pages.settings.systemObs.method')}</th>
+                  <th className="px-3 py-1.5 text-right font-medium">{t('pages.settings.systemObs.cpuMs')}</th>
+                  <th className="px-3 py-1.5 text-right font-medium">{t('pages.settings.systemObs.calls')}</th>
+                  <th className="px-3 py-1.5 text-right font-medium">{t('pages.settings.systemObs.avgUs')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(profile.data?.methods ?? []).slice(0, 10).map((m) => (
+                  <tr key={m.method} className="border-b border-line/60 last:border-0">
+                    <td className="pw-mono max-w-[280px] truncate px-3 py-1.5 text-fg" title={m.method}>
+                      {m.method}
+                    </td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{m.cpu_ms.toFixed(1)}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{m.calls}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{m.avg_us.toFixed(1)}</td>
+                  </tr>
+                ))}
+                {profile.data && profile.data.methods.length === 0 && (
+                  <tr>
+                    <td colSpan={4} className="px-3 py-3 text-center text-xs text-fg-subtle">
+                      {t('pages.settings.systemObs.noData')}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
         <p className="flex items-start gap-2 text-xs leading-relaxed text-fg-subtle">
           <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0" />
-          {t('pages.settings.pprofHint')}
+          {t('pages.settings.systemObs.hint')}
         </p>
       </CardBody>
     </Card>

@@ -39,7 +39,6 @@ export function NodeDialog({
   const [form, setForm] = useState<NodeFormState>(() =>
     request.mode === 'edit'
       ? {
-          name: request.node.name,
           address: request.node.address,
           weight: String(request.node.weight),
           poolId: request.node.pool_id,
@@ -66,11 +65,6 @@ export function NodeDialog({
 
   const submit = () => {
     setError(null)
-    const name = form.name.trim()
-    if (!name || name.length > 100) {
-      setError(t('pages.basic.errors.nameRequired'))
-      return
-    }
     const parsed = parseOriginAddress(form.address)
     if ('error' in parsed) {
       setError(t(`pages.basic.${parsed.error}`))
@@ -88,10 +82,10 @@ export function NodeDialog({
     }
 
     if (editing) {
-      save.mutate({ id: editing.id, payload: { name, address, weight, pool_id: form.poolId } })
+      save.mutate({ id: editing.id, payload: { address, weight, pool_id: form.poolId } })
       return
     }
-    save.mutate({ payload: { name, address, weight, pool_id: form.poolId } })
+    save.mutate({ payload: { address, weight, pool_id: form.poolId } })
   }
 
   return (
@@ -124,13 +118,6 @@ export function NodeDialog({
           required
         />
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <Input
-            label={t('pages.basic.nodeName')}
-            value={form.name}
-            placeholder={t('pages.basic.nodeNamePlaceholder')}
-            onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-            required
-          />
           <Input
             label={t('pages.basic.nodeWeight')}
             type="number"

@@ -117,6 +117,10 @@ pub mod site_upstreams {
         pub id: Uuid,
         pub site_id: Uuid,
         pub pool_id: Uuid,
+        /// Kept for the upcoming node-group feature; not part of the API
+        /// surface (the node name never took part in forwarding, load
+        /// balancing or health checks).
+        #[serde(skip_serializing)]
         pub name: String,
         pub address: String,
         pub weight: i32,

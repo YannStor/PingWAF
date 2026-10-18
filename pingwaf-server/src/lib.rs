@@ -103,7 +103,6 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
 
     // ── 6. Build shared state ────────────────────────────────────────────────
     let agents = AgentRegistry::new();
-    let debug_listen_addr = config.debug_listen_addr.clone();
     let shared_config = Arc::new(config);
 
     // ── 6b. Optional Elasticsearch log shipper ──────────────────────────────
@@ -195,43 +194,6 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
     notify_manager.reload().await;
     let _notify_reload_handle = start_notify_reload_loop(state.clone());
     let _self_monitor_handle = notify::self_monitor::start(state.clone());
-
-    // ── 6g. Loopback diagnostics listener (optional) ────────────────────────
-    // Serves the pprof endpoints **without Bearer auth** on 127.0.0.1 only —
-    // the loopback interface is the trust boundary, so `go tool pprof` /
-    // `jeprof` work without exchanging a token. Off unless explicitly set;
-    // non-loopback addresses are rejected before binding.
-    if let Some(raw_addr) = &debug_listen_addr {
-        let addr: SocketAddr = raw_addr.parse().map_err(|e| {
-            anyhow::anyhow!("invalid debug_listen_addr '{raw_addr}': {e}")
-        })?;
-        if !addr.ip().is_loopback() {
-            return Err(anyhow::anyhow!(
-                "debug_listen_addr must bind a loopback address (127.0.0.1 \
-                 or ::1) — refusing to expose the unauthenticated debug \
-                 endpoints on '{addr}'"
-            ));
-        }
-        let app = api::debug::loopback_routes().with_state(state.clone());
-        let listener = TcpListener::bind(addr).await.map_err(|err| {
-            anyhow::anyhow!(
-                "failed to bind the loopback diagnostics listener on \
-                     {addr}: {err}"
-            )
-        })?;
-        tracing::info!(
-            addr = %addr,
-            "loopback diagnostics listener started (no auth, localhost only)"
-        );
-        tokio::spawn(async move {
-            if let Err(err) = axum::serve(listener, app).await {
-                tracing::error!(
-                    error = %err,
-                    "loopback diagnostics listener stopped"
-                );
-            }
-        });
-    }
 
     if control_tls.is_enabled() {
         match api::system_tls::load_active_certificate(&state).await {

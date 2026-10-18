@@ -195,14 +195,12 @@ export function poolHealthCheckPayload(form: PoolFormState): {
 }
 
 export interface NodeFormState {
-  name: string
   address: string
   weight: string
   poolId: string
 }
 
 export const emptyNodeForm = (poolId: string): NodeFormState => ({
-  name: '',
   address: '',
   weight: '1',
   poolId,

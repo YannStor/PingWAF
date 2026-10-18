@@ -213,6 +213,8 @@ pub struct Server {
     downstream_read_timeout: Option<Duration>,
     // downstream write timeout
     downstream_write_timeout: Option<Duration>,
+    // requests per downstream keep-alive connection
+    keepalive_request_limit: Option<u32>,
 
     // server locations
     server_locations_provider: Arc<dyn ServerLocationsProvider>,
@@ -481,6 +483,7 @@ impl Server {
             modules: conf.modules.clone(),
             downstream_read_timeout: conf.downstream_read_timeout,
             downstream_write_timeout: conf.downstream_write_timeout,
+            keepalive_request_limit: conf.keepalive_request_limit,
             server_locations_provider: ctx.server_locations_provider,
             location_provider: ctx.location_provider,
             upstream_provider: ctx.upstream_provider,
@@ -611,6 +614,7 @@ impl Server {
         let client_ca_pem = self.client_ca_pem.clone();
         let h2_options = self.new_h2_options();
         let h2_idle_timeout = self.h2_idle_timeout;
+        let keepalive_request_limit = self.keepalive_request_limit;
         #[cfg(feature = "tracing")]
         let pool_observer = self.prometheus.clone();
         let builder = ProxyServiceBuilder::new(&conf, self)
@@ -635,6 +639,10 @@ impl Server {
             // use h2c if not tls and enable http2
             http_server_options.h2c = !is_tls && enabled_h2;
             http_server_options.h2_idle_timeout = h2_idle_timeout;
+            // Bounds HTTP/1.1 keep-alive connection age (pingora 0.9 has no
+            // h1 idle timeout, so request count is the supported cap).
+            http_server_options.keepalive_request_limit =
+                keepalive_request_limit;
             http_logic.server_options = Some(http_server_options);
             // Applies to every h2 handshake this listener performs, TLS/ALPN
             // and h2c alike. None keeps pingora's bounded defaults.
@@ -1379,6 +1387,10 @@ impl ProxyHttp for Server {
     {
         debug!(target: LOG_TARGET, "--> request filter");
         defer!(debug!(target: LOG_TARGET, "<-- request filter"););
+        // Module attribution (see pingwaf-profiler): one relaxed add on drop.
+        let _profile = pingwaf_profiler::timed(pingwaf_profiler::Module::Proxy);
+        let _profile_method =
+            pingwaf_profiler::timed_method("proxy::request_filter");
         // pingora cannot stop after early_request_filter, so a plugin that
         // answered at the EarlyRequest step arrives here with its response
         // already on the wire. Nothing else writes one before this point,

@@ -41,6 +41,8 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 walkdir = { workspace = true }
 
+pingwaf-profiler = { path = "../pingwaf-profiler" }
+
 [dev-dependencies]
 filetime = { workspace = true }
 pretty_assertions = { workspace = true }

@@ -3077,8 +3077,6 @@ credentials).
 | `get_defense_status` | | Observation mode and the control plane's own guards. |
 | `list_ip_groups` | | Shared IP groups with size and sync state. |
 | `query_control_plane_logs` | | The 9080 access log, including allowlist/WAF verdicts. |
-| `profile_memory` | | Memory snapshot of the control-plane process (process RSS) plus host-level totals, and container (cgroup) figures inside a memory-limited container — the numbers `docker stats` reports; scope notes included; cached for a few seconds. |
-| `profile_cpu` | | Capture a CPU profile of the control plane (`seconds` 1-5 default 5, `frequency` 1-199 default 99) and return a summary, a self-contained SVG dashboard and reading notes; status covers `normal`/`high_load`/`idle`. Linux-only sampling — other platforms get a live point-in-time readout (`platform_limited`); repeated calls within 60 seconds replay the cached capture. |
 | `set_observation_mode` | ✓ | Turn global observation mode on or off. |
 | `set_site_status` | ✓ | Activate or pause one site. |
 
@@ -3096,122 +3094,106 @@ audit — that clients can surface as one-click actions.
 
 ---
 
-## Debug & Profiling
+## System Observation
 
-Built-in pprof-style profiling of the control-plane process. All endpoints require an admin token. Sampling is process-global: while a capture is running, further requests return `409 Conflict`.
+Read-only self-observation of the process (successor of the removed pprof
+endpoints — see [Profiling](profiling.md#what-changed-vs-pprof) for the
+migration table). Both endpoints require an admin token, work on every
+platform and in every build, and have no enable switch.
 
-When `PINGWAF_DEBUG_LISTEN_ADDR` is set, the same pprof endpoint set is additionally served on a loopback-only listener **without auth** (non-loopback bind addresses are rejected at startup; default off) — see [Profiling](profiling.md#loopback-diagnostics-listener).
+### GET /system/metrics
 
-CPU sampling requires Linux (the only platform with a signal-safe unwinder for the sampling handler); on other platforms the capture endpoints return `501 Not Implemented`, while `/debug/pprof/memory` works everywhere.
-
-All CPU captures (and heap dumps) are gated by the `[basic] pprof_enabled` debug-capture switch (default on; legacy `PINGWAF_PPROF_ENABLED` env fallback, changes need a restart): when it is off, the capture endpoints and `/debug/pprof/heap` answer `503 Service Unavailable`, while the read-only snapshots keep working. See [Profiling](profiling.md#capture-audit-and-the-enable-switch).
-
-Symbols are resolved from the binary's symbol table. The default `release` profile strips symbols, so most frames read `Unknown` — profile a `release-perf` build (`make release-perf`) to get readable flame graphs.
-
-### GET /debug/pprof/profile
-
-Capture CPU samples and return a gzip-compressed pprof protobuf consumable by `go tool pprof` and speedscope.
-
-**Query:** `?seconds=5&frequency=99` — capture window (1-5 s, default 5; the default is also the hard ceiling) and sampling frequency in Hz (1-250, default 99). Appending `&selfload=true` generates light in-process load for exactly the window, so an idle process — whose time-based sampler would otherwise record nothing (the endpoints answer `409`) — still produces a profile; the profile then shows the runtime and the synthetic load, not site handlers. Captures are refused with `503 Service Unavailable` when the process is using more than 40% of one core at start (see [Load guard](profiling.md#load-guard)).
-
-```bash
-go tool pprof -http=: -insecure https://localhost:9080/api/v1/debug/pprof/profile?seconds=5
-```
-
-### GET /debug/pprof/flamegraph
-
-Capture CPU samples and return an SVG flamegraph as a **forced download**
-(`Content-Disposition: attachment; filename="flamegraph.svg"`) rather than
-inline content. Same query parameters as above.
-
-```bash
-curl -k -H "Authorization: Bearer $TOKEN" \
-  "https://localhost:9080/api/v1/debug/pprof/flamegraph?seconds=5" > flamegraph.svg
-```
-
-### GET /debug/pprof/cpu/summary
-
-Bounded aggregated readout consumed by the console's Performance diagnostics card and the MCP `profile_cpu` tool: one KB-scale JSON body with the live CPU snapshot plus the server-cached summary of the most recent capture. Without query parameters it costs one `cpu/metrics`-style snapshot and reads the cache — zero sampling overhead — and answers normally even with captures switched off.
-
-**Response (200):** `{ live, last_capture }`, where `live` is the same shape as `cpu/metrics` and `last_capture` is `null` until the first capture completes, then carries:
-
-```json
-{
-  "total_samples": 470,
-  "frequency": 99,
-  "window_secs": 5,
-  "cpu_secs": 0.9,
-  "process_cpu_fraction": 0.18,
-  "top_frames": [
-    { "name": "pingap_proxy::forward", "samples": 152, "share": 0.32 }
-  ],
-  "status": "normal",
-  "collected_at_ms": 1760000000000
-}
-```
-
-`top_frames` is capped at the 10 hottest functions (`name` / inclusive `samples` / `share` of the window); `status` is `normal` | `high_load` | `idle` | `platform_limited`. The cache holds only the latest summary and is refreshed by every finished capture (`profile`, `flamegraph`, `cpu/dashboard.svg`, and this endpoint's own capture).
-
-**Query:** `?capture=true` runs a fresh capture before answering (additional `seconds` / `frequency` / `selfload` accepted, `seconds` defaulting to 5 — the hard ceiling). The capture passes the 40% load guard (`503` on refusal, audited as `load_guard`); an idle window returns an `idle`-status summary instead of `409`. This capture path is a real sampling session and honours the `pprof_enabled` switch: when the switch is off it answers `503 service_unavailable` (see [Profiling](profiling.md#summary-endpoint-bounded-aggregated-readout)).
-
-### POST /debug/pprof/cpu/summary/import
-
-Decode a previously downloaded pprof protobuf body (the exact wire format `GET /debug/pprof/profile` exports) into the same bounded summary — no browser or external `go tool pprof` needed. Stateless: starts no capture and does not change the server's last-capture cache.
-
-**Request body:** raw pprof protobuf bytes (`application/octet-stream`).
-
-**Weight semantics:** pprof CPU profiles record per-sample values in CPU nanoseconds, so `total_samples` and per-frame `samples` weights are CPU nanoseconds (not sample counts); the proportional `share` values are unaffected, and `frequency` is reported as `0` (unrecoverable from the file).
-
-**Response (200):** a single `CpuCaptureSummary` object as above. Malformed bodies answer with the profiling error envelope and are audited like a failed capture.
-
-```bash
-curl -k -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/octet-stream" \
-  --data-binary @pingwaf-cpu.pb.gz \
-  "https://localhost:9080/api/v1/debug/pprof/cpu/summary/import"
-```
-
-### GET /debug/pprof/memory
-
-JSON snapshot of process RSS and system memory (no sampling, returns immediately).
+Point-in-time snapshot of process/host CPU and memory. No sampling and no
+state: the handler reads counters the OS already keeps (off the async runtime)
+and answers immediately.
 
 **Response (200):**
 ```json
 {
-  "rss_bytes": 120258048,
-  "virtual_bytes": 805984256,
-  "total_memory_bytes": 17179869184,
-  "used_memory_bytes": 9663676416,
-  "rss": "121.2 MB",
-  "total_memory": "16.0 GB",
-  "used_memory": "9.0 GB",
-  "collected_at_ms": 1727443200000
+  "cpu": {
+    "process_cpu_percent": 12.5,
+    "host_cpu_percent": 8.1,
+    "cores": 4,
+    "collected_at_ms": 1760000000000
+  },
+  "memory": {
+    "rss_bytes": 120258048,
+    "virtual_bytes": 805984256,
+    "total_memory_bytes": 17179869184,
+    "used_memory_bytes": 9663676416,
+    "rss": "121.2 MB",
+    "total_memory": "16.0 GB",
+    "used_memory": "9.0 GB",
+    "collected_at_ms": 1727443200000,
+    "used_memory_scope": "system",
+    "process_memory_scope": "process",
+    "container_memory_used_bytes": 805306368,
+    "container_memory_limit_bytes": 1073741824,
+    "container_memory_used": "805.3 MB",
+    "container_memory_limit": "1.0 GB",
+    "container_memory_scope": "cgroup_v2"
+  }
 }
 ```
 
-### GET /debug/pprof/heap
-
-Jeprof-format heap profile (`mem-prof` diagnostic builds only; other builds
-answer `501 Not Implemented`). The endpoint triggers a jemalloc `prof.dump`
-and returns the dump as an attachment (`application/octet-stream`,
-`Content-Disposition: attachment; filename="pingwaf-heap.<pid>.prof"`,
-`no-store`) — every live allocation path with its retained byte count. This
-is the tool for "which function allocates / retains memory"; a CPU flame
-graph answers CPU attribution instead.
-
-Requirements: build with `--features mem-prof` (swaps the global allocator to
-tikv-jemallocator — diagnostic builds only, not for production images) and
-run with `MALLOC_CONF=prof:true`. Render with `jeprof --svg <binary> <dump>`.
-The endpoint is read-only (no sampling session) but gated by the
-`pprof_enabled` debug-capture switch: with captures off it answers `503`.
-Control plane only — the data-plane admin plugin does not expose it.
+`cpu.process_cpu_percent` is percent of one core (multi-threaded work can
+exceed 100); `memory.total_memory_bytes` / `used_memory_bytes` are **host**
+figures, marked by `used_memory_scope: "system"` vs
+`process_memory_scope: "process"` for `rss`. The `container_memory_*` fields
+are present only when a container memory limit applies and match what
+`docker stats` reports — prefer them over the host totals in that case.
 
 ```bash
 curl -k -H "Authorization: Bearer $TOKEN" \
-  "https://localhost:9080/api/v1/debug/pprof/heap" -o pingwaf-heap.prof
+  "https://localhost:9080/api/v1/system/metrics"
 ```
 
-The data plane (pingap) exposes the same three endpoints under its admin path: `GET {admin-path}/api/pprof/profile`, `.../flamegraph` and `.../memory`, authenticated by the admin plugin's credentials. See [Profiling](profiling.md).
+### GET /system/profile
+
+CPU and memory attribution by module and method — pure Rust instrumentation
+(`pingwaf-profiler`), not a sampled profile: module-level atomic counters
+(`cpu_ns` / `mem_bytes` / `calls`) plus `timed_method` timers on instrumented
+hot paths. No sampling, no stack unwinding, no allocator hook, no external
+tool or image; the overhead is one relaxed atomic add per recording point.
+Counters are cumulative since process start; take two snapshots and compare
+deltas for a live view.
+
+**Response (200):**
+
+```json
+{
+  "collected_at_ms": 1760000000000,
+  "total_cpu_ms": 48213.4,
+  "modules": [
+    { "module": "proxy",  "cpu_ms": 30102.1, "cpu_share": 0.62, "mem_bytes": 41943040, "mem_share": 0.55, "calls": 102341, "avg_us": 294.1 },
+    { "module": "waf",    "cpu_ms": 11101.2, "cpu_share": 0.23, "mem_bytes": 8388608,  "mem_share": 0.11, "calls": 98111,  "avg_us": 113.1 }
+  ],
+  "methods": [
+    { "method": "waf::evaluate",  "cpu_ms": 9200.4, "calls": 98111, "avg_us": 93.8 },
+    { "method": "proxy::forward", "cpu_ms": 7100.9, "calls": 88430, "avg_us": 80.3 }
+  ]
+}
+```
+
+- `modules` — always exactly 7 rows in fixed order: `proxy`, `waf`, `cache`,
+  `plugin`, `db`, `control`, `other` (anything not yet instrumented).
+  `cpu_share` is the share of `total_cpu_ms`; `mem_bytes` is bytes the module
+  currently reports as held (reported, not intercepted — no allocator hook),
+  with `mem_share` its share of the total; `calls` / `avg_us` are the timed
+  operation count and average microseconds per operation.
+- `methods` — named call sites, hottest first, capped at 40 rows, same
+  semantics as the module rows.
+- `collected_at_ms` — Unix epoch milliseconds of the snapshot.
+
+The response is bounded by construction (7 module rows, at most 40 method
+rows, KB-scale JSON) and computed from atomics, so polling it is cheap. See
+[Profiling](profiling.md#get-apiv1systemprofile) for field tables and the
+reading recipe.
+
+```bash
+curl -k -H "Authorization: Bearer $TOKEN" \
+  "https://localhost:9080/api/v1/system/profile"
+```
 
 ---
 

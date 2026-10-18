@@ -26,10 +26,8 @@ use tracing::info;
 /// v2 enum bundled by libmimalloc-sys 0.1.49 (show_errors … eager_commit_
 /// delay=14, purge_delay=15). Re-check on dependency upgrades — the
 /// compile-time pin below is intentional.
-#[cfg(not(feature = "mem-prof"))]
 const MI_OPTION_PURGE_DELAY: std::os::raw::c_int = 15;
 
-#[cfg(not(feature = "mem-prof"))]
 unsafe extern "C" {
     /// mimalloc v2 runtime option setter (statically linked into this
     /// binary by the `mimalloc` crate).
@@ -84,13 +82,12 @@ fn env_override() -> Option<(i64, &'static str)> {
 pub fn apply() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        let total = pingwaf_pprof::total_bytes();
+        let total = pingwaf_system::total_bytes();
         let (delay, source) = match env_override() {
             Some(pair) => pair,
             None => (purge_delay_for(total.unwrap_or(0)), "adaptive"),
         };
 
-        #[cfg(not(feature = "mem-prof"))]
         let effective = {
             // SAFETY: mi_option_set is mimalloc v2's documented runtime API
             // and the allocator is statically linked into this binary. The
@@ -99,12 +96,6 @@ pub fn apply() {
                 mi_option_set(MI_OPTION_PURGE_DELAY, delay);
                 mi_option_get(MI_OPTION_PURGE_DELAY)
             }
-        };
-        #[cfg(feature = "mem-prof")]
-        let effective = {
-            // Diagnostic builds use jemalloc; its decay is compiled in by
-            // the mem-prof image, nothing to tune here.
-            delay
         };
 
         // Startup diagnostics: stderr is the only reliable channel this

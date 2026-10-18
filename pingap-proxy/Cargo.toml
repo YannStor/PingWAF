@@ -36,6 +36,8 @@ snafu = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
+pingwaf-profiler = { path = "../pingwaf-profiler" }
+
 [dev-dependencies]
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
