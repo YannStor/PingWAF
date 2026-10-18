@@ -28,7 +28,7 @@ RUN npm run build
 FROM mirror.gcr.io/library/rust:1.98.1-bookworm AS builder
 
 # Bake the heap-profiling conf into jemalloc at build time.
-ENV JEMALLOC_SYS_WITH_MALLOC_CONF=prof:true,lg_prof_sample:19,lg_prof_interval:32
+ENV JEMALLOC_SYS_WITH_MALLOC_CONF=prof:true,lg_prof_sample:12,lg_prof_interval:32
 
 # SYNC: keep this list in lockstep with Dockerfile / ci.yml / release.yml
 RUN apt-get update && apt-get install -y --no-install-recommends \
