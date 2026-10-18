@@ -26,12 +26,18 @@ pub const PENDING_COMMAND_LIMIT: usize = 64;
 struct Connection {
     sender: mpsc::Sender<ServerCommand>,
     connected_at: DateTime<Utc>,
+    /// Monotonic per-registry stream id. Teardown only removes the entry
+    /// when this id still matches, so a stale stream finishing after the
+    /// agent reconnected cannot delete the live connection (2026-10-18
+    /// audit: the old stream used to mark the new one offline).
+    generation: u64,
 }
 
 #[derive(Default)]
 struct Inner {
     connected: HashMap<Uuid, Connection>,
     pending: HashMap<Uuid, VecDeque<ServerCommand>>,
+    next_generation: u64,
 }
 
 /// Cheap-to-clone handle to the live agent connections.
@@ -59,13 +65,16 @@ impl AgentRegistry {
         &self,
         agent_id: Uuid,
         sender: mpsc::Sender<ServerCommand>,
-    ) -> VecDeque<ServerCommand> {
+    ) -> (u64, VecDeque<ServerCommand>) {
         let mut inner = self.inner.write().await;
+        inner.next_generation = inner.next_generation.wrapping_add(1);
+        let generation = inner.next_generation;
         inner.connected.insert(
             agent_id,
             Connection {
                 sender,
                 connected_at: Utc::now(),
+                generation,
             },
         );
         let drained = inner.pending.remove(&agent_id).unwrap_or_default();
@@ -76,14 +85,61 @@ impl AgentRegistry {
                 "delivering commands queued while the agent was offline"
             );
         }
-        drained
+        (generation, drained)
     }
 
-    /// Drops the connection when a heartbeat stream ends.
-    pub async fn disconnect(&self, agent_id: &Uuid) {
+    /// Drops the connection when a heartbeat stream ends. Only the stream
+    /// that owns the current generation may remove it (see [`Connection`]).
+    pub async fn disconnect(&self, agent_id: &Uuid, generation: u64) {
+        let mut inner = self.inner.write().await;
+        let current = inner
+            .connected
+            .get(agent_id)
+            .map(|connection| connection.generation);
+        match current {
+            Some(current) if current == generation => {
+                inner.connected.remove(agent_id);
+                tracing::debug!(%agent_id, "agent heartbeat stream closed");
+            },
+            Some(_) => {
+                tracing::debug!(
+                    %agent_id,
+                    "stale heartbeat stream closed; keeping the live connection"
+                );
+            },
+            None => {},
+        }
+    }
+
+    /// Unconditionally drops the connection (REST-triggered disconnect, where
+    /// the caller has no stream generation). The stream's own teardown then
+    /// sees no matching entry and does nothing.
+    pub async fn force_disconnect(&self, agent_id: &Uuid) {
         let mut inner = self.inner.write().await;
         if inner.connected.remove(agent_id).is_some() {
-            tracing::debug!(%agent_id, "agent heartbeat stream closed");
+            tracing::debug!(%agent_id, "agent connection closed by request");
+        }
+    }
+
+    /// Forgets queued commands for agents that no longer exist. Called by
+    /// the offline-agent sweep so `pending` cannot outlive the rows it
+    /// belongs to.
+    pub async fn forget(&self, agent_ids: &[Uuid]) {
+        if agent_ids.is_empty() {
+            return;
+        }
+        let mut inner = self.inner.write().await;
+        let mut dropped = 0usize;
+        for agent_id in agent_ids {
+            if inner.pending.remove(agent_id).is_some() {
+                dropped += 1;
+            }
+        }
+        if dropped > 0 {
+            tracing::info!(
+                agents = dropped,
+                "dropped queued commands for pruned agents"
+            );
         }
     }
 
@@ -226,7 +282,7 @@ mod tests {
         assert_eq!(registry.pending_count(&agent).await, 1);
 
         let (tx, mut rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
-        let drained = registry.connect(agent, tx).await;
+        let (generation, drained) = registry.connect(agent, tx).await;
         assert_eq!(drained.len(), 1);
         assert_eq!(registry.pending_count(&agent).await, 0);
         assert!(registry.is_connected(&agent).await);
@@ -234,7 +290,15 @@ mod tests {
         assert!(registry.send_command(&agent, restart("b")).await);
         assert!(rx.try_recv().is_ok());
 
-        registry.disconnect(&agent).await;
+        registry.disconnect(&agent, generation).await;
+        assert!(!registry.is_connected(&agent).await);
+
+        // A stale stream (older generation) must not remove a live one.
+        let (tx, _rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+        let (new_generation, _) = registry.connect(agent, tx).await;
+        registry.disconnect(&agent, generation).await;
+        assert!(registry.is_connected(&agent).await);
+        registry.disconnect(&agent, new_generation).await;
         assert!(!registry.is_connected(&agent).await);
     }
 

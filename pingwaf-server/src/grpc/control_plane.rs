@@ -361,7 +361,7 @@ impl ControlPlaneTrait for ControlPlaneService {
 
         let (sender, receiver) =
             mpsc::channel::<ServerCommand>(COMMAND_CHANNEL_CAPACITY);
-        let queued = self.agents.connect(agent_id, sender).await;
+        let (generation, queued) = self.agents.connect(agent_id, sender).await;
         for command in queued {
             // The registry owns the sender now, so replay through it.
             self.agents.send_command(&agent_id, command).await;
@@ -376,7 +376,7 @@ impl ControlPlaneTrait for ControlPlaneService {
             .record_heartbeat(agent_id, &first.site_statuses)
             .await;
         tokio::spawn(async move {
-            persist_heartbeat(&db, agent_id, &first).await;
+            persist_heartbeat(&db, agent_id, &first, &registry).await;
             persist_host_samples(&db, agent_id, &first.host_samples).await;
             persist_blocked_ips(&db, agent_id, &first.blocked_ips).await;
             record_upstream_health(&db, agent_id, &first.upstream_health).await;
@@ -391,7 +391,7 @@ impl ControlPlaneTrait for ControlPlaneService {
                 cache_status
                     .record_heartbeat(agent_id, &message.site_statuses)
                     .await;
-                persist_heartbeat(&db, agent_id, &message).await;
+                persist_heartbeat(&db, agent_id, &message, &registry).await;
                 persist_host_samples(&db, agent_id, &message.host_samples)
                     .await;
                 persist_blocked_ips(&db, agent_id, &message.blocked_ips).await;
@@ -399,7 +399,7 @@ impl ControlPlaneTrait for ControlPlaneService {
                     .await;
             }
             mark_offline(&db, agent_id).await;
-            registry.disconnect(&agent_id).await;
+            registry.disconnect(&agent_id, generation).await;
             tracing::info!(%agent_id, "agent heartbeat stream ended");
         });
 
@@ -858,6 +858,7 @@ async fn persist_heartbeat(
     db: &DatabaseConnection,
     agent_id: Uuid,
     message: &AgentHeartbeat,
+    registry: &AgentRegistry,
 ) {
     // Server time, not the agent's clock: liveness thresholds compare
     // `last_heartbeat` against Utc::now(), so trusting the reported timestamp
@@ -923,7 +924,7 @@ async fn persist_heartbeat(
 
     sweep_stale_pending_certificates(db).await;
 
-    sweep_offline_agents(db).await;
+    sweep_offline_agents(db, registry).await;
 }
 
 /// Writes the per-site certificate state reported by the edge back onto its
@@ -1507,7 +1508,10 @@ async fn sweep_agent_metrics(db: &DatabaseConnection, retention_days: i64) {
 /// Deletes agent rows that have been offline beyond the retention window, at
 /// most once an hour. Child rows are safe: host samples cascade, log rows
 /// keep their agent_id only as a nullable reference.
-async fn sweep_offline_agents(db: &DatabaseConnection) {
+async fn sweep_offline_agents(
+    db: &DatabaseConnection,
+    registry: &AgentRegistry,
+) {
     let now = Utc::now();
     let previous = LAST_AGENT_SWEEP.swap(now.timestamp(), Ordering::Relaxed);
     let swept_recently = DateTime::from_timestamp(previous, 0)
@@ -1558,13 +1562,16 @@ async fn sweep_offline_agents(db: &DatabaseConnection) {
     // Drop the matching in-memory state so the maps stay proportional to
     // the live inventory rather than to every agent ever seen.
     let stale_set: std::collections::HashSet<Uuid> =
-        stale.into_iter().collect();
+        stale.iter().copied().collect();
     if let Ok(mut buckets) = LAST_PERSISTED_BUCKET.lock() {
         buckets.retain(|id, _| !stale_set.contains(id));
     }
     if let Ok(mut strikes) = RESOURCE_STRIKES.lock() {
         strikes.retain(|(id, _), _| !stale_set.contains(id));
     }
+    // Queued commands would otherwise stay forever for agents whose rows are
+    // gone (2026-10-18 audit).
+    registry.forget(&stale).await;
 }
 
 /// Timestamps come from the agent's own clock. Anything outside the retention

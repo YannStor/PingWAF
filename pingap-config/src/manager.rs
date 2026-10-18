@@ -104,7 +104,18 @@ impl PingapTomlConfig {
         &self,
         replace_include: bool,
     ) -> Result<PingapConfig> {
-        convert_toml_config(self, replace_include)
+        let mut config = convert_toml_config(self, replace_include)?;
+        // A location without its own cap inherits the basic-level default.
+        // Absent everywhere stays unlimited (historic behaviour), so this is
+        // opt-in (2026-10-18 audit).
+        if let Some(global) = config.basic.client_max_body_size {
+            for location in config.locations.values_mut() {
+                if location.client_max_body_size.is_none() {
+                    location.client_max_body_size = Some(global);
+                }
+            }
+        }
+        Ok(config)
     }
 
     fn get_toml(&self, category: &Category, name: &str) -> Result<String> {
@@ -634,6 +645,38 @@ mod tests {
     use super::*;
     use nanoid::nanoid;
     use pretty_assertions::assert_eq;
+
+    /// The global body cap fills locations that do not set their own and
+    /// leaves explicit values alone (2026-10-18 audit).
+    #[test]
+    fn global_body_limit_fills_only_unset_locations() {
+        let raw = r#"
+[basic]
+client_max_body_size = "8MB"
+
+[upstreams.u]
+addrs = ["127.0.0.1:7080"]
+
+[locations.a]
+upstream = "u"
+
+[locations.b]
+upstream = "u"
+client_max_body_size = "1MB"
+"#;
+        let config = PingapTomlConfig::from_toml(raw)
+            .expect("toml")
+            .to_pingap_config(true)
+            .expect("config");
+        assert_eq!(
+            config.locations["a"].client_max_body_size,
+            Some(bytesize::ByteSize::mb(8))
+        );
+        assert_eq!(
+            config.locations["b"].client_max_body_size,
+            Some(bytesize::ByteSize::mb(1))
+        );
+    }
 
     fn new_pingap_config() -> PingapTomlConfig {
         let basic_config = r#"auto_restart_check_interval = "1s"

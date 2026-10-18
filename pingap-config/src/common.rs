@@ -1171,6 +1171,12 @@ const H2_MAX_WINDOW_SIZE: u64 = (1 << 31) - 1;
 pub struct BasicConf {
     /// Application name
     pub name: Option<String>,
+    /// Global request-body cap applied to locations that do not set their
+    /// own `client_max_body_size` (size string, e.g. "16MB"). Absent keeps
+    /// the historic "unlimited" behaviour, so existing configs are
+    /// unaffected (2026-10-18 audit: locations with no cap accept bodies of
+    /// any size).
+    pub client_max_body_size: Option<ByteSize>,
     /// Error page template
     pub error_template: Option<String>,
     /// Path to PID file (default: /run/pingap.pid)

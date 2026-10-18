@@ -384,7 +384,7 @@ async fn remove(
     load_agent(&state, id, &current).await?;
 
     agent::Entity::delete_by_id(id).exec(&state.db).await?;
-    state.agents.disconnect(&id).await;
+    state.agents.force_disconnect(&id).await;
 
     tracing::info!(agent_id = %id, requested_by = %current.id, "agent de-registered");
     Ok(StatusCode::NO_CONTENT.into_response())

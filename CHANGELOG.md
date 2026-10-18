@@ -8,6 +8,33 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+### Added
+
+- `[basic] client_max_body_size`: a global request-body cap that locations
+  inherit when they do not set their own (size string, e.g. `"16MB"`).
+  Absent keeps the historic "unlimited" behaviour, so existing configs are
+  unchanged.
+
+### Fixed
+
+- **Agent registry: stale heartbeat streams.** Each connection carries a
+  generation; the stream teardown only removes the entry when it still owns
+  the current generation, so a stream finishing after a reconnect no longer
+  marks the live agent offline. The offline-agent sweep also drops queued
+  commands for the agent rows it prunes (`pending` no longer outlives them).
+
+### Verified (no change needed)
+
+- **Cache size accounting**: the file backend's per-directory budget and
+  the cross-domain quota ledger serve different purposes, and both already
+  subtract the previous object's size when overwriting a key; the residual
+  difference is the documented estimate rather than a leak.
+- **`Box::leak` for cache backends / key locks**: bounded by the number of
+  distinct configuration values (typically one per deployment), and
+  removing it requires a provider-lifetime redesign — recorded, not changed.
+
 ## [PingWAF 0.27.7] — 2026-10-18
 
 ### Changed

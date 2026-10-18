@@ -142,13 +142,19 @@
 # This setting controls how often Pingap checks for configuration file changes.
 # When changes are detected, the process will automatically restart to apply the new configuration.
 # Default `90s`
+# Global request-body cap for locations that do not set their own
+# `client_max_body_size` in locations.toml. Size string ("16MB"); absent or 0
+# keeps the historic "unlimited" behaviour.
+# client_max_body_size = "16MB"
+
 # auto_restart_check_interval = "90s"
 
 # Set the file cache directory. Format: "/path/to/cache?reading_max=1000&writing_max=200&cache_max=100&cache_file_max_size=40960"
 # - reading_max: maximum number of concurrent read operations
 # - writing_max: maximum number of concurrent write operations
-# - cache_max: maximum number of tinyufo items for file cache
-# - cache_file_max_size: maximum size of file for tinyufo, if file size is greater than this value, it will be cached in file not tinyufo.
+# - cache_max: hot-layer capacity in 4 KB pages (0 disables the hot layer)
+# - cache_file_max_size: largest object (in 4 KB pages) admitted to the hot layer;
+#   larger objects are served from disk only
 # cache_directory = ""
 
 # Maximum size of the in-memory cache for file caching. This limit applies when no cache_directory is set.
