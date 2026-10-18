@@ -166,6 +166,16 @@ fn compress_dirs(params: &LogCompressParams) {
     else {
         return;
     };
+    // Archives used to be kept forever: rolling created a new file every
+    // period and the compressor only ever deleted the *uncompressed*
+    // original, so the .gz/.zst set grew without bound (2026-10-18 audit).
+    // Keep four times the compression delay, and at least 30 days.
+    let archive_days = days_ago.saturating_mul(4).max(30);
+    let Some(archive_before) = SystemTime::now()
+        .checked_sub(Duration::from_secs(24 * 3600 * u64::from(archive_days)))
+    else {
+        return;
+    };
     let compression = if params.compression == "gzip" {
         Compression::Gzip
     } else {
@@ -181,6 +191,30 @@ fn compress_dirs(params: &LogCompressParams) {
             let path = entry.path();
             let ext = path.extension().and_then(|ext| ext.to_str());
             if ext == Some(GZIP_EXT) || ext == Some(ZSTD_EXT) {
+                // Already-compressed archive: delete it once it outlives the
+                // retention window instead of skipping it forever.
+                let expired = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .is_some_and(|modified| modified < archive_before);
+                if expired {
+                    let file = path.display().to_string();
+                    match std::fs::remove_file(path) {
+                        Ok(()) => info!(
+                            target: LOG_TARGET,
+                            file,
+                            archive_days,
+                            "removed expired log archive"
+                        ),
+                        Err(e) => warn!(
+                            target: LOG_TARGET,
+                            file,
+                            error = %e,
+                            "could not remove expired log archive"
+                        ),
+                    }
+                }
                 continue;
             }
             let Some(modified) =

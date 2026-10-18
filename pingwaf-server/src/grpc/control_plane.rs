@@ -20,7 +20,7 @@ use pingwaf_proto::control_plane::{
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
-    QueryFilter, Set,
+    QueryFilter, QuerySelect, Set,
 };
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
@@ -585,7 +585,13 @@ impl ControlPlaneTrait for ControlPlaneService {
                 }
             }
 
-            if access_batch.len() >= batch_size {
+            // Flush on either table: a WAF-only stream never grows
+            // access_batch, so keying the flush solely on it let event_batch
+            // grow without bound for the life of the stream
+            // (2026-10-18 audit).
+            if access_batch.len() >= batch_size
+                || event_batch.len() >= batch_size
+            {
                 flush(&self.db, &mut access_batch, &mut event_batch).await?;
             }
         }
@@ -1511,23 +1517,53 @@ async fn sweep_offline_agents(db: &DatabaseConnection) {
     }
 
     let cutoff = now - chrono::Duration::days(OFFLINE_AGENT_RETENTION_DAYS);
-    match agent::Entity::delete_many()
+    // Collect the ids first: the in-memory per-agent tables below are keyed
+    // by agent id, and `delete_many` only reports a count. Without this the
+    // two maps grew forever for agents whose rows were pruned
+    // (2026-10-18 audit).
+    let stale: Vec<Uuid> = match agent::Entity::find()
+        .select_only()
+        .column(agent::Column::Id)
         .filter(agent::Column::Status.eq(agent_status::OFFLINE.to_string()))
         .filter(agent::Column::LastHeartbeat.lt(cutoff))
+        .into_tuple::<Uuid>()
+        .all(db)
+        .await
+    {
+        Ok(ids) => ids,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not list stale agents");
+            return;
+        },
+    };
+    if stale.is_empty() {
+        return;
+    }
+    let pruned = match agent::Entity::delete_many()
+        .filter(agent::Column::Id.is_in(stale.clone()))
         .exec(db)
         .await
     {
-        Ok(result) if result.rows_affected > 0 => {
-            tracing::info!(
-                deleted = result.rows_affected,
-                %cutoff,
-                "pruned long-offline agents"
-            );
-        },
-        Ok(_) => {},
+        Ok(result) => result.rows_affected,
         Err(err) => {
             tracing::warn!(error = %err, "could not prune offline agents");
+            return;
         },
+    };
+    if pruned == 0 {
+        return;
+    }
+    tracing::info!(deleted = pruned, %cutoff, "pruned long-offline agents");
+
+    // Drop the matching in-memory state so the maps stay proportional to
+    // the live inventory rather than to every agent ever seen.
+    let stale_set: std::collections::HashSet<Uuid> =
+        stale.into_iter().collect();
+    if let Ok(mut buckets) = LAST_PERSISTED_BUCKET.lock() {
+        buckets.retain(|id, _| !stale_set.contains(id));
+    }
+    if let Ok(mut strikes) = RESOURCE_STRIKES.lock() {
+        strikes.retain(|(id, _), _| !stale_set.contains(id));
     }
 }
 

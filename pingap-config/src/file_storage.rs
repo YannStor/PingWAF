@@ -161,11 +161,17 @@ impl Storage for FileStorage {
                 read_all_config_files(&target_path.to_string_lossy()).await?;
             Ok(String::from_utf8_lossy(&value).trim().to_string())
         } else {
-            // A single config file that has not been written yet. Reading it
-            // as a directory would work by accident - the glob matches
-            // nothing - but it would also hide the case from anyone reading
-            // this.
-            Ok(String::new())
+            // A single config file that does not exist. Returning an empty
+            // document here made a typo'd `-c` path start a server with no
+            // listeners while `--test` reported success (2026-10-18 audit).
+            // With `--admin` the caller deliberately falls back to an empty
+            // config and says so on stderr.
+            Err(Error::Invalid {
+                message: format!(
+                    "config file {} does not exist",
+                    target_path.display()
+                ),
+            })
         }
     }
 
@@ -358,7 +364,9 @@ mod tests {
         assert_eq!("[basic]", data);
 
         storage.delete("pingap.toml").await.unwrap();
-        let data = storage.fetch("pingap.toml").await.unwrap();
-        assert_eq!("", data);
+        // A missing file is an error rather than an empty document
+        // (2026-10-18 audit): a typo'd `-c` path used to start an empty
+        // server while `--test` reported success.
+        assert!(storage.fetch("pingap.toml").await.is_err());
     }
 }

@@ -271,8 +271,15 @@ pub(crate) async fn mint_key(
     expires_at: Option<DateTime<Utc>>,
 ) -> Result<(api_key::Model, String), ApiError> {
     let plaintext = generate_key();
-    let key_hash = hash_password_with_cost(&plaintext, KEY_HASH_COST)
-        .map_err(ApiError::internal)?;
+    // bcrypt is deliberately slow; keep it off the async worker pool
+    // (2026-10-18 audit: concurrent key creation/logins starved handlers).
+    let plaintext_for_hash = plaintext.clone();
+    let key_hash = tokio::task::spawn_blocking(move || {
+        hash_password_with_cost(&plaintext_for_hash, KEY_HASH_COST)
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
 
     let model = api_key::ActiveModel {
         id: Set(Uuid::new_v4()),
@@ -333,8 +340,13 @@ pub async fn authenticate_api_key(
         .await?;
 
     for candidate in candidates {
-        let matches = verify_password(raw_key, &candidate.key_hash)
-            .map_err(|err| ApiError::Internal(err.to_string()))?;
+        let raw = raw_key.to_string();
+        let stored = candidate.key_hash.clone();
+        let matches =
+            tokio::task::spawn_blocking(move || verify_password(&raw, &stored))
+                .await
+                .map_err(|err| ApiError::Internal(err.to_string()))?
+                .map_err(|err| ApiError::Internal(err.to_string()))?;
         if !matches {
             continue;
         }

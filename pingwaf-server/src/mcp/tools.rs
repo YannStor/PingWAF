@@ -48,6 +48,50 @@ pub struct ToolContext<'a> {
     pub actor: &'a str,
     /// Whether write tools may be invoked.
     pub can_write: bool,
+    /// Owning user id — used to narrow reads to the caller's own sites.
+    pub subject: Uuid,
+    /// Administrators see everything; everyone else is scoped to
+    /// `site.user_id == subject` (mirrors `load_site_read` in the REST API).
+    pub is_admin: bool,
+}
+
+/// Site ids the caller may read; `None` means "all sites" (admin only).
+async fn visible_site_ids(
+    ctx: &ToolContext<'_>,
+) -> Result<Option<Vec<Uuid>>, String> {
+    if ctx.is_admin {
+        return Ok(None);
+    }
+    let ids = site::Entity::find()
+        .select_only()
+        .column(site::Column::Id)
+        .filter(site::Column::UserId.eq(ctx.subject))
+        .into_tuple::<Uuid>()
+        .all(&ctx.state.db)
+        .await
+        .map_err(db_error)?;
+    Ok(Some(ids))
+}
+
+/// Resolves a requested site filter against the caller's visible set.
+///
+/// Non-admins must name a site they own (same rule as the REST API's
+/// `scope_site`); admins may omit it to cover every site. A site outside
+/// the caller's set is reported as "not found" rather than "forbidden", so
+/// the tool does not confirm that somebody else's site exists.
+fn require_scoped_site(
+    requested: Option<Uuid>,
+    visible: Option<&Vec<Uuid>>,
+) -> Result<Option<Uuid>, String> {
+    match (requested, visible) {
+        (Some(id), None) => Ok(Some(id)),
+        (Some(id), Some(allowed)) if allowed.contains(&id) => Ok(Some(id)),
+        (Some(_), Some(_)) => Err("site not found".to_string()),
+        (None, None) => Ok(None),
+        (None, Some(_)) => {
+            Err("site_id is required for non-admin accounts".to_string())
+        },
+    }
 }
 
 /// Metadata for one tool, mirroring MCP's `tools/list` shape.
@@ -674,6 +718,12 @@ async fn list_sites(
         );
     }
 
+    // Non-admins only see the sites they own (2026-10-18 audit: read
+    // tools returned every site to any authenticated caller).
+    if let Some(visible) = visible_site_ids(ctx).await? {
+        condition = condition.add(site::Column::Id.is_in(visible));
+    }
+
     let rows = site::Entity::find()
         .filter(condition)
         .order_by_desc(site::Column::CreatedAt)
@@ -729,6 +779,9 @@ async fn list_agents(
         }
         condition = condition.add(agent::Column::Status.eq(status));
     }
+    if let Some(visible) = visible_site_ids(ctx).await? {
+        condition = condition.add(agent::Column::SiteId.is_in(visible));
+    }
 
     let rows = agent::Entity::find()
         .filter(condition)
@@ -766,10 +819,15 @@ async fn list_agents(
 }
 
 async fn certificate_summary(ctx: &ToolContext<'_>) -> Result<Value, String> {
-    let rows = site_certificates::Entity::find()
+    let visible = visible_site_ids(ctx).await?;
+    let mut query = site_certificates::Entity::find()
         .select_only()
         .column(site_certificates::Column::Status)
-        .column(site_certificates::Column::ExpiresAt)
+        .column(site_certificates::Column::ExpiresAt);
+    if let Some(visible) = visible {
+        query = query.filter(site_certificates::Column::SiteId.is_in(visible));
+    }
+    let rows = query
         .into_tuple::<(String, Option<DateTime<Utc>>)>()
         .all(&ctx.state.db)
         .await
@@ -811,9 +869,12 @@ async fn query_access_logs(
     let limit = arg_limit(args, 20);
     let from = Utc::now() - Duration::hours(hours);
 
+    let visible = visible_site_ids(ctx).await?;
+    let site_id =
+        require_scoped_site(arg_uuid(args, "site_id")?, visible.as_ref())?;
     let mut condition =
         Condition::all().add(access_log::Column::Timestamp.gte(from));
-    if let Some(site_id) = arg_uuid(args, "site_id")? {
+    if let Some(site_id) = site_id {
         condition = condition.add(access_log::Column::SiteId.eq(site_id));
     }
     if let Some(class) = args.get("status_class").and_then(Value::as_i64) {
@@ -894,9 +955,12 @@ async fn query_waf_events(
     let limit = arg_limit(args, 20);
     let from = Utc::now() - Duration::hours(hours);
 
+    let visible = visible_site_ids(ctx).await?;
+    let site_id =
+        require_scoped_site(arg_uuid(args, "site_id")?, visible.as_ref())?;
     let mut condition =
         Condition::all().add(security_event::Column::Timestamp.gte(from));
-    if let Some(site_id) = arg_uuid(args, "site_id")? {
+    if let Some(site_id) = site_id {
         condition = condition.add(security_event::Column::SiteId.eq(site_id));
     }
     if let Some(action) = arg_string(args, "action") {
@@ -955,7 +1019,9 @@ async fn get_traffic_summary(
     args: &Value,
 ) -> Result<Value, String> {
     let hours = window_hours(args, DEFAULT_WINDOW_HOURS);
-    let site_id = arg_uuid(args, "site_id")?;
+    let visible = visible_site_ids(ctx).await?;
+    let site_id =
+        require_scoped_site(arg_uuid(args, "site_id")?, visible.as_ref())?;
     let to = Utc::now();
     let from = to - Duration::hours(hours);
 
@@ -1034,6 +1100,10 @@ fn read_i64(row: &Option<sea_orm::QueryResult>, column: &str) -> i64 {
 }
 
 async fn get_defense_status(ctx: &ToolContext<'_>) -> Result<Value, String> {
+    // Global control-plane defence settings: administrators only.
+    if !ctx.is_admin {
+        return Err("administrator role is required for this tool".to_string());
+    }
     let defense = defense::load(&ctx.state.db).await.map_err(api_error)?;
     let settings = self_protection::load_settings(&ctx.state.db)
         .await
@@ -1057,7 +1127,13 @@ async fn get_defense_status(ctx: &ToolContext<'_>) -> Result<Value, String> {
 }
 
 async fn list_ip_groups(ctx: &ToolContext<'_>) -> Result<Value, String> {
-    let rows = ip_groups::Entity::find()
+    let mut query = ip_groups::Entity::find();
+    if !ctx.is_admin {
+        // Site-bound groups belong to sites the caller may not own; only
+        // the shared global groups are visible to everyone.
+        query = query.filter(ip_groups::Column::IsGlobal.eq(true));
+    }
+    let rows = query
         .order_by_asc(ip_groups::Column::Name)
         .all(&ctx.state.db)
         .await
@@ -1086,6 +1162,10 @@ async fn query_control_plane_logs(
     ctx: &ToolContext<'_>,
     args: &Value,
 ) -> Result<Value, String> {
+    // Control-plane audit log: administrators only.
+    if !ctx.is_admin {
+        return Err("administrator role is required for this tool".to_string());
+    }
     let hours = window_hours(args, DEFAULT_WINDOW_HOURS);
     let limit = arg_limit(args, 20);
     let from = Utc::now() - Duration::hours(hours);
@@ -1193,6 +1273,10 @@ async fn set_site_status(
     }
     .map_err(db_error)?
     .ok_or_else(|| "site not found".to_string())?;
+    // Non-admins may only change the status of their own sites.
+    if !ctx.is_admin && row.user_id != ctx.subject {
+        return Err("site not found".to_string());
+    }
 
     let id = row.id;
     let previous = row.status.clone();

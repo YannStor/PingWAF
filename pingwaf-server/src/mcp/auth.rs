@@ -41,6 +41,11 @@ pub struct McpPrincipal {
     pub key_id: Option<Uuid>,
     pub can_read: bool,
     pub can_write: bool,
+    /// Administrator accounts see every site; everyone else is restricted
+    /// to the sites they own (`site.user_id == subject`). MCP tools apply
+    /// the same narrowing as the REST handlers (2026-10-18 audit: read
+    /// tools returned every site's data to any authenticated caller).
+    pub is_admin: bool,
 }
 
 /// Rejection of [`McpPrincipal`]; renders as `401`/`403`/`500` JSON.
@@ -135,6 +140,7 @@ fn key_principal(
         // A writer can always read; `write` keys are the broader grant.
         can_read: true,
         can_write: has_write && owner.role == role::ADMIN,
+        is_admin: owner.role == role::ADMIN,
     })
 }
 
@@ -152,6 +158,7 @@ fn jwt_principal(user: &AuthUser) -> Result<McpPrincipal, McpAuthError> {
         key_id: None,
         can_read: true,
         can_write: user.is_admin(),
+        is_admin: user.is_admin(),
     })
 }
 

@@ -216,6 +216,11 @@ fn validate_group(name: &str, phase: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Upper bound on a rule expression (bytes): rules are compiled per site
+/// on the data plane, and an unbounded expression is both a parsing cost
+/// and a memory lever.
+const MAX_EXPRESSION_LEN: usize = 8 * 1024;
+
 fn validate_rule(
     name: &str,
     expression: &str,
@@ -233,6 +238,18 @@ fn validate_rule(
             "expression must not be empty".to_string(),
         ));
     }
+    if expression.len() > MAX_EXPRESSION_LEN {
+        return Err(ApiError::BadRequest(format!(
+            "expression must be at most {MAX_EXPRESSION_LEN} bytes"
+        )));
+    }
+    // Reject unparsable expressions at the API boundary: the data plane
+    // silently drops a rule whose expression fails to parse, so without
+    // this check a rule looks enabled in the console while enforcing
+    // nothing (2026-10-18 audit, high).
+    pingwaf_waf::rules::expression::parse_expression(expression).map_err(
+        |err| ApiError::BadRequest(format!("expression is not valid: {err}")),
+    )?;
     if !action::is_valid(rule_action) {
         return Err(ApiError::BadRequest(format!(
             "unknown action '{rule_action}'"
@@ -626,8 +643,18 @@ mod tests {
 
     #[test]
     fn rule_validation_covers_every_field() {
+        assert!(validate_rule(
+            "r",
+            r#"http.request.method eq "POST""#,
+            "block",
+            "block",
+            3
+        )
+        .is_ok());
+        // `==` is not part of the expression grammar: such a rule used to be
+        // accepted here and then silently dropped by the data plane.
         assert!(validate_rule("r", "ip.src == 1.2.3.4", "block", "block", 3)
-            .is_ok());
+            .is_err());
         assert!(validate_rule("r", "  ", "block", "block", 3).is_err());
         assert!(validate_rule("r", "true", "nuke", "block", 3).is_err());
         assert!(validate_rule("r", "true", "block", "enforce", 3).is_err());

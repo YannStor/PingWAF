@@ -609,6 +609,7 @@ async fn send_message(
             message: content,
             page_context,
             can_write,
+            is_admin: current.is_admin(),
         },
         tx,
     ));

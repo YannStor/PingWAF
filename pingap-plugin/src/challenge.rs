@@ -141,6 +141,15 @@ fn generate_nonce() -> String {
 /// Only sweep the challenge map above this many outstanding entries.
 const PENDING_CHALLENGE_GC_THRESHOLD: usize = 1024;
 
+/// Hard ceiling on outstanding challenges. The TTL alone is not a bound:
+/// under a unique-URL flood (every request gets a fresh challenge and never
+/// verifies) the map would hold `QPS x 300s` entries, each carrying an
+/// attacker-controlled path/query (1k rps at 1KB ≈ 300MB). Past the ceiling
+/// the challenge is still issued (the nonce reaches the client) but not
+/// remembered — verification then fails closed and the client retries,
+/// which is the same outcome as an expired challenge.
+const PENDING_CHALLENGE_MAX_ENTRIES: usize = 4096;
+
 /// Throttle for the O(N) TTL sweeps: every Nth insert does the scan.
 static GC_TICK: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
@@ -164,6 +173,10 @@ pub(crate) fn store_pending(
     {
         PENDING_CHALLENGES
             .retain(|_, v| now.saturating_sub(v.created_at) < PENDING_TTL_SECS);
+    }
+    if PENDING_CHALLENGES.len() >= PENDING_CHALLENGE_MAX_ENTRIES {
+        // Reached the hard ceiling: issue the nonce without remembering it.
+        return generate_nonce();
     }
     let nonce = generate_nonce();
     PENDING_CHALLENGES.insert(

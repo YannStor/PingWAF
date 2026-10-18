@@ -408,6 +408,17 @@ async fn apply_config(
                 .await;
             }
         }
+        if !reload_fail_message.is_empty() {
+            // Report the partial failure instead of returning Ok: the caller
+            // records the config hash only after an Ok, and recording it
+            // would make the next tick skip this document forever — a
+            // failed hot reload would silently never be retried
+            // (2026-10-18 audit).
+            return Err(format!(
+                "hot reload applied with failures: {reload_fail_message}"
+            )
+            .into());
+        }
         return Ok(false);
     }
     // restart mode
@@ -443,6 +454,15 @@ async fn apply_config(
             })
             .await;
         }
+    }
+    if !reload_fail_message.is_empty() {
+        // Same rationale as the hot-reload branch: do not record the hash of
+        // a configuration that only partially applied, and do not restart
+        // into it — the next tick retries.
+        return Err(format!(
+            "configuration applied with failures: {reload_fail_message}"
+        )
+        .into());
     }
     if should_restart {
         restart().await;

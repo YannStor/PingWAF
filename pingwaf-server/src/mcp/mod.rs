@@ -194,6 +194,8 @@ async fn handle_message(
                 state,
                 actor: &principal.label,
                 can_write: principal.can_write,
+                subject: principal.subject,
+                is_admin: principal.is_admin,
             };
             tracing::info!(
                 tool = name,
@@ -217,12 +219,22 @@ async fn handle_message(
                     "resources/read requires a uri",
                 ));
             };
-            Some(match resources::read(state, &principal.label, uri).await {
-                Ok(value) => protocol::result(&id, value),
-                Err(message) => {
-                    protocol::error(&id, protocol::INVALID_PARAMS, message)
+            Some(
+                match resources::read(
+                    state,
+                    &principal.label,
+                    principal.subject,
+                    principal.is_admin,
+                    uri,
+                )
+                .await
+                {
+                    Ok(value) => protocol::result(&id, value),
+                    Err(message) => {
+                        protocol::error(&id, protocol::INVALID_PARAMS, message)
+                    },
                 },
-            })
+            )
         },
         other => {
             // Unknown notifications were already answered above; reaching

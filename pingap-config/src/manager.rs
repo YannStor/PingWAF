@@ -1206,10 +1206,11 @@ value = "/storage22"
             new_file_config_manager(&target.to_string_lossy()).unwrap();
         assert_eq!(ConfigMode::Single, manager.mode);
 
-        // Reading a config file that has not been written yet is empty, not an
-        // error.
-        let config = manager.load_all().await.unwrap();
-        assert_eq!(true, config.basic.is_none());
+        // Reading a config file that has not been written yet is an error:
+        // silently starting on an empty config hid typo'd paths
+        // (2026-10-18 audit). `--admin` deliberately falls back to an empty
+        // config at the caller, with a message on stderr.
+        assert!(manager.load_all().await.is_err());
 
         manager.save_all(&new_pingap_config()).await.unwrap();
 

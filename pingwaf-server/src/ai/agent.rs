@@ -72,6 +72,10 @@ pub struct TurnRequest {
     pub page_context: Option<String>,
     /// Whether write tools may be invoked (settings opt-in ∧ admin role).
     pub can_write: bool,
+    /// Whether the caller is an administrator. Independent of `can_write`:
+    /// the settings switch can disable writes for an admin, and read tools
+    /// still need to know whether to scope results to the caller's sites.
+    pub is_admin: bool,
 }
 
 /// Runs one chat turn to completion, reporting progress through `events`.
@@ -193,6 +197,8 @@ async fn execute(
         state,
         actor: &actor,
         can_write: request.can_write,
+        subject: request.user_id,
+        is_admin: request.is_admin,
     };
     let mut answer = String::new();
 

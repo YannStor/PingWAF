@@ -1143,6 +1143,16 @@ impl RateLimitPolicy {
     ) -> RateOutcome {
         let mut logged = Vec::new();
         if self.rules.is_empty() {
+            // A site whose rate-limit rules were removed (or that was
+            // deleted) leaves its counters behind, and this early return is
+            // the only path that would ever visit the table again
+            // (2026-10-18 audit). Sweep expired entries here, throttled by
+            // size so a policy-less site does not pay an O(N) scan per
+            // request.
+            if counters.len() > 1024 {
+                let now = unix_now();
+                counters.retain(|_, counter| counter.expires_at > now);
+            }
             return RateOutcome { deny: None, logged };
         }
         let now = unix_now();

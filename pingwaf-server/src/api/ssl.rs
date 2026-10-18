@@ -334,12 +334,41 @@ async fn insert_certificate<C: ConnectionTrait>(
         )?;
     }
 
-    let status = if payload.cert_pem.is_some() {
+    // Reject unparsable or mismatched PEM pairs before they reach the data
+    // plane: a broken certificate takes the site's HTTPS down, and this path
+    // used to store whatever string arrived (2026-10-18 audit). Same
+    // validation as the control-plane TLS upload.
+    let has_pem = payload
+        .cert_pem
+        .as_deref()
+        .is_some_and(|pem| !pem.trim().is_empty());
+    if let Some(cert_pem) = payload
+        .cert_pem
+        .as_deref()
+        .filter(|pem| !pem.trim().is_empty())
+    {
+        crate::pki::tls::describe(cert_pem)
+            .map_err(|err| ApiError::BadRequest(err.to_string()))?;
+        if let Some(key_pem) = payload
+            .key_pem
+            .as_deref()
+            .filter(|pem| !pem.trim().is_empty())
+        {
+            crate::pki::tls::certified_key(cert_pem, key_pem)
+                .map_err(|err| ApiError::BadRequest(err.to_string()))?;
+        }
+    }
+
+    let status = if has_pem {
         cert_status::ACTIVE
     } else if payload.acme_email.is_some() {
         cert_status::PENDING
     } else {
-        cert_status::ACTIVE
+        // Neither a PEM pair nor an ACME order: nothing to serve, and the
+        // old code still marked the row ACTIVE (2026-10-18 audit).
+        return Err(ApiError::BadRequest(
+            "provide cert_pem/key_pem or an acme_email".to_string(),
+        ));
     };
 
     let timestamp = Utc::now();

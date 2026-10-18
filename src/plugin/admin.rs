@@ -252,10 +252,21 @@ struct AesResp {
     value: String,
 }
 
+/// Admin routes buffer the whole body (AES payloads, config imports). A
+/// public admin location without `client_max_body_size` used to let a single
+/// request accumulate without bound (2026-10-18 audit); cap the buffer and
+/// let the caller's parse fail (400) instead.
+const MAX_ADMIN_BODY_BYTES: usize = 8 * 1024 * 1024;
+
 async fn get_request_body(session: &mut Session) -> pingora::Result<BytesMut> {
     let mut buf = BytesMut::with_capacity(4096);
     while let Some(value) = session.read_request_body().await? {
-        buf.put(value.as_ref());
+        if buf.len() >= MAX_ADMIN_BODY_BYTES {
+            break;
+        }
+        let room = MAX_ADMIN_BODY_BYTES - buf.len();
+        let take = room.min(value.len());
+        buf.put(&value[..take]);
     }
     Ok(buf)
 }

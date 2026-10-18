@@ -74,6 +74,8 @@ pub fn list() -> Value {
 pub async fn read(
     state: &AppState,
     actor: &str,
+    subject: uuid::Uuid,
+    is_admin: bool,
     uri: &str,
 ) -> Result<Value, String> {
     let ctx = ToolContext {
@@ -81,6 +83,8 @@ pub async fn read(
         actor,
         // Resources are read-only by construction.
         can_write: false,
+        subject,
+        is_admin,
     };
     let payload = match uri {
         "pingwaf://overview" => overview(&ctx).await?,

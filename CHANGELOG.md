@@ -77,6 +77,27 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Fixed
 
+- **Audit follow-ups (2026-10-18 performance/stability review).**
+  High: rule `expression` is now parsed at the API boundary (a rule whose
+  expression the data plane cannot compile used to be stored as "enabled"
+  and silently dropped, enforcing nothing); MCP read tools are scoped to
+  the caller's own sites (viewer and read-only API keys could read every
+  site's logs/WAF events); bcrypt runs on the blocking pool (concurrent
+  logins/API-key checks could starve every control-plane worker);
+  health-check task panics are logged instead of silently disabling an
+  upstream's checks forever.
+  Medium: WAF-only log streams flush on `event_batch` size (a stream that
+  never produced access rows grew it without bound); challenge state has a
+  hard 4096-entry ceiling; rate-limit counters are swept when a site has no
+  rules left; pruned agents now drop their `LAST_PERSISTED_BUCKET` /
+  `RESOURCE_STRIKES` entries; hot-reload partial failures return an error so
+  the config hash is not recorded (failed reloads used to never retry);
+  log archives are deleted after `max(30 days, 4x compression delay)`;
+  a missing `-c` config file fails fast instead of starting an empty
+  server; the all-in-one/agent entry point registers `storage_clear` so
+  expired cache files are reclaimed; certificate uploads parse the chain
+  and verify the key pair (and reject a row with neither PEM nor ACME);
+  the data-plane admin body buffer is capped at 8 MiB.
 - **CPU snapshot rate-limit race.** Concurrent callers of
   `cpu/metrics`/the load guard could both sleep to the same refresh
   deadline, the second refresh observing a ~zero delta and reporting a

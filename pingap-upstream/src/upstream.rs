@@ -1230,9 +1230,12 @@ impl BackgroundTask for HealthCheckTask {
         upstreams.retain(|(_, up)| !up.is_transparent());
         let interval = frequency_millis(self.interval);
         // run health check for each upstream
-        let jobs = upstreams.into_iter().map(|(name, up)| {
-            let runtime = pingora_runtime::current_handle();
-            runtime.spawn(async move {
+        let jobs: Vec<_> = upstreams
+            .into_iter()
+            .map(|(name, up)| {
+                let label = name.clone();
+                let runtime = pingora_runtime::current_handle();
+                let handle = runtime.spawn(async move {
                 // Frequencies are milliseconds so a sub-second
                 // `check_frequency` survives; `Duration::as_secs` rounded
                 // `500ms` down to `0`, which made `count` zero and
@@ -1301,9 +1304,23 @@ impl BackgroundTask for HealthCheckTask {
                     ),
                     "health check is done"
                 );
+            });
+                (label, handle)
             })
-        });
-        futures::future::join_all(jobs).await;
+            .collect();
+        // A panicking task silently disabled this upstream's update/health
+        // checks forever (join_all drops JoinError) — a backend that went
+        // down kept receiving traffic with no log. Surface it instead.
+        for (name, handle) in jobs {
+            if let Err(err) = handle.await {
+                error!(
+                    target: LOG_TARGET,
+                    name,
+                    error = %err,
+                    "health-check task panicked; this upstream's update/health                      checks stop until the next reload"
+                );
+            }
+        }
 
         // each 10 times, check unhealthy upstreams
         if check_count % 10 == 1 {

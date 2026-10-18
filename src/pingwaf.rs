@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use pingap_cache::new_storage_clear_service;
+
 use crate::certificates::{new_certificate_provider, try_update_certificates};
 use crate::cli::{
     AgentOpts, AllInOneOpts, CommonOpts, PingWafCli, PingWafCommand, ServerOpts,
@@ -1184,6 +1186,13 @@ pub async fn start_data_plane(
             ),
         );
         info!("data plane: ACME certificate management enabled");
+    }
+    // Expired cache files have no other reclaimer on this entry point: the
+    // periodic `storage_clear` service was registered only by the pingap
+    // entry point, so all-in-one/agent deployments kept expired cache
+    // files on disk forever (2026-10-18 audit).
+    if let Some(task) = new_storage_clear_service() {
+        background_tasks.add_task("storage_clear", task);
     }
     let background_tasks_name = background_tasks.name().to_string();
     my_server.add_service(background_service(

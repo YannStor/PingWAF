@@ -176,14 +176,27 @@ async fn login(
 
     let Some(account) = found else {
         // Spend a bcrypt verification anyway so that the response time does not
-        // reveal whether the e-mail exists.
-        let _ = verify_password(&payload.password, DUMMY_HASH);
+        // reveal whether the e-mail exists. bcrypt is deliberately slow
+        // (~50-300ms): running it on the async worker pool lets a burst of
+        // logins starve every other control-plane request (2026-10-18 audit),
+        // so it runs on the blocking pool.
+        let password = payload.password.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            verify_password(&password, DUMMY_HASH)
+        })
+        .await;
         tracing::debug!(%email, "login failed: unknown account");
         return Err(ApiError::Unauthorized(INVALID_CREDENTIALS.to_string()));
     };
 
-    let valid = verify_password(&payload.password, &account.password_hash)
-        .map_err(|err| ApiError::Internal(err.to_string()))?;
+    let password = payload.password.clone();
+    let stored_hash = account.password_hash.clone();
+    let valid = tokio::task::spawn_blocking(move || {
+        verify_password(&password, &stored_hash)
+    })
+    .await
+    .map_err(|err| ApiError::Internal(err.to_string()))?
+    .map_err(|err| ApiError::Internal(err.to_string()))?;
     if !valid {
         tracing::debug!(%email, "login failed: wrong password");
         return Err(ApiError::Unauthorized(INVALID_CREDENTIALS.to_string()));
@@ -392,7 +405,8 @@ async fn update_profile(
                     )
                 })?,
                 &password_hash,
-            )?;
+            )
+            .await?;
             let taken = user::Entity::find()
                 .filter(user::Column::Email.eq(email.clone()))
                 .one(&state.db)
@@ -423,12 +437,19 @@ async fn update_profile(
 /// A mismatch is a validation failure, not an authentication one: the caller is
 /// already authenticated, and answering 401 makes the console treat the session
 /// as dead and log the user out mid-form.
-fn require_current_password(
+async fn require_current_password(
     supplied: &str,
     stored_hash: &str,
 ) -> Result<(), ApiError> {
-    let valid = verify_password(supplied, stored_hash)
-        .map_err(|err| ApiError::Internal(err.to_string()))?;
+    // bcrypt on the blocking pool — see the login handler for why.
+    let supplied = supplied.to_string();
+    let stored_hash = stored_hash.to_string();
+    let valid = tokio::task::spawn_blocking(move || {
+        verify_password(&supplied, &stored_hash)
+    })
+    .await
+    .map_err(|err| ApiError::Internal(err.to_string()))?
+    .map_err(|err| ApiError::Internal(err.to_string()))?;
     if !valid {
         return Err(ApiError::BadRequest(
             "current password is incorrect".to_string(),
@@ -448,16 +469,19 @@ async fn change_password(
         .await?
         .ok_or_else(|| ApiError::NotFound("account not found".to_string()))?;
 
-    require_current_password(
-        &payload.current_password,
-        &account.password_hash,
-    )?;
+    require_current_password(&payload.current_password, &account.password_hash)
+        .await?;
     validate_password(&payload.new_password)
         .map_err(|err| ApiError::BadRequest(err.to_string()))?;
 
     let mut active: user::ActiveModel = account.into();
-    active.password_hash = Set(hash_password(&payload.new_password)
-        .map_err(|err| ApiError::BadRequest(err.to_string()))?);
+    let new_password = payload.new_password.clone();
+    let new_hash =
+        tokio::task::spawn_blocking(move || hash_password(&new_password))
+            .await
+            .map_err(|err| ApiError::Internal(err.to_string()))?
+            .map_err(|err| ApiError::BadRequest(err.to_string()))?;
+    active.password_hash = Set(new_hash);
     // The first-login gate only demands one successful change.
     active.must_change_password = Set(false);
     // A password change revokes every token minted before it, including the
@@ -513,8 +537,12 @@ pub async fn create_user(
             "unknown role '{assigned_role}'"
         )));
     }
-    let password_hash = hash_password(password)
-        .map_err(|err| ApiError::BadRequest(err.to_string()))?;
+    let password_owned = password.to_string();
+    let password_hash =
+        tokio::task::spawn_blocking(move || hash_password(&password_owned))
+            .await
+            .map_err(|err| ApiError::Internal(err.to_string()))?
+            .map_err(|err| ApiError::BadRequest(err.to_string()))?;
     let timestamp = Utc::now();
     let active = user::ActiveModel {
         id: Set(Uuid::new_v4()),
@@ -606,14 +634,14 @@ mod tests {
         assert!(json.contains("ops@example.com"));
     }
 
-    #[test]
-    fn a_wrong_current_password_is_rejected_as_a_bad_request() {
+    #[tokio::test]
+    async fn a_wrong_current_password_is_rejected_as_a_bad_request() {
         let hash = hash_password("correct horse battery").unwrap();
-        assert!(
-            require_current_password("correct horse battery", &hash).is_ok()
-        );
+        assert!(require_current_password("correct horse battery", &hash)
+            .await
+            .is_ok());
 
-        let err = require_current_password("staple", &hash).unwrap_err();
+        let err = require_current_password("staple", &hash).await.unwrap_err();
         // 401 would make the web client drop the session and log the user out.
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
         assert_eq!(err.code(), "bad_request");
