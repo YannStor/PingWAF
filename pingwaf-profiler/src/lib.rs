@@ -361,8 +361,20 @@ impl ProfileSnapshot {
 mod tests {
     use super::*;
 
+    /// The accounting tables are process-global, so these tests must not run
+    /// concurrently (a parallel test's timers would land in another test's
+    /// snapshot).
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn module_timers_accumulate_and_share() {
+        let _guard = serial();
         ProfileSnapshot::reset();
         {
             let _timer = timed(Module::Waf);
@@ -381,6 +393,7 @@ mod tests {
 
     #[test]
     fn memory_gauges_are_reported_and_shared() {
+        let _guard = serial();
         ProfileSnapshot::reset();
         set_memory(Module::Cache, 1024);
         add_memory(Module::Cache, 1024);
@@ -403,6 +416,7 @@ mod tests {
 
     #[test]
     fn method_rows_are_sorted_and_capped() {
+        let _guard = serial();
         ProfileSnapshot::reset();
         for index in 0..(ProfileSnapshot::MAX_METHODS + 10) {
             let name: &'static str =
