@@ -545,10 +545,40 @@ pub(crate) async fn heap_impl() -> Result<Response, ApiError> {
             )
         };
         if rc != 0 {
+            // Probe why: opt.prof tells whether jemalloc initialised with
+            // profiling, version tells whether this heap is jemalloc at all
+            // (ENOENT on both = the global allocator is not jemalloc).
+            let mut prof: bool = false;
+            let mut prof_len = std::mem::size_of::<bool>();
+            let prof_rc = unsafe {
+                tikv_jemalloc_sys::mallctl(
+                    b"opt.prof\0".as_ptr().cast(),
+                    &mut prof as *mut bool as *mut core::ffi::c_void,
+                    &mut prof_len,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            let mut ver_len = 64_usize;
+            let mut ver = [0_i8; 64];
+            let ver_rc = unsafe {
+                tikv_jemalloc_sys::mallctl(
+                    b"version\0".as_ptr().cast(),
+                    ver.as_mut_ptr().cast(),
+                    &mut ver_len,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            let ver_str = unsafe {
+                std::ffi::CStr::from_ptr(ver.as_ptr().cast())
+                    .to_string_lossy()
+                    .into_owned()
+            };
             return Err(ApiError::Internal(format!(
-                "prof.dump failed (rc {rc}, path {dump_path:?}) — heap \
-                 profiling must be active: run this diagnostic build with \
-                 MALLOC_CONF=prof:true"
+                "prof.dump failed (rc {rc}, path {dump_path:?}) — \
+                 opt.prof rc={prof_rc} val={prof}, version rc={ver_rc} \
+                 val={ver_str:?}"
             )));
         }
         let bytes = std::fs::read(&dump_path)
