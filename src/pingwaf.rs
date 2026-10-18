@@ -1203,6 +1203,27 @@ pub async fn start_data_plane(
     // Parse server configs and start proxy servers
     let server_conf_list: Vec<ServerConf> = parse_from_conf(config.clone());
 
+    // One-shot startup warning for listeners without downstream timeouts:
+    // pingora keeps a connection alive while the peer trickles bytes, so an
+    // unset read/write timeout lets slow clients (or stalled uploads) occupy
+    // connections indefinitely (2026-10-18 audit).
+    let no_timeouts: Vec<&str> = server_conf_list
+        .iter()
+        .filter(|conf| {
+            conf.downstream_read_timeout.is_none()
+                || conf.downstream_write_timeout.is_none()
+        })
+        .map(|conf| conf.addr.as_str())
+        .collect();
+    if !no_timeouts.is_empty() {
+        warn!(
+            listeners = %no_timeouts.join(" | "),
+            "downstream read/write timeouts are not configured; a slow client \
+             can hold a connection open indefinitely (set downstream_read_timeout \
+             / downstream_write_timeout in conf/config.toml)"
+        );
+    }
+
     for server_conf in server_conf_list {
         let ctx = AppContext {
             server_locations_provider: new_server_locations_provider(),

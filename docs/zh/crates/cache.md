@@ -38,7 +38,7 @@ TinyUFO 是 S3-FIFO 风格缓存，扫描抵抗好且无全局锁，比 LRU 更�
 
 `update_available_memory()` 由进程指标收集器调用，使默认预算跟踪机器（或容器限制）而非硬编码数。
 
-条目按 4 KB 页计重，因此按页算的预算也是缓存最多能容纳的条目数，TinyUFO 的索引与频率草图就按这个数字预估：256 MB 缓存只需几 MB，1 GB 上限约 16 MB。无法解析的参数（`max_size=lots`、`mode=tiny`）会让 `new_cache_backend` 报错，而不是静默使用默认值。
+条目按 4 KB 页计重（`cache_max` 为页数；`directory` 串里的 `?max_size=` 则是字节数，两者单位不同），因此按页算的预算也是缓存最多能容纳的条目数，TinyUFO 的索引与频率草图就按这个数字预估：256 MB 缓存只需几 MB，1 GB 上限约 16 MB。无法解析的参数（`max_size=lots`、`mode=tiny`）会让 `new_cache_backend` 报错，而不是静默使用默认值。
 
 ### 文件后端
 
@@ -47,7 +47,7 @@ TinyUFO 是 S3-FIFO 风格缓存，扫描抵抗好且无全局锁，比 LRU 更�
 | `inactive` | 无 | 移除超过该时长未触碰的文件，无论是否仍新鲜 |
 | `reading_max` | `10000` | 最大并发读；超限按**未命中**处理（回源），不返回 5xx |
 | `writing_max` | — | 最大并发写；超限**跳过**磁盘写入 |
-| `cache_max` | `0` | 前置 TinyUFO 热层大小，单位 4 KB 页 |
+| `cache_max` | `0` | 前置 TinyUFO 热层大小，单位为 **4 KB 页数**（注意与 `directory` 的 `?max_size=` 不同：后者是**字节**，同一段配置里两套单位不要混用） |
 | `cache_file_max_weight` | 256 页（1 MB） | 该层允许的最大条目，写入和从磁盘读出时都受此限制 |
 | `levels` | — | 目录嵌套，最多两级、每级取键的 1 到 3 个字符，如 `levels=1:2`，避免巨大扁平目录；其他写法会被拒绝 |
 | `max_size` | 无限制 | 磁盘总预算（如 `max_size=10gb`）；超出时按最久未访问优先淘汰文件 |

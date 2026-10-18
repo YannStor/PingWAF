@@ -8,7 +8,7 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
-## [Unreleased]
+## [PingWAF 0.27.7] — 2026-10-18
 
 ### Changed
 
@@ -44,6 +44,28 @@ verbatim for reference and attribution, and is not maintained here.
   request once over threshold (removes a request-level O( N ) CPU
   amplifier under challenge floods).
 - Memory watchdog polls every 500 ms instead of 250 ms.
+
+### Added
+
+- Startup warning for listeners that leave `downstream_read_timeout` /
+  `downstream_write_timeout` unset: a slow client can hold a connection
+  open indefinitely, and silence made that look configured.
+
+### Changed
+
+- Documented the two cache size units side by side (`cache_max` counts
+  4 KB pages; `directory`'s `?max_size=` is bytes) so a config cannot
+  silently mix them.
+
+### Verified (no change needed)
+
+- HTTP/2 limits: the listener already starts from `default_h2_options()`
+  (64 KiB header list, 100 concurrent streams) whenever nothing is
+  configured, and only overrides what is set — the earlier audit note
+  about inheriting an unbounded h2 builder did not hold for this code.
+- Closing the downstream connection on internally generated errors is
+  intentional (those paths do not reuse connections; advertising
+  keep-alive would mislead the client). The TODO is now a decision note.
 
 ## [PingWAF 0.27.6] — 2026-10-17
 

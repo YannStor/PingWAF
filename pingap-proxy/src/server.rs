@@ -2042,12 +2042,13 @@ impl ProxyHttp for Server {
         let _ = resp
             .insert_header(http::header::CONTENT_LENGTH, buf.len().to_string());
 
-        // TODO: we shouldn't be closing downstream connections on internally generated errors
-        // and possibly other upstream connect() errors (connection refused, timeout, etc)
-        //
-        // This change is only here because we DO NOT re-use downstream connections
-        // today on these errors and we should signal to the client that pingora is dropping it
-        // rather than a misleading the client with 'keep-alive'
+        // Closed on purpose. With internally generated errors (and some
+        // upstream connect failures such as refused/timeout) the downstream
+        // connection is not reusable today, and advertising keep-alive would
+        // mislead the client into reusing it. Revisit only once the error
+        // path starts reusing downstream connections; the extra connection
+        // churn during an error storm is the honest trade (2026-10-18 audit
+        // reviewed this and confirmed the behaviour).
         server_session.set_keepalive(None);
 
         server_session
