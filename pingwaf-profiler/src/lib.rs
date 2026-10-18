@@ -388,7 +388,10 @@ mod tests {
             .expect("waf row");
         assert_eq!(waf.calls, 1);
         assert!(waf.cpu_ms > 0.0, "timer recorded time");
-        assert!((waf.cpu_share - 1.0).abs() < f64::EPSILON);
+        // Round-tripping ns → ms → share is exact mathematically but not in
+        // binary floating point; EPSILON is too tight for a platform-neutral
+        // assertion (it flipped between toolchains).
+        assert!((waf.cpu_share - 1.0).abs() < 1e-9);
     }
 
     #[test]
