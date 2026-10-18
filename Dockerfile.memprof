@@ -27,6 +27,9 @@ RUN npm run build
 # ─── Stage 2: Rust Builder (release-perf profile) ────────────────────────────
 FROM mirror.gcr.io/library/rust:1.98.1-bookworm AS builder
 
+# Bake the heap-profiling conf into jemalloc at build time.
+ENV JEMALLOC_SYS_WITH_MALLOC_CONF=prof:true,lg_prof_sample:19,lg_prof_interval:32
+
 # SYNC: keep this list in lockstep with Dockerfile / ci.yml / release.yml
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
@@ -150,10 +153,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # and override it (lower values return freed pages to the OS sooner, at a
 # small CPU cost). SYNC: keep in lockstep with Dockerfile /
 # Dockerfile.runtime.
-# jemalloc reads MALLOC_CONF at startup; prof must be on before the first
-# allocation. lg_prof_sample:19 = ~1/512k sampled bytes (low overhead);
-# lg_prof_interval:32M = dump-able stats every ~32MB of allocation churn.
-ENV MALLOC_CONF=prof:true,lg_prof_sample:19,lg_prof_interval:32M
+# Compile the profiling conf INTO jemalloc (--with-malloc-conf via
+# JEMALLOC_SYS_WITH_MALLOC_CONF, read by tikv-jemalloc-sys' build script).
+# Runtime MALLOC_CONF was ignored in every shape we tried (env, /etc/malloc.conf)
+# — a compile-time default cannot be missed. lg_prof_sample:19 = ~1/512k
+# sampled bytes; lg_prof_interval:32 = auto-dump every 2^32 bytes.
 
 COPY --from=builder /app/target/release-perf/pingwaf /usr/local/bin/pingwaf
 COPY pingwaf.toml /etc/pingwaf/pingwaf.toml
