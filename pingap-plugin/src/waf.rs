@@ -1599,15 +1599,25 @@ const PENDING_ACCESS_TTL: Duration = Duration::from_secs(60);
 /// from the same client are dropped before the engine runs again.
 const WAF_AUTO_BLOCK_SECS: u64 = 600;
 
-/// Only pay for garbage collection above this many outstanding entries.
-const PENDING_ACCESS_GC_THRESHOLD: usize = 65536;
+/// Outstanding request-facts entries are capped: each carries up to 64 KiB
+/// of body prefix (and header vectors), so an unbounded map is a direct
+/// OOM lever on a small host. At the cap expired entries are evicted first;
+/// if it is still full the enrichment for the new request is dropped — every
+/// consumer treats a missing entry as a no-op, so the request itself is
+/// unaffected. (2026-10-17 audit: the old 65536-entry threshold allowed
+/// hundreds of MB of retained bodies under a slow-upstream flood.)
+const PENDING_ACCESS_MAX_ENTRIES: usize = 2048;
 
 static PENDING_ACCESS: LazyLock<DashMap<String, PendingAccess>> =
     LazyLock::new(DashMap::new);
 
 fn register_pending_access(request_id: &str, pending: PendingAccess) {
-    if PENDING_ACCESS.len() > PENDING_ACCESS_GC_THRESHOLD {
+    if PENDING_ACCESS.len() >= PENDING_ACCESS_MAX_ENTRIES {
         PENDING_ACCESS.retain(|_, v| v.start.elapsed() < PENDING_ACCESS_TTL);
+        if PENDING_ACCESS.len() >= PENDING_ACCESS_MAX_ENTRIES {
+            // Fail-open on the enrichment only: no facts for this request.
+            return;
+        }
     }
     PENDING_ACCESS.insert(request_id.to_string(), pending);
 }
@@ -1673,6 +1683,12 @@ struct DeferredBody {
     deferred: Option<DeferredVerdict>,
     created_at: Instant,
 }
+
+/// Concurrent withheld-body staging is capped: each entry may hold the whole
+/// inspect window (up to `max_body_size`, megabytes). Past the cap the
+/// request is not staged at all — its body flows to the upstream untouched
+/// (fail-open), the same outcome as the inspect timeout.
+const DEFERRED_BODY_MAX_ENTRIES: usize = 1024;
 
 static DEFERRED_BODY: LazyLock<DashMap<String, DeferredBody>> =
     LazyLock::new(DashMap::new);
@@ -3248,6 +3264,18 @@ impl Plugin for WafPlugin {
                 EngineChoice::Disabled | EngineChoice::FailClosed => false,
             };
             let inspect = should_inspect && engine_runs;
+            if DEFERRED_BODY.len() >= DEFERRED_BODY_MAX_ENTRIES {
+                DEFERRED_BODY
+                    .retain(|_, v| v.created_at.elapsed() < PENDING_ACCESS_TTL);
+            }
+            if DEFERRED_BODY.len() >= DEFERRED_BODY_MAX_ENTRIES {
+                // Fail-open: no staging, the body streams through
+                // uninspected (matches the timeout path).
+                if let Some(agent) = &agent {
+                    agent.record_request(false);
+                }
+                return Ok(RequestPluginResult::Continue);
+            }
             DEFERRED_BODY.insert(
                 request_id.clone(),
                 DeferredBody {

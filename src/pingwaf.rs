@@ -1547,6 +1547,10 @@ pub fn main() {
         std::env::var("PINGWAF_PPROF_ENABLED").ok().as_deref(),
     ));
 
+    // Allocator retention policy (adaptive by memory ceiling, overridable
+    // via env). This entry point bypasses main.rs, so apply it here too.
+    crate::allocator_tune::apply();
+
     // Initialize tracing
     init_tracing();
 

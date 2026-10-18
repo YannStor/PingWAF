@@ -35,6 +35,18 @@ const TOP_FRAMES: usize = 10;
 // Last-capture summary cache (feeds /cpu/summary and MCP)
 // ─────────────────────────────────────────────────────────────
 
+/// Snapshots younger than this are reused as-is: `/cpu/metrics`, the
+/// capture load guard and the console card all poll the same process, and
+/// every refresh costs a stretch sleep under the sampler lock. One-second
+/// freshness is plenty for a CPU percentage and removes the queueing
+/// (2026-10-18 performance audit).
+const SNAPSHOT_TTL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// `<stats, taken_at>` for the 1s reuse window; lock order is
+/// CPU_SAMPLER → LAST_SNAPSHOT, never the other way round.
+static LAST_SNAPSHOT: Mutex<Option<(CpuLiveStats, std::time::Instant)>> =
+    Mutex::new(None);
+
 /// The most recent capture summary, kept so that the `/cpu/summary`
 /// endpoint and the MCP tools can answer "what did the last capture show"
 /// without re-running a capture. Only the latest one is retained — the
@@ -132,6 +144,17 @@ pub fn cpu_snapshot() -> CpuLiveStats {
     let mut sys = CPU_SAMPLER
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // 1s reuse: concurrent pollers get the same reading instead of queueing
+    // for their own refresh (see SNAPSHOT_TTL).
+    if let Some((cached, taken_at)) = LAST_SNAPSHOT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+    {
+        if taken_at.elapsed() < SNAPSHOT_TTL {
+            return cached.clone();
+        }
+    }
     stretch_to_minimum_interval();
     sys.refresh_cpu_specifics(CpuRefreshKind::everything());
     let pid = Pid::from_u32(std::process::id());
@@ -152,6 +175,10 @@ pub fn cpu_snapshot() -> CpuLiveStats {
         profiling: crate::capture_stats(),
     };
     mark_refreshed();
+    *LAST_SNAPSHOT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+        Some((stats.clone(), std::time::Instant::now()));
     stats
 }
 
@@ -817,6 +844,25 @@ mod tests {
             "cpu usage is never negative"
         );
         assert!(stats.host_cpu_percent >= 0.0);
+    }
+
+    /// Back-to-back calls inside the 1s window must reuse the reading —
+    /// that is what keeps `/cpu/metrics` + the guard + the console card
+    /// from serializing on the sampler lock.
+    #[test]
+    fn snapshot_is_reused_within_ttl() {
+        let first = cpu_snapshot();
+        let started = Instant::now();
+        let second = cpu_snapshot();
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(300),
+            "second call must hit the cache, took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            first.collected_at_ms, second.collected_at_ms,
+            "cached snapshot must be byte-identical"
+        );
     }
 
     /// Concurrent snapshots must all succeed under the serialized

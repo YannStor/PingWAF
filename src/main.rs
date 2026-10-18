@@ -79,6 +79,7 @@ use sysinfo::System;
 use tracing::{error, info, warn};
 
 mod admin;
+mod allocator_tune;
 mod certificates;
 mod cli;
 mod config_file;
@@ -1227,6 +1228,10 @@ fn main() {
     // providers (ring + aws-lc-rs), so install ring explicitly before any
     // TLS listener or client initialises. No-op if already installed.
     let _ = rustls::crypto::ring::default_provider().install_default();
+
+    // Allocator retention policy (adaptive by memory ceiling, überridable
+    // via env). Runs before any workload; no-op on repeated calls.
+    allocator_tune::apply();
 
     // Check if PingWAF mode is requested (via subcommand or PINGWAF_MODE env)
     if cli::is_pingwaf_mode() {

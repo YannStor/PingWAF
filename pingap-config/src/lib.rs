@@ -91,6 +91,20 @@ impl Observer {
             source: Box::new(e),
         })?;
 
+        if resp.is_none() {
+            // The stream ended (etcd restart / connection drop). Returning
+            // Ok(false) with the dead stream still in place makes the caller
+            // (`AutoRestart::run`) `continue` immediately and re-poll a
+            // finished stream — a tight loop that burns a whole runtime
+            // worker (2026-10-18 audit H1). Drop the stream instead: the
+            // next call takes the "no stream" branch above, which sleeps
+            // before retrying. Config changes are still picked up by the
+            // caller's periodic full diff.
+            self.etcd_watch_stream = None;
+            tracing::warn!(
+                "etcd watch stream ended; falling back to periodic config diff"
+            );
+        }
         Ok(resp.is_some())
     }
 }

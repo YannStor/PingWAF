@@ -42,7 +42,8 @@ pub use cpu_svg::{
     CpuLiveStats, CpuStatus, DashboardSvgOpts, TopFrame,
 };
 pub use memory_guard::{
-    available_bytes, ensure_admission, memory_pressure_now, MIN_AVAILABLE_BYTES,
+    available_bytes, ensure_admission, memory_pressure_now, total_bytes,
+    MIN_AVAILABLE_BYTES,
 };
 
 #[cfg(target_os = "linux")]
@@ -627,7 +628,10 @@ pub fn spawn_memory_watchdog(abort: SessionAbort, window: std::time::Duration) {
             Instant::now() + window + std::time::Duration::from_secs(2);
         let mut breaches = 0_u32;
         while Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(250));
+            // 500ms: two consecutive breaches still trip within ~1s, while
+            // halving the wake-ups of a watchdog that lives only for one
+            // capture window (2026-10-18 CPU audit).
+            std::thread::sleep(std::time::Duration::from_millis(500));
             if abort.aborted() {
                 return; // finished normally elsewhere
             }

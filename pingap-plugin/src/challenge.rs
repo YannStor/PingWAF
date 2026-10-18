@@ -138,6 +138,13 @@ fn generate_nonce() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
+/// Only sweep the challenge map above this many outstanding entries.
+const PENDING_CHALLENGE_GC_THRESHOLD: usize = 1024;
+
+/// Throttle for the O(N) TTL sweeps: every Nth insert does the scan.
+static GC_TICK: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// Record a freshly issued challenge, opportunistically dropping stale ones.
 pub(crate) fn store_pending(
     request_id: &str,
@@ -145,8 +152,16 @@ pub(crate) fn store_pending(
     original_url: &str,
 ) -> String {
     let now = now_secs();
-    // Cheap garbage collection so the map cannot grow without bound.
-    if PENDING_CHALLENGES.len() > 1024 {
+    // Opportunistic garbage collection so the map cannot grow without bound.
+    // Under a challenge flood (unauthenticated traffic) a per-request full
+    // scan is itself a CPU amplifier: once over the threshold, sweep only
+    // every 64th insert. The TTL sweep still bounds the map, it just stops
+    // costing O(N) on every request (2026-10-18 audit H2).
+    if PENDING_CHALLENGES.len() > PENDING_CHALLENGE_GC_THRESHOLD
+        && GC_TICK
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .is_multiple_of(64)
+    {
         PENDING_CHALLENGES
             .retain(|_, v| now.saturating_sub(v.created_at) < PENDING_TTL_SECS);
     }
@@ -671,8 +686,14 @@ impl ChallengePlugin {
         entry.count = entry.count.saturating_add(1);
         let count = entry.count;
         drop(entry);
-        // Opportunistic cleanup so the map does not grow unbounded.
-        if self.rates.len() > 8192 {
+        // Opportunistic cleanup so the map does not grow unbounded; same
+        // throttle as the challenge map — a per-request full scan would be
+        // a CPU amplifier under many-source traffic (2026-10-18 audit H3).
+        if self.rates.len() > 8192
+            && GC_TICK
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                .is_multiple_of(64)
+        {
             self.rates.retain(|_, w| {
                 now.saturating_sub(w.window_start) < RATE_WINDOW_SECS * 2
             });

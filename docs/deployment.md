@@ -171,6 +171,7 @@ and therefore no file key:
 | `PINGWAF_PASSKEY_ORIGIN` | derived from the request | Origin the dashboard is served from |
 | `PINGWAF_PASSKEY_TRUST_FORWARDED_PROTO` | `false` | Believe `X-Forwarded-Proto` when deriving the origin |
 | `PINGWAF_PPROF_ENABLED` | enabled | Fallback for the debug-capture switch (honoured only when the `[basic] pprof_enabled` config key is unset, default `true`). Set to `0` (`false`/`off`/`no`, case-insensitive) to disable the CPU-capture endpoints, the heap endpoint and the MCP `profile_cpu` tool; the read-only memory/metrics snapshots stay available — see [Profiling](./profiling.md#capture-audit-and-the-enable-switch) |
+| `PINGWAF_MALLOC_PURGE_DELAY_MS` | derived from memory ceiling | Allocator purge delay in **milliseconds** (mimalloc `mi_option_purge_delay`). Overrides the automatic bucketing (<1 GB → 0, 1-4 GB → 250, 4-16 GB → 500, >16 GB → 1000); `-1` disables purging. The standard `MIMALLOC_PURGE_DELAY` is honoured as a fallback |
 
 The refresh-token lifetime (30 days), the minimum pool size (`1`) and the
 server-side log batch size (`500`) are compiled-in constants with no override.
@@ -295,11 +296,23 @@ that share the box with PostgreSQL):
   [mimalloc](https://github.com/microsoft/mimalloc) as its global allocator on
   every platform (previously only musl builds used it; glibc builds went
   through the system allocator, whose per-thread arenas could pin tens of
-  megabytes of RSS). Freed pages are now purged back to the kernel instead of
-  lingering until a restart. Tune the purge cadence with the
-  `MIMALLOC_PURGE_DELAY` environment variable — it is in **milliseconds**,
-  the images ship `1000` (mimalloc v3's own default); lower it (e.g. `100`)
-  to return memory sooner at a small CPU cost.
+  megabytes of RSS). Freed pages are purged back to the kernel instead of
+  lingering until a restart, and the purge delay now **derives from the memory
+  ceiling at startup** (cgroup limit, then host total):
+
+  | Memory ceiling | Purge delay |
+  | --- | --- |
+  | < 1 GB | 0 ms (return pages immediately) |
+  | 1-4 GB | 250 ms |
+  | 4-16 GB | 500 ms |
+  | > 16 GB | 1000 ms |
+
+  Small hosts return pages aggressively (a little more CPU for a materially
+  lower RSS); large hosts keep mimalloc's lazier default. Pin an explicit
+  value with `PINGWAF_MALLOC_PURGE_DELAY_MS` (milliseconds, `-1` = never
+  purge); the standard `MIMALLOC_PURGE_DELAY` is honoured as a fallback. The
+  effective value is logged at startup
+  (`pingwaf: allocator retention purge_delay=...`).
 - **Set transparent hugepages to `madvise`** on the host kernel
   (`/sys/kernel/mm/transparent_hugepage/enabled`); `always` lets the
   hugepage backing inflate resident memory.

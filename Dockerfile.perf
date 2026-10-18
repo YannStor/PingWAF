@@ -147,13 +147,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && mkdir -p /etc/pingwaf /var/lib/pingwaf \
     && chown -R pingwaf:pingwaf /var/lib/pingwaf /etc/pingwaf
 
-# mimalloc runtime tuning. The binary's global allocator reads MIMALLOC_*
-# options at startup. PURGE_DELAY is in MILLISECONDS; 1000 is mimalloc v3's
-# own default, pinned here so memory-constrained deployments can discover
-# and override it (lower values return freed pages to the OS sooner, at a
-# small CPU cost). SYNC: keep in lockstep with Dockerfile /
-# Dockerfile.runtime.
-ENV MIMALLOC_PURGE_DELAY=1000
+# Allocator retention (purge delay) is now derived at startup from the
+# memory ceiling (cgroup limit → host total): <1GB → 0ms, 1-4GB → 250ms,
+# 4-16GB → 500ms, >16GB → 1000ms. Override with
+# PINGWAF_MALLOC_PURGE_DELAY_MS (explicit) or MIMALLOC_PURGE_DELAY — see
+# src/allocator_tune.rs. No fixed ENV here on purpose: a pinned 1000ms
+# kept freed pages resident on small hosts and fed the OOM incidents.
 
 COPY --from=builder /app/target/release-perf/pingwaf /usr/local/bin/pingwaf
 COPY pingwaf.toml /etc/pingwaf/pingwaf.toml

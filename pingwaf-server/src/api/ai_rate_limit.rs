@@ -45,6 +45,11 @@ struct Entry {
     count: u32,
 }
 
+/// Hard cap on the counter table. Keys are `(bucket, user_id)`, so growth
+/// is bounded by the user count in practice; the sweep keeps the table
+/// honest and matches the login limiter's policy (10_000 + retain).
+const MAX_ENTRIES: usize = 10_000;
+
 static COUNTERS: LazyLock<Mutex<Counters>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -97,7 +102,17 @@ pub(crate) fn check_user_limit(
     let verdict = {
         let mut counters =
             COUNTERS.lock().expect("ai rate-limit counters poisoned");
-        consume(&mut counters, bucket, rate, user_id, Instant::now())
+        let now = Instant::now();
+        if counters.len() >= MAX_ENTRIES {
+            // Drop entries whose window already reset — they would be
+            // re-created lazily on the next call for that user.
+            counters.retain(|(bucket, _), entry| {
+                rate_for(bucket)
+                    .map(|r| now.duration_since(entry.window_start) < r.window)
+                    .unwrap_or(false)
+            });
+        }
+        consume(&mut counters, bucket, rate, user_id, now)
     };
     verdict.map_err(|retry_after| {
         tracing::warn!(

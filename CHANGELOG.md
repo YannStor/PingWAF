@@ -8,6 +8,43 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+### Changed
+
+- **Allocator retention is now derived from the memory ceiling** instead of
+  the fixed 1000 ms purge delay baked into the images (mimalloc's own
+  default is 10 ms — the pin made every host, including 1 GB ones, retain
+  freed pages for a second). Buckets: <1 GB → 0 ms, 1-4 GB → 250 ms,
+  4-16 GB → 500 ms, >16 GB → 1000 ms. Applied at startup through
+  mimalloc's runtime API (`mi_option_set`), so containers and bare-metal
+  systemd units behave identically. Override with
+  `PINGWAF_MALLOC_PURGE_DELAY_MS` (fallback: `MIMALLOC_PURGE_DELAY`); the
+  effective value is logged at startup.
+
+### Added
+
+- Memory caps from the 2026-10-17 risk audit: `PENDING_ACCESS` 65536 →
+  2048 entries (fail-open on enrichment), `DEFERRED_BODY` capped at 1024
+  staged bodies (fail-open, body streams through), agent log channel
+  16384 → 2048, AI rate-limit table capped at 10 000 with a retain sweep,
+  certificate-alert dedup set capped at 4096.
+- CPU snapshot reuse: readings younger than 1 s are shared, so
+  `/cpu/metrics`, the capture load guard and the console card no longer
+  queue behind each other on the sampler lock.
+
+### Fixed
+
+- **etcd watch busy-loop (high):** when the watch stream ended (etcd
+  restart / connection drop) the observer returned `Ok(false)` and the
+  caller `continue`d immediately, re-polling a dead stream and burning a
+  whole runtime worker. The stream is now dropped so the next poll takes
+  the sleeping path (periodic diff still covers config changes).
+- Challenge/rate tables swept every 64th insert instead of on every
+  request once over threshold (removes a request-level O( N ) CPU
+  amplifier under challenge floods).
+- Memory watchdog polls every 500 ms instead of 250 ms.
+
 ## [PingWAF 0.27.6] — 2026-10-17
 
 ### Changed

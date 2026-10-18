@@ -29,6 +29,11 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(3600);
 static ALERTED: std::sync::LazyLock<std::sync::Mutex<HashSet<String>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
 
+/// Hard cap on the dedup set. The set only grows with distinct
+/// `{site}:{expiry-date}` pairs; clearing at the cap costs at most one
+/// duplicate alert per pending certificate, not lost alerts.
+const ALERTED_MAX_ENTRIES: usize = 4096;
+
 /// Spawns the hourly scanner; the handle is detached by the caller.
 pub fn start(db: DatabaseConnection) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -69,7 +74,12 @@ async fn scan(db: &DatabaseConnection) {
         let key = alert_key(row.site_id, expires_at);
         if ALERTED
             .lock()
-            .map(|mut set| !set.insert(key))
+            .map(|mut set| {
+                if set.len() >= ALERTED_MAX_ENTRIES {
+                    set.clear();
+                }
+                !set.insert(key)
+            })
             .unwrap_or(true)
         {
             continue;

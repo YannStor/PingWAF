@@ -20,9 +20,35 @@ pub fn available_bytes() -> Option<u64> {
     cgroup_v2().or_else(cgroup_v1).or_else(sysinfo_available)
 }
 
+/// Memory ceiling in bytes: the cgroup limit when one is set, otherwise
+/// the host total. Used by the allocator retention policy to size its
+/// purge delay; `None` when nothing is discoverable.
+pub fn total_bytes() -> Option<u64> {
+    cgroup_v2_limit()
+        .or_else(cgroup_v1_limit)
+        .or_else(host_total)
+}
+
+fn cgroup_v2_limit() -> Option<u64> {
+    parse_limit(&std::fs::read_to_string("/sys/fs/cgroup/memory.max").ok()?)
+}
+
+fn cgroup_v1_limit() -> Option<u64> {
+    parse_limit(
+        &std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+            .ok()?,
+    )
+}
+
+fn host_total() -> Option<u64> {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    let total = sys.total_memory();
+    (total > 0).then_some(total)
+}
+
 fn cgroup_v2() -> Option<u64> {
-    let max = std::fs::read_to_string("/sys/fs/cgroup/memory.max").ok()?;
-    let max = parse_limit(&max)?;
+    let max = cgroup_v2_limit()?;
     let current: u64 = std::fs::read_to_string("/sys/fs/cgroup/memory.current")
         .ok()?
         .trim()
@@ -32,10 +58,7 @@ fn cgroup_v2() -> Option<u64> {
 }
 
 fn cgroup_v1() -> Option<u64> {
-    let limit =
-        std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes")
-            .ok()?;
-    let limit = parse_limit(&limit)?;
+    let limit = cgroup_v1_limit()?;
     let usage: u64 =
         std::fs::read_to_string("/sys/fs/cgroup/memory/memory.usage_in_bytes")
             .ok()?
@@ -105,6 +128,13 @@ mod tests {
         // but a value must be sane when present.
         if let Some(available) = available_bytes() {
             assert!(available > 0);
+        }
+    }
+
+    #[test]
+    fn total_bytes_is_plausible() {
+        if let Some(total) = total_bytes() {
+            assert!(total > 16 * 1024 * 1024, "ceiling {total} is absurd");
         }
     }
 

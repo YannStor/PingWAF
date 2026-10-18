@@ -130,9 +130,12 @@ impl ControlPlaneClient {
         rule_cache: Arc<RuleCache>,
         metrics: Arc<MetricsCollector>,
     ) -> Self {
-        // Bigger buffer: every request now ships a full log entry (headers
-        // and a body prefix), so bursts need more headroom before drops.
-        let (log_tx, log_rx) = mpsc::channel(16384);
+        // Bounded on purpose: entries carry headers plus a body prefix
+        // (8-64 KiB each), so 16384 entries could pin ~1 GB while the
+        // control plane is unreachable (2026-10-17 audit). 2048 caps the
+        // backlog in the tens of MB; the rest are dropped and counted by
+        // the existing try_send warning path.
+        let (log_tx, log_rx) = mpsc::channel(2048);
         let retry_delay_ms = AtomicU64::new(config.reconnect_initial_delay_ms);
 
         // A purge is actionable without the host application: the edge cache
