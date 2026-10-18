@@ -534,20 +534,21 @@ pub(crate) async fn heap_impl() -> Result<Response, ApiError> {
         let cpath =
             std::ffi::CString::new(dump_path.to_string_lossy().as_bytes())
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
-        // `prof.dump` is a write-only mallctl (man: `prof.dump (const
-        // char *) r-`): the path travels through `oldp` as a
-        // `const char *`, not through `newp` — passing it as newp answers
-        // EINVAL (rc 22).
+        // `prof.dump` follows jemalloc's write-only mallctl contract:
+        // WRITEONLY() demands oldp/oldlenp be NULL (EPERM otherwise), and
+        // WRITE(filename, const char *) demands newlen == sizeof(pointer)
+        // (EINVAL otherwise) with the path passed through newp. Both wrong
+        // shapes were hit before this landed (rc 22 then rc 1).
         let mut path_ptr: *mut core::ffi::c_void =
             cpath.as_ptr() as *mut core::ffi::c_void;
         let rc = unsafe {
             tikv_jemalloc_sys::mallctl(
                 b"prof.dump\0".as_ptr().cast(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
                 &mut path_ptr as *mut *mut core::ffi::c_void
                     as *mut core::ffi::c_void,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                0,
+                std::mem::size_of::<*mut core::ffi::c_void>(),
             )
         };
         if rc != 0 {
