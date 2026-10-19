@@ -1249,6 +1249,17 @@ means the global switch turns every protective action into logging.
 
 ## WAF Rules
 
+### Security event detail suffixes
+
+`waf_details` may end with optional, machine-readable suffixes (added 2026-10-19):
+
+- `; surface=<query|header|body|path>` — the first surface that matched;
+- `; surfaces=<a,b>` — every surface that matched in this pass;
+- `; downgraded=true would_enforce=<block|challenge> cause=site-mode-monitor` —
+  a would-be enforcement suppressed by the site-wide monitor mode.
+
+They never contain rule ids, rule names or request content.
+
 ### Rule modes
 
 Every rule — custom or built-in — carries a `mode` field with the same three

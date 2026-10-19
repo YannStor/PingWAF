@@ -38,6 +38,7 @@ use crate::host_cache::{HostCacheSweep, touch};
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
+use http::{HeaderName, HeaderValue};
 use ipnet::IpNet;
 use pingap_config::{PluginCategory, PluginConf};
 use pingap_core::{
@@ -1874,6 +1875,36 @@ fn emit_generated_access(
     );
 }
 
+/// Header the WAF and every other edge defence stamps on a response they
+/// generated, so a visitor (or the site owner reading a report) can tell a
+/// PingWAF block from an upstream 403 that happens to carry the same status
+/// code. Mirrors Cloudflare's `cf-mitigated`.
+const MITIGATED_HEADER: &str = "x-pingwaf-mitigated";
+
+/// Adds the mitigation marker to a response the WAF itself produced.
+///
+/// [`block_page`](crate::challenge::block_page) already stamps it; this is the
+/// single choke point the WAF verdict paths go through, so a future response
+/// builder cannot drop the marker (D26). The value is a fixed vocabulary word
+/// — `block` or `challenge` — and never carries a rule id, rule name or any
+/// other detail, so the header cannot leak what matched.
+fn stamp_mitigated(
+    mut response: HttpResponse,
+    challenge: bool,
+) -> HttpResponse {
+    let value = if challenge { "challenge" } else { "block" };
+    let header = (
+        HeaderName::from_static(MITIGATED_HEADER),
+        HeaderValue::from_static(value),
+    );
+    let headers = response.headers.get_or_insert_with(Vec::new);
+    // Replace rather than append, so a marker set by the page builder cannot
+    // end up duplicated on the wire.
+    headers.retain(|(name, _)| name.as_str() != MITIGATED_HEADER);
+    headers.push(header);
+    response
+}
+
 /// Content types whose bodies are text-like and thus worth storing.
 fn is_textual_content_type(value: &str) -> bool {
     let mime = value
@@ -2443,6 +2474,7 @@ impl WafPlugin {
         } else {
             block_page(request_id, &verdict.details)
         };
+        let response = stamp_mitigated(response, denial.challenge);
         emit_generated_access(agent, request_id, &response);
         RequestPluginResult::Respond(response)
     }
@@ -2605,6 +2637,10 @@ impl WafPlugin {
                 ChallengeKind::Js,
             )
         };
+        // D26: an upstream 403 and a WAF block share the status code; the
+        // marker is what makes the origin of the response unambiguous.
+        let response =
+            stamp_mitigated(response, verdict.action == WafAction::Challenge);
         emit_generated_access(agent, request_id, &response);
         VerdictOutcome::Respond(response)
     }
@@ -4057,6 +4093,125 @@ advanced_mode = true
             panic!("expected a block response");
         };
         assert_eq!(http::StatusCode::FORBIDDEN, resp.status);
+    }
+
+    /// Reads one header off a generated response.
+    fn mitigated_of(resp: &HttpResponse) -> Option<String> {
+        resp.headers.as_ref().and_then(|headers| {
+            headers
+                .iter()
+                .find(|(name, _)| name.as_str() == "x-pingwaf-mitigated")
+                .map(|(_, value)| {
+                    value.to_str().unwrap_or_default().to_string()
+                })
+        })
+    }
+
+    /// D26: a WAF block and an upstream 403 share the status code, so the WAF
+    /// response carrying the mitigation marker is what tells them apart.
+    #[tokio::test]
+    async fn test_waf_block_carries_the_mitigation_header() {
+        let _agent_lock = lock_agent().await;
+        PingWafAgent::set_agent_instance(None);
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        let input_header = "GET /api/users?id=1'%20OR%201=1%20-- HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+
+        let result = plugin
+            .handle_request(
+                PluginStep::EarlyRequest,
+                &mut session,
+                &mut Ctx::default(),
+            )
+            .await
+            .unwrap();
+        let RequestPluginResult::Respond(resp) = result else {
+            panic!("expected a block response");
+        };
+        assert_eq!(http::StatusCode::FORBIDDEN, resp.status);
+        assert_eq!(mitigated_of(&resp).as_deref(), Some("block"));
+    }
+
+    /// D26: a clean request never carries the marker — its presence alone must
+    /// mean security intervened.
+    #[tokio::test]
+    async fn test_a_clean_request_carries_no_mitigation_header() {
+        let _agent_lock = lock_agent().await;
+        PingWafAgent::set_agent_instance(None);
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        let input_header =
+            "GET /api/users?page=1 HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+
+        let result = plugin
+            .handle_request(
+                PluginStep::EarlyRequest,
+                &mut session,
+                &mut Ctx::default(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result, RequestPluginResult::Continue));
+    }
+
+    /// D26: the marker value is a fixed vocabulary word, never a rule id,
+    /// rule name or matched payload — the header must not leak what fired.
+    #[test]
+    fn test_the_mitigation_header_leaks_no_rule_detail() {
+        let blocked = stamp_mitigated(
+            block_page("req-1", "SQLi rule matched PINGWAF-1002"),
+            false,
+        );
+        assert_eq!(mitigated_of(&blocked).as_deref(), Some("block"));
+
+        let challenged = stamp_mitigated(
+            block_page("req-2", "challenge for PINGWAF-1005"),
+            true,
+        );
+        assert_eq!(mitigated_of(&challenged).as_deref(), Some("challenge"));
+
+        for response in [&blocked, &challenged] {
+            let headers = response.headers.as_ref().expect("headers");
+            let marker_values: Vec<&str> = headers
+                .iter()
+                .filter(|(name, _)| name.as_str() == "x-pingwaf-mitigated")
+                .map(|(_, value)| value.to_str().unwrap_or_default())
+                .collect();
+            // Exactly one marker, and never a rule identifier in it.
+            assert_eq!(marker_values.len(), 1);
+            let value = marker_values[0];
+            assert!(matches!(value, "block" | "challenge"), "{value}");
+            assert!(!value.contains("PINGWAF"), "{value}");
+            assert!(!value.contains("1002"), "{value}");
+        }
+    }
+
+    /// D26: stamping is idempotent in the on-the-wire sense — the marker is
+    /// replaced, never duplicated, when a page builder already set it.
+    #[test]
+    fn test_stamping_replaces_a_preexisting_marker() {
+        let once = stamp_mitigated(block_page("req-3", "blocked"), false);
+        let twice = stamp_mitigated(once, false);
+        let markers = twice
+            .headers
+            .as_ref()
+            .expect("headers")
+            .iter()
+            .filter(|(name, _)| name.as_str() == "x-pingwaf-mitigated")
+            .count();
+        assert_eq!(markers, 1);
     }
 
     #[tokio::test]

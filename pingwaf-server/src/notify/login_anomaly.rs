@@ -141,6 +141,11 @@ impl LoginSecuritySettings {
             return Err("online_geo_url must start with http:// or https://"
                 .to_string());
         }
+        // SSRF gate (D16): the control plane fetches this URL on every login,
+        // so a stored private / metadata / loopback host turns the operator
+        // surface into an internal network probe. Refused at save time —
+        // before anything is persisted — and again on the request path.
+        check_geo_url_host(&self.online_geo_url)?;
         if let Some(header) = &self.trusted_header {
             let name = header.trim().to_ascii_lowercase();
             if name.is_empty() {
@@ -214,6 +219,135 @@ pub fn is_private(ip: IpAddr) -> bool {
             (segments[0] & 0xfe00) == 0xfc00 || (segments[0] & 0xffc0) == 0xfe80
         },
     }
+}
+
+/// Extracts the host of an absolute `http(s)://` URL without parsing it into
+/// a full `Url` (the crate is not a dependency of this package). Handles an
+/// optional userinfo, an IPv6 literal in brackets, an optional port and the
+/// path/query tail. Returns `None` for anything that is not shaped like an
+/// absolute URL with a non-empty authority — the caller treats that as a
+/// rejection, never as a pass.
+pub fn url_host(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .or_else(|| url.strip_prefix("HTTP://"))
+        .or_else(|| url.strip_prefix("HTTPS://"))?;
+    // Authority ends at the first `/`, `?` or `#`.
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if authority.is_empty() {
+        return None;
+    }
+    // Drop `user:pass@`; only the part after the last `@` is the host, so a
+    // crafted `http://127.0.0.1@evil/` resolves to `evil` and a crafted
+    // `http://evil@127.0.0.1/` resolves to `127.0.0.1` — both judged on the
+    // host the client would actually connect to.
+    let host_port = match authority.rsplit_once('@') {
+        Some((_, host_port)) => host_port,
+        None => authority,
+    };
+    let (host, port) = if let Some(stripped) = host_port.strip_prefix('[') {
+        // Bracketed IPv6 literal, optionally followed by `:port`.
+        let (inside, tail) = stripped.split_once(']')?;
+        (inside.to_string(), tail.strip_prefix(':').unwrap_or(""))
+    } else {
+        match host_port.rsplit_once(':') {
+            // A lone colon can only be `host:port` here; a bare IPv6 literal
+            // never has colons left unbracketed in an absolute URL.
+            Some((host, port)) => (host.to_string(), port),
+            None => (host_port.to_string(), ""),
+        }
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return None;
+    }
+    // Reject a malformed / out-of-range port rather than ignoring it.
+    if !port.is_empty()
+        && (port.parse::<u16>().is_err() || port.starts_with('+'))
+    {
+        return None;
+    }
+    Some(host)
+}
+
+/// Hostname literals that resolve inside the deployment by definition. No DNS
+/// lookup is performed — resolving here would itself be the SSRF the check is
+/// meant to stop, and a rebinding record would defeat a one-shot lookup
+/// anyway. Operator-configured internal suffixes are refused by name.
+pub fn is_private_hostname(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty()
+        || host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+        || host.ends_with(".home.arpa")
+        || host.ends_with(".lan")
+        || host.ends_with(".intranet")
+    {
+        return true;
+    }
+    // A single-label name (`geo`, `db`, `kubernetes`) is resolved through the
+    // container/enterprise search domain: there is no public DNS meaning for
+    // it, so it is an internal target.
+    if !host.contains('.') && !host.contains(':') {
+        return true;
+    }
+    false
+}
+
+/// Host-only form of a geo URL for log lines: the path and query may carry a
+/// provider key, which must never reach the log.
+fn redact_url(url: &str) -> String {
+    match url_host(url) {
+        Some(host) => format!("{host}/…"),
+        None => "<unparsable>".to_string(),
+    }
+}
+
+/// True when `url` is safe to fetch from the control plane: absolute
+/// `http(s)`, a parseable authority, and a host that is neither a private /
+/// loopback / link-local / metadata address literal nor an obviously internal
+/// name. See [`check_geo_url_host`] for the error text.
+pub fn is_public_geo_url(url: &str) -> bool {
+    check_geo_url_host(url).is_ok()
+}
+
+/// Validates the host part of an operator-supplied geo lookup URL.
+///
+/// Rejected address literals: `0.0.0.0/8` (incl. `0.0.0.0`), `127/8`,
+/// `10/8`, `172.16/12`, `192.168/16`, `169.254/16` (so the
+/// `169.254.169.254` metadata endpoint), `100.64/10` CGNAT, `255.255.255.255`,
+/// `::1`, `::`, `fc00::/7` and `fe80::/10` — plus anything already covered by
+/// [`is_private`], including IPv4-mapped IPv6 forms.
+pub fn check_geo_url_host(url: &str) -> Result<(), String> {
+    let Some(host) = url_host(url) else {
+        return Err(
+            "online_geo_url must be an absolute http:// or https:// URL with a host"
+                .to_string(),
+        );
+    };
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_private(ip) {
+            return Err(
+                "online_geo_url must not point at a private, loopback, \
+                 link-local or metadata address"
+                    .to_string(),
+            );
+        }
+        return Ok(());
+    }
+    if is_private_hostname(&host) {
+        return Err("online_geo_url must not point at an internal host name \
+             (localhost, *.local, *.internal or a single-label name)"
+            .to_string());
+    }
+    Ok(())
 }
 
 /// Resolves the client IP for one login: a trusted forwarding header wins
@@ -312,6 +446,22 @@ async fn lookup_online(
     settings: &LoginSecuritySettings,
 ) -> GeoInfo {
     let url = settings.online_geo_url.replace("{ip}", &ip.to_string());
+    // Belt and braces on the request path (D16): the stored value was checked
+    // at save time, but a row written by an older build (or edited in the
+    // database) must not turn one login into an internal probe. The client
+    // already refuses redirects, so a public host cannot bounce us onto a
+    // private one.
+    if let Err(reason) = check_geo_url_host(&url) {
+        tracing::warn!(
+            url = %redact_url(&url),
+            %reason,
+            "skipping online geo lookup for a non-public URL"
+        );
+        return GeoInfo {
+            source: crate::models::geo_source::UNKNOWN,
+            ..GeoInfo::default()
+        };
+    }
     let parsed = match http_client().get(&url).send().await {
         Ok(response) => response.json::<OnlineGeo>().await.ok(),
         Err(_) => None,
@@ -616,6 +766,46 @@ mod tests {
             ..LoginSecuritySettings::default()
         };
         assert!(empty_header.validate().is_err());
+    }
+
+    /// D16 regression: a stored geo URL pointing inside the deployment is
+    /// refused on the request path too, so a row written by an older build
+    /// cannot turn a login into an internal probe. `lookup_online` returns
+    /// before any socket is opened, which is what makes this test offline.
+    #[tokio::test]
+    async fn a_private_geo_url_never_reaches_the_network() {
+        for url in [
+            "http://169.254.169.254/latest/meta-data/{ip}",
+            "http://127.0.0.1:8080/{ip}",
+            "http://localhost/{ip}",
+            "http://10.1.2.3/{ip}",
+            "http://[::1]/{ip}",
+        ] {
+            let settings = LoginSecuritySettings {
+                online_geo_url: url.to_string(),
+                ..LoginSecuritySettings::default()
+            };
+            // A public address, so `lookup_geo` reaches the online path.
+            let geo = lookup_geo(ip("8.8.8.8"), &settings).await;
+            assert_eq!(
+                geo.source,
+                crate::models::geo_source::UNKNOWN,
+                "{url} produced {:?}",
+                geo.source
+            );
+            assert!(geo.country_code.is_none(), "{url}");
+        }
+    }
+
+    /// D16: log lines for a refused URL keep only the host — a provider key
+    /// in the query string must not reach the log.
+    #[test]
+    fn refused_urls_are_logged_host_only() {
+        assert_eq!(
+            redact_url("https://geo.example.com/lookup?key=secret&ip=1.2.3.4"),
+            "geo.example.com/…"
+        );
+        assert_eq!(redact_url("not a url"), "<unparsable>");
     }
 
     #[test]

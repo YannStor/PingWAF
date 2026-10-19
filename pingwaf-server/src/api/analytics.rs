@@ -115,6 +115,14 @@ impl Resolved {
             3
         }
     }
+
+    /// The row cap, re-clamped and widened to `u64` here rather than at the
+    /// call site so no caller can hand the query builder an unclamped or
+    /// differently-typed value. `resolve` already clamps; this is the single
+    /// place a `LIMIT` value can come from.
+    fn bound_limit(&self) -> u64 {
+        u64::try_from(self.limit.clamp(1, MAX_LIMIT)).unwrap_or(1)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -656,17 +664,18 @@ async fn sites_over_time(
     ))
 }
 
-/// `GET /api/v1/analytics/top-rules`
-async fn top_rules(
-    State(state): State<AppState>,
-    current: AuthUser,
-    Query(query): Query<RangeQuery>,
-) -> Result<Json<Vec<TopRule>>, ApiError> {
-    let resolved = resolve(&state, &current, &query).await?;
+/// Statement for `top-rules`.
+///
+/// D19: the row cap is a *bound parameter* (`LIMIT $n`), never interpolated
+/// into the SQL text — `sea_orm::Statement::from_sql_and_values` (via
+/// [`query_all`]) sends it out of band, so no code path can turn the limit
+/// into SQL. `resolved.bound_limit()` is the only source of the value and it
+/// clamps again, keeping the "value came from a query string" precondition
+/// local to one function instead of relying on every caller's `format!`.
+fn top_rules_sql(resolved: &Resolved) -> (String, Vec<Value>) {
     let (where_sql, mut values) = resolved.filter("security_events");
-    let limit_placeholder = resolved.next_placeholder();
-    values.push(Value::from(resolved.limit));
-
+    let placeholder = resolved.next_placeholder();
+    values.push(Value::from(resolved.bound_limit()));
     let sql = format!(
         "SELECT COALESCE(rule_id, 'unknown') AS rule_id, \
                 COALESCE(rule_name, '') AS rule_name, \
@@ -676,8 +685,35 @@ async fn top_rules(
          FROM security_events WHERE {where_sql} \
          GROUP BY rule_id, rule_name, action \
          ORDER BY hits DESC, rule_id ASC \
-         LIMIT ${limit_placeholder}"
+         LIMIT ${placeholder}"
     );
+    (sql, values)
+}
+
+/// Statement for `top-paths`; see [`top_rules_sql`] for the bound-limit rule.
+fn top_paths_sql(resolved: &Resolved) -> (String, Vec<Value>) {
+    let (where_sql, mut values) = resolved.filter("access_logs");
+    let placeholder = resolved.next_placeholder();
+    values.push(Value::from(resolved.bound_limit()));
+    let sql = format!(
+        "SELECT COALESCE(path, '/') AS path, \
+                COUNT(*) AS requests, \
+                COUNT(*) FILTER (WHERE cache_status = 'hit') AS cache_hits, \
+                COALESCE(AVG(total_latency_ms), 0)::BIGINT AS avg_latency_ms \
+         FROM access_logs WHERE {where_sql} \
+         GROUP BY path ORDER BY requests DESC LIMIT ${placeholder}"
+    );
+    (sql, values)
+}
+
+/// `GET /api/v1/analytics/top-rules`
+async fn top_rules(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Query(query): Query<RangeQuery>,
+) -> Result<Json<Vec<TopRule>>, ApiError> {
+    let resolved = resolve(&state, &current, &query).await?;
+    let (sql, values) = top_rules_sql(&resolved);
 
     let rows = query_all(&state.db, &sql, values).await?;
     Ok(Json(
@@ -735,18 +771,7 @@ async fn top_paths(
     Query(query): Query<RangeQuery>,
 ) -> Result<Json<Vec<TopPath>>, ApiError> {
     let resolved = resolve(&state, &current, &query).await?;
-    let (where_sql, mut values) = resolved.filter("access_logs");
-    let limit_placeholder = resolved.next_placeholder();
-    values.push(Value::from(resolved.limit));
-
-    let sql = format!(
-        "SELECT COALESCE(path, '/') AS path, \
-                COUNT(*) AS requests, \
-                COUNT(*) FILTER (WHERE cache_status = 'hit') AS cache_hits, \
-                COALESCE(AVG(total_latency_ms), 0)::BIGINT AS avg_latency_ms \
-         FROM access_logs WHERE {where_sql} \
-         GROUP BY path ORDER BY requests DESC LIMIT ${limit_placeholder}"
-    );
+    let (sql, values) = top_paths_sql(&resolved);
 
     let rows = query_all(&state.db, &sql, values).await?;
     Ok(Json(
@@ -939,6 +964,53 @@ mod tests {
         assert!(sql.ends_with("AND site_id = $3"));
         assert_eq!(values.len(), 3);
         assert_eq!(scoped.next_placeholder(), 4);
+    }
+
+    /// D19: the `LIMIT` never appears as a literal in the SQL text — it is
+    /// always a `$n` placeholder with the value bound separately. This is the
+    /// regression guard for the `format!("LIMIT {limit}")` shape.
+    #[test]
+    fn top_endpoints_bind_the_limit_instead_of_interpolating_it() {
+        for resolved in [resolved(None), resolved(Some(Uuid::new_v4()))] {
+            for (sql, values) in
+                [top_paths_sql(&resolved), top_rules_sql(&resolved)]
+            {
+                let placeholder =
+                    format!("LIMIT ${}", resolved.next_placeholder());
+                assert!(sql.ends_with(&placeholder), "{sql}");
+                // No digit may follow `LIMIT `: that would be an interpolated
+                // value rather than the bound parameter.
+                let after_limit =
+                    sql.rsplit("LIMIT ").next().unwrap_or_default();
+                assert!(after_limit.starts_with('$'), "unbound LIMIT in {sql}");
+                // The bound values cover the WHERE clause plus the cap, and
+                // `$n` placeholders are 1-based, so the count of bound
+                // values equals the index of the last placeholder.
+                assert_eq!(values.len(), resolved.next_placeholder());
+            }
+        }
+    }
+
+    /// D19: the bound cap is clamped even if a caller hands `Resolved` an
+    /// out-of-range `limit` directly, so an unbounded scan cannot be
+    /// requested through this path.
+    #[test]
+    fn the_bound_limit_is_always_clamped() {
+        let mut out_of_range = resolved(None);
+        out_of_range.limit = i64::MAX;
+        assert_eq!(out_of_range.bound_limit(), MAX_LIMIT as u64);
+
+        let mut negative = resolved(None);
+        negative.limit = -5;
+        assert_eq!(negative.bound_limit(), 1);
+
+        let mut zero = resolved(None);
+        zero.limit = 0;
+        assert_eq!(zero.bound_limit(), 1);
+
+        let mut in_range = resolved(None);
+        in_range.limit = 42;
+        assert_eq!(in_range.bound_limit(), 42);
     }
 
     #[test]

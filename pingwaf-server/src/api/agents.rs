@@ -43,6 +43,28 @@ pub mod command_type {
     pub const RESTART_AGENT: i32 = 7;
 }
 
+/// Upper bound on the `block_ip` duration a dashboard command may carry, in
+/// seconds (365 days). `0` keeps its protocol meaning of "until unblocked" and
+/// stays valid; anything beyond a year is a typo or an attempt to pin a block
+/// nobody will remember to remove. Negative values are refused rather than
+/// clamped, so a client that meant "forever" has to spell it `0`.
+const MAX_BLOCK_DURATION_SECONDS: i64 = 86_400 * 365;
+
+/// Same ceiling `api::cache` applies to `POST /cache/purge` (D12).
+///
+/// Duplicated rather than imported: `cache::MAX_PURGE_URLS` is private to that
+/// module, and widening it to `pub(crate)` from here would couple the two
+/// modules in the wrong direction. Keep the two values equal — both endpoints
+/// fan the same list out to the same fleet.
+const MAX_PURGE_URLS: usize = 1000;
+/// Cap on tag selectors in one command; nothing populates tags yet, so any
+/// non-trivial list is a mistake.
+const MAX_PURGE_TAGS: usize = 100;
+/// Cap on one url or tag selector. The longest legitimate entry is an absolute
+/// url with a long path and query string; 2 KiB is far past that and stops a
+/// single string from bloating a command that is mirrored to every agent.
+const MAX_PURGE_SELECTOR_LEN: usize = 2048;
+
 /// Agent row enriched with live connection information.
 #[derive(Debug, Serialize)]
 pub struct AgentResponse {
@@ -524,6 +546,64 @@ async fn enrich(
     Ok(out)
 }
 
+/// Bounds the `block_ip` duration (D12).
+///
+/// `None` and `0` both mean "permanent" in the protocol; a negative value used
+/// to reach the agent as-is, and an absurdly large one pinned a block for
+/// centuries. The value is rejected rather than clamped so a caller never gets
+/// a silently different block lifetime than it asked for.
+fn validate_block_duration(duration: Option<i64>) -> Result<i64, ApiError> {
+    let duration = duration.unwrap_or(0);
+    if !(0..=MAX_BLOCK_DURATION_SECONDS).contains(&duration) {
+        return Err(ApiError::BadRequest(format!(
+            "duration_seconds must be between 0 (permanent) and \
+             {MAX_BLOCK_DURATION_SECONDS} (one year), got {duration}"
+        )));
+    }
+    Ok(duration)
+}
+
+/// Bounds the url and tag selectors of a `purge_cache` command (D12).
+///
+/// The list is copied into one command per agent, so an unbounded list is
+/// amplified by the fleet size. Blank entries are dropped (same tolerance as
+/// `POST /cache/purge`), and the count and per-entry length are capped.
+fn validate_purge_selectors(
+    urls: &[String],
+    tags: &[String],
+) -> Result<(Vec<String>, Vec<String>), ApiError> {
+    let clean = |items: &[String]| -> Vec<String> {
+        items
+            .iter()
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect()
+    };
+    let urls = clean(urls);
+    let tags = clean(tags);
+
+    if urls.len() > MAX_PURGE_URLS {
+        return Err(ApiError::BadRequest(format!(
+            "at most {MAX_PURGE_URLS} urls can be purged in one command"
+        )));
+    }
+    if tags.len() > MAX_PURGE_TAGS {
+        return Err(ApiError::BadRequest(format!(
+            "at most {MAX_PURGE_TAGS} tags can be purged in one command"
+        )));
+    }
+    for item in urls.iter().chain(tags.iter()) {
+        if item.len() > MAX_PURGE_SELECTOR_LEN {
+            return Err(ApiError::BadRequest(format!(
+                "a url or tag may be at most {MAX_PURGE_SELECTOR_LEN} \
+                 characters, got {}",
+                item.len()
+            )));
+        }
+    }
+    Ok((urls, tags))
+}
+
 /// Turns a dashboard command request into the protocol message.
 pub fn build_command(
     payload: &CommandRequest,
@@ -539,14 +619,18 @@ pub fn build_command(
             })),
         ),
         "reload" => (command_type::CONFIG_RELOAD, None),
-        "purge_cache" => (
-            command_type::PURGE_CACHE,
-            Some(server_command_payload::PurgeCache(PurgeCacheCommand {
-                site_id: site.clone(),
-                urls: payload.urls.clone(),
-                tags: payload.tags.clone(),
-            })),
-        ),
+        "purge_cache" => {
+            let (urls, tags) =
+                validate_purge_selectors(&payload.urls, &payload.tags)?;
+            (
+                command_type::PURGE_CACHE,
+                Some(server_command_payload::PurgeCache(PurgeCacheCommand {
+                    site_id: site.clone(),
+                    urls,
+                    tags,
+                })),
+            )
+        },
         "block_ip" => {
             if payload.ip_addresses.is_empty() {
                 return Err(ApiError::BadRequest(
@@ -572,7 +656,9 @@ pub fn build_command(
                 Some(server_command_payload::BlockIp(BlockIpCommand {
                     site_id: site.clone(),
                     ip_addresses: normalized,
-                    duration_seconds: payload.duration_seconds.unwrap_or(0),
+                    duration_seconds: validate_block_duration(
+                        payload.duration_seconds,
+                    )?,
                     reason: payload
                         .reason
                         .clone()
@@ -746,6 +832,92 @@ mod tests {
             None
         )
         .is_err());
+    }
+
+    fn purge_payload(req: &CommandRequest) -> PurgeCacheCommand {
+        match build_command(req, None).unwrap().payload.unwrap() {
+            server_command_payload::PurgeCache(cmd) => cmd,
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    fn block_duration(req: &CommandRequest) -> i64 {
+        match build_command(req, None).unwrap().payload.unwrap() {
+            server_command_payload::BlockIp(cmd) => cmd.duration_seconds,
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    /// D12: a negative duration used to reach the agent verbatim, and an
+    /// absurd one pinned a block for centuries. `0` stays "permanent".
+    #[test]
+    fn block_ip_duration_is_bounded() {
+        let mut req = ips("block_ip", &["203.0.113.7"]);
+
+        req.duration_seconds = None;
+        assert_eq!(block_duration(&req), 0, "absent means permanent");
+        req.duration_seconds = Some(0);
+        assert_eq!(block_duration(&req), 0, "zero means permanent");
+        req.duration_seconds = Some(3600);
+        assert_eq!(block_duration(&req), 3600);
+        req.duration_seconds = Some(MAX_BLOCK_DURATION_SECONDS);
+        assert_eq!(block_duration(&req), MAX_BLOCK_DURATION_SECONDS);
+
+        for bad in [-1, -86_400, MAX_BLOCK_DURATION_SECONDS + 1, i64::MAX] {
+            let mut req = ips("block_ip", &["203.0.113.7"]);
+            req.duration_seconds = Some(bad);
+            match build_command(&req, None) {
+                Err(ApiError::BadRequest(message)) => {
+                    assert!(
+                        message.contains("duration_seconds"),
+                        "{bad}: {message}"
+                    );
+                },
+                other => panic!("{bad} must be refused, got {other:?}"),
+            }
+        }
+    }
+
+    /// D12: the url/tag lists are copied into one command per agent, so an
+    /// unbounded list is amplified by the fleet. Blank entries are dropped,
+    /// matching `POST /cache/purge`.
+    #[test]
+    fn purge_cache_selectors_are_bounded() {
+        let mut req = request("purge_cache");
+        req.urls = vec![" /a ".into(), "".into(), "/b".into()];
+        req.tags = vec![" tag1 ".into()];
+        let cmd = purge_payload(&req);
+        assert_eq!(cmd.urls, vec!["/a".to_string(), "/b".to_string()]);
+        assert_eq!(cmd.tags, vec!["tag1".to_string()]);
+
+        let mut overflow = request("purge_cache");
+        overflow.urls =
+            (0..=MAX_PURGE_URLS).map(|_| "/x".to_string()).collect();
+        assert!(matches!(
+            build_command(&overflow, None),
+            Err(ApiError::BadRequest(_))
+        ));
+
+        let mut too_many_tags = request("purge_cache");
+        too_many_tags.tags =
+            (0..=MAX_PURGE_TAGS).map(|i| format!("t{i}")).collect();
+        assert!(matches!(
+            build_command(&too_many_tags, None),
+            Err(ApiError::BadRequest(_))
+        ));
+
+        let mut long_url = request("purge_cache");
+        long_url.urls = vec!["a".repeat(MAX_PURGE_SELECTOR_LEN + 1)];
+        assert!(matches!(
+            build_command(&long_url, None),
+            Err(ApiError::BadRequest(_))
+        ));
+
+        // Exactly at the limits is still accepted.
+        let mut at_limit = request("purge_cache");
+        at_limit.urls = vec!["a".repeat(MAX_PURGE_SELECTOR_LEN)];
+        at_limit.tags = (0..MAX_PURGE_TAGS).map(|i| format!("t{i}")).collect();
+        assert!(build_command(&at_limit, None).is_ok());
     }
 
     #[test]

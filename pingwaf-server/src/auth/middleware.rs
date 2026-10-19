@@ -1,10 +1,11 @@
 //! Axum extractors that turn a `Authorization: Bearer <jwt>` header into an
 //! [`AuthUser`], plus role helpers used by the write endpoints.
 
-use axum::extract::{FromRef, FromRequestParts};
+use axum::extract::{FromRef, FromRequestParts, Request, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use uuid::Uuid;
 
@@ -155,6 +156,78 @@ impl IntoResponse for AuthError {
     }
 }
 
+/// Endpoints a first-login account may still reach (D20).
+///
+/// Everything under `/api/v1/auth/` that a session needs in order to *become*
+/// a normal session — status probe, login/refresh/logout, the password change
+/// itself and the profile read the console makes on boot — stays reachable.
+/// Every other authenticated endpoint is refused while
+/// `must_change_password` is set.
+const PASSWORD_CHANGE_EXEMPT_PREFIX: &str = "/api/v1/auth/";
+
+/// Paths inside [`PASSWORD_CHANGE_EXEMPT_PREFIX`] that are *not* exempt.
+///
+/// `PUT /auth/me` can change the login e-mail, and the passkey registry lives
+/// under the same prefix; both are ordinary account mutations that have no
+/// business running before the shipped default password is replaced.
+const PASSWORD_CHANGE_REQUIRES_CHANGE: &[&str] =
+    &["/api/v1/auth/passkeys", "/api/v1/auth/passkey"];
+
+/// Whether `path` may be used by a session that still owes a password change.
+fn password_change_exempt(path: &str) -> bool {
+    if !path.starts_with(PASSWORD_CHANGE_EXEMPT_PREFIX) {
+        return false;
+    }
+    !PASSWORD_CHANGE_REQUIRES_CHANGE.iter().any(|blocked| {
+        path == *blocked || path.starts_with(&format!("{blocked}/"))
+    })
+}
+
+/// Refuses every authenticated request from an account that still carries the
+/// initial password (D20).
+///
+/// `require_write` already blocks *mutations* for such an account, but the read
+/// surface was wide open: the seeded `admin@pingwaf.local` / `pingwaf123` pair
+/// ships in the repository, so until the password changes, anybody who reads
+/// the source can enumerate sites, keys, logs and certificates. This middleware
+/// closes the read side too, leaving only the endpoints the console needs to
+/// finish the forced change.
+///
+/// The check runs *after* the bearer token is resolved, so an unauthenticated
+/// request still gets its 401 and the reply never reveals whether an account
+/// exists. A request without a token is passed through untouched — the
+/// extractors downstream produce the usual rejection.
+pub async fn require_password_change(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path().to_string();
+    if password_change_exempt(&path) {
+        return next.run(request).await;
+    }
+
+    // Reuse the extractor so the middleware applies exactly the same
+    // signature, revocation and role checks as the handlers behind it.
+    let (mut parts, _body) = request.into_parts();
+    let Ok(user) = AuthUser::from_request_parts(&mut parts, &state).await
+    else {
+        // No usable credential: let the handler answer with its own 401.
+        let request = Request::from_parts(parts, _body);
+        return next.run(request).await;
+    };
+    let request = Request::from_parts(parts, _body);
+    if !user.must_change_password {
+        return next.run(request).await;
+    }
+
+    error_response(
+        StatusCode::FORBIDDEN,
+        "password_change_required",
+        "change the default password first",
+    )
+}
+
 /// Pulls the raw bearer token out of the request headers.
 pub fn bearer_token(parts: &Parts) -> Result<String, AuthError> {
     let header = parts
@@ -287,6 +360,46 @@ mod tests {
         let admin = AuthUser::new(Uuid::new_v4(), "a@example.com", role::ADMIN);
         assert!(admin.is_admin());
         assert!(admin.require_admin().is_ok());
+    }
+
+    /// D20: only the endpoints a first-login account needs to finish the
+    /// forced change stay reachable; everything else is refused.
+    #[test]
+    fn password_change_exemptions_cover_only_the_login_flow() {
+        for path in [
+            "/api/v1/auth/status",
+            "/api/v1/auth/login",
+            "/api/v1/auth/register",
+            "/api/v1/auth/refresh",
+            "/api/v1/auth/logout",
+            "/api/v1/auth/password",
+            "/api/v1/auth/me",
+        ] {
+            assert!(password_change_exempt(path), "{path} must stay reachable");
+        }
+
+        for path in [
+            // Read surfaces the shipped default password would otherwise open.
+            "/api/v1/sites",
+            "/api/v1/sites/abc",
+            "/api/v1/keys",
+            "/api/v1/users",
+            "/api/v1/logs",
+            "/api/v1/login-history",
+            "/api/v1/agents",
+            "/api/v1/settings",
+            "/api/v1/system/info",
+            // MCP lives outside the API prefix entirely.
+            "/mcp",
+            // Not the auth namespace even though it starts with a similar
+            // string — a prefix check must not be fooled by `auth` alone.
+            "/api/v1/authority",
+            // Ordinary account mutations hidden inside the auth prefix.
+            "/api/v1/auth/passkeys",
+            "/api/v1/auth/passkey/register/begin",
+        ] {
+            assert!(!password_change_exempt(path), "{path} must be refused");
+        }
     }
 
     #[test]

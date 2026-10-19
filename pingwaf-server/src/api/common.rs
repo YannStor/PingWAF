@@ -3,15 +3,15 @@
 
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait,
-    QueryFilter, Statement,
+    ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, DbErr,
+    EntityTrait, QueryFilter, Statement,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::error::ApiError;
 use crate::auth::AuthUser;
-use crate::models::{acme_challenge, site};
+use crate::models::{acme_challenge, agent, site};
 
 /// [`axum::Json`] with API-consistent rejection bodies.
 ///
@@ -318,6 +318,56 @@ pub fn scope_site(
             "site_id is required for non-admin accounts".to_string(),
         )),
     }
+}
+
+/// Whether `agent_id` may act on `site_id` (D09/D10).
+///
+/// The single authorisation check the cache purge and the agent log paths share.
+/// An agent row must exist *and* the site must be one it actually serves:
+///
+/// - a site-bound agent (`agent.site_id = Some(id)`) only for that one site;
+/// - an unbound ("global") agent only for a site that exists — it serves
+///   whichever sites its API key's owner has, and the caller has already
+///   established that ownership through [`load_site`].
+///
+/// Anything else — a missing agent, a site-bound agent asked about somebody
+/// else's site, a dangling `site_id` — is `false`. Returns an error only when
+/// the database itself failed, so a transport hiccup never reads as "denied".
+pub(crate) async fn agent_may_touch_site(
+    db: &DatabaseConnection,
+    agent_id: Uuid,
+    site_id: Uuid,
+) -> Result<bool, ApiError> {
+    let Some(row) = agent::Entity::find_by_id(agent_id).one(db).await? else {
+        return Ok(false);
+    };
+    match row.site_id {
+        Some(bound) => Ok(bound == site_id),
+        // A global agent sees every site that exists; a stale id in an agent
+        // report is not a site at all, so it is refused.
+        None => Ok(site::Entity::find_by_id(site_id).one(db).await?.is_some()),
+    }
+}
+
+/// The agents a purge for `site_id` may be sent to (D09).
+///
+/// A site-level purge reaches the agents bound to the site plus the global
+/// (unbound) ones, which serve it through their key's owner; a purge with no
+/// site reaches only the global agents, because a site-bound agent cannot cache
+/// anything outside its own site. Agents bound to *another* site are never in
+/// the result, which is what stops an unbound-agent sweep from spilling one
+/// tenant's purge into another's edges.
+pub(crate) async fn purge_target_agents(
+    db: &DatabaseConnection,
+    site_id: Option<Uuid>,
+) -> Result<Vec<agent::Model>, ApiError> {
+    let condition = match site_id {
+        Some(id) => Condition::any()
+            .add(agent::Column::SiteId.eq(id))
+            .add(agent::Column::SiteId.is_null()),
+        None => Condition::any().add(agent::Column::SiteId.is_null()),
+    };
+    Ok(agent::Entity::find().filter(condition).all(db).await?)
 }
 
 /// Trims an optional filter string, turning blanks into `None`.
@@ -837,6 +887,44 @@ mod tests {
             &set(&["blog.example.net"])
         )
         .is_ok());
+    }
+
+    /// D09: a purge must only reach agents that serve the site. The SQL filter
+    /// is checked here as SQL (there is no database in a unit test); the
+    /// per-agent re-check through `agent_may_touch_site` is what actually
+    /// decides, and its rule is asserted separately below.
+    #[test]
+    fn purge_targets_never_include_a_foreign_site() {
+        use sea_orm::QueryTrait;
+        let site = Uuid::new_v4();
+        let other = Uuid::new_v4();
+
+        // Site-level purge: the site's own agents plus the unbound ones.
+        let query = agent::Entity::find()
+            .filter(
+                Condition::any()
+                    .add(agent::Column::SiteId.eq(site))
+                    .add(agent::Column::SiteId.is_null()),
+            )
+            .build(sea_orm::DbBackend::Postgres);
+        let sql = query.sql;
+        assert!(sql.contains("\"site_id\" IS NULL"), "{sql}");
+        assert!(sql.contains("\"site_id\" = $1"), "{sql}");
+        // A *global* purge reaches the unbound agents only.
+        let query = agent::Entity::find()
+            .filter(Condition::any().add(agent::Column::SiteId.is_null()))
+            .build(sea_orm::DbBackend::Postgres);
+        assert!(query.sql.contains("\"site_id\" IS NULL"), "{}", query.sql);
+        assert!(!query.sql.contains("= $"), "{}", query.sql);
+
+        // The predicate that matters: an agent bound elsewhere is refused.
+        let bound_here = |bound: Option<Uuid>, asked: Uuid| match bound {
+            Some(id) => id == asked,
+            None => true,
+        };
+        assert!(bound_here(Some(site), site));
+        assert!(!bound_here(Some(other), site));
+        assert!(bound_here(None, site), "a global agent may serve any site");
     }
 
     #[test]

@@ -158,6 +158,67 @@ impl RequestData {
     }
 }
 
+/// The part of the request a hit was found in, as reported to the event log
+/// (D17). Coarser than [`ValueSource`]: a cookie is a header on the wire and
+/// an event reader asks "where did it land?", not which parser split it, so
+/// `QueryParam` and `Cookie` collapse into `Query`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Surface {
+    Query,
+    Header,
+    Body,
+    Path,
+}
+
+impl Surface {
+    /// Stable wire name used in `waf_details` (`surface=` / `surfaces=`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Surface::Query => "query",
+            Surface::Header => "header",
+            Surface::Body => "body",
+            Surface::Path => "path",
+        }
+    }
+
+    fn of(source: ValueSource) -> Self {
+        match source {
+            ValueSource::QueryParam | ValueSource::Cookie => Surface::Query,
+            ValueSource::Header => Surface::Header,
+            ValueSource::Body => Surface::Body,
+            ValueSource::Path => Surface::Path,
+        }
+    }
+}
+
+/// First surface to report for a verdict, in reading order. `None` only when
+/// nothing was recorded (a pure Stage-2 rule match on request metadata the
+/// Stage-1 values do not cover), in which case no marker is emitted.
+fn first_surface(surfaces: &[Surface]) -> Option<Surface> {
+    [
+        Surface::Query,
+        Surface::Header,
+        Surface::Body,
+        Surface::Path,
+    ]
+    .into_iter()
+    .find(|candidate| surfaces.contains(candidate))
+}
+
+/// `[query]` / `[query,body]` marker for the verdict details. The surfaces are
+/// fixed vocabulary words — never request content — so the marker cannot leak
+/// data or rule internals.
+fn surfaces_marker(surfaces: &[Surface]) -> Option<String> {
+    let mut unique: Vec<Surface> = surfaces.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    if unique.is_empty() {
+        return None;
+    }
+    let names: Vec<&str> = unique.iter().map(|s| s.as_str()).collect();
+    Some(format!("[{}]", names.join(",")))
+}
+
 /// Deferred Stage-1 hit record. Scoring happens inline while the value is
 /// hot, but the human-readable strings are only materialized when the verdict
 /// turns out to be something other than a clean pass — the overwhelmingly
@@ -407,6 +468,9 @@ impl WafEngine {
 
         let mut breakdown = ScoreBreakdown::clean();
         let mut recs: Vec<HitRec> = Vec::new();
+        // Every surface a recorded hit came from, in first-seen order; the
+        // verdict details name the first one and aggregate the rest (D17).
+        let mut surfaces: Vec<Surface> = Vec::new();
         let mut critical_hit = false;
 
         // Reused scan buffers: a full request costs one allocation here
@@ -575,6 +639,7 @@ impl WafEngine {
                             name: &value.name,
                             monitored,
                         });
+                        surfaces.push(Surface::of(value.source));
                         continue;
                     }
                     self.scorer.add_category_hit_ex(
@@ -590,6 +655,7 @@ impl WafEngine {
                         name: &value.name,
                         monitored,
                     });
+                    surfaces.push(Surface::of(value.source));
                 }
             }
 
@@ -619,6 +685,7 @@ impl WafEngine {
                     name: &value.name,
                     monitored,
                 });
+                surfaces.push(Surface::of(value.source));
             }
             // Raw backticks inside the path (`/ax--exec=`id`--remote`): URL
             // content never carries them unescaped, so a pair of them frames
@@ -646,6 +713,7 @@ impl WafEngine {
                     name: &value.name,
                     monitored,
                 });
+                surfaces.push(Surface::of(value.source));
             }
             // Double executable extension at the path tail
             // (`/uploadfiles/apache.php.jpeg`): multi-extension parser abuse
@@ -673,6 +741,7 @@ impl WafEngine {
                     name: &value.name,
                     monitored,
                 });
+                surfaces.push(Surface::of(value.source));
             }
             if !matches!(
                 value.source,
@@ -735,6 +804,7 @@ impl WafEngine {
                         name: &value.name,
                         monitored,
                     });
+                    surfaces.push(Surface::of(value.source));
                 }
             }
             let (is_xss, xss_fp) = detect_xss(needle);
@@ -778,6 +848,7 @@ impl WafEngine {
                         name: &value.name,
                         monitored,
                     });
+                    surfaces.push(Surface::of(value.source));
                 }
             }
 
@@ -820,6 +891,7 @@ impl WafEngine {
                     name: &value.name,
                     monitored,
                 });
+                surfaces.push(Surface::of(value.source));
             }
 
             // Exploit-only shape compositions, each a critical with no
@@ -848,6 +920,7 @@ impl WafEngine {
                     name: &value.name,
                     monitored,
                 });
+                surfaces.push(Surface::of(value.source));
             }
             if ci_chr_chain(needle) {
                 let monitored = self.hit_monitored(
@@ -870,6 +943,7 @@ impl WafEngine {
                     name: &value.name,
                     monitored,
                 });
+                surfaces.push(Surface::of(value.source));
             }
             if ssrf_protocol_smuggling(needle) {
                 let monitored =
@@ -890,6 +964,7 @@ impl WafEngine {
                     name: &value.name,
                     monitored,
                 });
+                surfaces.push(Surface::of(value.source));
             }
             if pt_remote_backslash_include(needle) {
                 let monitored = self.hit_monitored(
@@ -912,6 +987,7 @@ impl WafEngine {
                     name: &value.name,
                     monitored,
                 });
+                surfaces.push(Surface::of(value.source));
             }
 
             // Strict level: structural EL / SSTI detection over the decoded
@@ -933,6 +1009,7 @@ impl WafEngine {
                         name: &value.name,
                         monitored: expr_monitored,
                     });
+                    surfaces.push(Surface::of(value.source));
                 } else if detect_js_call(needle)
                     && (value.field || value.source != ValueSource::Body)
                 {
@@ -953,6 +1030,7 @@ impl WafEngine {
                         name: &value.name,
                         monitored: expr_monitored,
                     });
+                    surfaces.push(Surface::of(value.source));
                 }
             }
         }
@@ -1013,6 +1091,7 @@ impl WafEngine {
                 name: "",
                 monitored,
             });
+            surfaces.push(Surface::Path);
         }
 
         // ----- Build evaluation context (snapshot of Stage-1 scores) -----
@@ -1072,8 +1151,13 @@ impl WafEngine {
                 score: breakdown.total_u8(),
                 matched_rules: matched,
                 details: format!(
-                    "allow-rule matched: {} [{}]",
-                    rule.id, rule.name
+                    "allow-rule matched: {} [{}]{}",
+                    rule.id,
+                    rule.name,
+                    surfaces_marker(&surfaces)
+                        .map_or_else(String::new, |marker| format!(
+                            " {marker}"
+                        )),
                 ),
                 breakdown,
             };
@@ -1087,6 +1171,7 @@ impl WafEngine {
                 self.details_from(&recs, &[]),
                 Some(WafAction::Block),
                 "stage1-critical",
+                &surfaces,
             );
         }
 
@@ -1193,6 +1278,7 @@ impl WafEngine {
             self.details_from(&recs, &rule_recs),
             Some(action),
             reason,
+            &surfaces,
         )
     }
 
@@ -1305,6 +1391,7 @@ impl WafEngine {
         details: Vec<String>,
         action: Option<WafAction>,
         reason: &str,
+        surfaces: &[Surface],
     ) -> WafVerdict {
         breakdown.overall_class = self.scorer.classify(breakdown.block_total);
         let requested = action.unwrap_or(WafAction::Pass);
@@ -1336,6 +1423,21 @@ impl WafEngine {
         } else {
             format!("{}: {}", reason, details.join("; "))
         };
+        // Where the request was hit (D17): `surface=` names the first hit
+        // surface in reading order and `surfaces=` lists every distinct one,
+        // so an event is no longer a single blob of mixed body/query/header
+        // hits. Emitted before the downgrade phrase (which stays the trailing,
+        // documented marker) and omitted when nothing was recorded — so every
+        // existing detail shape keeps its documented parts. The values are
+        // fixed vocabulary words, never request content or rule internals, so
+        // the marker cannot leak data or rule details.
+        if let Some(first) = first_surface(surfaces) {
+            detail_str.push_str(&format!("; surface={}", first.as_str()));
+        }
+        if let Some(marker) = surfaces_marker(surfaces) {
+            let names = marker.trim_start_matches('[').trim_end_matches(']');
+            detail_str.push_str(&format!("; surfaces={names}"));
+        }
         if let Some(enforced) = downgraded {
             detail_str.push_str(&format!(
                 "; downgraded=true would_enforce={enforced} \
@@ -1450,6 +1552,65 @@ mod tests {
         assert!(v.matched_rules.contains(&"PINGWAF-1002".to_string()));
         assert!(v.breakdown.total > 0);
         assert!(v.details.contains("[monitored]"));
+    }
+
+    /// D17: the verdict names the request surface a hit came from instead of
+    /// merging query / header / body hits into one undifferentiated blob.
+    #[test]
+    fn verdict_details_name_the_hit_surface() {
+        let e = engine();
+
+        let query = e.inspect(&req("GET", "/api/users", "id=1' OR 1=1 --"));
+        assert!(query.details.contains("surface=query"), "{}", query.details);
+
+        let mut body_req = req("POST", "/api/users", "");
+        body_req.body = Some(b"q=<script>alert(1)</script>".to_vec());
+        let body = e.inspect(&body_req);
+        assert!(body.details.contains("surface=body"), "{}", body.details);
+
+        let mut header_req = req("GET", "/", "");
+        header_req
+            .headers
+            .push(("X-Forwarded-Host".into(), "1' OR 1=1 --".into()));
+        let header = e.inspect(&header_req);
+        assert!(
+            header.details.contains("surface=header"),
+            "{}",
+            header.details
+        );
+
+        let path = e.inspect(&req("GET", "/files/../../etc/passwd", ""));
+        assert!(path.details.contains("surface=path"), "{}", path.details);
+    }
+
+    /// D17: a request hit on several surfaces aggregates them, so an operator
+    /// sees `surfaces=query,body` rather than only the first hit.
+    #[test]
+    fn several_hit_surfaces_are_aggregated() {
+        let e = engine();
+        let mut r = req("POST", "/api/users", "id=1' OR 1=1 --");
+        r.body = Some(b"q=<script>alert(1)</script>".to_vec());
+        let v = e.inspect(&r);
+        assert!(v.details.contains("surface=query"), "{}", v.details);
+        assert!(v.details.contains("surfaces=query,body"), "{}", v.details);
+    }
+
+    /// D17: the marker only ever carries fixed vocabulary words — never rule
+    /// internals or request content.
+    #[test]
+    fn surface_marker_leaks_no_rule_detail() {
+        let e = engine();
+        let v = e.inspect(&req("GET", "/api/users", "id=1' OR 1=1 --"));
+        for part in v.details.split("; ") {
+            if let Some(names) = part.strip_prefix("surfaces=") {
+                for name in names.split(',') {
+                    assert!(
+                        matches!(name, "query" | "header" | "body" | "path"),
+                        "unexpected surface name {name}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

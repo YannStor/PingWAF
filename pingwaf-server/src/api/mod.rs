@@ -97,6 +97,9 @@ async fn record_control_module(request: Request, next: Next) -> Response {
 /// Builds the complete HTTP router, including CORS, compression and tracing.
 pub fn build_router(state: AppState) -> Router {
     let config = state.config.clone();
+    // The D20 middleware needs the state before the router is built; the
+    // handler layers take the original `state` through `with_state` at the end.
+    let api_state = state.clone();
 
     let api = Router::new()
         .merge(auth::routes())
@@ -139,6 +142,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/version", get(version))
         .fallback(api_not_found)
+        // An account still holding the shipped initial password may only use
+        // the endpoints that let it finish the forced change (D20). Applied to
+        // the whole `/api/v1` group, so a route added later is covered by
+        // default rather than opt-in.
+        .layer(middleware::from_fn_with_state(
+            api_state.clone(),
+            crate::auth::middleware::require_password_change,
+        ))
         // The limiter covers the whole API surface but only ever matches the
         // credential endpoints (see `bucket_for`), which is also what keeps
         // passkey logins — registered by a different module — covered.

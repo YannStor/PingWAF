@@ -513,10 +513,19 @@ impl ControlPlaneTrait for ControlPlaneService {
     ) -> Result<Response<LogAck>, Status> {
         let agent = self.authorize(&Self::metadata_token(&request)).await?;
         let authenticated_id = agent.id;
+        // The sites this agent serves, resolved once per stream: every entry's
+        // `site_id` is checked against it below (D10).
+        let visible_sites: Vec<Uuid> = self
+            .visible_sites(&agent)
+            .await?
+            .iter()
+            .map(|row| row.id)
+            .collect();
         let mut inbound = request.into_inner();
         let batch_size = self.config.log_batch_size.max(1);
 
         let mut received: u64 = 0;
+        let mut dropped: u64 = 0;
         let mut access_batch: Vec<access_log::ActiveModel> =
             Vec::with_capacity(batch_size);
         let mut event_batch: Vec<security_event::ActiveModel> =
@@ -544,6 +553,20 @@ impl ControlPlaneTrait for ControlPlaneService {
                     claimed = %message.agent_id,
                     agent_id = %authenticated_id,
                     "log entry stamped with a foreign agent_id"
+                );
+                continue;
+            }
+            if !site_stamp_is_visible(&message.site_id, &visible_sites) {
+                // The agent may only write history for the sites it serves.
+                // The entry is dropped rather than answered with an error: a
+                // misbehaving edge would otherwise retry the whole batch
+                // forever, and the batch also carries legitimate entries.
+                dropped += 1;
+                tracing::warn!(
+                    site_id = %message.site_id,
+                    agent_id = %authenticated_id,
+                    dropped,
+                    "log entry stamped with a site this agent does not serve"
                 );
                 continue;
             }
@@ -598,7 +621,15 @@ impl ControlPlaneTrait for ControlPlaneService {
 
         flush(&self.db, &mut access_batch, &mut event_batch).await?;
 
-        tracing::debug!(received, "log batch persisted");
+        if dropped > 0 {
+            tracing::warn!(
+                agent_id = %authenticated_id,
+                received,
+                dropped,
+                "log stream finished with entries dropped for a foreign site"
+            );
+        }
+        tracing::debug!(received, dropped, "log batch persisted");
         Ok(Response::new(LogAck {
             received_count: received,
             success: true,
@@ -612,9 +643,19 @@ impl ControlPlaneTrait for ControlPlaneService {
     ) -> Result<Response<CertEventAck>, Status> {
         let agent = self.authorize(&Self::metadata_token(&request)).await?;
         let authenticated_id = agent.id;
+        // Same tenancy check as `ship_logs`: a certificate event drives a
+        // state transition on the site's certificate, so a foreign `site_id`
+        // here would let an edge fail another tenant's renewal (D10).
+        let visible_sites: Vec<Uuid> = self
+            .visible_sites(&agent)
+            .await?
+            .iter()
+            .map(|row| row.id)
+            .collect();
         let mut inbound = request.into_inner();
         let batch_size = self.config.log_batch_size.max(1);
         let mut received: u64 = 0;
+        let mut dropped: u64 = 0;
         let mut batch: Vec<certificate_events::ActiveModel> =
             Vec::with_capacity(batch_size);
 
@@ -642,6 +683,19 @@ impl ControlPlaneTrait for ControlPlaneService {
                     claimed = %message.agent_id,
                     agent_id = %authenticated_id,
                     "certificate event stamped with a foreign agent_id"
+                );
+                continue;
+            }
+            if !site_stamp_is_visible(&message.site_id, &visible_sites) {
+                // Dropped, not rejected: see `ship_logs`. The alert and the
+                // certificate state transition below both act on the site, so
+                // the check has to happen before either.
+                dropped += 1;
+                tracing::warn!(
+                    site_id = %message.site_id,
+                    agent_id = %authenticated_id,
+                    dropped,
+                    "certificate event stamped with a site this agent does not serve"
                 );
                 continue;
             }
@@ -710,7 +764,15 @@ impl ControlPlaneTrait for ControlPlaneService {
         }
 
         flush_cert_events(&self.db, &mut batch).await?;
-        tracing::debug!(received, "certificate events persisted");
+        if dropped > 0 {
+            tracing::warn!(
+                agent_id = %authenticated_id,
+                received,
+                dropped,
+                "certificate event stream finished with entries dropped for a foreign site"
+            );
+        }
+        tracing::debug!(received, dropped, "certificate events persisted");
         Ok(Response::new(CertEventAck {
             received_count: received,
             success: true,
@@ -2189,6 +2251,29 @@ fn db_status(err: sea_orm::DbErr) -> Status {
     }
 }
 
+/// Decides whether an agent-reported `site_id` may be persisted (D10).
+///
+/// `authorize()` proves *which* agent is talking, and the `agent_id` stamp
+/// check proves the entry is not impersonating another agent — but neither
+/// says the entry's `site_id` is a site the agent serves. Without this, a
+/// compromised or merely buggy edge could write log lines and certificate
+/// events into another tenant's history (and, for certificate events, drive a
+/// state transition on a foreign certificate).
+///
+/// The comparison is deliberately against the *agent's own* binding rather
+/// than the site's owner, so a global agent still needs its caller's scoping
+/// applied elsewhere. `visible` is the set computed once per stream by
+/// [`ControlPlaneService::visible_sites`].
+///
+/// A missing or unparsable stamp is refused as well: an unattributed entry
+/// cannot be proven to belong to the reporting agent.
+fn site_stamp_is_visible(stamped: &str, visible: &[Uuid]) -> bool {
+    match parse_optional_uuid(stamped) {
+        Some(id) => visible.contains(&id),
+        None => false,
+    }
+}
+
 fn parse_optional_uuid(raw: &str) -> Option<Uuid> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -2380,6 +2465,30 @@ mod tests {
         assert_eq!(positive_i32(0), None);
         assert_eq!(positive_i32(7), Some(7));
         assert_eq!(positive_i32(i64::MAX), Some(i32::MAX));
+    }
+
+    /// D10: an agent may only stamp entries with a site it serves. A foreign
+    /// site, an absent stamp and a malformed one are all refused — dropping
+    /// them is what keeps one tenant's logs and certificate state out of
+    /// another's history.
+    #[test]
+    fn site_stamps_must_belong_to_the_reporting_agent() {
+        let own = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let visible = [own];
+
+        assert!(site_stamp_is_visible(&own.to_string(), &visible));
+        assert!(
+            site_stamp_is_visible(&format!(" {} ", own), &visible),
+            "surrounding blanks are tolerated"
+        );
+
+        assert!(!site_stamp_is_visible(&other.to_string(), &visible));
+        assert!(!site_stamp_is_visible("", &visible));
+        assert!(!site_stamp_is_visible("   ", &visible));
+        assert!(!site_stamp_is_visible("not-a-uuid", &visible));
+        // An agent that serves no site can write for none of them.
+        assert!(!site_stamp_is_visible(&own.to_string(), &[]));
     }
 
     #[test]

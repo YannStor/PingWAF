@@ -20,8 +20,8 @@ use uuid::Uuid;
 
 use crate::api::agents::command_type;
 use crate::api::common::{
-    load_site_read, load_site_write, non_empty, parse_uuid, scope_site, Page,
-    Pagination,
+    agent_may_touch_site, load_site_read, load_site_write, non_empty,
+    parse_uuid, purge_target_agents, scope_site, Page, Pagination,
 };
 use crate::api::error::ApiError;
 use crate::api::sites::touch_site;
@@ -30,7 +30,7 @@ use crate::auth::AuthUser;
 use crate::grpc::cache_status::SiteCacheStatus;
 use crate::grpc::config::now_timestamp;
 use crate::grpc::notify_config_changed;
-use crate::models::{agent, cache_rules, site};
+use crate::models::{cache_rules, site};
 
 /// TTL bounds: agents refuse nonsensical values, so reject them at the source.
 const MAX_TTL_SECONDS: i32 = 30 * 86_400;
@@ -973,16 +973,28 @@ async fn purge(
 
     let urls = normalize_purge_urls(&payload)?;
 
-    // Agents bound to this site, plus the ones bound to no single site: those
-    // serve whichever sites their API key covers, so this one may be theirs.
-    let targets = agent::Entity::find()
-        .filter(
-            Condition::any()
-                .add(agent::Column::SiteId.eq(id))
-                .add(agent::Column::SiteId.is_null()),
-        )
-        .all(&state.db)
-        .await?;
+    // Only the agents that actually serve this site: the ones bound to it plus
+    // the global (unbound) ones, which serve it through their key's owner
+    // (D09). Before, every unbound agent was swept in regardless of whom it
+    // belonged to, so one tenant's purge reached another tenant's edges.
+    //
+    // Two filters, deliberately: the query narrows the candidate set, and each
+    // candidate is then re-checked through `agent_may_touch_site` so the
+    // decision lives in exactly one place — a future change to the query can
+    // only widen the candidate set, never the set that is actually sent to.
+    let candidates = purge_target_agents(&state.db, Some(id)).await?;
+    let mut targets = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        if agent_may_touch_site(&state.db, candidate.id, id).await? {
+            targets.push(candidate);
+        } else {
+            tracing::warn!(
+                agent_id = %candidate.id,
+                site_id = %id,
+                "skipping agent for cache purge: it does not serve this site"
+            );
+        }
+    }
     if targets.is_empty() {
         return Err(ApiError::NotFound(format!(
             "no agent is registered for site {id}"
@@ -1008,13 +1020,17 @@ async fn purge(
         }
     }
 
+    // The audit line records how many edges the command reached, so an operator
+    // can tell a one-agent purge from a fleet-wide one after the fact.
     tracing::info!(
         site_id = %id,
         purge_all,
         urls = urls.len(),
         agents = targets.len(),
         delivered,
+        queued = targets.len() - delivered,
         actor = %current.id,
+        actor_email = %current.email,
         "cache purge requested"
     );
 
