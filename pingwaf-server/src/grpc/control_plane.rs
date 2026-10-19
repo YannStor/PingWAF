@@ -20,7 +20,7 @@ use pingwaf_proto::control_plane::{
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
-    QueryFilter, QuerySelect, Set,
+    QueryFilter, QuerySelect, Set, UpdateMany,
 };
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
@@ -646,6 +646,11 @@ impl ControlPlaneTrait for ControlPlaneService {
                 continue;
             }
             received += 1;
+            // A terminal ACME failure is both an alertable log line and a
+            // state transition; parse it once so the row update and the
+            // stored event type agree on what the line means.
+            let failure = parse_acme_failure(&message.message);
+            let is_failure = failure.is_some();
             // ACME failures surface as raw ERROR-level events: raise an
             // alert so a renewal that keeps failing is not discovered
             // through an expired certificate.
@@ -675,13 +680,18 @@ impl ControlPlaneTrait for ControlPlaneService {
                 })
                 .await;
             }
+            if let Some(failure) = &failure {
+                fail_certificate_from_event(&self.db, &message, failure).await;
+            }
             batch.push(certificate_events::ActiveModel {
                 id: Set(Uuid::new_v4()),
                 certificate_id: Set(parse_optional_uuid(
                     &message.certificate_id,
                 )),
                 site_id: Set(parse_optional_uuid(&message.site_id)),
-                event_type: Set(if message.event_type.is_empty() {
+                event_type: Set(if is_failure {
+                    ACME_FAILED_EVENT.to_string()
+                } else if message.event_type.is_empty() {
                     "acme_raw".to_string()
                 } else {
                     message.event_type.chars().take(30).collect()
@@ -1019,13 +1029,222 @@ async fn persist_site_certificates(
     }
 }
 
+/// Marker the edge prefixes a terminal ACME failure with. The raw ACME
+/// capture channel ships message text only, so the prefix is what tells the
+/// control plane a log line is also a certificate state transition.
+const ACME_FAILED_EVENT: &str = "acme_failed";
+
+/// Cap on the failure text stored on the certificate row. The CA's problem
+/// document names every identifier and its subproblems, so an uncapped value
+/// would turn the dashboard's status column into a wall of text.
+const MAX_FAILURE_REASON_CHARS: usize = 500;
+
+/// Reason recorded when a pending order outlives the grace window. The
+/// detailed explanation goes to the certificate event instead, keeping the
+/// status field a status.
+const ISSUANCE_TIMED_OUT_REASON: &str = "issuance timed out";
+
+/// A terminal issuance failure parsed out of an edge event.
+#[derive(Debug, PartialEq)]
+struct AcmeFailure<'a> {
+    /// Hostnames the order covers, used to attribute the event when the agent
+    /// could not (and to pick the right row when a site has several orders).
+    domains: Vec<&'a str>,
+    /// The CA/client error text, i.e. the real reason issuance failed.
+    reason: &'a str,
+}
+
+/// Recognises the edge's one-line failure event:
+/// `acme_failed domain=<d1,d2> reason=<error>`.
+///
+/// Anything else - including raw ACME logs that merely mention a failure - is
+/// not a state transition: a line without the marker or without a reason must
+/// never fail a certificate row.
+fn parse_acme_failure(message: &str) -> Option<AcmeFailure<'_>> {
+    let rest = message.strip_prefix(ACME_FAILED_EVENT)?;
+    let (head, reason) = rest.strip_prefix(' ')?.split_once(" reason=")?;
+    let domains = head.strip_prefix("domain=")?;
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return None;
+    }
+    Some(AcmeFailure {
+        domains: domains
+            .split(',')
+            .map(str::trim)
+            .filter(|domain| !domain.is_empty())
+            .collect(),
+        reason,
+    })
+}
+
+/// Caps the failure reason at [`MAX_FAILURE_REASON_CHARS`] characters without
+/// splitting a multi-byte character (the column is `text`; the cap keeps the
+/// dashboard readable).
+fn truncate_failure_reason(reason: &str) -> String {
+    reason
+        .trim()
+        .chars()
+        .take(MAX_FAILURE_REASON_CHARS)
+        .collect()
+}
+
+/// The values a terminal failure writes onto the certificate row. Split from
+/// the query so the policy - `failed`, capped reason, fresh `updated_at` - is
+/// testable without a database.
+#[derive(Debug, PartialEq)]
+struct CertificateFailureUpdate {
+    status: String,
+    failure_reason: String,
+    updated_at: DateTime<Utc>,
+}
+
+fn certificate_failure_update(
+    reason: &str,
+    now: DateTime<Utc>,
+) -> CertificateFailureUpdate {
+    CertificateFailureUpdate {
+        status: cert_status::FAILED.to_string(),
+        failure_reason: truncate_failure_reason(reason),
+        updated_at: now,
+    }
+}
+
+/// Builds the update that fails the row a terminal event belongs to, or
+/// `None` when the event cannot be attributed to one.
+///
+/// The reported certificate is not necessarily the pending row: the site's
+/// TLS posture can still point at the certificate this order is replacing.
+/// So the event matches either that id or a pending row of the same site
+/// covering one of the reported domains, and the base filters decide which
+/// rows are the control plane's to fail at all. Only pending, PEM-less ACME
+/// rows are touched: a manual upload or a certificate the edge already
+/// reported live is not this event's to fail.
+fn certificate_failure_query(
+    update: &CertificateFailureUpdate,
+    certificate_id: Option<Uuid>,
+    site_id: Option<Uuid>,
+    domains: &[&str],
+) -> Option<UpdateMany<site_certificates::Entity>> {
+    let mut target = Condition::any();
+    let mut attributable = false;
+    if let Some(certificate_id) = certificate_id {
+        target = target.add(site_certificates::Column::Id.eq(certificate_id));
+        attributable = true;
+    }
+    if let Some(site_id) = site_id {
+        if domains.is_empty() {
+            // A bare site id is not enough to pick between its orders.
+            if !attributable {
+                return None;
+            }
+        } else {
+            target = target.add(
+                Condition::all()
+                    .add(site_certificates::Column::SiteId.eq(site_id))
+                    .add(site_certificates::Column::Domain.is_in(
+                        domains.iter().map(|domain| domain.to_string()),
+                    )),
+            );
+            attributable = true;
+        }
+    }
+    if !attributable {
+        return None;
+    }
+    let condition = Condition::all()
+        .add(site_certificates::Column::Status.eq(cert_status::PENDING))
+        .add(site_certificates::Column::CertPem.is_null())
+        .add(site_certificates::Column::AcmeEmail.is_not_null())
+        .add(target);
+    Some(
+        site_certificates::Entity::update_many()
+            .col_expr(
+                site_certificates::Column::Status,
+                Expr::value(update.status.clone()),
+            )
+            .col_expr(
+                site_certificates::Column::FailureReason,
+                Expr::value(Some(update.failure_reason.clone())),
+            )
+            .col_expr(
+                site_certificates::Column::UpdatedAt,
+                Expr::value(update.updated_at),
+            )
+            .filter(condition),
+    )
+}
+
+/// Applies a terminal ACME failure event to the certificate row it names.
+/// Best-effort like every other write driven by an event stream: a database
+/// error is logged, never propagated into the agent's stream.
+async fn fail_certificate_from_event(
+    db: &DatabaseConnection,
+    event: &CertEventEntry,
+    failure: &AcmeFailure<'_>,
+) {
+    let now = Utc::now();
+    let update = certificate_failure_update(failure.reason, now);
+    let certificate_id = parse_optional_uuid(&event.certificate_id);
+    let site_id = parse_optional_uuid(&event.site_id);
+    let Some(query) = certificate_failure_query(
+        &update,
+        certificate_id,
+        site_id,
+        &failure.domains,
+    ) else {
+        tracing::debug!(
+            site_id = %event.site_id,
+            certificate_id = %event.certificate_id,
+            "ACME failure event cannot be attributed to a certificate"
+        );
+        return;
+    };
+    match query.exec(db).await {
+        Ok(result) if result.rows_affected > 0 => {
+            tracing::info!(
+                certificate_id = ?certificate_id,
+                site_id = ?site_id,
+                rows = result.rows_affected,
+                "certificate marked failed from edge event"
+            );
+        },
+        Ok(_) => {
+            tracing::debug!(
+                certificate_id = ?certificate_id,
+                site_id = ?site_id,
+                "ACME failure event matched no pending certificate"
+            );
+        },
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not persist ACME failure event"
+            );
+        },
+    }
+}
+
 /// How long an ACME order may sit in `pending` with no sign of life before
 /// the control plane gives up on it and marks the row `failed`.
 const PENDING_CERTIFICATE_GRACE: chrono::Duration =
     chrono::Duration::minutes(30);
 
+/// The instant a pending row must predate to be considered timed out. Pure so
+/// the grace boundary is testable without a database.
+fn pending_certificate_cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
+    now - PENDING_CERTIFICATE_GRACE
+}
+
+/// What the sweep writes on a timed-out row: the short reason the dashboard
+/// shows, with the full explanation left to the certificate event.
+fn stale_pending_failure(now: DateTime<Utc>) -> CertificateFailureUpdate {
+    certificate_failure_update(ISSUANCE_TIMED_OUT_REASON, now)
+}
+
 /// Marks ACME certificate rows `failed` when their order has been pending
-/// longer than [`PENDING_CERTIFICATE_GRACE`], recording why.
+/// longer than [`PENDING_CERTIFICATE_GRACE`], recording [`ISSUANCE_TIMED_OUT_REASON`]
+/// on the row and the full explanation in a certificate event.
 ///
 /// Issuance runs entirely on the edge, so a wedged order — the CA
 /// unreachable, a stalled DNS provider, a challenge that never validates —
@@ -1037,7 +1256,7 @@ const PENDING_CERTIFICATE_GRACE: chrono::Duration =
 /// the grace window is measured from.
 async fn sweep_stale_pending_certificates(db: &DatabaseConnection) {
     let now = Utc::now();
-    let cutoff = now - PENDING_CERTIFICATE_GRACE;
+    let cutoff = pending_certificate_cutoff(now);
     let stale = match site_certificates::Entity::find()
         .filter(site_certificates::Column::Status.eq(cert_status::PENDING))
         .filter(site_certificates::Column::CertPem.is_null())
@@ -1057,19 +1276,20 @@ async fn sweep_stale_pending_certificates(db: &DatabaseConnection) {
     };
 
     for row in stale {
-        let reason = format!(
+        let failure = stale_pending_failure(now);
+        let detail = format!(
             "ACME issuance did not finish within {} minutes of the last \
              request. The edge may be offline, the CA or DNS provider may \
-             be unreachable, or the challenge never validated — see the \
+             be unreachable, or the challenge never validated - see the \
              certificate events for the raw ACME log.",
             PENDING_CERTIFICATE_GRACE.num_minutes(),
         );
         let cert_id = row.id;
         let site_id = row.site_id;
         let mut active: site_certificates::ActiveModel = row.into();
-        active.status = Set(cert_status::FAILED.to_string());
-        active.failure_reason = Set(Some(reason.clone()));
-        active.updated_at = Set(now);
+        active.status = Set(failure.status);
+        active.failure_reason = Set(Some(failure.failure_reason));
+        active.updated_at = Set(failure.updated_at);
         if let Err(err) = active.update(db).await {
             tracing::warn!(
                 %cert_id,
@@ -1090,7 +1310,7 @@ async fn sweep_stale_pending_certificates(db: &DatabaseConnection) {
             certificate_id: Set(Some(cert_id)),
             site_id: Set(Some(site_id)),
             event_type: Set("issuance_failed".to_string()),
-            message: Set(reason),
+            message: Set(detail),
             details: Set(None),
             created_at: Set(now),
         };
@@ -2029,6 +2249,96 @@ fn positive_i32(value: i64) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D03: an `acme_failed` event from the edge turns the certificate row
+    /// `failed` with the real reason, without touching anything else.
+    #[test]
+    fn simulated_failure_event_fails_the_pending_certificate() {
+        let event = "acme_failed domain=mirror.liveflowhub.com,www.mirror.liveflowhub.com \
+                     reason=ACME instant error: API error: Invalid response from \
+                     http://mirror.liveflowhub.com/.well-known/acme-challenge/abc: 404 \
+                     (urn:ietf:params:acme:error:unauthorized)";
+        let failure = parse_acme_failure(event).expect("D03 event must parse");
+        assert_eq!(
+            failure.domains,
+            vec!["mirror.liveflowhub.com", "www.mirror.liveflowhub.com"]
+        );
+        assert!(failure.reason.contains("404"), "{}", failure.reason);
+
+        let now = Utc::now();
+        let update = certificate_failure_update(failure.reason, now);
+        assert_eq!(update.status, cert_status::FAILED);
+        assert_eq!(update.status, "failed");
+        assert!(update.failure_reason.contains("404"));
+        assert_eq!(update.updated_at, now);
+
+        // The query that lands in PostgreSQL writes those values onto a
+        // pending ACME row...
+        let query = certificate_failure_query(
+            &update,
+            None,
+            Some(Uuid::new_v4()),
+            &failure.domains,
+        )
+        .expect("a site-attributed event is actionable");
+        let sql =
+            sea_orm::QueryTrait::build(&query, sea_orm::DbBackend::Postgres)
+                .sql;
+        assert!(sql.contains("UPDATE \"site_certificates\""), "{sql}");
+        for column in ["\"status\"", "\"failure_reason\"", "\"updated_at\""] {
+            assert!(sql.contains(column), "{sql}");
+        }
+        assert!(sql.contains("\"cert_pem\" IS NULL"), "{sql}");
+        assert!(sql.contains("\"acme_email\" IS NOT NULL"), "{sql}");
+        assert!(sql.contains("\"site_id\" = "), "{sql}");
+        assert!(sql.contains("\"domain\" IN ("), "{sql}");
+
+        // The agent may report the certificate the site still serves instead
+        // of the pending replacement; the id branch covers that.
+        let query =
+            certificate_failure_query(&update, Some(Uuid::new_v4()), None, &[])
+                .expect("a certificate id is actionable on its own");
+        let sql =
+            sea_orm::QueryTrait::build(&query, sea_orm::DbBackend::Postgres)
+                .sql;
+        assert!(sql.contains("\"id\" = "), "{sql}");
+
+        // Without a certificate or site id the event cannot be attributed.
+        assert!(certificate_failure_query(&update, None, None, &[]).is_none());
+    }
+
+    /// D03: only the marked line is a state transition. The edge's own 404
+    /// warning carries a token, not a site, and must never fail a row; the
+    /// reason is capped so a large CA problem document cannot fill the row.
+    #[test]
+    fn raw_acme_logs_are_not_certificate_failures() {
+        assert!(parse_acme_failure("let's encrypt http-01 token not found")
+            .is_none());
+        assert!(parse_acme_failure("acme_failed domain=example.com").is_none());
+        assert!(parse_acme_failure("acme_failed while polling").is_none());
+
+        let capped = truncate_failure_reason(&"é".repeat(700));
+        assert_eq!(capped.chars().count(), MAX_FAILURE_REASON_CHARS);
+        assert_eq!(capped, "é".repeat(MAX_FAILURE_REASON_CHARS));
+    }
+
+    /// D03: a pending order that outlives the grace window is failed with
+    /// `issuance timed out`, so the dashboard stops spinning.
+    #[test]
+    fn pending_certificate_past_grace_fails_with_reason() {
+        let now = Utc::now();
+        let cutoff = pending_certificate_cutoff(now);
+        assert_eq!(cutoff, now - chrono::Duration::minutes(30));
+        // Last touched 29 minutes ago: still inside the window.
+        assert!(now - chrono::Duration::minutes(29) >= cutoff);
+        // Last touched 31 minutes ago: the sweep picks it up.
+        assert!(now - chrono::Duration::minutes(31) < cutoff);
+
+        let update = stale_pending_failure(now);
+        assert_eq!(update.status, cert_status::FAILED);
+        assert_eq!(update.failure_reason, "issuance timed out");
+        assert_eq!(update.updated_at, now);
+    }
 
     #[test]
     fn metadata_token_reads_the_x_agent_token_header() {

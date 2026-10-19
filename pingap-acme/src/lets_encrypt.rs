@@ -175,6 +175,25 @@ struct UpdateCertificateParams {
     dns_service_url: String,
 }
 
+/// Marker the control plane recognises as a terminal issuance failure. The
+/// raw ACME capture layer ships message text only, so this prefix is what
+/// turns a log line into a certificate state update.
+const ACME_FAILURE_MARKER: &str = "acme_failed";
+
+/// The event line for a failed renewal:
+/// `acme_failed domain=<d1,d2> reason=<error>`.
+///
+/// Newlines are folded into spaces: the capture layer stores one message per
+/// event and the control plane parses the line.
+fn acme_failure_event_message(domains: &[String], error: &Error) -> String {
+    let reason = error.to_string().replace(['\n', '\r'], " ");
+    format!(
+        "{} domain={} reason={reason}",
+        ACME_FAILURE_MARKER,
+        domains.join(",")
+    )
+}
+
 /// Periodically checks and updates certificates that need renewal.
 /// A certificate needs renewal if:
 /// - It is invalid or expired
@@ -249,12 +268,18 @@ async fn do_update_certificates(
         )
         .await
         {
+            // Terminal failure for this attempt. Besides the operator log,
+            // this line is the event the control plane turns into a `failed`
+            // certificate row: the raw ACME capture ships only the message
+            // text, so the domains travel inside it for site attribution.
+            let message = acme_failure_event_message(domains, &e);
             error!(
                 target: LOG_TARGET,
                 error = %e,
                 domains = domains.join(","),
                 name,
-                "certificate renewal failed, will retry later"
+                "{}",
+                message
             );
         }
     }
@@ -445,12 +470,41 @@ impl BackgroundTask for LetsEncryptTask {
 static HTTP_01_TOKEN_REMARK: &str = "let's encrypt http-01 token";
 /// The remark the ACME account credentials are stored with.
 static ACCOUNT_REMARK: &str = "let's encrypt account credentials";
-/// How old a token has to be before cleanup may touch it. Validation completes
-/// within minutes of `set_ready`, whichever instance wrote the token, so a day
-/// is far outside any window in which another process could still need it.
-const HTTP_01_TOKEN_MAX_AGE: u64 = 24 * 3600;
+/// How long a pending ACME order can stay in flight: Let's Encrypt expires an
+/// order about a week after it is created, and only until then can a retry
+/// still need the token the order wrote.
+const ACME_ORDER_LIFETIME_SECS: u64 = 7 * 24 * 3600;
+/// How old a token has to be before cleanup may touch it.
+///
+/// A token is only needed between `set_ready` and the CA finishing validation,
+/// normally minutes. But storage carries no order id, so cleanup cannot ask
+/// whether the order that wrote a token is still in flight - and an order that
+/// keeps backing off can still be serving its token long after the challenge
+/// started. The window is therefore the longest an order can live plus a day
+/// of margin. The previous 24h window was shorter than an order's lifetime and
+/// deleted tokens out from under retrying validations, which the CA saw as
+/// `token not found` 404s.
+const HTTP_01_TOKEN_MAX_AGE: u64 = ACME_ORDER_LIFETIME_SECS + 24 * 3600;
+
+// The cleanup window must outlive any order the CA can still validate: a
+// shorter window is the bug this constant used to encode.
+const _: () = assert!(HTTP_01_TOKEN_MAX_AGE > ACME_ORDER_LIFETIME_SECS);
+const _: () = assert!(ACME_ORDER_LIFETIME_SECS >= 7 * 24 * 3600);
 /// Cleanup cadence in service cycles (one cycle per minute).
 const TOKEN_CLEAR_INTERVAL: u32 = 60;
+
+/// Whether a token written at `created_at` may be removed at `now`.
+///
+/// A storage entry carries the token value, a remark and a creation time - no
+/// order id - so this is the one place the cleanup rule can be expressed:
+/// anything younger than the longest an order can stay in flight belongs to an
+/// order that may still be retrying, and is kept. Pure so the boundary can be
+/// tested without a config manager.
+fn http_token_is_stale(created_at: Option<u64>, now: u64) -> bool {
+    created_at.is_none_or(|created_at| {
+        now.saturating_sub(created_at) > HTTP_01_TOKEN_MAX_AGE
+    })
+}
 
 /// Removes http-01 challenge tokens, and the TXT values the manual DNS task
 /// records, that no validation can still be using.
@@ -458,10 +512,13 @@ const TOKEN_CLEAR_INTERVAL: u32 = 60;
 /// Tokens used to be stored and never deleted, piling up in the storage
 /// category forever (one file per token in the separated layout). Removal is
 /// by age rather than on order completion so it stays safe across processes:
-/// deleting a day old token cannot sabotage an in-flight validation, no matter
-/// which instance wrote it. A token without `created_at` predates the field
-/// and is removed too - by the time this runs (an hour after start at the
-/// earliest) no older-version instance can still be waiting on it.
+/// deleting an old token cannot sabotage an in-flight validation, no matter
+/// which instance wrote it. The age is one order lifetime plus a margin
+/// ([`HTTP_01_TOKEN_MAX_AGE`]): the entry has no order id, so "is the order
+/// that wrote this token still running?" cannot be answered here. A token
+/// without `created_at` predates the field and is removed too - the first
+/// sweep runs an hour after start, far longer than the minutes between writing
+/// a token and the CA finishing validation.
 async fn clear_stale_http_tokens(
     config_manager: &Arc<ConfigManager>,
     now: u64,
@@ -483,10 +540,7 @@ async fn clear_stale_http_tokens(
         ) {
             continue;
         }
-        let stale = conf.created_at.is_none_or(|created_at| {
-            now.saturating_sub(created_at) > HTTP_01_TOKEN_MAX_AGE
-        });
-        if !stale {
+        if !http_token_is_stale(conf.created_at, now) {
             continue;
         }
         match config_manager.delete(Category::Storage, name).await {
@@ -1209,12 +1263,12 @@ mod tests {
             remark: Some(remark.to_string()),
             created_at,
         };
-        // Older than a day: removable.
+        // Older than an order can live: removable.
         manager
             .update(
                 Category::Storage,
                 "stale",
-                &token(Some(now - 25 * 3600), HTTP_01_TOKEN_REMARK),
+                &token(Some(now - 9 * 24 * 3600), HTTP_01_TOKEN_REMARK),
             )
             .await
             .unwrap();
@@ -1251,7 +1305,7 @@ mod tests {
                 Category::Storage,
                 "manual-txt",
                 &token(
-                    Some(now - 25 * 3600),
+                    Some(now - 9 * 24 * 3600),
                     crate::dns_manual::MANUAL_DNS_REMARK,
                 ),
             )
@@ -1271,6 +1325,68 @@ mod tests {
 
         // Nothing left to do on the next run.
         assert_eq!(0, clear_stale_http_tokens(&manager, now).await.unwrap());
+    }
+
+    /// D24: the previous 24h window deleted tokens that orders still backing
+    /// off needed, which the CA saw as a 404 (`token not found`). Given a
+    /// token's creation time and the state its order can still be in, only
+    /// tokens older than a whole order lifetime may go.
+    #[test]
+    fn test_http_token_cleanup_keeps_in_flight_orders() {
+        use super::{
+            ACME_ORDER_LIFETIME_SECS, HTTP_01_TOKEN_MAX_AGE,
+            http_token_is_stale,
+        };
+        let now = 1_800_000_000_u64;
+        let age = |secs: u64| Some(now - secs);
+
+        // Order just started: in flight, the token must stay.
+        assert!(!http_token_is_stale(age(0), now));
+        // Order still retrying after a day: the old rule deleted this token.
+        assert!(!http_token_is_stale(age(24 * 3600 + 1), now));
+        // Order at the end of its lifetime: still possibly in flight.
+        assert!(!http_token_is_stale(age(ACME_ORDER_LIFETIME_SECS), now));
+        // Lifetime plus the margin: no order can still be waiting on it.
+        assert!(http_token_is_stale(age(HTTP_01_TOKEN_MAX_AGE + 1), now));
+        // Written before `created_at` existed: removable.
+        assert!(http_token_is_stale(None, now));
+    }
+
+    /// D03: the failure line the control plane relies on must name the domains
+    /// (for site attribution) and the real error (for the row's reason).
+    #[test]
+    fn test_acme_failure_event_is_attributable() {
+        use super::{ACME_FAILURE_MARKER, Error, acme_failure_event_message};
+
+        let error = Error::Fail {
+            category: "poll_ready".to_string(),
+            message: "API error: Invalid response from http://mirror.liveflowhub.com/.well-known/acme-challenge/abc: 404 (urn:ietf:params:acme:error:unauthorized)".to_string(),
+        };
+        let message = acme_failure_event_message(
+            &[
+                "mirror.liveflowhub.com".to_string(),
+                "www.mirror.liveflowhub.com".to_string(),
+            ],
+            &error,
+        );
+        assert!(message.starts_with(&format!("{ACME_FAILURE_MARKER} ")));
+        assert!(message.contains(
+            "domain=mirror.liveflowhub.com,www.mirror.liveflowhub.com"
+        ));
+        assert!(message.contains("404"));
+        assert!(!message.contains('\n'));
+
+        // A multiline error must stay a single event line.
+        let multiline = Error::Fail {
+            category: "poll_ready".to_string(),
+            message: "line one\nline two".to_string(),
+        };
+        let message = acme_failure_event_message(
+            &["a.example.com".to_string()],
+            &multiline,
+        );
+        assert!(!message.contains('\n'));
+        assert!(message.contains("line one line two"));
     }
 
     #[test]
