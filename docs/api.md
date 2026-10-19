@@ -1194,6 +1194,22 @@ to the Strict level with body deep inspection. The three `monitor_*` lists
 downgrade matching managed rules to observe-only, described in
 [Monitoring downgrades](#waf-rules).
 
+`mode` is the site-level enforcement mode. It accepts exactly three values —
+the same enum every rule carries (see [Rule modes](#rule-modes)):
+
+| `mode` | Behaviour at the edge |
+|--------|-----------------------|
+| `off` | The engine returns immediately: nothing is detected, no events are written. |
+| `monitor` | Everything is detected and recorded, nothing is blocked. A rule that asks to block is downgraded and the event says so (`downgraded=true`). |
+| `block` | Rules enforce their configured action. |
+
+The value that enforces is `block`; `enforce` and `prevention` are **not**
+accepted, and a request that sends one is rejected with
+`400 unknown mode value 'enforce'; allowed: off|monitor|block` (plus a hint
+that `block` is the enforcing value). A site without a settings row falls back
+to the aggregate mode of its enabled rules and, when it has none, to `monitor`
+— never to `off`, which is only ever an explicit choice.
+
 ### GET /sites/{site_id}/waf/posture
 
 The site's effective WAF posture — what the data plane enforces right now,
@@ -1232,6 +1248,38 @@ protection action — both `"off"` when none apply. `observation_mode: true`
 means the global switch turns every protective action into logging.
 
 ## WAF Rules
+
+### Rule modes
+
+Every rule — custom or built-in — carries a `mode` field with the same three
+values as the site mode:
+
+| `mode` | Behaviour |
+|--------|-----------|
+| `off` | Not enforced. The edge currently treats a rule-level `off` exactly like `monitor` (detected, scored and logged, never blocked); to take a rule out of evaluation entirely use `enabled: false`. |
+| `monitor` | The rule still evaluates and its match is recorded, but it never blocks or challenges. |
+| `block` | The rule enforces the action in its `action` field. |
+
+The API field name is `block`, **not** `enforce`: `"mode": "enforce"` is
+rejected with a `400` that lists `off|monitor|block`. UI copy may call the
+blocking mode "Prevention"/"Enforce"; the wire value is always `block`.
+
+The site mode is a ceiling on top of the rule mode. With the site in `monitor`,
+a rule whose action is `block` is downgraded rather than dropped: the request
+goes through, and the security event records the suppression. `waf_details`
+ends with `downgraded=true would_enforce=block cause=site-mode-monitor`, while
+each matched rule keeps its configured `rule_action=block`. `action: "monitor"`
+plus that marker is the "observed, not enforced" signal; a plain `monitor` with
+no marker means the rule itself was configured to observe.
+
+A **new site** is seeded with the built-in rule set in `mode: "block"`, so
+"WAF enabled" means the shipped SQLi/XSS/reconnaissance rules actually enforce;
+before this change they were seeded as `monitor` and a fresh site answered 200
+to SQLi/XSS payloads while only logging them. The restore endpoint
+(`POST /sites/{site_id}/waf/defaults`) is the deliberate exception: rules it
+re-adds come back in `monitor`, so repairing an existing site never starts
+blocking traffic that site was serving unfiltered. Seeding is matched on the
+rule name and never edits an existing row.
 
 ### GET /sites/{site_id}/rule-groups
 
@@ -1284,7 +1332,7 @@ Create a rule.
   "description": "Detects common SQLi patterns",
   "enabled": true,
   "priority": 10,
-  "mode": "prevention",
+  "mode": "block",
   "conditions": [
     {
       "field": "uri",
@@ -1506,6 +1554,13 @@ List security events, newest first.
 | `q` | string | Free text; matches the path or the host |
 
 `from` must be earlier than `to` and the window may not exceed 90 days.
+
+`action` is the verdict that was actually taken: `monitor` covers both "the rule
+was configured to observe" and "a block was suppressed by the site mode". Those
+two are told apart by `waf_details`: a downgraded block ends with
+`downgraded=true would_enforce=block cause=site-mode-monitor` and keeps the
+rule's own `rule_action=block`, so a monitor-mode site never looks like a site
+whose block rules silently stopped working.
 
 **Response (200):** paginated `security_events` rows.
 

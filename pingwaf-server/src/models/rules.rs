@@ -45,10 +45,19 @@ pub mod action {
 }
 
 /// Evaluation mode of a rule: disabled, log only, or enforcing.
+///
+/// These three lower-case words are the complete set the REST API accepts
+/// (`POST/PUT /sites/{id}/rules`, `PUT /sites/{id}/waf/settings`) and the only
+/// values `pingwaf::WafMode` understands. There is no `enforce` / `prevention`
+/// value: "enforce" is what `block` *does*, not what it is called. Callers that
+/// reject an unknown mode must list the enum in the error message.
 pub mod mode {
     pub const OFF: &str = "off";
     pub const MONITOR: &str = "monitor";
     pub const BLOCK: &str = "block";
+
+    /// The accepted values, in the order the docs list them.
+    pub const ALL: [&str; 3] = [OFF, MONITOR, BLOCK];
 
     pub fn is_valid(mode: &str) -> bool {
         matches!(mode, OFF | MONITOR | BLOCK)

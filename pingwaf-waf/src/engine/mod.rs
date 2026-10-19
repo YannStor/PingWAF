@@ -191,6 +191,17 @@ enum HitRec<'a> {
     },
 }
 
+/// Name of an enforcement action as it appears in verdict details. Mirrors
+/// `WafAction` without widening the crate's public API.
+fn enforce_action_str(action: WafAction) -> &'static str {
+    match action {
+        WafAction::Pass => "pass",
+        WafAction::Monitor => "monitor",
+        WafAction::Block => "block",
+        WafAction::Challenge => "challenge",
+    }
+}
+
 /// A Stage-2 rule match, recorded by reference and stringified only when the
 /// verdict needs details.
 struct RuleRec<'a> {
@@ -371,6 +382,13 @@ impl WafEngine {
     ///    pick the final action. Hit strings are only materialized when the
     ///    verdict is something other than a clean pass, so the happy path
     ///    pays zero formatting cost.
+    ///
+    /// Under `WafMode::Monitor` a `Block`/`Challenge` verdict is downgraded to
+    /// `Monitor` — that behaviour is the whole point of the mode. The verdict
+    /// keeps the *original* action visible in `details`
+    /// (`downgraded=true would_enforce=block cause=site-mode-monitor`) so the
+    /// event log distinguishes "a block rule was suppressed" from "a rule
+    /// configured to log fired".
     pub fn inspect(&self, request: &RequestData) -> WafVerdict {
         if self.mode == WafMode::Off {
             return WafVerdict::pass();
@@ -1264,8 +1282,12 @@ impl WafEngine {
         }
         for rule in rules {
             let suffix = if rule.monitored { " [monitored]" } else { "" };
+            // `rule_action` is the action the rule was *configured* with — it
+            // stays `block` even when the site mode (or the per-rule monitor
+            // switch) suppressed enforcement. Naming it here instead of a bare
+            // `action` keeps the original rule action in the event payload.
             details.push(format!(
-                "{} [{}] action={} sev={}{}",
+                "{} [{}] rule_action={} sev={}{}",
                 rule.id,
                 rule.name,
                 rule.action.as_str(),
@@ -1285,12 +1307,23 @@ impl WafEngine {
         reason: &str,
     ) -> WafVerdict {
         breakdown.overall_class = self.scorer.classify(breakdown.block_total);
-        let mut action = action.unwrap_or(WafAction::Pass);
-        if self.mode == WafMode::Monitor
-            && matches!(action, WafAction::Block | WafAction::Challenge)
+        let requested = action.unwrap_or(WafAction::Pass);
+        let mut action = requested;
+        // Site-wide observe-only mode: the verdict becomes `Monitor` and the
+        // request goes through. That part is the documented semantics — what
+        // must not happen is the *downgrade disappearing*: an event that only
+        // says `action: monitor` is indistinguishable from a rule configured to
+        // log, so an operator reading the dashboard concludes the block rule is
+        // broken. The event struct has no dedicated field, so the marker rides
+        // in `details` (the field the data plane ships as `waf_details`).
+        let downgraded = if self.mode == WafMode::Monitor
+            && matches!(requested, WafAction::Block | WafAction::Challenge)
         {
             action = WafAction::Monitor;
-        }
+            Some(enforce_action_str(requested))
+        } else {
+            None
+        };
         // De-dup matched ids while preserving first-seen order.
         let mut seen: Vec<String> = Vec::with_capacity(matched.len());
         for id in matched {
@@ -1298,11 +1331,17 @@ impl WafEngine {
                 seen.push(id);
             }
         }
-        let detail_str = if details.is_empty() {
+        let mut detail_str = if details.is_empty() {
             reason.to_string()
         } else {
             format!("{}: {}", reason, details.join("; "))
         };
+        if let Some(enforced) = downgraded {
+            detail_str.push_str(&format!(
+                "; downgraded=true would_enforce={enforced} \
+                 cause=site-mode-monitor"
+            ));
+        }
         WafVerdict {
             action,
             score: breakdown.total_u8(),
@@ -1502,6 +1541,85 @@ mod tests {
         let v = e.inspect(&req("GET", "/api/users", "id=1' OR 1=1 --"));
         assert_eq!(v.action, WafAction::Monitor);
         assert!(v.score > 0);
+        // The score path asked to block; the site mode downgraded it. The
+        // suppression is recorded instead of being silently swallowed, as one
+        // trailing, machine-readable phrase (docs/api.md quotes it verbatim).
+        assert!(
+            v.details.ends_with(
+                "downgraded=true would_enforce=block cause=site-mode-monitor"
+            ),
+            "{}",
+            v.details
+        );
+    }
+
+    #[test]
+    fn monitor_mode_keeps_the_rule_action_visible() {
+        let custom = CompiledRule::compile(
+            "BLOCK-SECRET",
+            "block /secret",
+            r#"http.request.uri.path starts_with "/secret""#,
+            RuleAction::Block,
+            5,
+            vec!["custom".into()],
+        )
+        .unwrap();
+        let r = req("GET", "/secret/data", "");
+
+        // Monitor semantics are unchanged — the request goes through …
+        let monitor = WafEngineConfig {
+            mode: WafMode::Monitor,
+            rules: vec![custom.clone()],
+            ..Default::default()
+        };
+        let v = WafEngine::new(&monitor).inspect(&r);
+        assert_eq!(v.action, WafAction::Monitor);
+        // … while the event says a block rule was suppressed by the site mode,
+        // and keeps the action the rule was configured with.
+        assert!(v.details.contains("rule_action=block"), "{}", v.details);
+        assert!(v.details.contains("downgraded=true"), "{}", v.details);
+        assert!(v.details.contains("would_enforce=block"), "{}", v.details);
+        assert!(
+            v.details.contains("cause=site-mode-monitor"),
+            "{}",
+            v.details
+        );
+
+        // Block mode enforces and has nothing to downgrade.
+        let blocking = WafEngineConfig {
+            rules: vec![custom],
+            ..Default::default()
+        };
+        let v = WafEngine::new(&blocking).inspect(&r);
+        assert_eq!(v.action, WafAction::Block);
+        assert!(v.details.contains("rule_action=block"), "{}", v.details);
+        assert!(!v.details.contains("downgraded=true"), "{}", v.details);
+    }
+
+    #[test]
+    fn monitor_mode_marks_a_downgraded_challenge() {
+        let custom = CompiledRule::compile(
+            "CHALLENGE-SECRET",
+            "challenge /secret",
+            r#"http.request.uri.path starts_with "/secret""#,
+            RuleAction::Challenge,
+            4,
+            vec![],
+        )
+        .unwrap();
+        let cfg = WafEngineConfig {
+            mode: WafMode::Monitor,
+            rules: vec![custom],
+            ..Default::default()
+        };
+        let v = WafEngine::new(&cfg).inspect(&req("GET", "/secret/data", ""));
+        assert_eq!(v.action, WafAction::Monitor);
+        assert!(v.details.contains("rule_action=challenge"), "{}", v.details);
+        assert!(
+            v.details.contains("would_enforce=challenge"),
+            "{}",
+            v.details
+        );
     }
 
     #[test]

@@ -8,6 +8,39 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+### Changed
+
+- **New sites now enforce the built-in WAF rules.** `seed_site_defaults`
+  creates the 11 built-in rules with `mode: "block"` instead of `"monitor"`, so
+  "WAF enabled" means SQLi/XSS/reconnaissance payloads are actually stopped
+  rather than recorded while the origin still answers `200`. Restored defaults
+  (`POST /sites/{site_id}/waf/defaults`) intentionally keep seeding `monitor`:
+  repairing an existing site must never start blocking traffic that site was
+  serving unfiltered. Existing rows are untouched — seeding is name-matched and
+  never edits a rule that already exists.
+- **A site without a `waf_settings` row now falls back to `monitor`, not
+  `off`.** The gRPC config builder used to derive `off` from "no enabled rule
+  with an explicit mode", which made an unconfigured site weaker than monitor:
+  the engine returned `Pass` before evaluating anything, so not even the
+  always-loaded managed ruleset produced an event. `off` is now only what an
+  explicit row (or `waf_enabled: false`) says. The REST read model follows the
+  same floor (`derive_site_mode`, `GET /sites/{id}/waf/posture`), so opening the
+  settings page can no longer weaken a site.
+- **Monitor-mode downgrades are visible in security events.** When a rule with
+  `action: "block"` runs under a site in `monitor`, the event keeps
+  `action: "monitor"` — the semantics are unchanged — but `waf_details` now ends
+  with `downgraded=true would_enforce=block cause=site-mode-monitor`, and each
+  matched rule records its configured `rule_action=block`. Previously the
+  downgraded block and a rule configured to log looked identical.
+- **`mode` validation names the legal enum.** Rule and site-settings endpoints
+  now answer `400 unknown mode …; allowed: off|monitor|block` instead of a bare
+  `unknown mode '…'`, and explicitly point `enforce`/`prevention` at `block`.
+  The API value for the enforcing mode is `block`; `enforce` was never accepted.
+  Docs (`docs/api.md`, `docs/user-guide.md`, `docs/zh/http-lifecycle.md`) now
+  spell the three values out.
+
 ## [PingWAF 0.27.9] — 2026-10-19
 
 ### Fixed

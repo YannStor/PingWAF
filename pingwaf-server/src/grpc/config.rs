@@ -44,6 +44,10 @@ use crate::pki::mtls::normalise_fingerprint;
 /// The numbers are spelled out instead of referencing the generated enum
 /// variants: prost strips a value prefix that matches the enum name, and the
 /// control plane should not depend on that naming rule.
+// `off` is never *derived* any more (a site without a posture row floors at
+// monitor); the value stays declared so the enum is complete and the tests can
+// pin that only an explicit settings row produces it.
+#[allow(dead_code)]
 const WAF_MODE_OFF: i32 = 0;
 const WAF_MODE_MONITOR: i32 = 1;
 const WAF_MODE_BLOCK: i32 = 2;
@@ -751,7 +755,8 @@ fn routes_to_proto(
 /// The engine switch is explicit (`waf_settings.waf_enabled`, default on);
 /// the evaluation mode and paranoia level come from the posture row's
 /// explicit columns. The rule-derived mode is only the legacy fallback for
-/// sites whose posture row has not been created yet.
+/// sites whose posture row has not been created yet — and that fallback
+/// **floors at monitor**, never `off` (see [`waf_config_to_proto`]).
 fn waf_config_to_proto(
     rules: &[WafRule],
     groups: &[rule_groups::Model],
@@ -759,13 +764,18 @@ fn waf_config_to_proto(
 ) -> WafConfig {
     let active: Vec<&WafRule> = rules.iter().filter(|r| r.enabled).collect();
 
-    // Blocking wins over monitoring, monitoring wins over off.
+    // A posture row is the only source of `off`: without one, a site lands on
+    // `monitor` at worst. The old derivation fell through to `off` when no
+    // enabled rule carried an explicit mode, which made an unconfigured site
+    // *weaker than monitor* — the engine returned `Pass` before evaluating
+    // anything, so not even the always-loaded managed ruleset produced an
+    // event. `off` is an operator decision (the `mode` column or
+    // `waf_enabled`), never something to infer from an empty rule list.
+    // `block` still wins when a rule asks for it.
     let derived_mode = if active.iter().any(|r| r.mode == WAF_MODE_BLOCK) {
         WAF_MODE_BLOCK
-    } else if active.iter().any(|r| r.mode == WAF_MODE_MONITOR) {
-        WAF_MODE_MONITOR
     } else {
-        WAF_MODE_OFF
+        WAF_MODE_MONITOR
     };
     let mode = settings
         .map(|s| mode::to_proto(&s.mode))
@@ -1535,9 +1545,11 @@ mod tests {
         let config =
             waf_config_to_proto(&[rule_to_proto(&disabled)], &[], None);
         // The engine switch is explicit now: a disabled rule only drops the
-        // derived mode, the managed engine itself stays on.
+        // derived mode to its floor, the managed engine itself stays on. The
+        // floor is monitor — a site without a posture row never loses
+        // detection entirely just because nobody configured a rule.
         assert!(config.enabled);
-        assert_eq!(config.mode, WAF_MODE_OFF);
+        assert_eq!(config.mode, WAF_MODE_MONITOR);
 
         // An explicit off switch turns the config off regardless of rules.
         let mut off =
@@ -1640,10 +1652,62 @@ mod tests {
         assert_eq!(config.monitor_managed_rules, vec!["PINGWAF-1010"]);
 
         // No rules and no settings row: the engine defaults to on — the
-        // managed ruleset ships enabled for every site until switched off.
+        // managed ruleset ships enabled for every site until switched off —
+        // and the mode floors at monitor, not off.
         let config = waf_config_to_proto(&[], &[], None);
         assert!(config.enabled);
-        assert_eq!(config.mode, WAF_MODE_OFF);
+        assert_eq!(config.mode, WAF_MODE_MONITOR);
+    }
+
+    #[test]
+    fn missing_settings_row_floors_at_monitor() {
+        // D14: no posture row must never hand the data plane `off`. The engine
+        // treats off as "return Pass immediately", so an unconfigured site
+        // produced zero telemetry — weaker than monitor and impossible to
+        // distinguish from a broken WAF.
+        let disabled = rule::Model {
+            id: Uuid::new_v4(),
+            group_id: None,
+            site_id: Uuid::nil(),
+            name: "r".into(),
+            description: None,
+            expression: "true".into(),
+            action: action::BLOCK.into(),
+            severity: 3,
+            tags: vec!["sqli".into()],
+            enabled: false,
+            mode: mode::BLOCK.into(),
+            priority: 0,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        // Empty rule list and "all rules disabled" both fall back to monitor.
+        let empty: Vec<WafRule> = Vec::new();
+        let all_disabled = vec![rule_to_proto(&disabled)];
+        for rules in [&empty, &all_disabled] {
+            let config = waf_config_to_proto(rules, &[], None);
+            assert!(config.enabled, "engine must stay on");
+            assert_eq!(config.mode, WAF_MODE_MONITOR, "rules: {rules:?}");
+        }
+
+        // An explicit row is still the only way to get `off`, and a row that
+        // says block keeps winning over the fallback.
+        let mut row =
+            waf_settings_row(Uuid::nil(), false, Vec::new(), Vec::new());
+        assert_eq!(
+            waf_config_to_proto(&[], &[], Some(&row)).mode,
+            WAF_MODE_OFF
+        );
+        row.mode = mode::MONITOR.into();
+        assert_eq!(
+            waf_config_to_proto(&[], &[], Some(&row)).mode,
+            WAF_MODE_MONITOR
+        );
+        row.mode = mode::BLOCK.into();
+        assert_eq!(
+            waf_config_to_proto(&[], &[], Some(&row)).mode,
+            WAF_MODE_BLOCK
+        );
     }
 
     #[test]

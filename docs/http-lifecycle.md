@@ -107,6 +107,28 @@ in this order and **the first one that answers ends the request**:
 | 6 | Rate limiting | Site → Security → Rate limiting | Fixed-window counters per rule (IP, host, path, header, cookie…). Over the threshold: the rule's action, `challenge` issuing a clearance cookie when configured. |
 | 7 | WAF engine | Site → Security → WAF | Rule inspection (signatures + expressions + anomaly score). Verdicts: pass, monitor (log only), block, challenge. |
 
+The WAF engine (step 7) verdict is governed by a **mode**; sites and rules share
+the same three API values:
+
+| Mode (API value) | Behaviour |
+| --- | --- |
+| Off (`off`) | The engine returns immediately: no detection, no event. |
+| Observe (`monitor`) | Detects and records events, but never blocks or challenges. |
+| Enforce (`block`) | Applies the action configured on the rule. |
+
+The enforcing API value is `block`, **not** `enforce`/`prevention` — anything
+else is rejected with a `400` that lists `off|monitor|block`. The site mode is a
+ceiling on top of the rules: with the site in `monitor`, a `block` rule is
+**downgraded** rather than ignored — the event's `action` is `monitor` and its
+`waf_details` ends with
+`downgraded=true would_enforce=block cause=site-mode-monitor`, while the rule
+keeps its own `rule_action=block`. That marker is what separates "suppressed by
+the site mode" from "configured to observe".
+
+A new site seeds the built-in rules as `block`, so "WAF enabled" takes effect
+immediately; restoring defaults on an existing site keeps seeding `monitor`, so
+a repair never starts blocking traffic that site was serving unfiltered.
+
 Two cross-cutting behaviours are worth remembering:
 
 - **Observation mode** (Site → Security → WAF) downgrades every block/challenge

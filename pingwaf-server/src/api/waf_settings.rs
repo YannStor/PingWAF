@@ -253,11 +253,19 @@ async fn get_waf_posture(
             "off".to_string()
         };
     // The explicit site mode wins; the rule derivation is only the fallback
-    // for a site that never got a posture row.
+    // for a site that never got a posture row. The fallback floors at
+    // `monitor` for the same reason `derive_site_mode` does: the data plane
+    // treats "no posture row" as monitor, so reporting `off` here would show a
+    // posture weaker than what the edge is actually running.
+    let fallback_mode = if custom_mode == mode::OFF {
+        mode::MONITOR.to_string()
+    } else {
+        custom_mode.clone()
+    };
     let site_mode = settings
         .as_ref()
         .map(|s| s.mode.clone())
-        .unwrap_or_else(|| custom_mode.clone());
+        .unwrap_or(fallback_mode);
 
     let rate_limits = rate_limit_rules::Entity::find()
         .filter(rate_limit_rules::Column::SiteId.eq(id))
@@ -330,12 +338,26 @@ async fn get_waf_posture(
 }
 
 /// Trims and lowercase-validates the site enforcement mode.
+///
+/// The only accepted values are `off`, `monitor` and `block` — `block` is the
+/// enforcing mode, there is no `enforce`/`prevention` alias. The error message
+/// spells the whole enum out (and names the `block`/`enforce` confusion
+/// explicitly) because the old one-word rejection sent operators guessing
+/// which of the three words the API wanted.
 fn normalise_mode(raw: &str) -> Result<String, ApiError> {
     use crate::models::mode;
     let value = raw.trim().to_ascii_lowercase();
     if !mode::is_valid(&value) {
+        let hint = if matches!(
+            value.as_str(),
+            "enforce" | "enforcement" | "prevent" | "prevention"
+        ) {
+            " ('enforce' is not an API value: use 'block' to enforce)"
+        } else {
+            ""
+        };
         return Err(ApiError::BadRequest(format!(
-            "unknown mode value '{value}'; allowed: {}, {}, {}",
+            "unknown mode value '{value}'; allowed: {}|{}|{}{hint}",
             mode::OFF,
             mode::MONITOR,
             mode::BLOCK
@@ -395,9 +417,14 @@ fn normalise_rule_ids(
 }
 
 /// Derives the legacy site mode from the site's enabled custom rules
-/// (block > monitor > off). Used exactly once when the posture row is first
-/// created so a lazy-created row matches the historical behavior; afterwards
-/// the stored explicit value wins.
+/// (block > monitor, with **monitor as the floor**). Used exactly once when the
+/// posture row is first created, so a lazy-created row matches what the data
+/// plane is already doing; afterwards the stored explicit value wins.
+///
+/// The floor is monitor, not off: with no posture row the data plane already
+/// falls back to monitor (`grpc::config::waf_config_to_proto`), so creating the
+/// row as `off` here would silently weaken a site just because an operator
+/// opened its settings page. `off` stays an explicit choice.
 async fn derive_site_mode(
     db: &sea_orm::DatabaseConnection,
     site_id: Uuid,
@@ -410,18 +437,16 @@ async fn derive_site_mode(
         .await?;
     let derived = if active.iter().any(|rule| rule.mode == mode::BLOCK) {
         mode::BLOCK
-    } else if active.iter().any(|rule| rule.mode == mode::MONITOR) {
-        mode::MONITOR
     } else {
-        mode::OFF
+        mode::MONITOR
     };
     Ok(derived.to_string())
 }
 
-/// Finds the waf_settings row for a site, creating a default (enforce
-/// everything, no advanced mode) one if absent. The freshly created row
-/// seeds `mode` from the site's enabled rules once, matching the legacy
-/// derivation the data plane used before the explicit column existed.
+/// Finds the waf_settings row for a site, creating a default (engine on, no
+/// advanced mode) one if absent. The freshly created row seeds `mode` from the
+/// site's enabled rules once, matching the legacy derivation the data plane
+/// uses when the row is absent (block > monitor, never off).
 async fn find_or_create(
     state: &AppState,
     site_id: Uuid,
@@ -439,6 +464,8 @@ async fn find_or_create(
         id: Set(Uuid::new_v4()),
         site_id: Set(site_id),
         waf_enabled: Set(true),
+        // Fresh rows inherit the aggregate rule mode; a site with no rules
+        // lands on monitor (see `derive_site_mode`), never off.
         mode: Set(derive_site_mode(&state.db, site_id).await?),
         paranoia_level: Set(2),
         advanced_mode: Set(false),
@@ -504,10 +531,25 @@ mod tests {
     fn normalise_mode_trims_and_validates() {
         assert_eq!(normalise_mode(" Block ").unwrap(), "block");
         assert_eq!(normalise_mode("MONITOR").unwrap(), "monitor");
+        assert_eq!(normalise_mode("off").unwrap(), "off");
 
         let err = normalise_mode("bogus").unwrap_err();
         assert!(matches!(err, ApiError::BadRequest(_)));
         assert!(err.to_string().contains("bogus"));
+        // D25: the rejection names every legal value so a caller can fix the
+        // request without reading the source.
+        assert!(err.to_string().contains("off|monitor|block"), "{err}");
+    }
+
+    #[test]
+    fn enforce_is_rejected_with_the_legal_enum() {
+        // `enforce` is what the console copy calls the blocking mode; it was
+        // never an API value. The 400 must say which value does the job.
+        let err = normalise_mode("enforce").unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(_)));
+        let message = err.to_string();
+        assert!(message.contains("off|monitor|block"), "{message}");
+        assert!(message.contains("use 'block'"), "{message}");
     }
 
     #[test]

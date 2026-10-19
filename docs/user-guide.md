@@ -143,15 +143,37 @@ The Web Protection page is organized into three tabs — **Managed rules** (atta
 
 ### Security Modes
 
-Each site operates in one of three modes:
+Each site operates in one of three modes. The console labels are shown first;
+the value in parentheses is what the API expects:
 
-| Mode | Behavior |
-|------|----------|
-| **Off** | Traffic passes through without inspection |
-| **Detection** | Rules evaluated, matches logged, but not blocked |
-| **Prevention** | Rules evaluated, matches blocked with configured action |
+| Mode | API value | Behavior |
+|------|-----------|----------|
+| **Off** | `off` | Traffic passes through without inspection |
+| **Detection** | `monitor` | Rules evaluated, matches logged, but not blocked |
+| **Prevention** | `block` | Rules evaluated, matches blocked with configured action |
+
+The enforcing value is `block` — **not** `enforce` or `prevention`. The API
+rejects anything else with a `400` that lists `off|monitor|block`. The same enum
+applies per rule; see [Rule modes](#rule-modes).
 
 Set via: `Sites → [site] → Web Protection → Custom rules`
+
+### Rule modes
+
+Every rule has its own `mode`: `off` (not enforced — today the edge treats a
+rule-level `off` like `monitor`), `monitor` (detect and record, never enforce)
+or `block` (enforce the rule's action); `enabled: false` is what takes a rule
+out of evaluation. A brand-new site is seeded with the built-in rule set in
+`block`, so switching the WAF on protects it immediately; restored defaults on
+an existing site come back as `monitor` so a repair never starts blocking
+traffic that site was serving unfiltered.
+
+The site mode caps the rules: with the site in **Detection** (`monitor`), a rule
+that says `block` is *downgraded*, not ignored. The request passes, and the
+security event shows both sides — `action: monitor` with `waf_details` ending in
+`downgraded=true would_enforce=block cause=site-mode-monitor`, plus the rule's
+own `rule_action=block`. If the event has no `downgraded=true`, the rule itself
+was configured to observe.
 
 ### Rule Groups
 
@@ -197,7 +219,7 @@ PingWAF includes built-in protection against SQL injection, XSS, remote code exe
 
 **Backend stacks** (`java`, `php`, `python`, `node`) downgrade stack-specific detections the same way; language-agnostic detections are never affected by a stack switch. Stack switches are collapsed by default.
 
-A site without explicit settings behaves exactly like the default posture: every detection blocks.
+A site without explicit settings inherits the aggregate of its enabled rules: `block` when any rule blocks, otherwise `monitor`. It never silently lands on `off` — an unconfigured site keeps detecting and logging, and only an explicit **Off** (or the engine switch) turns inspection off.
 
 ### Under Attack Mode
 

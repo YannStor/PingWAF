@@ -99,6 +99,11 @@ fn default_severity() -> i32 {
     3
 }
 
+/// Default for a rule created without `mode`.
+///
+/// `block` is the enforcing value of the `off` | `monitor` | `block` enum —
+/// there is no `enforce` alias — and it matches what the console's
+/// "Prevention" label means.
 fn default_mode() -> String {
     mode::BLOCK.to_string()
 }
@@ -178,6 +183,30 @@ async fn seed_defaults(
     })))
 }
 
+/// Rejects an unknown rule mode, naming the whole enum.
+///
+/// `enforce` is the word operators (and old UI copy) reach for, but the API
+/// value that enforces is `block`. A bare "unknown mode 'enforce'" left them
+/// guessing, so the rejection lists `off` | `monitor` | `block` and spells the
+/// confusion out when it recognises the near-miss.
+fn validate_mode(rule_mode: &str) -> Result<(), ApiError> {
+    if mode::is_valid(rule_mode) {
+        return Ok(());
+    }
+    let hint = if matches!(
+        rule_mode,
+        "enforce" | "enforcement" | "prevent" | "prevention"
+    ) {
+        " ('enforce' is not an API value: use 'block' to enforce)"
+    } else {
+        ""
+    };
+    Err(ApiError::BadRequest(format!(
+        "unknown mode '{rule_mode}'; allowed: {}{hint}",
+        mode::ALL.join("|")
+    )))
+}
+
 /// Validates and normalises a tag list.
 fn normalise_tags(tags: &[String]) -> Result<Vec<String>, ApiError> {
     if tags.len() > MAX_TAGS {
@@ -238,11 +267,7 @@ fn validate_rule(
             "unknown action '{rule_action}'"
         )));
     }
-    if !mode::is_valid(rule_mode) {
-        return Err(ApiError::BadRequest(format!(
-            "unknown mode '{rule_mode}'"
-        )));
-    }
+    validate_mode(rule_mode)?;
     if !(1..=5).contains(&severity) {
         return Err(ApiError::BadRequest(
             "severity must be between 1 and 5".to_string(),
@@ -528,11 +553,7 @@ async fn update_rule(
         active.enabled = Set(enabled);
     }
     if let Some(rule_mode) = non_empty(&payload.mode) {
-        if !mode::is_valid(&rule_mode) {
-            return Err(ApiError::BadRequest(format!(
-                "unknown mode '{rule_mode}'"
-            )));
-        }
+        validate_mode(&rule_mode)?;
         active.mode = Set(rule_mode);
     }
     if let Some(priority) = payload.priority {
@@ -643,9 +664,16 @@ mod tests {
         assert!(validate_rule("r", "ip.src == 1.2.3.4", "block", "block", 3)
             .is_err());
         assert!(validate_rule("r", "  ", "block", "block", 3).is_err());
-        assert!(validate_rule("r", "true", "nuke", "block", 3).is_err());
-        assert!(validate_rule("r", "true", "block", "enforce", 3).is_err());
-        assert!(validate_rule("r", "true", "block", "block", 9).is_err());
+        // A valid expression, so the rejections below come from the field
+        // under test instead of the expression parser running first.
+        const OK_EXPR: &str = r#"http.request.method eq "POST""#;
+        assert!(validate_rule("r", OK_EXPR, "nuke", "block", 3).is_err());
+        let err =
+            validate_rule("r", OK_EXPR, "block", "enforce", 3).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("off|monitor|block"), "{message}");
+        assert!(message.contains("use 'block'"), "{message}");
+        assert!(validate_rule("r", OK_EXPR, "block", "block", 9).is_err());
     }
 
     #[test]

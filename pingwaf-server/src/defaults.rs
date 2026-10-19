@@ -1,11 +1,14 @@
 //! Built-in policy seeded for every site.
 //!
 //! PingWAF is meant to be useful the moment a site is added: a fresh site gets
-//! an OWASP-flavoured WAF rule set that is already *enabled* and running in
-//! monitor mode, so the dashboard fills with detections without anyone having
-//! to author a rule first. Caching works the same way, except the seeded rules
-//! start disabled: switching caching on for a site is a single toggle, and the
-//! common cases (static assets, HTML, API responses) are already covered.
+//! an OWASP-flavoured WAF rule set that is already *enabled* and **blocking**,
+//! so "WAF is on" means SQLi/XSS payloads are actually stopped instead of only
+//! being recorded while the origin still answers 200. Restoring the defaults on
+//! an existing site is the one exception: missing rules come back in monitor
+//! mode, so a repair action never starts blocking traffic that site has been
+//! serving unfiltered. Caching works the same way, except the seeded cache
+//! rules start disabled: switching caching on for a site is a single toggle,
+//! and the common cases (static assets, HTML, API responses) are covered.
 //!
 //! Seeding is idempotent and matched on the rule *name*, so restoring the
 //! defaults after an edit only re-adds what is missing and never duplicates.
@@ -108,8 +111,12 @@ pub struct DefaultCacheRule {
     pub respect_origin: bool,
 }
 
-/// The built-in WAF rule set: one monitor-mode rule per detection family plus
-/// the reconnaissance patterns that generate noise on any public site.
+/// The built-in WAF rule set: one blocking rule per detection family plus the
+/// reconnaissance patterns that generate noise on any public site.
+///
+/// The *mode* these rules are seeded with is decided by the seeding path (see
+/// [`NEW_SITE_WAF_RULE_MODE`] / [`RESTORE_WAF_RULE_MODE`]); every rule keeps its
+/// explicit `block` action so switching the mode is all it takes to enforce.
 pub fn waf_rules() -> Vec<DefaultWafRule> {
     vec![
         DefaultWafRule {
@@ -234,7 +241,26 @@ pub fn cache_rules_defaults() -> Vec<DefaultCacheRule> {
     ]
 }
 
-/// Creates the built-in WAF group and any missing WAF rules for `site_id`.
+/// Rule mode seeded for the built-in rules of a **new site**.
+///
+/// "WAF enabled" has to mean the shipped rules actually enforce: seeding them
+/// as `monitor` left a fresh site recording SQLi/XSS detections while the same
+/// payloads reached the origin and answered 200, which reads as a broken WAF.
+/// `block` is therefore the only honest default for a site whose only policy is
+/// the built-in one; an operator who wants to start in observe-only can flip
+/// the site mode to `monitor` in one place.
+pub const NEW_SITE_WAF_RULE_MODE: &str = mode::BLOCK;
+
+/// Rule mode used when the *restore defaults* endpoint re-adds a missing
+/// built-in rule to an **existing site**.
+///
+/// Deliberately `monitor`: a repair action must never start blocking traffic a
+/// site has been serving unfiltered, and an existing site's posture is an
+/// operator decision. New sites go through [`NEW_SITE_WAF_RULE_MODE`] instead.
+pub const RESTORE_WAF_RULE_MODE: &str = mode::MONITOR;
+
+/// Creates the built-in WAF group and any missing WAF rules for `site_id`,
+/// seeded in [`RESTORE_WAF_RULE_MODE`].
 ///
 /// Returns the number of rules inserted. Existing rows are left untouched, so
 /// an operator edit to a built-in rule survives a later restore.
@@ -242,6 +268,17 @@ pub async fn seed_waf_defaults(
     db: &DatabaseConnection,
     site_id: Uuid,
 ) -> Result<usize, sea_orm::DbErr> {
+    seed_waf_defaults_with_mode(db, site_id, RESTORE_WAF_RULE_MODE).await
+}
+
+/// Creates the built-in WAF group and any missing WAF rules for `site_id` in
+/// `rule_mode`; the single implementation behind both seeding paths.
+async fn seed_waf_defaults_with_mode(
+    db: &DatabaseConnection,
+    site_id: Uuid,
+    rule_mode: &str,
+) -> Result<usize, sea_orm::DbErr> {
+    debug_assert!(mode::is_valid(rule_mode), "invalid seed mode {rule_mode}");
     let timestamp = Utc::now();
     let group = ensure_waf_group(db, site_id, timestamp).await?;
 
@@ -269,10 +306,10 @@ pub async fn seed_waf_defaults(
             severity: Set(spec.severity),
             tags: Set(spec.tags.iter().map(|tag| tag.to_string()).collect()),
             enabled: Set(true),
-            // Monitor mode is the product default: detections are recorded in
-            // the dashboard without blocking live traffic until an operator
-            // switches the rule (or the site) to blocking.
-            mode: Set(mode::MONITOR.to_string()),
+            // The seeded mode is what gates enforcement: `block` on the new-site
+            // path (the rule's own `action` stays `block`), `monitor` on the
+            // restore path so an existing site is never silently promoted.
+            mode: Set(rule_mode.to_string()),
             priority: Set(index as i32),
             created_at: Set(timestamp),
             updated_at: Set(timestamp),
@@ -326,11 +363,16 @@ pub async fn seed_cache_defaults(
 }
 
 /// Seeds both the WAF and cache defaults, used when a site is created.
+///
+/// The WAF rules land in [`NEW_SITE_WAF_RULE_MODE`] (`block`): this is the only
+/// path that seeds a site's *initial* policy, and a brand-new site has no
+/// traffic history that a blocking rule could surprise. Existing sites never
+/// reach this function.
 pub async fn seed_site_defaults(
     db: &DatabaseConnection,
     site_id: Uuid,
 ) -> Result<(), sea_orm::DbErr> {
-    seed_waf_defaults(db, site_id).await?;
+    seed_waf_defaults_with_mode(db, site_id, NEW_SITE_WAF_RULE_MODE).await?;
     seed_cache_defaults(db, site_id).await?;
     Ok(())
 }
@@ -428,6 +470,24 @@ mod tests {
                     )
                 });
             assert!(spec.edge_ttl_seconds >= 0);
+        }
+    }
+
+    #[test]
+    fn new_sites_seed_blocking_rules_and_restore_stays_monitor() {
+        use crate::models::action;
+
+        // D13: "WAF enabled" on a fresh site has to mean enforcement.
+        assert_eq!(NEW_SITE_WAF_RULE_MODE, mode::BLOCK);
+        assert_eq!(RESTORE_WAF_RULE_MODE, mode::MONITOR);
+        assert!(mode::is_valid(NEW_SITE_WAF_RULE_MODE));
+        assert!(mode::is_valid(RESTORE_WAF_RULE_MODE));
+
+        // Every built-in rule keeps its explicit `block` action: the seeded
+        // mode is the only switch between observe and enforce, so a rule whose
+        // action was `log` would stay harmless even after the flip.
+        for spec in waf_rules() {
+            assert_eq!(spec.action, action::BLOCK, "{}", spec.name);
         }
     }
 
