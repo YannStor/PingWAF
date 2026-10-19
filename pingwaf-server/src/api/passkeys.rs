@@ -44,7 +44,7 @@ use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::auth::middleware::AuthUser;
 use crate::models::{
-    instance_setting, passkey_credential, passkey_state, user,
+    instance_setting, passkey_credential, passkey_state, role, user,
 };
 
 /// How long a ceremony's challenge stays valid, in seconds.
@@ -409,6 +409,12 @@ async fn login_finish(
             )
         })?;
 
+    // The ceremony only proves possession of the authenticator; the account
+    // row is still the source of truth, exactly as for a password login. A
+    // passkey bound before the administrator disabled the account (or before a
+    // credential change bumped `token_version`) must not mint a fresh session.
+    ensure_account_active(&account)?;
+
     tracing::info!(%user_id, "user logged in with a passkey");
 
     // Passkey logins join the history (the baseline for password-login
@@ -431,6 +437,26 @@ async fn login_finish(
 
     let tokens = crate::api::auth::issue_tokens(&state, account)?;
     Ok((StatusCode::OK, Json(tokens)).into_response())
+}
+
+/// Refuses a passkey login for an account the password flow would refuse.
+///
+/// A completed WebAuthn ceremony proves possession of the authenticator, not
+/// that the account may still sign in: the disabled flag and the unknown-role
+/// guard apply to every factor. The wording matches the password login
+/// (`crate::api::auth`) so a caller cannot tell the two flows apart.
+fn ensure_account_active(account: &user::Model) -> Result<(), ApiError> {
+    if account.disabled {
+        tracing::debug!(user_id = %account.id, "passkey login failed: account disabled");
+        return Err(ApiError::Unauthorized("account is disabled".to_string()));
+    }
+    if !role::is_valid(&account.role) {
+        return Err(ApiError::Unauthorized(format!(
+            "account has an unknown role '{}'",
+            account.role
+        )));
+    }
+    Ok(())
 }
 
 /// Loads a credential the caller owns, or reports it as missing.
@@ -1139,5 +1165,49 @@ mod tests {
             relying_party(&state, &headers(&[("host", "waf.example.com")]))
                 .unwrap_err();
         assert_eq!(err.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    /// A `users` row with the fields the login gate looks at.
+    fn account(disabled: bool, role_name: &str) -> user::Model {
+        user::Model {
+            id: Uuid::new_v4(),
+            email: "ops@example.com".into(),
+            password_hash: "$2b$10$secret".into(),
+            name: Some("Ops".into()),
+            role: role_name.into(),
+            disabled,
+            must_change_password: false,
+            token_version: 0,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn a_disabled_account_cannot_finish_a_passkey_login() {
+        // The passkey ceremony succeeded, but the administrator has since
+        // disabled the account: minting tokens would resurrect the session.
+        let err =
+            ensure_account_active(&account(true, role::ADMIN)).unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+        // Same wording as the password login, so the response does not reveal
+        // which factor was used.
+        assert!(err.to_string().contains("account is disabled"));
+    }
+
+    #[test]
+    fn an_active_account_finishes_a_passkey_login() {
+        assert!(ensure_account_active(&account(false, role::ADMIN)).is_ok());
+        assert!(ensure_account_active(&account(false, role::VIEWER)).is_ok());
+        assert!(ensure_account_active(&account(false, role::AUDITOR)).is_ok());
+    }
+
+    #[test]
+    fn an_unknown_role_cannot_finish_a_passkey_login() {
+        // Matches `authenticate_user`/`refresh`: a role no longer in the set
+        // must not become a live session.
+        let err =
+            ensure_account_active(&account(false, "superuser")).unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
     }
 }
