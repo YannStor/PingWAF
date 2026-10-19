@@ -19,6 +19,7 @@ use crate::api::common::{
 use crate::api::error::ApiError;
 use crate::api::sites::touch_site;
 use crate::api::state::AppState;
+use crate::api::validation::validate_expression;
 use crate::auth::AuthUser;
 use crate::grpc::notify_config_changed;
 use crate::models::{action, mode, rule, rule_groups};
@@ -216,11 +217,6 @@ fn validate_group(name: &str, phase: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Upper bound on a rule expression (bytes): rules are compiled per site
-/// on the data plane, and an unbounded expression is both a parsing cost
-/// and a memory lever.
-const MAX_EXPRESSION_LEN: usize = 8 * 1024;
-
 fn validate_rule(
     name: &str,
     expression: &str,
@@ -233,23 +229,10 @@ fn validate_rule(
             "rule name must be 1-200 characters".to_string(),
         ));
     }
-    if expression.trim().is_empty() {
-        return Err(ApiError::BadRequest(
-            "expression must not be empty".to_string(),
-        ));
-    }
-    if expression.len() > MAX_EXPRESSION_LEN {
-        return Err(ApiError::BadRequest(format!(
-            "expression must be at most {MAX_EXPRESSION_LEN} bytes"
-        )));
-    }
-    // Reject unparsable expressions at the API boundary: the data plane
-    // silently drops a rule whose expression fails to parse, so without
-    // this check a rule looks enabled in the console while enforcing
-    // nothing (2026-10-18 audit, high).
-    pingwaf_waf::rules::expression::parse_expression(expression).map_err(
-        |err| ApiError::BadRequest(format!("expression is not valid: {err}")),
-    )?;
+    // The length ceiling and the parser live in `validation`, shared with the
+    // rate-limit and certificate paths: one implementation, so an update path
+    // cannot drift away from its create counterpart (2026-10-19 audit).
+    validate_expression(expression)?;
     if !action::is_valid(rule_action) {
         return Err(ApiError::BadRequest(format!(
             "unknown action '{rule_action}'"
@@ -516,6 +499,10 @@ async fn update_rule(
         active.description = Set(non_empty(&Some(description)));
     }
     if let Some(expression) = non_empty(&payload.expression) {
+        // Same gate as create: an unparsable expression is dropped by the data
+        // plane, which used to let an update turn a working rule into a
+        // silently disabled one (2026-10-19 audit, D04).
+        validate_expression(&expression)?;
         active.expression = Set(expression);
     }
     if let Some(rule_action) = non_empty(&payload.action) {

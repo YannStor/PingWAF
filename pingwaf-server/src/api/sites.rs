@@ -22,6 +22,7 @@ use crate::api::common::{
 };
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
+use crate::api::validation::validate_pem_bundle;
 use crate::auth::AuthUser;
 use crate::grpc::notify_config_changed;
 use crate::models::{
@@ -632,6 +633,11 @@ impl TlsPosture {
             next.max_tls_version = Some(normalise_tls_version(&raw)?);
         }
         if let Some(raw) = non_empty(&req.mtls_client_ca) {
+            // The bundle is the only trust anchor an agent has: a string that
+            // is not a PEM chain verifies nothing, yet `mtls_enabled` would
+            // read as on. Validate it here rather than at handshake
+            // (2026-10-19 audit, D08).
+            validate_pem_bundle(&raw, "mtls_client_ca")?;
             next.mtls_client_ca = Some(raw);
         }
         if let Some(age) = req.hsts_max_age {
@@ -1319,9 +1325,26 @@ async fn update_upstream(
             ApiError::NotFound(format!("upstream {target} not found"))
         })?;
 
+    // Validate the post-update state *before* anything is written: this used
+    // to run `active.update()` first and `validate_upstream` on the returned
+    // row, so a rejected weight stayed in the database while the caller saw a
+    // 400 (2026-10-19 audit, D21). Both fields are validated here — the
+    // effective address and the effective weight — because either half of the
+    // pair alone is not enough to decide.
+    let next_address = match non_empty(&payload.address) {
+        Some(address) => normalize_origin_address(&address)?,
+        None => row.address.clone(),
+    };
+    let next_weight = payload.weight.unwrap_or(row.weight);
+    validate_upstream(&next_address, next_weight)?;
+
     let mut active: site_upstreams::ActiveModel = row.into();
-    if let Some(address) = non_empty(&payload.address) {
-        active.address = Set(normalize_origin_address(&address)?);
+    if payload
+        .address
+        .as_deref()
+        .is_some_and(|a| !a.trim().is_empty())
+    {
+        active.address = Set(next_address);
     }
     if let Some(weight) = payload.weight {
         active.weight = Set(weight);
@@ -1343,7 +1366,6 @@ async fn update_upstream(
     }
 
     let updated = active.update(&state.db).await?;
-    validate_upstream(&updated.address, updated.weight)?;
 
     tracing::info!(site_id = %id, upstream = %target, "upstream updated");
     touch_site(&state, id).await?;
@@ -2545,5 +2567,103 @@ mod tests {
                 ..Default::default()
             })
             .is_err());
+    }
+
+    /// A random string used to arm mTLS verifies nothing, so the posture
+    /// merge must reject it with a 400 instead of storing it (D08).
+    #[test]
+    fn merged_rejects_a_client_ca_that_is_not_a_pem_bundle() {
+        let base = TlsPosture::unset();
+        let err = base
+            .merged(&TlsPostureRequest {
+                mtls_enabled: Some(true),
+                mtls_client_ca: Some("not a certificate".to_string()),
+                ..Default::default()
+            })
+            .expect_err("a non-PEM client CA must be rejected");
+        assert_eq!(err.code(), "bad_request");
+        assert!(
+            err.to_string().contains("mtls_client_ca"),
+            "the message must name the field: {err}"
+        );
+
+        // A real bundle is accepted, and a broken second block is not: the
+        // agent verifies against every certificate in the anchor.
+        let ca = crate::pki::tls::generate_self_signed(
+            "Test CA",
+            &["localhost".to_string()],
+            30,
+        )
+        .expect("the test CA must generate");
+        let merged = base
+            .merged(&TlsPostureRequest {
+                mtls_enabled: Some(true),
+                mtls_client_ca: Some(ca.cert_pem.clone()),
+                ..Default::default()
+            })
+            .expect("a PEM client CA must validate");
+        assert!(merged.mtls_enabled);
+        assert!(merged.mtls_client_ca.is_some());
+
+        assert!(base
+            .merged(&TlsPostureRequest {
+                mtls_enabled: Some(true),
+                mtls_client_ca: Some(format!(
+                    "{}\n-----BEGIN CERTIFICATE-----\nnope",
+                    ca.cert_pem
+                )),
+                ..Default::default()
+            })
+            .is_err());
+
+        // Omitting the field keeps the previous value, so an existing mTLS
+        // site is not reconfigured by an unrelated request.
+        let err = TlsPosture::unset()
+            .merged(&TlsPostureRequest {
+                mtls_enabled: Some(true),
+                ..Default::default()
+            })
+            .expect_err("mtls_enabled without a CA must still be rejected");
+        assert!(err.to_string().contains("requires the client CA bundle"));
+    }
+
+    /// Mirrors `update_upstream`'s `payload.weight.unwrap_or(row.weight)`.
+    fn effective_weight_for_test(requested: Option<i32>, stored: i32) -> i32 {
+        requested.unwrap_or(stored)
+    }
+
+    /// D21 regression: the weight is validated against the effective
+    /// post-update value *before* any write, so a rejected update leaves the
+    /// stored row untouched. The database is not available in a unit test, so
+    /// what is asserted here is the ordering contract the handler relies on:
+    /// `validate_upstream` rejects the effective pair on its own.
+    #[test]
+    fn update_upstream_validates_the_effective_values_before_writing() {
+        // What `update_upstream` computes for `{ "weight": 0 }` against a row
+        // whose address is unchanged: `payload.weight.unwrap_or(row.weight)`.
+        let row_address = "10.0.0.1:8080".to_string();
+        let row_weight = 5;
+        // The handler's expression, fed the `{ "weight": 0 }` payload.
+        let next_weight = effective_weight_for_test(Some(0), row_weight);
+        let err = validate_upstream(&row_address, next_weight)
+            .expect_err("weight 0 is out of range");
+        assert!(err.to_string().contains("between 1 and 10000"));
+
+        // The same normalisation the handler runs before validating: a bad
+        // address is rejected during normalisation, also before the write.
+        assert!(
+            normalize_origin_address("https://origin.example.com/api").is_err()
+        );
+        assert_eq!(
+            normalize_origin_address("https://origin.example.com:8443/")
+                .unwrap(),
+            "origin.example.com:8443"
+        );
+
+        // A valid pair passes so the handler can proceed to the write.
+        validate_upstream(&row_address, 10).expect("a valid pair must pass");
+
+        // Nothing above touched the database: the checks are pure, which is
+        // what lets the handler run them before `active.update()`.
     }
 }

@@ -26,6 +26,7 @@ use crate::api::sites::{
     TlsPostureRequest,
 };
 use crate::api::state::AppState;
+use crate::api::validation::{validate_certificate_and_key, validate_pem_pair};
 use crate::auth::AuthUser;
 use crate::grpc::notify_config_changed;
 use crate::models::{
@@ -336,27 +337,34 @@ async fn insert_certificate<C: ConnectionTrait>(
 
     // Reject unparsable or mismatched PEM pairs before they reach the data
     // plane: a broken certificate takes the site's HTTPS down, and this path
-    // used to store whatever string arrived (2026-10-18 audit). Same
-    // validation as the control-plane TLS upload.
+    // used to store whatever string arrived (2026-10-18 audit). The checks
+    // live in `validation`, shared with the update path.
     let has_pem = payload
         .cert_pem
         .as_deref()
         .is_some_and(|pem| !pem.trim().is_empty());
-    if let Some(cert_pem) = payload
-        .cert_pem
-        .as_deref()
-        .filter(|pem| !pem.trim().is_empty())
-    {
-        crate::pki::tls::describe(cert_pem)
-            .map_err(|err| ApiError::BadRequest(err.to_string()))?;
-        if let Some(key_pem) = payload
+    match (
+        payload
+            .cert_pem
+            .as_deref()
+            .filter(|pem| !pem.trim().is_empty()),
+        payload
             .key_pem
             .as_deref()
-            .filter(|pem| !pem.trim().is_empty())
-        {
-            crate::pki::tls::certified_key(cert_pem, key_pem)
-                .map_err(|err| ApiError::BadRequest(err.to_string()))?;
-        }
+            .filter(|pem| !pem.trim().is_empty()),
+    ) {
+        (Some(cert_pem), Some(key_pem)) => {
+            validate_certificate_and_key(cert_pem, key_pem)?;
+        },
+        (Some(cert_pem), None) => validate_pem_pair(cert_pem, None)?,
+        // A key without its certificate cannot be served; storing it would
+        // leave the row looking complete.
+        (None, Some(_)) => {
+            return Err(ApiError::BadRequest(
+                "key_pem requires cert_pem".to_string(),
+            ));
+        },
+        (None, None) => {},
     }
 
     let status = if has_pem {
@@ -480,6 +488,35 @@ async fn update_certificate(
             &split_domains(&cert_domain),
             Some(&challenge),
         )?;
+    }
+
+    // Replacing either half of the stored pair re-validates the pair as it
+    // will be after this request: the update path used to store an unparsable
+    // certificate (or a key that does not match it) that create would have
+    // refused, which takes the site's HTTPS down on the next push
+    // (2026-10-19 audit, D07).
+    let stored_cert =
+        row.cert_pem.as_deref().filter(|pem| !pem.trim().is_empty());
+    let stored_key =
+        row.key_pem.as_deref().filter(|pem| !pem.trim().is_empty());
+    let next_cert = match payload.cert_pem.as_deref() {
+        Some(pem) => Some(pem).filter(|pem| !pem.trim().is_empty()),
+        None => stored_cert,
+    };
+    let next_key = match payload.key_pem.as_deref() {
+        Some(pem) => Some(pem).filter(|pem| !pem.trim().is_empty()),
+        None => stored_key,
+    };
+    // A replacement certificate validates against the stored key and a
+    // replacement key against the stored certificate, so a mismatched pair
+    // cannot be assembled one request at a time.
+    if let Some(cert_pem) = next_cert {
+        validate_pem_pair(cert_pem, next_key)?;
+    } else if next_key.is_some() {
+        return Err(ApiError::BadRequest(
+            "key_pem requires a certificate: upload cert_pem with it"
+                .to_string(),
+        ));
     }
 
     let mut active: site_certificates::ActiveModel = row.into();

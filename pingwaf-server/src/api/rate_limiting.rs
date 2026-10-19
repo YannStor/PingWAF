@@ -19,6 +19,7 @@ use crate::api::common::{
 use crate::api::error::ApiError;
 use crate::api::sites::touch_site;
 use crate::api::state::AppState;
+use crate::api::validation::validate_optional_expression;
 use crate::auth::AuthUser;
 use crate::grpc::notify_config_changed;
 use crate::models::{action, characteristic, rate_limit_rules};
@@ -235,6 +236,11 @@ async fn create(
         payload.mitigation_timeout_seconds,
     )?;
     let characteristics = normalise_characteristics(&payload.characteristics)?;
+    // A rate-limit expression is optional (blank = every request for the
+    // site), but a present one is compiled on the data plane, which drops the
+    // whole rule when it fails to parse — so it is validated here, the same way
+    // the update path does (2026-10-19 audit, D05).
+    validate_optional_expression(&payload.expression)?;
 
     let timestamp = chrono::Utc::now();
     let model = rate_limit_rules::ActiveModel {
@@ -285,6 +291,7 @@ async fn update(
         active.name = Set(name);
     }
     if let Some(expression) = payload.expression {
+        validate_optional_expression(&expression)?;
         active.expression = Set(expression);
     }
     if let Some(characteristics) = payload.characteristics {
