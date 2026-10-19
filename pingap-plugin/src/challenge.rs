@@ -992,6 +992,19 @@ impl Plugin for ChallengePlugin {
             return Ok(RequestPluginResult::Skipped);
         }
 
+        // ACME http-01 validation requests are answered by the proxy before
+        // the plugin chain runs; skip them here too, as a second line of
+        // defense: challenging a CA verification request would make the
+        // certificate unissuable regardless of `exempt_paths`.
+        if session
+            .req_header()
+            .uri
+            .path()
+            .starts_with(super::waf::ACME_HTTP_01_PATH_PREFIX)
+        {
+            return Ok(RequestPluginResult::Continue);
+        }
+
         let path = session.req_header().uri.path().to_string();
         let method = session.req_header().method.as_str().to_string();
 
@@ -1347,6 +1360,41 @@ cookie_secret = "test-secret"
         .unwrap();
 
         let input_header = "GET /health HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+
+        let result = plugin
+            .handle_request(
+                PluginStep::EarlyRequest,
+                &mut session,
+                &mut Ctx::default(),
+            )
+            .await
+            .unwrap();
+        assert!(result == RequestPluginResult::Continue);
+    }
+
+    /// ACME http-01 validation requests pass even in under-attack mode and
+    /// without any `exempt_paths` entry: challenging the CA would make the
+    /// certificate unissuable.
+    #[tokio::test]
+    async fn test_acme_challenge_path_is_exempt() {
+        let _agent_lock = lock_agent().await;
+        PingWafAgent::set_agent_instance(None);
+        let plugin = ChallengePlugin::new(
+            &toml::from_str::<PluginConf>(
+                r###"
+under_attack_mode = true
+pow_difficulty = 0
+cookie_secret = "test-secret"
+"###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let input_header = "GET /.well-known/acme-challenge/x-token HTTP/1.1\r\nHost: example.com\r\n\r\n";
         let mock_io = Builder::new().read(input_header.as_bytes()).build();
         let mut session = Session::new_h1(Box::new(mock_io));
         session.read_request().await.unwrap();

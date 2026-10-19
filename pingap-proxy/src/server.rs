@@ -1366,6 +1366,19 @@ impl ProxyHttp for Server {
         if self.enabled_otel {
             initialize_telemetry(&self.name, session, ctx);
         }
+        // ACME http-01 challenges are answered before the location lookup,
+        // so the plugin chain (EarlyRequest plugins such as WAF / IP
+        // blacklist / CC) never sees a CA validation request: a 403 or a
+        // challenge page here would make the certificate unissuable. The
+        // response goes out inside `handle_acme_challenge`; the
+        // `response_written` guard at the top of `request_filter` then
+        // short-circuits the rest of the pipeline.
+        if self.lets_encrypt_enabled
+            && let Some(result) = self.handle_acme_challenge(session, ctx).await
+        {
+            result?;
+            return Ok(());
+        }
         self.find_and_apply_location(session, ctx).await?;
 
         Ok(())

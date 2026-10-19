@@ -1692,6 +1692,30 @@ struct DeferredBody {
     /// needs, snapshotted in the request phase.
     deferred: Option<DeferredVerdict>,
     created_at: Instant,
+    /// Fail-open deadline: past this instant the staged (and any further)
+    /// body is released to the upstream un-inspected, so a client dripping
+    /// bytes slowly cannot hold the upstream connection forever.
+    deadline: Instant,
+}
+
+/// Per-request ACME http-01 path prefix. Requests under it are never
+/// evaluated: blocking or challenging a CA validation request would make
+/// the site's certificate unissuable.
+pub(crate) const ACME_HTTP_01_PATH_PREFIX: &str =
+    "/.well-known/acme-challenge/";
+
+/// Hard ceiling for the withheld-body stage, applied on top of the
+/// configured stage timeout: a slow-drip client must not pin an upstream
+/// connection longer than this even with a generous read timeout.
+const DEFERRED_BODY_MAX_STAGE_SECS: u64 = 30;
+
+/// Resolves the withheld-body stage deadline: the smaller of the
+/// configured timeout (mirroring the site's `downstream_read_timeout`)
+/// and the hard 30s ceiling; unset means 30s.
+fn stage_deadline_timeout(configured: Option<Duration>) -> Duration {
+    configured
+        .unwrap_or(Duration::from_secs(DEFERRED_BODY_MAX_STAGE_SECS))
+        .min(Duration::from_secs(DEFERRED_BODY_MAX_STAGE_SECS))
 }
 
 /// Concurrent withheld-body staging is capped: each entry may hold the whole
@@ -1955,6 +1979,9 @@ pub struct WafPlugin {
     max_body_size: usize,
     /// Proof-of-work difficulty used when delegating a `Challenge` verdict.
     pow_difficulty: u32,
+    /// Max time a body may stay withheld from the upstream before the
+    /// fail-open flush (`min(configured, 30s)`, default 30s).
+    body_stage_timeout: Duration,
     hash_value: String,
     /// Per-domain engines built from agent rules, keyed by host.
     site_contexts: DashMap<String, CachedSite>,
@@ -2629,6 +2656,19 @@ impl TryFrom<&PluginConf> for WafPlugin {
             get_int_conf_or_default(value, "max_body_size", 64 * 1024) as usize;
         let pow_difficulty =
             get_int_conf_or_default(value, "pow_difficulty", 20) as u32;
+        // Mirrors the site's `downstream_read_timeout`: withheld bodies are
+        // released once the client stops making progress. Hard-capped at
+        // 30s; unset means 30s.
+        let body_stage_timeout =
+            stage_deadline_timeout(Some(Duration::from_secs(
+                get_int_conf_or_default(
+                    value,
+                    "body_stage_timeout_secs",
+                    DEFERRED_BODY_MAX_STAGE_SECS as i64,
+                )
+                .clamp(0, DEFERRED_BODY_MAX_STAGE_SECS as i64)
+                    as u64,
+            )));
 
         let plugin_step = match super::get_step_conf_in(
             value,
@@ -2674,6 +2714,7 @@ impl TryFrom<&PluginConf> for WafPlugin {
             inspect_body,
             max_body_size,
             pow_difficulty,
+            body_stage_timeout,
             hash_value,
             site_contexts: DashMap::new(),
             context_sweep: HostCacheSweep::default(),
@@ -2696,6 +2737,18 @@ impl Plugin for WafPlugin {
         ctx: &mut Ctx,
     ) -> pingora::Result<RequestPluginResult> {
         if step != self.plugin_step {
+            return Ok(RequestPluginResult::Skipped);
+        }
+        // ACME http-01 validation requests are answered by the proxy before
+        // the plugin chain runs; skip them here too, as a second line of
+        // defense: no rule evaluation, no challenge, no block page — a CA
+        // validation request must never see a 403.
+        if session
+            .req_header()
+            .uri
+            .path()
+            .starts_with(ACME_HTTP_01_PATH_PREFIX)
+        {
             return Ok(RequestPluginResult::Skipped);
         }
         let _profile = pingwaf_profiler::timed(pingwaf_profiler::Module::Waf);
@@ -3313,6 +3366,7 @@ impl Plugin for WafPlugin {
                         request_data: request_data.clone(),
                     }),
                     created_at: Instant::now(),
+                    deadline: Instant::now() + self.body_stage_timeout,
                 },
             );
         }
@@ -3342,6 +3396,74 @@ impl Plugin for WafPlugin {
         else {
             return Ok(None);
         };
+        // Fail-open deadline: while still withholding bytes, an entry past
+        // its deadline releases everything buffered (plus the current
+        // chunk) to the upstream un-inspected and the entry is dropped, so
+        // the rest of the body flows through untouched. Without this a
+        // slow-drip client could pin an upstream connection indefinitely.
+        if entry.inspect
+            && !entry.passthrough
+            && Instant::now() >= entry.deadline
+        {
+            warn!(
+                request_id = %request_id,
+                "body stage timeout; flushing withheld body upstream (fail-open)"
+            );
+            if let Some(agent) = PingWafAgent::instance()
+                && let Some(dv) = entry.deferred.as_ref()
+            {
+                agent.log_security_event(SecurityEvent {
+                    site_id: dv.site_id.clone(),
+                    request_id: request_id.clone(),
+                    client_ip: dv.request_data.client_ip.clone(),
+                    method: dv.request_data.method.clone(),
+                    scheme: dv.request_data.scheme.clone(),
+                    protocol: dv.request_data.protocol.clone(),
+                    host: dv.host.clone(),
+                    path: dv.request_data.path.clone(),
+                    query_string: dv.request_data.query.clone(),
+                    rule_id: String::new(),
+                    rule_name: String::new(),
+                    event_type: "body_stage_timeout".to_string(),
+                    action: "pass".to_string(),
+                    score: 0,
+                    details: "withheld request body timed out; released \
+                              to the upstream un-inspected"
+                        .to_string(),
+                    response_status: 0,
+                    user_agent: dv
+                        .request_data
+                        .headers
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or_default(),
+                    country_code: dv
+                        .request_data
+                        .country_code
+                        .clone()
+                        .unwrap_or_default(),
+                    matched_tags: Vec::new(),
+                });
+            }
+            let (log_body, log_body_size, log_truncated) =
+                entry.log_prefix.finish();
+            amend_pending_access_body(
+                &request_id,
+                log_body,
+                log_body_size,
+                log_truncated,
+            );
+            let staged = std::mem::take(&mut entry.buffer).freeze();
+            if !staged.is_empty() || body.is_some() {
+                let mut out = staged.to_vec();
+                if let Some(chunk) = body.as_deref() {
+                    out.extend_from_slice(chunk);
+                }
+                *body = Some(Bytes::from(out));
+            }
+            return Ok(None);
+        }
         if let Some(chunk) = body.as_deref() {
             entry.log_prefix.absorb(chunk);
         }
@@ -4040,6 +4162,97 @@ inspect_body = true"###,
             .unwrap();
         let request_id = ctx.state.request_id.clone().unwrap();
         assert!(!DEFERRED_BODY.contains_key(&request_id));
+    }
+
+    #[tokio::test]
+    async fn test_acme_challenge_path_is_skipped() {
+        let _agent_lock = lock_agent().await;
+        PingWafAgent::set_agent_instance(None);
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        // A CA http-01 validation request must never be evaluated: no rule
+        // run, no block page — otherwise certificates could never issue on
+        // a WAF-protected site.
+        let input_header = "GET /.well-known/acme-challenge/x-token HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+
+        let result = plugin
+            .handle_request(
+                PluginStep::EarlyRequest,
+                &mut session,
+                &mut Ctx::default(),
+            )
+            .await
+            .unwrap();
+        assert!(result == RequestPluginResult::Skipped);
+    }
+
+    /// An entry whose fail-open deadline has passed releases the staged
+    /// bytes (plus the current chunk) to the upstream and is dropped: the
+    /// rest of the body flows through untouched.
+    #[tokio::test]
+    async fn test_body_stage_timeout_fails_open() {
+        let _agent_lock = lock_agent().await;
+        PingWafAgent::set_agent_instance(None);
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(
+                r###"mode = "block"
+inspect_body = true"###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let input_header = "POST /api/search HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n";
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let mut ctx = Ctx::default();
+        plugin
+            .handle_request(PluginStep::EarlyRequest, &mut session, &mut ctx)
+            .await
+            .unwrap();
+        let request_id = ctx.state.request_id.clone().unwrap();
+        assert!(DEFERRED_BODY.contains_key(&request_id));
+
+        // Force the deadline into the past and drip one more chunk in.
+        DEFERRED_BODY.entry(request_id.clone()).and_modify(|entry| {
+            entry.deadline = Instant::now() - Duration::from_secs(1);
+        });
+        let mut body = Some(bytes::Bytes::from_static(b"q=1"));
+        let response = plugin
+            .handle_request_body(&mut session, &mut ctx, &mut body, false)
+            .unwrap();
+        assert!(response.is_none(), "fail-open must not answer the client");
+        assert!(
+            !DEFERRED_BODY.contains_key(&request_id),
+            "the timed-out stage must be dropped"
+        );
+        assert_eq!(
+            Some(&bytes::Bytes::from_static(b"q=1")),
+            body.as_ref(),
+            "the withheld body must be released upstream"
+        );
+    }
+
+    #[test]
+    fn test_stage_deadline_timeout() {
+        // Unset -> 30s; a generous read timeout is capped at 30s; a shorter
+        // one is kept.
+        assert_eq!(Duration::from_secs(30), stage_deadline_timeout(None));
+        assert_eq!(
+            Duration::from_secs(30),
+            stage_deadline_timeout(Some(Duration::from_secs(120)))
+        );
+        assert_eq!(
+            Duration::from_secs(10),
+            stage_deadline_timeout(Some(Duration::from_secs(10)))
+        );
     }
 
     #[tokio::test]
