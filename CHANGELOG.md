@@ -8,10 +8,41 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
-## [Unreleased]
+## [PingWAF 0.27.10] — 2026-10-19
+
+### Fixed
+
+- **Security review batch (D01–D26, 2026-10-19).**
+  Blocker: passkey login now refuses a disabled account (it issued tokens
+  after only checking that the row existed). High: certificate *update*
+  validates the PEM pair like create; rule and rate-limit *update* parse
+  the expression like create; MCP returns a generic 401 instead of
+  `storage error: <DbErr>`; `mtls_client_ca` must parse as a PEM bundle.
+  Medium: cache purge only reaches agents of the target site (plus global
+  agents); `ship_logs`/`ship_cert_events` drop entries for sites the agent
+  does not own; agent commands bound their durations and list sizes;
+  DbErr/I-O detail is no longer echoed by the REST API or the data-plane
+  admin; `online_geo_url` rejects private/metadata hosts (SSRF); WAF
+  details gain `surface=` markers; body withholding has a deadline and
+  fails open. Low: analytics binds `LIMIT`; login-history offset is capped;
+  admin static assets only gzip when the client asked; ACME token cleanup
+  keeps in-flight orders.
+- **ACME issuance reaches a terminal state.** The edge reports
+  `acme_failed` over the existing cert-event channel; the control plane
+  marks the pending row `failed` with the CA's reason, and the 30-minute
+  sweep fills `issuance timed out` instead of leaving it pending forever.
+- **ACME challenge is handled before the plugin chain.** A site with WAF,
+  IP rules or CC used to answer the CA with 403, so http-01 could never
+  issue or renew. WAF and challenge plugins also hard-skip
+  `/.well-known/acme-challenge/`.
 
 ### Changed
 
+- **Default-password sessions can only reach the login flow.** While
+  `must_change_password` is set, every endpoint except `/api/v1/auth/*`
+  answers `403 password_change_required`; previously such a session could
+  read all sites and logs. Automation that relies on the shipped
+  `pingwaf123` password must change it first.
 - **New sites now enforce the built-in WAF rules.** `seed_site_defaults`
   creates the 11 built-in rules with `mode: "block"` instead of `"monitor"`, so
   "WAF enabled" means SQLi/XSS/reconnaissance payloads are actually stopped
