@@ -26,7 +26,9 @@ describe('IpQuickActions', () => {
   })
 
   it('keeps tooltip and accessible name on both buttons', () => {
+    // 语义走 aria-label + 统一 Tooltip（原生 title 键盘聚焦不可见）。
     expect(actions.match(/aria-label=/g)).toHaveLength(2)
-    expect(actions.match(/title=\{/g)).toHaveLength(2)
+    expect(actions.match(/<Tooltip/g)).toHaveLength(2)
+    expect(actions.match(/content=\{/g)).toHaveLength(2)
   })
 })

@@ -4,7 +4,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Prohibit, ShieldCheck } from '@phosphor-icons/react'
 import { blockedIpsApi, blockedIpKeys } from '@/api/blockedIps'
 import { ipRuleKeys, ipRulesApi } from '@/api/ipRules'
-import { Button, ConfirmDialog, useToast } from '@/components/ui'
+import { Button, ConfirmDialog, Tooltip, useToast } from '@/components/ui'
 
 type Action = 'block' | 'js_challenge'
 
@@ -99,36 +99,43 @@ export function IpQuickActions({ ip, siteId }: IpQuickActionsProps) {
 
   return (
     <>
-      {/* 行内操作统一为纯图标按钮（size="icon"）：语义只通过 title +
-          aria-label 提供。曾经保留 children，Dashboard 与站点流量页因此渲染成
-          "图标 + 文字"，看起来像"图标化改动未生效"（2026-10-19 E2E）。 */}
+      {/* 行内操作统一为纯图标按钮（size="icon"）：语义通过 aria-label 与
+          Tooltip 提供（原生 title 键盘不可见）。曾经保留 children，Dashboard
+          与站点流量页因此渲染成"图标 + 文字"，看起来像"图标化改动未生效"
+          （2026-10-19 E2E）。 */}
       <div className="flex items-center justify-end gap-2">
-        <Button
-          variant="ghost"
-          size="icon"
-          icon={<Prohibit weight="duotone" className="h-4 w-4" />}
-          disabled={disabled || busy}
-          title={
+        <Tooltip
+          content={
             disabled
               ? t('components.ipQuickActions.disabledHint')
               : t('components.ipQuickActions.blockLabel')
           }
-          aria-label={t('components.ipQuickActions.blockLabel')}
-          onClick={() => setPending('block')}
-        />
-        <Button
-          variant="ghost"
-          size="icon"
-          icon={<ShieldCheck weight="duotone" className="h-4 w-4" />}
-          disabled={disabled || busy}
-          title={
+        >
+          <Button
+            variant="ghost"
+            size="icon"
+            icon={<Prohibit weight="duotone" className="h-4 w-4" />}
+            disabled={disabled || busy}
+            aria-label={t('components.ipQuickActions.blockLabel')}
+            onClick={() => setPending('block')}
+          />
+        </Tooltip>
+        <Tooltip
+          content={
             disabled
               ? t('components.ipQuickActions.disabledHint')
               : t('components.ipQuickActions.challengeLabel')
           }
-          aria-label={t('components.ipQuickActions.challengeLabel')}
-          onClick={() => setPending('js_challenge')}
-        />
+        >
+          <Button
+            variant="ghost"
+            size="icon"
+            icon={<ShieldCheck weight="duotone" className="h-4 w-4" />}
+            disabled={disabled || busy}
+            aria-label={t('components.ipQuickActions.challengeLabel')}
+            onClick={() => setPending('js_challenge')}
+          />
+        </Tooltip>
       </div>
 
       <ConfirmDialog

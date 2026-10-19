@@ -28,6 +28,14 @@ verbatim for reference and attribution, and is not maintained here.
   handshakes from internet scanners (`pingora_core::services::listening`
   defaults to WARN; an explicit `RUST_LOG` directive still wins).
 
+### Changed
+
+- New shared `Tooltip` component (hover/focus, Esc/blur to close, works on
+  disabled buttons) replaces the native `title` on the icon-only quick
+  actions: native titles never show on keyboard focus or touch and cannot be
+  styled. `aria-label` stays on the buttons; the bubble is linked through
+  `aria-describedby` so screen readers read it as a description.
+
 ## [PingWAF 0.27.8] — 2026-10-19
 
 ### Breaking

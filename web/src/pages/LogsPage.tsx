@@ -38,6 +38,7 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { Pagination } from '@/components/ui/Pagination'
 import { SkeletonRows } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
+import { Tooltip } from '@/components/ui/Tooltip'
 import { ErrorState } from '@/components/ErrorState'
 import { IpGroupPickerDialog } from '@/components/logs/IpGroupPickerDialog'
 import { downloadJson, fileTimestamp, logKeys, logsApi } from '@/api/logs'
@@ -1288,39 +1289,42 @@ export function LogsPage() {
               <span className="text-xs text-fg-subtle">
                 {t('pages.logs.quickActions')}
               </span>
-              {/* Quick actions：纯图标按钮，语义通过 title + aria-label 提供 */}
-              <Button
-                size="icon"
-                variant="ghost"
-                aria-label={t('pages.logs.searchThisIp')}
-                title={t('pages.logs.searchThisIp')}
-                icon={<MagnifyingGlass weight="duotone" className="h-4 w-4" />}
-                onClick={() => searchValue('client_ip', selectedEvent.client_ip)}
-              />
-              <Button
-                size="icon"
-                variant="secondary"
-                aria-label={t('pages.logs.blockIp')}
-                title={t('pages.logs.blockIp')}
-                icon={<Prohibit weight="duotone" className="h-4 w-4" />}
-                disabled={!selectedEvent.site_id || !canWrite}
-                onClick={() => {
-                  setBlockHours(0)
-                  setBlockTarget({
-                    ip: selectedEvent.client_ip,
-                    siteId: selectedEvent.site_id ?? '',
-                  })
-                }}
-              />
-              <Button
-                size="icon"
-                variant="secondary"
-                aria-label={t('pages.logs.addToIpGroup')}
-                title={t('pages.logs.addToIpGroup')}
-                icon={<Users weight="duotone" className="h-4 w-4" />}
-                disabled={!canWrite}
-                onClick={() => setIpGroupTarget(selectedEvent.client_ip)}
-              />
+              {/* Quick actions：纯图标按钮，语义通过 aria-label 与 Tooltip 提供 */}
+              <Tooltip content={t('pages.logs.searchThisIp')}>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  aria-label={t('pages.logs.searchThisIp')}
+                  icon={<MagnifyingGlass weight="duotone" className="h-4 w-4" />}
+                  onClick={() => searchValue('client_ip', selectedEvent.client_ip)}
+                />
+              </Tooltip>
+              <Tooltip content={t('pages.logs.blockIp')}>
+                <Button
+                  size="icon"
+                  variant="secondary"
+                  aria-label={t('pages.logs.blockIp')}
+                  icon={<Prohibit weight="duotone" className="h-4 w-4" />}
+                  disabled={!selectedEvent.site_id || !canWrite}
+                  onClick={() => {
+                    setBlockHours(0)
+                    setBlockTarget({
+                      ip: selectedEvent.client_ip,
+                      siteId: selectedEvent.site_id ?? '',
+                    })
+                  }}
+                />
+              </Tooltip>
+              <Tooltip content={t('pages.logs.addToIpGroup')}>
+                <Button
+                  size="icon"
+                  variant="secondary"
+                  aria-label={t('pages.logs.addToIpGroup')}
+                  icon={<Users weight="duotone" className="h-4 w-4" />}
+                  disabled={!canWrite}
+                  onClick={() => setIpGroupTarget(selectedEvent.client_ip)}
+                />
+              </Tooltip>
               {!selectedEvent.site_id && (
                 <span className="text-xs text-fg-warning">
                   {t('pages.logs.unassignedBlockHint')}
