@@ -14,6 +14,22 @@ use rust_embed::RustEmbed;
 #[folder = "../web/dist/"]
 struct FrontendAssets;
 
+/// Paths that must 404 when the file is missing instead of falling back to
+/// the SPA shell: hashed bundles under the assets directory, plus the static
+/// extensions the SPA never routes through (a client-route path containing a
+/// dot is not a page in this app).
+fn is_asset_path(path: &str) -> bool {
+    const ASSET_EXTS: [&str; 9] = [
+        "js", "css", "map", "png", "svg", "ico", "woff", "woff2", "webp",
+    ];
+    if path.starts_with("assets/") {
+        return true;
+    }
+    path.rsplit_once('.')
+        .map(|(_, ext)| ASSET_EXTS.contains(&ext.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
 /// Serve an embedded static file, or fall back to `index.html` for SPA routing.
 ///
 /// This handler is mounted as the router's fallback so that:
@@ -26,6 +42,22 @@ pub async fn serve_frontend(uri: axum::http::Uri) -> Response {
     // Try to serve the exact file first
     if let Some(file) = FrontendAssets::get(path) {
         return build_asset_response(file, path);
+    }
+
+    // A missing hashed asset is a hard 404. Falling back to index.html would
+    // answer 200 text/html for a JS/CSS URL, so a browser holding a stale
+    // index.html (or a proxy that cached one) sees a "successful" HTML
+    // response instead of a missing-file signal — which is exactly how a
+    // stale bundle hides during cache investigations (2026-10-19 E2E).
+    if is_asset_path(path) {
+        return (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "application/json")],
+            Body::from(
+                r#"{"error":{"code":"not_found","message":"asset not found"}}"#,
+            ),
+        )
+            .into_response();
     }
 
     // SPA fallback: serve index.html for non-API, non-asset paths
@@ -78,4 +110,21 @@ fn build_asset_response(
             (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
                 .into_response()
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_asset_path;
+
+    #[test]
+    fn hashed_assets_do_not_fall_back_to_the_spa_shell() {
+        assert!(is_asset_path("assets/index-K3jA9zY0.js"));
+        assert!(is_asset_path("favicon.svg"));
+        assert!(is_asset_path("fonts/inter.woff2"));
+        // Client-side routes must keep falling back to index.html.
+        assert!(!is_asset_path("dashboard"));
+        assert!(!is_asset_path(
+            "sites/163365ca-89f1-4955-aca1-e7ff2655be8f/basic"
+        ));
+    }
 }

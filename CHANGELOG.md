@@ -8,6 +8,26 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+### Fixed
+
+- **Quick actions are icon-only everywhere.** `IpQuickActions` (the shared
+  component behind the dashboard's top-threat-IP table and the site traffic
+  page) still rendered an icon plus a visible label; the earlier icon-only
+  change had only touched the log drawer, so the two tables looked
+  unchanged. Both buttons now use `size="icon"` with `aria-label`/`title`
+  tooltips, matching the drawer; a source-contract test pins the shape.
+- Actions column is a fixed 96 px on both tables (the two icon buttons no
+  longer shrink-wrap, which had widened the column and forced horizontal
+  scrolling on mobile).
+- A missing hashed asset now answers 404 instead of the SPA shell:
+  returning `200 text/html` for a stale `assets/*` URL hid cache problems
+  behind a "successful" HTML response.
+- pingora's listener no longer floods ERROR with failed downstream TLS
+  handshakes from internet scanners (`pingora_core::services::listening`
+  defaults to WARN; an explicit `RUST_LOG` directive still wins).
+
 ## [PingWAF 0.27.8] — 2026-10-19
 
 ### Breaking

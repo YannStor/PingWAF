@@ -36,6 +36,19 @@ pub enum Error {
 
 pub fn new_env_filter(level: &str) -> EnvFilter {
     let mut initial_filter = EnvFilter::from_default_env();
+    // pingora's listener logs every failed downstream TLS handshake at ERROR.
+    // Internet scanners do that continuously (2026-10-19 E2E: 12 lines in
+    // 30 s from one address), which drowns real errors. Default that target to
+    // WARN; an operator who wants the raw stream sets RUST_LOG with an
+    // explicit `pingora_core` directive, which wins because we only add ours
+    // when the environment says nothing about that crate.
+    let configured = std::env::var("RUST_LOG").unwrap_or_default();
+    if !configured.contains("pingora_core")
+        && let Ok(directive) =
+            "pingora_core::services::listening=warn".parse::<Directive>()
+    {
+        initial_filter = initial_filter.add_directive(directive);
+    }
     for item in level.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         match item.parse::<Directive>() {
             Ok(directive) => {

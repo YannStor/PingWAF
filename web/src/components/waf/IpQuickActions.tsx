@@ -99,11 +99,14 @@ export function IpQuickActions({ ip, siteId }: IpQuickActionsProps) {
 
   return (
     <>
-      <div className="flex items-center justify-end gap-1">
+      {/* 行内操作统一为纯图标按钮（size="icon"）：语义只通过 title +
+          aria-label 提供。曾经保留 children，Dashboard 与站点流量页因此渲染成
+          "图标 + 文字"，看起来像"图标化改动未生效"（2026-10-19 E2E）。 */}
+      <div className="flex items-center justify-end gap-2">
         <Button
           variant="ghost"
-          size="sm"
-          icon={<Prohibit weight="regular" className="h-3.5 w-3.5" />}
+          size="icon"
+          icon={<Prohibit weight="duotone" className="h-4 w-4" />}
           disabled={disabled || busy}
           title={
             disabled
@@ -112,13 +115,11 @@ export function IpQuickActions({ ip, siteId }: IpQuickActionsProps) {
           }
           aria-label={t('components.ipQuickActions.blockLabel')}
           onClick={() => setPending('block')}
-        >
-          {t('components.ipQuickActions.blockLabel')}
-        </Button>
+        />
         <Button
           variant="ghost"
-          size="sm"
-          icon={<ShieldCheck weight="regular" className="h-3.5 w-3.5" />}
+          size="icon"
+          icon={<ShieldCheck weight="duotone" className="h-4 w-4" />}
           disabled={disabled || busy}
           title={
             disabled
@@ -127,9 +128,7 @@ export function IpQuickActions({ ip, siteId }: IpQuickActionsProps) {
           }
           aria-label={t('components.ipQuickActions.challengeLabel')}
           onClick={() => setPending('js_challenge')}
-        >
-          {t('components.ipQuickActions.challengeLabel')}
-        </Button>
+        />
       </div>
 
       <ConfirmDialog

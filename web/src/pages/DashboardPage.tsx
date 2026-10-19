@@ -356,7 +356,10 @@ export function DashboardPage() {
       key: 'actions',
       header: t('pages.dashboard.quickActions'),
       align: 'right',
-      width: '1%',
+      // Fixed width for two icon buttons: '1%' let the cells shrink-wrap their
+      // content, which widened the column and forced horizontal scrolling on
+      // mobile once the labels were removed (2026-10-19 E2E).
+      width: '96px',
       cell: (r) => <IpQuickActions ip={r.client_ip} siteId={r.top_site_id ?? null} />,
     },
   ]
