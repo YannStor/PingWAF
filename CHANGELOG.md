@@ -8,7 +8,7 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
-## [Unreleased]
+## [PingWAF 0.27.9] — 2026-10-19
 
 ### Fixed
 
@@ -16,8 +16,8 @@ verbatim for reference and attribution, and is not maintained here.
   component behind the dashboard's top-threat-IP table and the site traffic
   page) still rendered an icon plus a visible label; the earlier icon-only
   change had only touched the log drawer, so the two tables looked
-  unchanged. Both buttons now use `size="icon"` with `aria-label`/`title`
-  tooltips, matching the drawer; a source-contract test pins the shape.
+  unchanged. Both buttons now use `size="icon"` with an `aria-label` and the
+  shared tooltip, matching the drawer; a source-contract test pins the shape.
 - Actions column is a fixed 96 px on both tables (the two icon buttons no
   longer shrink-wrap, which had widened the column and forced horizontal
   scrolling on mobile).
