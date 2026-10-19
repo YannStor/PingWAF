@@ -126,6 +126,13 @@ export function PostureOverview({
               tone="warning"
             />
           )}
+          {/* Observation mode means every category detects but nothing is
+              enforced — the "enabled" badges above can mislead without this. */}
+          {enforcement.observation_mode && (
+            <p className="text-xs text-fg-warning">
+              {t('pages.protection.observationModeHint')}
+            </p>
+          )}
           {Object.entries(enforcement.managed).map(([category, action]) => (
             <PostureBadge
               key={category}

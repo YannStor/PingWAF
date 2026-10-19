@@ -280,18 +280,17 @@ export function CustomRulesPanel() {
       header: t('pages.waf.mode'),
       accessor: (r) => r.mode,
       cell: (r) => (
-        <span
-          className={cn(
-            'text-xs font-medium',
-            r.mode === 'block'
-              ? 'text-fg-danger'
-              : r.mode === 'monitor'
-                ? 'text-fg-warning'
-                : 'text-fg-subtle',
-          )}
+        <Badge
+          tone={MODE_TONE[r.mode] ?? 'neutral'}
+          dot
+          title={
+            r.mode === 'monitor' && r.action === 'block'
+              ? t('pages.waf.modeMonitorHint')
+              : undefined
+          }
         >
           {t(`pages.waf.mode_${r.mode}`, r.mode)}
-        </span>
+        </Badge>
       ),
     },
     {
