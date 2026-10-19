@@ -113,9 +113,19 @@ fn map_key_error(err: ApiError) -> McpAuthError {
 
 /// Maps a REST auth failure onto the MCP rejection: policy rejections
 /// (disabled account) keep their `403`, identity failures are `401`.
+///
+/// `AuthError::Internal` wraps the storage error verbatim — table names,
+/// connection details. MCP still answers `401`, because that is what the
+/// protocol tells a client to do with a credential it could not verify (and a
+/// `500` would instead invite a retry loop), but the body carries a fixed
+/// text: the detail is only ever logged.
 fn map_auth_error(err: AuthError) -> McpAuthError {
     match err {
         AuthError::Forbidden(message) => McpAuthError::forbidden(message),
+        AuthError::Internal(message) => {
+            tracing::error!(error = %message, "MCP credential lookup failed");
+            McpAuthError::unauthorized("could not verify the credentials")
+        },
         other => McpAuthError::unauthorized(other.to_string()),
     }
 }
@@ -291,6 +301,28 @@ mod tests {
         let viewer = jwt_principal(&viewer).unwrap();
         assert!(viewer.can_read);
         assert!(!viewer.can_write);
+    }
+
+    /// D06: the storage error used to be the 401 body, table names included.
+    /// The `401` itself has to stay — without a `WWW-Authenticate: Bearer`
+    /// challenge some MCP clients never send the key at all.
+    #[test]
+    fn storage_failures_answer_without_the_database_detail() {
+        let err = map_auth_error(AuthError::Internal(
+            "no such table: api_keys (postgres://pingwaf@10.0.0.2/pingwaf)"
+                .to_string(),
+        ));
+        assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(err.code, "unauthorized");
+        assert_eq!(err.message, "could not verify the credentials");
+    }
+
+    /// The rejection of a bad credential still says *why* it was rejected.
+    #[test]
+    fn identity_failures_keep_their_reason() {
+        let err = map_auth_error(AuthError::ExpiredToken);
+        assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(err.message, "token expired");
     }
 
     #[test]

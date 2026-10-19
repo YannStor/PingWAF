@@ -21,6 +21,20 @@ pub fn error_response(
     (status, Json(body)).into_response()
 }
 
+/// Fixed text for an unexpected failure.
+///
+/// The detail stays in the log: a `DbErr` or an I-O error names tables, files
+/// and connection strings, and this is what a caller who did nothing wrong
+/// gets to read.
+const INTERNAL_MESSAGE: &str = "internal server error";
+
+/// Fixed text for a row the database reports as missing.
+///
+/// `DbErr::RecordNotFound` carries whatever text the lookup used, and a
+/// generated `find_related` / `update` path puts the table name in it, so the
+/// message is not safe to echo.
+const NOT_FOUND_MESSAGE: &str = "not found";
+
 /// Errors surfaced by API handlers.
 #[derive(Debug)]
 pub enum ApiError {
@@ -91,6 +105,19 @@ impl ApiError {
         ApiError::Internal(err.to_string())
     }
 
+    /// An unexpected failure whose detail must not leave the process.
+    ///
+    /// The error is logged here — with its cause chain — and the reply carries
+    /// [`INTERNAL_MESSAGE`] only. Prefer this over
+    /// `ApiError::Internal(x.to_string())`: the variant keeps `x` in the enum,
+    /// where `Display` would hand it to whoever formats the error next (the
+    /// MCP endpoint, a log line, a future response), and only the log is
+    /// allowed to see it.
+    pub fn internal_generic(err: impl std::fmt::Display) -> Self {
+        tracing::error!(error = %err, "internal API error");
+        ApiError::Internal(INTERNAL_MESSAGE.to_string())
+    }
+
     pub fn bad_request(err: impl std::fmt::Display) -> Self {
         ApiError::BadRequest(err.to_string())
     }
@@ -125,8 +152,11 @@ impl IntoResponse for ApiError {
         let status = self.status();
         let code = self.code();
         if status == StatusCode::INTERNAL_SERVER_ERROR {
+            // The cause was already logged where it was known
+            // (`internal_generic`, the `DbErr` / `anyhow` conversions); this
+            // line only records that a 500 went out.
             tracing::error!(error = %self, "internal API error");
-            return error_response(status, code, "internal server error");
+            return error_response(status, code, INTERNAL_MESSAGE);
         }
         if status.is_server_error() {
             tracing::error!(error = %self, "API error");
@@ -140,20 +170,26 @@ impl IntoResponse for ApiError {
 impl From<DbErr> for ApiError {
     fn from(err: DbErr) -> Self {
         match &err {
-            DbErr::RecordNotFound(msg) => ApiError::NotFound(msg.clone()),
+            // The lookup text can name the table the row was searched in; the
+            // 404 body says only that it is gone.
+            DbErr::RecordNotFound(_) => {
+                ApiError::NotFound(NOT_FOUND_MESSAGE.to_string())
+            },
             DbErr::Exec(runtime_err) | DbErr::Query(runtime_err)
                 if runtime_err.to_string().contains("duplicate key") =>
             {
                 ApiError::Conflict("resource already exists".to_string())
             },
-            other => ApiError::Internal(other.to_string()),
+            other => ApiError::internal_generic(other),
         }
     }
 }
 
 impl From<anyhow::Error> for ApiError {
     fn from(err: anyhow::Error) -> Self {
-        ApiError::Internal(err.to_string())
+        // `{:#}` flattens the context chain into the single log line; the
+        // client never sees any of it.
+        ApiError::internal_generic(format!("{err:#}"))
     }
 }
 
@@ -166,5 +202,55 @@ impl From<serde_json::Error> for ApiError {
 impl From<uuid::Error> for ApiError {
     fn from(err: uuid::Error) -> Self {
         ApiError::BadRequest(format!("invalid UUID: {err}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    /// Renders the error the way Axum does, and returns the status plus the
+    /// parsed envelope.
+    async fn envelope(err: ApiError) -> (StatusCode, serde_json::Value) {
+        let response = err.into_response();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 8192).await.unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    /// D11: `DbErr::RecordNotFound` carries the lookup text, which on a
+    /// generated query names the table — a 404 must not echo it back.
+    #[tokio::test]
+    async fn record_not_found_is_reported_without_the_database_text() {
+        let err = ApiError::from(DbErr::RecordNotFound(
+            "sites: no row for id 7".to_string(),
+        ));
+        let (status, body) = envelope(err).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "not_found");
+        assert_eq!(body["error"]["message"], NOT_FOUND_MESSAGE);
+    }
+
+    /// A 404 the handler phrased itself (an id the operator typed) still says
+    /// what was missing.
+    #[tokio::test]
+    async fn handler_not_found_keeps_its_message() {
+        let (status, body) =
+            envelope(ApiError::NotFound("site 42 not found".to_string())).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["message"], "site 42 not found");
+    }
+
+    /// The generic constructor logs the cause and puts none of it in the body.
+    #[tokio::test]
+    async fn internal_generic_body_omits_the_cause() {
+        let err = ApiError::from(DbErr::Query(sea_orm::RuntimeErr::Internal(
+            "connection refused: pingwaf@10.0.0.2:5432".to_string(),
+        )));
+        let (status, body) = envelope(err).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["code"], "internal_error");
+        assert_eq!(body["error"]["message"], INTERNAL_MESSAGE);
     }
 }

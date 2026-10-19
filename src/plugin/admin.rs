@@ -72,57 +72,115 @@ static LOG_TARGET: &str = "main::admin";
 #[folder = "dist/"]
 struct AdminAsset;
 
+/// A file of the embedded admin bundle, with the `max-age` to advertise.
 pub struct EmbeddedStaticFile(pub Option<EmbeddedFile>, pub Duration);
 
-impl From<EmbeddedStaticFile> for HttpResponse {
-    fn from(value: EmbeddedStaticFile) -> Self {
-        let Some(file) = value.0 else {
+/// Below this size the gzip frame costs more than it saves.
+const GZIP_MIN_BYTES: usize = 1024;
+
+/// `true` when the request's `Accept-Encoding` lets the caller decode gzip.
+///
+/// Not an optimisation knob: `Content-Encoding: gzip` on a body the client
+/// never asked for is undecodable, so the header decides whether the asset may
+/// be compressed at all. The token rules (comma/`;` boundaries, `x-gzip` is a
+/// different coding, an explicit `q=0` refuses) are the ones
+/// `pingap_plugin::accepts_encoding` applies for the `compression` and
+/// `accept_encoding` plugins; that helper is crate-private, so the rule is
+/// restated here rather than exposing a pingap-plugin internal for one caller.
+fn accepts_gzip(accept_encoding: Option<&str>) -> bool {
+    let Some(value) = accept_encoding else {
+        return false;
+    };
+    value.split(',').any(|part| {
+        let mut segments = part.split(';');
+        let name = segments.next().unwrap_or_default().trim();
+        if !name.eq_ignore_ascii_case("gzip") {
+            return false;
+        }
+        // Acceptable unless the token is explicitly weighted q=0.
+        !segments.any(|seg| {
+            let seg = seg.trim();
+            seg.get(..2).is_some_and(|p| p.eq_ignore_ascii_case("q="))
+                && seg[2..].trim().parse::<f32>().is_ok_and(|q| q <= 0.0)
+        })
+    })
+}
+
+/// gzip-encodes `data`, or `None` when it cannot — a half-written body is
+/// worse than an uncompressed one.
+fn gzip_bytes(data: &[u8]) -> Option<Vec<u8>> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+    encoder.write_all(data).ok()?;
+    encoder.finish().ok()
+}
+
+/// Renders one asset of the bundle for a caller that may or may not accept
+/// gzip.
+///
+/// `Vary: Accept-Encoding` is set whenever the body depends on that header, so
+/// a shared cache keeps the compressed and the plain variant apart.
+fn static_asset_response(
+    data: &[u8],
+    mime_type: &str,
+    sha256_hash: [u8; 32],
+    max_age: Duration,
+    gzip: bool,
+) -> HttpResponse {
+    // generate content hash
+    let hash = &encode(sha256_hash)[0..8];
+    // cut hash and file length as etag
+    let entity_tag = format!(r#""{:x}-{hash}""#, data.len());
+    // html set no-cache
+    let max_age = if mime_type.contains("text/html") {
+        0
+    } else {
+        max_age.as_secs()
+    };
+
+    let mut headers = vec![];
+    if let Ok(value) = HeaderValue::from_str(mime_type) {
+        headers.push((header::CONTENT_TYPE, value));
+    }
+    if let Ok(value) = HeaderValue::from_str(&entity_tag) {
+        headers.push((header::ETAG, value));
+    }
+
+    let mut body = Bytes::copy_from_slice(data);
+    if data.len() > GZIP_MIN_BYTES {
+        // Only the size-gated branch varies by `Accept-Encoding`.
+        headers
+            .push((header::VARY, HeaderValue::from_static("Accept-Encoding")));
+        if gzip && let Some(compressed) = gzip_bytes(data) {
+            headers.push((
+                header::CONTENT_ENCODING,
+                HeaderValue::from_static("gzip"),
+            ));
+            body = Bytes::from(compressed);
+        }
+    }
+
+    HttpResponse {
+        status: StatusCode::OK,
+        body,
+        max_age: Some(max_age as u32),
+        headers: Some(headers),
+        ..Default::default()
+    }
+}
+
+impl EmbeddedStaticFile {
+    /// Renders the asset, compressing only when the caller advertised gzip.
+    fn into_response(self, gzip: bool) -> HttpResponse {
+        let Some(file) = self.0 else {
             return HttpResponse::not_found("Not Found");
         };
-        // generate content hash
-        let str = &encode(file.metadata.sha256_hash())[0..8];
-        let mime_type = file.metadata.mimetype();
-        // cut hash and file length as etag
-        let entity_tag = format!(r#""{:x}-{str}""#, file.data.len());
-        // html set no-cache
-        let max_age = if mime_type.contains("text/html") {
-            0
-        } else {
-            value.1.as_secs()
-        };
-
-        let mut headers = vec![];
-        if let Ok(value) = HeaderValue::from_str(mime_type) {
-            headers.push((header::CONTENT_TYPE, value));
-        }
-        if let Ok(value) = HeaderValue::from_str(&entity_tag) {
-            headers.push((header::ETAG, value));
-        }
-
-        let mut gzip_body = None;
-        if file.data.len() > 1024 {
-            let mut d = GzEncoder::new(vec![], Compression::best());
-            let _ = d.write_all(&file.data);
-            if let Ok(w) = d.finish() {
-                gzip_body = Some(Bytes::copy_from_slice(w.as_ref()));
-                if let Ok(value) = HeaderValue::from_str("gzip") {
-                    headers.push((header::CONTENT_ENCODING, value));
-                }
-            }
-        }
-        let body = if let Some(data) = gzip_body {
-            data
-        } else {
-            Bytes::copy_from_slice(&file.data)
-        };
-
-        HttpResponse {
-            status: StatusCode::OK,
-            body,
-            max_age: Some(max_age as u32),
-            headers: Some(headers),
-            ..Default::default()
-        }
+        static_asset_response(
+            &file.data,
+            file.metadata.mimetype(),
+            file.metadata.sha256_hash(),
+            self.1,
+            gzip,
+        )
     }
 }
 
@@ -139,6 +197,78 @@ pub struct AdminServe {
 #[derive(Serialize, Deserialize)]
 struct ErrorResponse {
     message: String,
+}
+
+/// Fixed text for a failed admin request. The detail names storage backends,
+/// configuration files and I-O paths, so it stays in the log.
+const INTERNAL_ERROR_MESSAGE: &str = "internal error";
+
+/// Why an admin handler failed, split by who can fix it.
+///
+/// The split decides what the client is told: a [`AdminError::BadRequest`]
+/// reason is about the request the operator just sent, and is the whole point
+/// of the error; anything else collapses to [`INTERNAL_ERROR_MESSAGE`].
+#[derive(Debug)]
+enum AdminError {
+    /// Malformed url, request body or configuration value.
+    BadRequest(String),
+    /// Storage, config loading or I-O failed. Only ever logged.
+    Internal(String),
+    /// The client connection broke mid-request; there is nobody to answer.
+    Downstream(pingora::BError),
+}
+
+/// Every admin handler answers with one of these.
+type AdminResult<T> = std::result::Result<T, AdminError>;
+
+impl AdminError {
+    fn bad_request(message: impl std::fmt::Display) -> Self {
+        AdminError::BadRequest(message.to_string())
+    }
+
+    fn internal(err: impl std::fmt::Display) -> Self {
+        AdminError::Internal(err.to_string())
+    }
+
+    /// Renders the failure as the `{"message": …}` body the admin UI shows.
+    fn into_response(self) -> HttpResponse {
+        let (status, message) = match self {
+            AdminError::BadRequest(message) => {
+                (StatusCode::BAD_REQUEST, message)
+            },
+            AdminError::Internal(detail) => {
+                error!(target: LOG_TARGET, error = detail, "admin request failed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    INTERNAL_ERROR_MESSAGE.to_string(),
+                )
+            },
+            AdminError::Downstream(detail) => {
+                // The caller hands a broken connection back to `fail_to_proxy`
+                // instead of answering it; this arm keeps the match exhaustive
+                // and still leaks nothing if a future caller forgets to.
+                error!(target: LOG_TARGET, error = %detail, "admin request aborted");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    INTERNAL_ERROR_MESSAGE.to_string(),
+                )
+            },
+        };
+        HttpResponse::try_from_json_status(&ErrorResponse { message }, status)
+            .unwrap_or(HttpResponse::unknown_error("Json serde fail"))
+    }
+}
+
+impl From<pingora::BError> for AdminError {
+    fn from(err: pingora::BError) -> Self {
+        // A read/write failure on the session is the connection, not our
+        // processing: hand it back so `fail_to_proxy` can classify it (a client
+        // that went away is `499`, and nothing is written).
+        if matches!(err.esource(), pingora::ErrorSource::Downstream) {
+            return AdminError::Downstream(err);
+        }
+        AdminError::internal(err)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -350,35 +480,31 @@ impl AdminServe {
     async fn load_config(
         &self,
         replace_include: bool,
-    ) -> pingora::Result<PingapConfig> {
-        let config = self.manager.load_all().await.map_err(|e| {
-            error!(target: LOG_TARGET, "failed to load config: {e}");
-            pingap_core::new_internal_error(400, e)
-        })?;
+    ) -> AdminResult<PingapConfig> {
+        let config =
+            self.manager.load_all().await.map_err(|e| {
+                AdminError::internal(format!("load config: {e}"))
+            })?;
         let config = config.to_pingap_config(replace_include).map_err(|e| {
-            error!(target: LOG_TARGET, "failed to convert config: {e}");
-            pingap_core::new_internal_error(400, e)
+            AdminError::internal(format!("convert config: {e}"))
         })?;
         Ok(config)
     }
-    async fn get_config(
-        &self,
-        category: &str,
-    ) -> pingora::Result<HttpResponse> {
+    async fn get_config(&self, category: &str) -> AdminResult<HttpResponse> {
         let conf = self.load_config(false).await?;
         if category == "full" {
             let full_conf = self.load_config(true).await?;
             let mut full_toml = toml::to_string_pretty(&full_conf)
-                .map_err(|e| pingap_core::new_internal_error(400, e))?;
+                .map_err(AdminError::internal)?;
             if let Ok(value) = pingap_util::toml_omit_empty_value(&full_toml) {
                 full_toml = value;
             };
             let hcl = convert_toml_to_hcl(&full_toml)
-                .map_err(|e| pingap_core::new_internal_error(400, e))?;
+                .map_err(AdminError::internal)?;
             let kdl = convert_toml_to_kdl(&full_toml)
-                .map_err(|e| pingap_core::new_internal_error(400, e))?;
-            let mut original_toml = toml::to_string_pretty(&conf)
-                .map_err(|e| pingap_core::new_internal_error(400, e))?;
+                .map_err(AdminError::internal)?;
+            let mut original_toml =
+                toml::to_string_pretty(&conf).map_err(AdminError::internal)?;
             if let Ok(value) =
                 pingap_util::toml_omit_empty_value(&original_toml)
             {
@@ -389,7 +515,8 @@ impl AdminServe {
                 kdl,
                 full: full_toml,
                 original: original_toml,
-            });
+            })
+            .map_err(AdminError::from);
         }
         let resp = match category {
             CATEGORY_UPSTREAM => HttpResponse::try_from_json(&conf.upstreams)?,
@@ -408,13 +535,13 @@ impl AdminServe {
         &self,
         category: &str,
         name: &str,
-    ) -> pingora::Result<HttpResponse> {
-        let category = Category::from_str(category)
-            .map_err(|e| pingap_core::new_internal_error(400, e))?;
-        self.manager.delete(category, name).await.map_err(|e| {
-            error!(target: LOG_TARGET, error = e.to_string(), "delete config fail");
-            pingap_core::new_internal_error(400, e)
-        })?;
+    ) -> AdminResult<HttpResponse> {
+        let category =
+            Category::from_str(category).map_err(AdminError::bad_request)?;
+        self.manager
+            .delete(category, name)
+            .await
+            .map_err(|e| AdminError::internal(format!("delete config: {e}")))?;
         Ok(HttpResponse::no_content())
     }
     async fn handle_update_config<T>(
@@ -422,31 +549,23 @@ impl AdminServe {
         name: &str,
         buf: &[u8],
         category: Category,
-    ) -> pingora::Result<()>
+    ) -> AdminResult<()>
     where
         T: DeserializeOwned + Serialize + Send + Sync + Validate,
     {
+        // The payload is the operator's own JSON, so the parser's complaint is
+        // exactly what they need to fix it.
         let conf: T = serde_json::from_slice(buf).map_err(|e| {
-            error!(
-                target: LOG_TARGET,
-                error = e.to_string(),
-                "parse {} config fail",
-                category.to_string()
-            );
-            pingap_core::new_internal_error(400, e)
+            AdminError::bad_request(format!("parse {category} config: {e}"))
         })?;
         conf.validate().map_err(|e| {
-            error!(target: LOG_TARGET, error = e.to_string(), "validate config fail");
-            pingap_core::new_internal_error(400, e)
+            AdminError::bad_request(format!("validate config: {e}"))
         })?;
 
         self.manager
             .update(category, name, &conf)
             .await
-            .map_err(|e| {
-                error!(target: LOG_TARGET, error = e.to_string(), "update config fail");
-                pingap_core::new_internal_error(400, e)
-            })?;
+            .map_err(|e| AdminError::internal(format!("update config: {e}")))?;
 
         Ok(())
     }
@@ -456,12 +575,9 @@ impl AdminServe {
         session: &mut Session,
         category: &str,
         name: &str,
-    ) -> pingora::Result<HttpResponse> {
+    ) -> AdminResult<HttpResponse> {
         if name.is_empty() {
-            return Err(pingap_core::new_internal_error(
-                400,
-                "name is empty".to_string(),
-            ));
+            return Err(AdminError::bad_request("name is empty"));
         }
         let buf = get_request_body(session).await?;
 
@@ -529,16 +645,17 @@ impl AdminServe {
     async fn import_config(
         &self,
         session: &mut Session,
-    ) -> pingora::Result<HttpResponse> {
+    ) -> AdminResult<HttpResponse> {
         let buf = get_request_body(session).await?;
         let config = toml::from_slice(&buf).map_err(|e| {
-            error!(target: LOG_TARGET, error = e.to_string(), "import config fail");
-            pingap_core::new_internal_error(400, e)
+            AdminError::bad_request(format!("import config: {e}"))
         })?;
-        self.manager.save_all(&config).await.map_err(|e| {
-            error!(target: LOG_TARGET, error = e.to_string(), "import config fail");
-            pingap_core::new_internal_error(400, e)
-        })?;
+        // Writing the file can fail on permissions or a full disk; that is not
+        // the operator's mistake, and the message names the path.
+        self.manager
+            .save_all(&config)
+            .await
+            .map_err(|e| AdminError::internal(format!("import config: {e}")))?;
 
         Ok(HttpResponse::no_content())
     }
@@ -591,6 +708,24 @@ async fn handle_request_admin(
             ..Default::default()
         }));
     }
+    match route_admin_request(plugin, session).await {
+        Ok(resp) => Ok(Some(resp)),
+        // The client connection broke mid-request: there is nobody left to
+        // answer, so hand the error back and let `fail_to_proxy` classify it
+        // (`499` for a client that went away, nothing written).
+        Err(AdminError::Downstream(err)) => Err(err),
+        Err(err) => Ok(Some(err.into_response())),
+    }
+}
+
+/// Routes one admin request — the `/api` surface and the static bundle alike.
+///
+/// Every handler failure comes back as an [`AdminError`], never as a ready-made
+/// response: only the caller knows which part of a message is safe to show.
+async fn route_admin_request(
+    plugin: &AdminServe,
+    session: &mut Session,
+) -> AdminResult<HttpResponse> {
     let (method, mut path) = get_method_path(session);
     let api_prefix = "/api";
     if path.starts_with(api_prefix) {
@@ -608,55 +743,50 @@ async fn handle_request_admin(
         match method {
             Method::POST => {
                 if category == "import" {
-                    plugin.import_config(session).await
+                    plugin.import_config(session).await?
                 } else if params.len() < 4 {
-                    Err(pingora::Error::new_str("Url is invalid(no name)"))
+                    return Err(AdminError::bad_request(
+                        "Url is invalid(no name)",
+                    ));
                 } else {
-                    plugin.update_config(session, category, &params[3]).await
+                    plugin.update_config(session, category, &params[3]).await?
                 }
             },
             Method::DELETE => {
                 if params.len() < 4 {
-                    Err(pingora::Error::new_str("Url is invalid(no name)"))
-                } else {
-                    plugin.remove_config(category, &params[3]).await
+                    return Err(AdminError::bad_request(
+                        "Url is invalid(no name)",
+                    ));
                 }
+                plugin.remove_config(category, &params[3]).await?
             },
-            _ => plugin.get_config(category).await,
+            _ => plugin.get_config(category).await?,
         }
-        .unwrap_or_else(|err| {
-            HttpResponse::try_from_json_status(
-                &ErrorResponse {
-                    message: err.to_string(),
-                },
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .unwrap_or(HttpResponse::unknown_error("Json serde fail"))
-        })
     } else if path.starts_with("/config-history") {
-        let category = Category::from_str(category).map_err(|e| {
-            error!(target: LOG_TARGET, error = e.to_string(), "get config category fail");
-            pingap_core::new_internal_error(400, e)
-        })?;
+        let category =
+            Category::from_str(category).map_err(AdminError::bad_request)?;
         // The name segment is optional in the url but not in the code below,
         // so reject a short url instead of indexing past the end of `params`.
         let Some(name) = params.get(3).cloned() else {
-            return Err(pingap_core::new_internal_error(
-                400,
-                "Url is invalid(no name)",
-            ));
+            return Err(AdminError::bad_request("Url is invalid(no name)"));
         };
-        let arr = plugin.manager.history(category.clone(), &name).await.map_err(|e| {
-            error!(target: LOG_TARGET, error = e.to_string(), "get config history fail");
-            pingap_core::new_internal_error(400, e)
-        })?.unwrap_or_default();
+        let arr = plugin
+            .manager
+            .history(category.clone(), &name)
+            .await
+            .map_err(|e| {
+                AdminError::internal(format!("get config history: {e}"))
+            })?
+            .unwrap_or_default();
 
         let mut history = vec![];
         for item in arr {
-            let data:toml::Table = toml::from_str(&item.data).map_err(|e| {
-                error!(target: LOG_TARGET, error = e.to_string(), "get config history fail");
-                pingap_core::new_internal_error(400, e)
-            })?;
+            // Stored data, not the caller's payload — a parse failure here is
+            // corruption, not a mistake to report back.
+            let data: toml::Table =
+                toml::from_str(&item.data).map_err(|e| {
+                    AdminError::internal(format!("parse config history: {e}"))
+                })?;
             let key = format_category(&category);
             let Some(data) = data.get(key).cloned() else {
                 continue;
@@ -744,21 +874,22 @@ async fn handle_request_admin(
             .unwrap_or(HttpResponse::unknown_error("Json serde fail"))
     } else if path == "/restart" && method == Method::POST {
         if let Err(e) = restart_now().await {
-            error!(target: LOG_TARGET, error = e.to_string(), "Restart fail");
-            HttpResponse::bad_request(e.to_string())
-        } else {
-            HttpResponse::no_content()
+            // Spawning the replacement failed; the reason names paths and pids.
+            return Err(AdminError::internal(format!("restart: {e}")));
         }
+        HttpResponse::no_content()
     } else if path == "/aes" {
         let buf = get_request_body(session).await?;
         let params: AesParams = serde_json::from_slice(buf.as_ref())
-            .map_err(|e| pingap_core::new_internal_error(400, e))?;
+            .map_err(AdminError::bad_request)?;
+        // A bad key or a payload that is not valid ciphertext is the caller's
+        // to fix, and the crypto error says which.
         let value = if params.category == "encrypt" {
             pingap_util::aes_encrypt(&params.key, &params.data)
         } else {
             pingap_util::aes_decrypt(&params.key, &params.data)
         }
-        .map_err(|e| pingap_core::new_internal_error(400, e))?;
+        .map_err(AdminError::bad_request)?;
         HttpResponse::try_from_json(&AesResp { value })
             .unwrap_or(HttpResponse::unknown_error("Json serde fail"))
     } else if path == "/certificates" {
@@ -780,13 +911,19 @@ async fn handle_request_admin(
         if file.is_empty() {
             file = "index.html";
         }
+        // The bundle is compressed only for a client that said it can decode
+        // it; anybody else gets the plain bytes.
+        let gzip = accepts_gzip(pingap_core::get_req_header_value(
+            session.req_header(),
+            "Accept-Encoding",
+        ));
         EmbeddedStaticFile(
             AdminAsset::get(file),
             Duration::from_secs(365 * 24 * 3600),
         )
-        .into()
+        .into_response(gzip)
     };
-    Ok(Some(resp))
+    Ok(resp)
 }
 
 #[async_trait]
@@ -824,13 +961,17 @@ fn init() {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdminAsset, AdminServe, EmbeddedStaticFile, handle_request_admin,
+        AdminAsset, AdminServe, EmbeddedStaticFile, GZIP_MIN_BYTES,
+        accepts_gzip, handle_request_admin, static_asset_response,
     };
     use crate::config_manager::try_init_config_manager;
+    use flate2::read::GzDecoder;
+    use http::header;
     use pingap_config::PluginConf;
     use pingap_core::{Ctx, HttpResponse};
     use pingora::proxy::Session;
     use pretty_assertions::assert_eq;
+    use std::io::Read;
     use std::time::Duration;
     use tokio_test::io::Builder;
 
@@ -897,7 +1038,8 @@ mod tests {
             return;
         };
         let resp: HttpResponse =
-            EmbeddedStaticFile(Some(file), Duration::from_secs(60)).into();
+            EmbeddedStaticFile(Some(file), Duration::from_secs(60))
+                .into_response(false);
         assert_eq!(true, !resp.body.is_empty());
         assert_eq!(200, resp.status.as_u16());
         assert_eq!(0, resp.max_age.unwrap_or_default());
@@ -907,8 +1049,96 @@ mod tests {
         );
 
         let resp: HttpResponse =
-            EmbeddedStaticFile(None, Duration::from_secs(60)).into();
+            EmbeddedStaticFile(None, Duration::from_secs(60))
+                .into_response(false);
         assert_eq!(404, resp.status.as_u16())
+    }
+
+    /// The decision has to come from the request header, so every shape a
+    /// client can send is pinned here.
+    #[test]
+    fn test_accepts_gzip_header() {
+        assert_eq!(false, accepts_gzip(None));
+        assert_eq!(false, accepts_gzip(Some("")));
+        assert_eq!(true, accepts_gzip(Some("gzip")));
+        assert_eq!(true, accepts_gzip(Some("GZIP")));
+        assert_eq!(true, accepts_gzip(Some("deflate, gzip;q=0.5")));
+        assert_eq!(true, accepts_gzip(Some("br;q=1.0,gzip;q=0.8")));
+        // `x-gzip` / `gzipx` are different codings.
+        assert_eq!(false, accepts_gzip(Some("x-gzip")));
+        assert_eq!(false, accepts_gzip(Some("gzipx")));
+        assert_eq!(false, accepts_gzip(Some("br, zstd")));
+        // An explicit q=0 refuses it.
+        assert_eq!(false, accepts_gzip(Some("gzip;q=0")));
+        assert_eq!(false, accepts_gzip(Some("gzip;q=0, br")));
+    }
+
+    /// A 4 KiB asset over both branches of the `Accept-Encoding` decision.
+    fn asset_payload() -> Vec<u8> {
+        b"<html><body><h1>pingap admin</h1></body></html>".repeat(96)
+    }
+
+    /// Value of one response header, or `""` when it was not set.
+    fn header_value(
+        resp: &HttpResponse,
+        name: &http::header::HeaderName,
+    ) -> String {
+        resp.headers
+            .as_ref()
+            .and_then(|headers| {
+                headers
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| {
+                        value.to_str().unwrap_or_default().to_string()
+                    })
+            })
+            .unwrap_or_default()
+    }
+
+    /// D23: a client that never advertised gzip used to be handed gzip bytes
+    /// under `Content-Encoding: gzip`. Without the header, nothing is encoded.
+    #[test]
+    fn test_static_asset_is_not_compressed_without_accept_encoding() {
+        let payload = asset_payload();
+        assert_eq!(true, payload.len() > GZIP_MIN_BYTES);
+        let resp = static_asset_response(
+            &payload,
+            "text/html",
+            [7u8; 32],
+            Duration::from_secs(60),
+            accepts_gzip(None),
+        );
+        assert_eq!("", header_value(&resp, &header::CONTENT_ENCODING));
+        assert_eq!(payload.len(), resp.body.len());
+        assert_eq!(&payload[..], &resp.body[..]);
+        // The representation depends on the header even when it is absent, so
+        // a shared cache must key on it.
+        assert_eq!("Accept-Encoding", header_value(&resp, &header::VARY));
+    }
+
+    /// … and with the header, the same asset arrives gzip-encoded and still
+    /// decodes back to the original bytes.
+    #[test]
+    fn test_static_asset_is_compressed_when_gzip_is_accepted() {
+        let payload = asset_payload();
+        let resp = static_asset_response(
+            &payload,
+            "text/html",
+            [7u8; 32],
+            Duration::from_secs(60),
+            accepts_gzip(Some("deflate, gzip")),
+        );
+        assert_eq!("gzip", header_value(&resp, &header::CONTENT_ENCODING));
+        assert_eq!("Accept-Encoding", header_value(&resp, &header::VARY));
+        assert_eq!(true, resp.body.len() < payload.len());
+
+        let mut decoded = vec![];
+        let mut decoder = GzDecoder::new(&resp.body[..]);
+        // flate2 reports a short read on a truncated frame, so this also proves
+        // the body was written completely.
+        decoder.read_to_end(&mut decoded).unwrap();
+        assert_eq!(&payload[..], &decoded[..]);
     }
 
     #[test]
@@ -956,6 +1186,9 @@ mod tests {
 
     /// Regression: `/config-history/{category}` without the trailing name used
     /// to index past the end of the split url and panic the request task.
+    ///
+    /// A url the operator typed wrong is answered as `400` with the reason —
+    /// the handler no longer lets its error escape to `fail_to_proxy`.
     #[tokio::test]
     async fn test_config_history_without_name() {
         let file = tempfile::NamedTempFile::with_suffix(".toml").unwrap();
@@ -971,15 +1204,16 @@ mod tests {
         let mut session = Session::new_h1(Box::new(mock_io));
         session.read_request().await.unwrap();
 
-        let err =
+        let resp =
             handle_request_admin(&admin, &mut session, &mut Ctx::default())
                 .await
-                .err()
+                .unwrap()
                 .unwrap();
-        assert_eq!(
-            true,
-            err.to_string().contains("Url is invalid(no name)"),
-            "unexpected error: {err}"
+        assert_eq!(400, resp.status.as_u16());
+        let body = std::str::from_utf8(&resp.body).unwrap();
+        assert!(
+            body.contains("Url is invalid(no name)"),
+            "unexpected body: {body}"
         );
     }
 }
