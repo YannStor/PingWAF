@@ -6,6 +6,8 @@ ANDed = "ANDed"
 LIKEs = "LIKEs"
 
 [default.extend-words]
+# pingora BError::esource() — method name, not "resource".
+esource = "esource"
 abd = "abd"
 dbe = "dbe"
 ded = "ded"

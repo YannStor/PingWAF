@@ -10,6 +10,8 @@ extend-ignore-re = [
 # 'FO' (Faroe Islands) and 'PN' (Pitcairn Islands) are ISO 3166-1 alpha-2
 # codes in web/src/components/charts/isoNumeric.ts.
 [default.extend-words]
+# pingora BError::esource() — method name, not "resource".
+esource = "esource"
 BA = "BA"
 COSE = "COSE"
 FO = "FO"
