@@ -2806,7 +2806,7 @@ function SystemObservabilityCard() {
                   <tr key={m.module} className="border-b border-line/60 last:border-0">
                     <td className="px-3 py-1.5 font-medium text-fg">{m.module}</td>
                     <td className="px-3 py-1.5 text-right tabular-nums">{m.cpu_ms.toFixed(1)}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{m.cpu_share.toFixed(1)}%</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{(m.cpu_share * 100).toFixed(1)}%</td>
                     <td className="px-3 py-1.5 text-right tabular-nums">{formatSize(m.mem_bytes)}</td>
                     <td className="px-3 py-1.5 text-right tabular-nums">{m.calls}</td>
                   </tr>

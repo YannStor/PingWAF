@@ -992,7 +992,7 @@ async fn create(
         site_id: Set(id),
         pool_id: Set(pool.id),
         // Kept for the upcoming node-group feature; mirrors the address.
-        name: Set(upstream_address.clone()),
+        name: Set(upstream_name_placeholder(&upstream_address)),
         address: Set(upstream_address.clone()),
         weight: Set(default_weight()),
         tls: Set(payload.upstream_tls.unwrap_or(false)),
@@ -1283,7 +1283,7 @@ async fn create_upstream(
         pool_id: Set(pool_id),
         // The column is kept for the upcoming node-group feature; nothing
         // reads it today, so it mirrors the address instead of an input.
-        name: Set(address.clone()),
+        name: Set(upstream_name_placeholder(&address)),
         address: Set(address),
         weight: Set(payload.weight),
         tls: Set(payload.tls),
@@ -1989,6 +1989,14 @@ fn split_origin_host_port(address: &str) -> Option<(&str, Option<&str>)> {
 ///
 /// The address is expected to be canonical already — write paths run it
 /// through [`normalize_origin_address`] first.
+/// The `site_upstreams.name` column is `varchar(100)` and is no longer an
+/// API field (kept for the upcoming node-group feature). Echo the address,
+/// truncated to the column width: addresses may be 255 bytes, and writing
+/// one verbatim used to fail the insert (2026-10-19 review).
+fn upstream_name_placeholder(address: &str) -> String {
+    address.chars().take(100).collect()
+}
+
 fn validate_upstream(address: &str, weight: i32) -> Result<(), ApiError> {
     if address.is_empty() || address.len() > 255 {
         return Err(ApiError::BadRequest(

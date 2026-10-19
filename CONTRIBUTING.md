@@ -166,7 +166,7 @@ cargo build --bin pingwaf --no-default-features --features tls-rustls,full
 | `pingwaf-proto/` | `control_plane.proto` and the generated gRPC stubs (needs `protoc`) |
 | `pingwaf-waf/` | Detection engine: input normalisation, Aho-Corasick + libinjection-style SQLi/XSS fast path, expression rule engine with anomaly scoring (`WafVerdict`) |
 | `pingwaf-challenge/` | JS challenge, clearance cookies, browser fingerprinting |
-| `pingwaf-pprof/` | pprof-style profiling endpoints: CPU profile and SVG flamegraph (CPU sampling is Linux-only), memory snapshot |
+| `pingwaf-profiler/, pingwaf-system/` | pprof-style profiling endpoints: CPU profile and SVG flamegraph (CPU sampling is Linux-only), memory snapshot |
 | `pingap-*` | The inherited proxy stack: cache, certificates, ACME, config, plugins, proxy, upstream, logging, observability |
 | `web/` | React 19 + TypeScript + Vite dashboard (Tailwind v4, Zustand, TanStack Query, i18next) |
 | `docs/` | English documentation; `docs/zh/` holds the Chinese mirror |

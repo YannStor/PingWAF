@@ -9,9 +9,9 @@ import { apiClient } from './client'
 
 /** 进程/主机 CPU 快照。 */
 export interface SystemCpuMetrics {
-  /** 本进程 CPU 使用率（百分比，0-100）。 */
+  /** 本进程 CPU 使用率（百分比，0.0-1.0）。 */
   process_cpu_percent: number
-  /** 整机 CPU 使用率（百分比，0-100）。 */
+  /** 整机 CPU 使用率（百分比，0.0-1.0）。 */
   host_cpu_percent: number
   /** 逻辑核心数。 */
   cores: number
@@ -63,10 +63,10 @@ export interface SystemMetrics {
 export interface SystemProfileModule {
   module: string
   cpu_ms: number
-  /** 占总 CPU 的比例（0-100）。 */
+  /** 占总 CPU 的比例（0.0-1.0）。 */
   cpu_share: number
   mem_bytes: number
-  /** 占总内存的比例（0-100）。 */
+  /** 占总内存的比例（0.0-1.0）。 */
   mem_share: number
   calls: number
   /** 平均单次调用耗时（微秒）。 */

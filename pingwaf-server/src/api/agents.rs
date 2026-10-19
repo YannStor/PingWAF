@@ -385,6 +385,10 @@ async fn remove(
 
     agent::Entity::delete_by_id(id).exec(&state.db).await?;
     state.agents.force_disconnect(&id).await;
+    // The row is gone, so nothing will ever connect under this id again:
+    // drop its queued commands now instead of waiting for a sweep that only
+    // looks at rows which still exist (2026-10-19 review).
+    state.agents.forget(&[id]).await;
 
     tracing::info!(agent_id = %id, requested_by = %current.id, "agent de-registered");
     Ok(StatusCode::NO_CONTENT.into_response())

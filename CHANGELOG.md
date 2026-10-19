@@ -26,8 +26,9 @@ verbatim for reference and attribution, and is not maintained here.
   [Profiling](./docs/profiling.md#what-changed-vs-pprof)).
 - **Cache rules: `disk_quota_mb` removed.** The field is ignored in requests
   and no longer returned in responses (the DB column is kept but no longer
-  participates in any calculation). Disk budgets live only in the site-level
-  `cache-settings.quota_mb` and the global `/settings/cache.max_space_mb` —
+  participates in any calculation; rows created from now on store `0`).
+  Disk budgets live only in the site-level `cache-settings.quota_mb` and the
+  global `/settings/cache.max_space_mb` —
   see the boundary table in
   [docs/zh/crates/cache.md](./docs/zh/crates/cache.md#缓存策略与规则的边界).
 - **Upstream node name removed from the API and UI.** `site_upstreams.name`

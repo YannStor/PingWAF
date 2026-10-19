@@ -283,7 +283,6 @@ PINGWAF_CONFIG=/etc/pingwaf/pingwaf.toml pingwaf all-in-one   # 等价写法
 | `PINGWAF_HEARTBEAT_INTERVAL` | `15` | 控制面在注册时下发给 Agent 的心跳间隔（秒）。Agent 侧的 `--heartbeat-interval-secs` 读取同一变量但回退值为 `30`，且仅在控制面未下发间隔时生效 |
 | `PINGWAF_TLS_ENABLED` | `true` | REST API 与控制台是否以 HTTPS 提供服务（替换前为自签名证书）；置于 TLS 终止代理之后时设为 `false` |
 | `PINGWAF_TLS_SANS` | 主机名、`localhost`、`127.0.0.1` | 生成的自签名证书所覆盖的 SAN 列表（逗号分隔） |
-| `PINGWAF_PPROF_ENABLED` | 启用 | 调试采集开关的回退（仅当 `[basic] pprof_enabled` 配置键未显式设置时生效，默认 `true`）。设为 `0`（`false`/`off`/`no`，大小写不敏感）禁用 CPU 采集端点、堆端点与 MCP `profile_cpu` 工具；只读的内存/指标快照仍可用——详见[性能剖析](./docs/zh/profiling.md#采集审计与开关) |
 | `PINGWAF_SERVER_URL` | `http://localhost:9090` | *（agent）* 控制面 gRPC 地址 |
 | `PINGWAF_API_KEY` | *（空）* | *（agent）* API Key；为空则通过本地回环自动注册 |
 | `PINGWAF_CACHE_DIR` | `./data/cache` | *（agent）* 本地规则缓存目录 |

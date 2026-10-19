@@ -3,7 +3,7 @@
 //! The alternative to a profiler that samples stacks: the code that knows
 //! what it is doing accounts for itself.
 //!
-//! * **Modules** are the six functional areas of the process — proxy, waf,
+//! * **Modules** are the seven functional areas of the process — proxy, waf,
 //!   cache, plugin, db, control — recorded in a fixed array of atomics, so
 //!   recording costs one relaxed add and no allocation.
 //! * **Methods** are named call sites (`"proxy::handle_request"`, …) kept in
@@ -184,7 +184,10 @@ impl Drop for MethodTimer {
         if ns == 0 {
             return;
         }
-        match METHODS.get_mut(self.name) {
+        // `get` (read lock) is enough: every field is atomic. `get_mut`
+        // takes the shard's write lock, serialising every thread on a hot
+        // call site (2026-10-19 review).
+        match METHODS.get(self.name) {
             Some(counters) => {
                 counters.cpu_ns.fetch_add(ns, Ordering::Relaxed);
                 counters.calls.fetch_add(1, Ordering::Relaxed);
@@ -425,9 +428,10 @@ mod tests {
             let name: &'static str =
                 Box::leak(format!("m{index}").into_boxed_str());
             let _timer = timed_method(name);
-            if index % 2 == 0 {
-                std::thread::sleep(std::time::Duration::from_micros(200));
-            }
+            // Every call site needs a non-zero measurement: `Drop` skips a
+            // timer that stops inside the same clock tick, so the row count
+            // was flaky when half the iterations slept and half did not.
+            std::thread::sleep(std::time::Duration::from_micros(200));
         }
         let snapshot = ProfileSnapshot::collect();
         assert_eq!(snapshot.methods.len(), ProfileSnapshot::MAX_METHODS);

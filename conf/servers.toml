@@ -101,8 +101,9 @@ locations = ["lo"]
 
 # Connection-phase (TCP accept + TLS handshake + request-head read) timeout.
 # pingora has no separate handshake knob, so this is applied by taking the
-# shorter of it and `downstream_read_timeout` — the first read is where a
-# stalled handshake is detected. Unset keeps the read timeout alone.
+# shorter of it and `downstream_read_timeout` (a cap: it only tightens the
+# read timeout, a larger value is ignored). Unset keeps the read timeout
+# alone.
 # Default `none`
 # downstream_connection_timeout = "10s"
 

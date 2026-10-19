@@ -49,12 +49,17 @@ pub fn set_append_proxy_headers(
                 let _ = header.insert_header(k, value);
             }
         }
-        // `upstream_host` is the explicit knob for "which virtual host the
-        // origin sees"; it wins over any Host entry in the proxy headers
-        // above so the effective value is unambiguous.
-        if let Some(host) = location.upstream_host() {
-            let _ = header.insert_header(http::header::HOST, host.clone());
-        }
+    }
+    // `upstream_host` is the explicit knob for "which virtual host the
+    // origin sees"; it wins over any Host entry in the proxy headers above
+    // so the effective value is unambiguous. Applied outside the headers
+    // block: a location that only sets upstream_host has no proxy headers,
+    // and the override used to be skipped in exactly that case
+    // (2026-10-19 review).
+    if let Some(location) = &ctx.upstream.location_instance
+        && let Some(host) = location.upstream_host()
+    {
+        let _ = header.insert_header(http::header::HOST, host.clone());
     }
 }
 

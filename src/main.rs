@@ -479,9 +479,6 @@ fn run_admin_node(args: Args) -> Result<(), Box<dyn Error>> {
     pingap_logger::logger_try_init(pingap_logger::LoggerParams {
         ..Default::default()
     })?;
-    // The `--cp --admin` node exposes the same debug endpoints, so the
-    // capture switch must be honoured here too. The full config is not
-    // loaded on this node, so only the legacy env fallback applies (the
     let (server_conf, name, proxy_plugin_info) =
         plugin::parse_admin_plugin(&args.admin.unwrap_or_default())?;
 

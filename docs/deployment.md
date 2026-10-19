@@ -285,7 +285,7 @@ table). They govern the client-facing side of the proxy:
 |-----|---------|---------|
 | `downstream_read_timeout` | unset | Max gap between reads from the client. Unset, a slow client can hold a connection open indefinitely — the startup log warns when it is missing |
 | `downstream_write_timeout` | unset | Max gap between writes to the client |
-| `downstream_connection_timeout` | unset | Connection-phase (TCP accept + TLS handshake + request-head read) timeout. Pingora has no separate handshake knob, so it is applied by taking the **shorter** of it and `downstream_read_timeout` as the read timeout — the first read is where a stalled handshake is detected |
+| `downstream_connection_timeout` | unset | **Read-timeout cap for the connection phase.** Pingora 0.9 has no first-read-only knob, so the effective read timeout is `min(this, downstream_read_timeout)`. It can only *tighten* the read timeout, never extend it; a value larger than the read timeout is ignored |
 | `keepalive_request_limit` | unset (pingora default: no limit) | Maximum requests served on one downstream keep-alive connection before pingora closes it |
 | `h2_idle_timeout` | unset (never) | Close an idle HTTP/2 client connection after this long |
 | `tcp_idle` / `tcp_interval` / `tcp_probe_count` | unset | TCP keepalive probes on client connections |
@@ -301,7 +301,8 @@ Recommendations (starting points, not defaults):
 - Set `downstream_read_timeout` (e.g. `60s`) and
   `downstream_write_timeout` (e.g. `60s`) unless a workload genuinely needs
   longer gaps.
-- Set `downstream_connection_timeout` well below the read timeout — most
+- Set `downstream_connection_timeout` **below** the read timeout (it is a
+  cap, not an independent budget) — most
   legitimate TLS handshakes finish in well under a second even on mobile
   networks, so `5s`–`10s` comfortably separates stalled handshakes from slow
   clients. Note the effective first-read timeout is the **shorter** of the

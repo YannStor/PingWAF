@@ -5,7 +5,8 @@
 # Stage 3: Minimal runtime image (behavior contract unchanged)
 #
 # NOTE: Dockerfile.perf mirrors this file with `--profile release-perf`
-# (symbols kept for pprof flamegraphs). Keep the two files in lockstep —
+# (symbols kept so perf-record/perf-report can resolve frames). Keep the two
+# files in lockstep —
 # the layer structure must stay identical apart from the profile flag.
 
 # ─── Stage 1: Frontend ───────────────────────────────────────────────────────
@@ -73,7 +74,8 @@ COPY pingap-pyroscope/Cargo.toml pingap-pyroscope/
 COPY pingap-imageoptim/Cargo.toml pingap-imageoptim/
 COPY pingap-webhook/Cargo.toml pingap-webhook/
 COPY pingwaf-proto/Cargo.toml pingwaf-proto/
-COPY pingwaf-pprof/Cargo.toml pingwaf-pprof/
+COPY pingwaf-profiler/Cargo.toml pingwaf-profiler/
+COPY pingwaf-system/Cargo.toml pingwaf-system/
 COPY pingwaf-server/Cargo.toml pingwaf-server/
 COPY pingwaf-agent/Cargo.toml pingwaf-agent/
 COPY pingwaf-waf/Cargo.toml pingwaf-waf/
@@ -90,7 +92,8 @@ RUN mkdir -p src && echo "fn main() {}" > src/main.rs \
        pingap-certificate pingap-discovery pingap-health pingap-location \
        pingap-logger pingap-plugin pingap-proxy pingap-upstream pingap-acme \
        pingap-performance pingap-otel pingap-sentry pingap-pyroscope \
-       pingap-imageoptim pingap-webhook pingwaf-pprof pingwaf-server \
+       pingap-imageoptim pingap-webhook pingwaf-profiler pingwaf-system \
+       pingwaf-server \
        pingwaf-agent \
        pingwaf-waf pingwaf-challenge; do \
        mkdir -p "$dir/src" && echo "" > "$dir/src/lib.rs"; \
@@ -134,7 +137,8 @@ COPY pingap-pyroscope/ pingap-pyroscope/
 COPY pingap-imageoptim/ pingap-imageoptim/
 COPY pingap-webhook/ pingap-webhook/
 COPY pingwaf-proto/ pingwaf-proto/
-COPY pingwaf-pprof/ pingwaf-pprof/
+COPY pingwaf-profiler/ pingwaf-profiler/
+COPY pingwaf-system/ pingwaf-system/
 COPY pingwaf-server/ pingwaf-server/
 COPY pingwaf-agent/ pingwaf-agent/
 COPY pingwaf-waf/ pingwaf-waf/

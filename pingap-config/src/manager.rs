@@ -108,7 +108,14 @@ impl PingapTomlConfig {
         // A location without its own cap inherits the basic-level default.
         // Absent everywhere stays unlimited (historic behaviour), so this is
         // opt-in (2026-10-18 audit).
-        if let Some(global) = config.basic.client_max_body_size {
+        // 0 means "unlimited" (the historic behaviour), so it must not be
+        // written into locations as an explicit value: a `Some(0)` would be
+        // echoed back by config dumps as "configured" (2026-10-19 review).
+        if let Some(global) = config
+            .basic
+            .client_max_body_size
+            .filter(|value| value.as_u64() > 0)
+        {
             for location in config.locations.values_mut() {
                 if location.client_max_body_size.is_none() {
                     location.client_max_body_size = Some(global);
