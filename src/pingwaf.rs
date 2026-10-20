@@ -373,13 +373,19 @@ const WAF_BODY_STAGE_DEFAULT_SECS: u64 = 30;
 /// protocol message nor the agent site cache carries a downstream timeout,
 /// and the generated listeners use pingap defaults. Keeping the resolver
 /// separate means exposing a site-level setting later only changes the
-/// argument, never the clamping rule. The value is whole seconds, so a
-/// sub-second site timeout rounds down to 0 (no withholding).
+/// argument, never the clamping rule.
+///
+/// The value is whole seconds and the lower bound is 1s, not 0: the plugin
+/// reads 0 as "do not withhold the body at all", which is not the intended
+/// meaning of a sub-second site timeout (audit R-06). A `Duration` below one
+/// second therefore states 1s — the shortest stage the plugin can honour —
+/// rather than silently switching body buffering off, and a zero timeout falls
+/// into the same floor instead of disabling the WAF's body inspection.
 fn waf_body_stage_timeout_secs(site_read_timeout: Option<Duration>) -> i64 {
     site_read_timeout
         .unwrap_or(Duration::from_secs(WAF_BODY_STAGE_DEFAULT_SECS))
         .as_secs()
-        .min(WAF_BODY_STAGE_MAX_SECS) as i64
+        .clamp(1, WAF_BODY_STAGE_MAX_SECS) as i64
 }
 
 fn cached_rules_to_pingap_config(
@@ -2415,6 +2421,33 @@ mod tests {
             waf_body_stage_timeout_secs(Some(Duration::from_secs(30))),
             30
         );
+        assert_eq!(
+            waf_body_stage_timeout_secs(Some(Duration::from_secs(120))),
+            30
+        );
+    }
+
+    /// R-06: the resolver never states 0, because the plugin reads 0 as "do
+    /// not withhold the body" rather than as the 30s default. A sub-second (or
+    /// zero) site timeout therefore floors at the shortest real stage, 1s.
+    #[test]
+    fn waf_body_stage_timeout_never_states_zero() {
+        assert_eq!(
+            waf_body_stage_timeout_secs(Some(Duration::from_millis(500))),
+            1,
+            "a sub-second timeout must not round down to 0 (no withholding)"
+        );
+        assert_eq!(waf_body_stage_timeout_secs(Some(Duration::ZERO)), 1);
+        assert_eq!(
+            waf_body_stage_timeout_secs(Some(Duration::from_nanos(1))),
+            1
+        );
+        assert_eq!(
+            waf_body_stage_timeout_secs(Some(Duration::from_millis(1999))),
+            1
+        );
+        // The floor does not leak into the other branches.
+        assert_eq!(waf_body_stage_timeout_secs(None), 30);
         assert_eq!(
             waf_body_stage_timeout_secs(Some(Duration::from_secs(120))),
             30

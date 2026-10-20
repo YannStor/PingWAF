@@ -212,39 +212,41 @@ fn split_domains(value: &str) -> Vec<String> {
         .collect()
 }
 
-/// Upper bound on a certificate domain, matching the `domain` column.
-const MAX_CERT_DOMAIN_LEN: usize = 255;
+/// Longest single hostname a certificate row may name. A DNS name is at most
+/// 253 characters (RFC 1035), and one wildcard label still fits inside it.
+const MAX_SINGLE_HOSTNAME_LEN: usize = 253;
 
-/// Normalises and vets the `domain` a certificate row is stored under.
-///
-/// The value is not merely cosmetic: it names the hostnames the certificate is
-/// issued for (the ACME order is built from it) and it is what the control
-/// plane matches against a site's hostnames. A string carrying `/`, `:` or
-/// control characters used to be stored verbatim, so a caller could park a
-/// path, a port or a smuggled header inside a field the edge later parses as a
-/// hostname.
+/// Anti-abuse bound on the whole comma-separated list. The `domain` column is
+/// TEXT — a certificate legitimately covering five hostnames already exceeds
+/// the old 255-character limit (see
+/// `m20240101_000021_site_alternate_domains`) — so the cap here only exists to
+/// stop a caller parking an unbounded blob in the row.
+const MAX_CERT_DOMAIN_LIST_LEN: usize = 4096;
+
+/// Normalises and vets one hostname from a certificate's hostname list.
 ///
 /// Returns the trimmed, lower-cased form; a single leading `*.` wildcard label
 /// is allowed, anything else about the name must look like DNS labels.
-pub(crate) fn validate_cert_domain(raw: &str) -> Result<String, ApiError> {
+fn validate_cert_hostname(raw: &str) -> Result<String, ApiError> {
     let domain = raw.trim().to_ascii_lowercase();
     let invalid = |reason: &str| {
         ApiError::BadRequest(format!("invalid domain: {reason}"))
     };
 
     if domain.is_empty() {
-        return Err(invalid("must be 1-255 characters"));
+        return Err(invalid("must be 1-253 characters"));
     }
-    if domain.len() > MAX_CERT_DOMAIN_LEN {
-        return Err(invalid("must be 1-255 characters"));
+    if domain.len() > MAX_SINGLE_HOSTNAME_LEN {
+        return Err(invalid("must be 1-253 characters"));
     }
     // Control characters and the separators that would make the value
     // ambiguous to whoever parses it as a host: `a/b` reads as a path and
-    // `a:443` as host plus port.
+    // `a:443` as host plus port. `,` is the list separator and is handled by
+    // the caller, never inside one hostname.
     if domain.chars().any(|ch| {
         ch.is_ascii_control()
             || ch.is_whitespace()
-            || matches!(ch, '/' | ':' | '\\' | '@' | '?')
+            || matches!(ch, '/' | ':' | '\\' | '@' | '?' | '#' | ',')
     }) {
         return Err(invalid("contains a forbidden character"));
     }
@@ -271,6 +273,62 @@ pub(crate) fn validate_cert_domain(raw: &str) -> Result<String, ApiError> {
     }
 
     Ok(domain)
+}
+
+/// Normalises and vets the `domain` a certificate row is stored under.
+///
+/// The column holds the comma-separated list of hostnames the certificate is
+/// issued for — `a.com,b.com` is an existing, supported input, and five names
+/// legitimately exceed 255 characters. Each segment is therefore validated as
+/// one hostname and the whole list only carries an anti-abuse bound.
+///
+/// The value is not merely cosmetic: it names the hostnames the certificate is
+/// issued for (the ACME order is built from it) and it is what the control
+/// plane matches against a site's hostnames. A string carrying `/`, `:` or
+/// control characters used to be stored verbatim, so a caller could park a
+/// path, a port or a smuggled header inside a field the edge later parses as a
+/// hostname.
+///
+/// Returns the normalised list: `,`-joined, lower-cased, no surrounding
+/// spaces, input order preserved, duplicates dropped. An empty segment
+/// (`a.com,,b.com`, a trailing `,`) is a bad request rather than something to
+/// silently skip.
+pub(crate) fn validate_cert_domain_list(raw: &str) -> Result<String, ApiError> {
+    let invalid = |reason: &str| {
+        ApiError::BadRequest(format!("invalid domain: {reason}"))
+    };
+
+    // Bound the input before splitting so a huge blob is refused cheaply.
+    if raw.len() > MAX_CERT_DOMAIN_LIST_LEN {
+        return Err(invalid("domain list exceeds 4096 bytes"));
+    }
+    if raw.trim().is_empty() {
+        return Err(invalid("must name at least one hostname"));
+    }
+
+    let mut hostnames: Vec<String> = Vec::new();
+    for segment in raw.split(',') {
+        if segment.trim().is_empty() {
+            return Err(invalid(
+                "empty entry in the comma-separated domain list",
+            ));
+        }
+        let hostname = validate_cert_hostname(segment)?;
+        if !hostnames.iter().any(|existing| existing == &hostname) {
+            hostnames.push(hostname);
+        }
+    }
+    if hostnames.is_empty() {
+        return Err(invalid("must name at least one hostname"));
+    }
+
+    let joined = hostnames.join(",");
+    // Deduplication only shortens the list, so this can only fire on input
+    // that was already over the bound; kept as a belt-and-braces check.
+    if joined.len() > MAX_CERT_DOMAIN_LIST_LEN {
+        return Err(invalid("domain list exceeds 4096 bytes"));
+    }
+    Ok(joined)
 }
 
 /// Routes contributed to `/api/v1`.
@@ -374,7 +432,7 @@ async fn insert_certificate<C: ConnectionTrait>(
     payload: CreateCertificateRequest,
 ) -> Result<site_certificates::Model, ApiError> {
     let site_id = site.id;
-    let domain = validate_cert_domain(&payload.domain)?;
+    let domain = validate_cert_domain_list(&payload.domain)?;
     if !acme_challenge::is_valid(&payload.acme_challenge_type) {
         return Err(ApiError::BadRequest(format!(
             "invalid acme_challenge_type '{}'",
@@ -520,32 +578,6 @@ async fn update_certificate(
 
     let row = find_certificate(&state, id, target).await?;
 
-    // An ACME order without a stored PEM is issued against the site's whole
-    // hostname set, which a wildcard may not contain under http-01.
-    let cert_missing = match payload.cert_pem.as_deref() {
-        Some(pem) => pem.trim().is_empty(),
-        None => row
-            .cert_pem
-            .as_deref()
-            .is_none_or(|pem| pem.trim().is_empty()),
-    };
-    let acme_email = match payload.acme_email.as_ref() {
-        Some(email) => non_empty(&Some(email.clone())),
-        None => non_empty(&row.acme_email),
-    };
-    if cert_missing && acme_email.is_some() {
-        let challenge = non_empty(&payload.acme_challenge_type)
-            .unwrap_or_else(|| row.acme_challenge_type.clone());
-        let cert_domain = non_empty(&payload.domain)
-            .map(|value| value.to_lowercase())
-            .unwrap_or_else(|| row.domain.clone());
-        ensure_acme_wildcard_supported(
-            &site,
-            &split_domains(&cert_domain),
-            Some(&challenge),
-        )?;
-    }
-
     // Replacing either half of the stored pair re-validates the pair as it
     // will be after this request: the update path used to store an unparsable
     // certificate (or a key that does not match it) that create would have
@@ -575,12 +607,41 @@ async fn update_certificate(
         ));
     }
 
-    // Vetted before the row is touched: a rejected domain must leave the
-    // stored certificate exactly as it was.
+    // The domain is vetted first, exactly as on the create path: the ACME
+    // wildcard guard below reads the hostname list, so letting it run on the
+    // unvalidated `payload.domain` would both check a different string from
+    // the one stored and reorder the two failures (audit R-03). A rejected
+    // domain must leave the stored certificate exactly as it was.
     let next_domain = match non_empty(&payload.domain) {
-        Some(raw) => Some(validate_cert_domain(&raw)?),
+        Some(raw) => Some(validate_cert_domain_list(&raw)?),
         None => None,
     };
+    // The list the certificate will name once this request commits: the
+    // normalised payload domain when one was sent, the stored one otherwise.
+    let effective_domain = next_domain.as_deref().unwrap_or(&row.domain);
+
+    // An ACME order without a stored PEM is issued against the site's whole
+    // hostname set, which a wildcard may not contain under http-01.
+    let cert_missing = match payload.cert_pem.as_deref() {
+        Some(pem) => pem.trim().is_empty(),
+        None => row
+            .cert_pem
+            .as_deref()
+            .is_none_or(|pem| pem.trim().is_empty()),
+    };
+    let acme_email = match payload.acme_email.as_ref() {
+        Some(email) => non_empty(&Some(email.clone())),
+        None => non_empty(&row.acme_email),
+    };
+    if cert_missing && acme_email.is_some() {
+        let challenge = non_empty(&payload.acme_challenge_type)
+            .unwrap_or_else(|| row.acme_challenge_type.clone());
+        ensure_acme_wildcard_supported(
+            &site,
+            &split_domains(effective_domain),
+            Some(&challenge),
+        )?;
+    }
 
     let mut active: site_certificates::ActiveModel = row.into();
 
@@ -1230,13 +1291,19 @@ async fn list_all_events(
 mod tests {
     use super::*;
 
-    /// R-03: a domain longer than the column is refused before it reaches the
-    /// database (which would otherwise truncate or reject it).
+    /// R-03: one hostname longer than a DNS name is refused before it reaches
+    /// the database. The bound is per hostname (253), not per row: the row
+    /// holds a comma-separated list and the column is TEXT.
     #[test]
-    fn an_overlong_certificate_domain_is_a_bad_request() {
+    fn an_overlong_certhostname_domain_is_a_bad_request() {
         let long = format!("{}.example.com", "a".repeat(250));
-        assert!(long.len() > MAX_CERT_DOMAIN_LEN);
-        let err = validate_cert_domain(&long).unwrap_err();
+        assert!(long.len() > MAX_SINGLE_HOSTNAME_LEN);
+        let err = validate_cert_hostname(&long).unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+
+        // The same hostname inside a list is refused too.
+        let list = format!("a.com,{long}");
+        let err = validate_cert_domain_list(&list).unwrap_err();
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -1244,7 +1311,9 @@ mod tests {
     #[test]
     fn a_blank_certificate_domain_is_a_bad_request() {
         for raw in ["", "   ", "\t\n"] {
-            let err = validate_cert_domain(raw).unwrap_err();
+            let err = validate_cert_domain_list(raw).unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{raw:?}");
+            let err = validate_cert_hostname(raw).unwrap_err();
             assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{raw:?}");
         }
     }
@@ -1260,8 +1329,10 @@ mod tests {
             "exa mple.com",
             "example.com\u{0}",
             "example.com\r\nX-Injected: 1",
+            "example.com#frag",
+            "user@example.com",
         ] {
-            let err = validate_cert_domain(raw).unwrap_err();
+            let err = validate_cert_domain_list(raw).unwrap_err();
             assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{raw:?}");
         }
     }
@@ -1279,11 +1350,11 @@ mod tests {
             "*.*.example.com",
             "a.*.com",
         ] {
-            let err = validate_cert_domain(raw).unwrap_err();
+            let err = validate_cert_domain_list(raw).unwrap_err();
             assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{raw:?}");
         }
         assert_eq!(
-            validate_cert_domain("*.example.com").unwrap(),
+            validate_cert_domain_list("*.example.com").unwrap(),
             "*.example.com"
         );
     }
@@ -1293,16 +1364,141 @@ mod tests {
     #[test]
     fn a_valid_certificate_domain_is_normalised() {
         assert_eq!(
-            validate_cert_domain("  Example.COM  ").unwrap(),
+            validate_cert_domain_list("  Example.COM  ").unwrap(),
             "example.com"
         );
         assert_eq!(
-            validate_cert_domain("*.Example.COM").unwrap(),
+            validate_cert_domain_list("*.Example.COM").unwrap(),
             "*.example.com"
         );
         assert_eq!(
-            validate_cert_domain("a-b.c1.example.com").unwrap(),
+            validate_cert_domain_list("a-b.c1.example.com").unwrap(),
             "a-b.c1.example.com"
         );
+        assert_eq!(
+            validate_cert_hostname("  Example.COM  ").unwrap(),
+            "example.com"
+        );
+    }
+
+    /// R-03 (High): the column holds the whole hostname list — `a.com,b.com`
+    /// is an existing, accepted input (`split_domains`,
+    /// `ensure_acme_wildcard_supported`) — so the validator must split on `,`
+    /// instead of treating the row as one hostname.
+    #[test]
+    fn a_certhostname_list_domain_is_accepted() {
+        assert_eq!(
+            validate_cert_domain_list("a.com,b.com").unwrap(),
+            "a.com,b.com"
+        );
+        // Whitespace around a segment is cosmetic and must not reject the
+        // list, nor survive into the stored value.
+        assert_eq!(
+            validate_cert_domain_list("a.com, b.com").unwrap(),
+            "a.com,b.com"
+        );
+        assert_eq!(
+            validate_cert_domain_list(" A.COM ,\tb.com\n").unwrap(),
+            "a.com,b.com"
+        );
+        // A wildcard and an exact name in one certificate.
+        assert_eq!(
+            validate_cert_domain_list("*.example.com,api.example.com").unwrap(),
+            "*.example.com,api.example.com"
+        );
+        // Input order is preserved, duplicates drop out.
+        assert_eq!(
+            validate_cert_domain_list("b.com,a.com,b.com").unwrap(),
+            "b.com,a.com"
+        );
+        // An IDN in its A-label form is an ordinary hostname.
+        assert_eq!(
+            validate_cert_domain_list("xn--fiq228c.com").unwrap(),
+            "xn--fiq228c.com"
+        );
+    }
+
+    /// R-03 (High): a realistic certificate for five hostnames exceeds the old
+    /// 255-character limit and must still be accepted — the bound lives on the
+    /// column (TEXT, widened by m20240101_000021_site_alternate_domains), not
+    /// on the validator.
+    #[test]
+    fn a_certhostname_list_domain_over_255_chars_is_accepted() {
+        let hosts: Vec<String> = (1..=5)
+            .map(|i| {
+                format!("{i}.{}.production.example.com", "segment".repeat(5))
+            })
+            .collect();
+        let list = hosts.join(",");
+        assert!(list.len() > 255, "{list} is {} chars", list.len());
+        assert_eq!(validate_cert_domain_list(&list).unwrap(), list);
+
+        // Five long (but legal) hostnames: still well under the 4096 guard.
+        let hosts: Vec<String> = (1..=5)
+            .map(|i| format!("{i}{}.example.com", "a".repeat(50)))
+            .collect();
+        let joined = hosts.join(",");
+        assert!(joined.len() > 255);
+        assert_eq!(validate_cert_domain_list(&joined).unwrap(), joined);
+    }
+
+    /// R-03 (High): an empty segment is a mistake in the client's list, not
+    /// something to silently skip — `a.com,,b.com` would otherwise store a
+    /// shorter list than the caller asked for.
+    #[test]
+    fn an_empty_certhostname_list_segment_is_a_bad_request() {
+        for raw in [
+            "a.com,,b.com",
+            "a.com,",
+            ",a.com",
+            ",,",
+            "a.com, ,b.com",
+            " , ",
+        ] {
+            let err = validate_cert_domain_list(raw).unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{raw:?}");
+        }
+    }
+
+    /// R-03 (High): the anti-abuse bound on the whole list is 4096 bytes, so a
+    /// caller cannot park an unbounded blob in a TEXT column.
+    #[test]
+    fn an_oversized_certhostname_list_is_a_bad_request() {
+        let hosts: Vec<String> = (0..205)
+            .map(|i| format!("host{i:03}.example.com"))
+            .collect();
+        let joined = hosts.join(",");
+        // Just over the bound: the guard, not the hostnames, is what rejects.
+        assert!(joined.len() > 4096, "{}", joined.len());
+        assert!(joined.len() < 4096 + 32, "{}", joined.len());
+        let err = validate_cert_domain_list(&joined).unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+
+        // Just under the guard still passes, so the bound is the only limit.
+        let hosts: Vec<String> = (0..200)
+            .map(|i| format!("host{i:03}.example.com"))
+            .collect();
+        let joined = hosts.join(",");
+        assert!(joined.len() < 4096 && joined.len() > 2048);
+        assert_eq!(validate_cert_domain_list(&joined).unwrap(), joined);
+    }
+
+    /// R-03 (High): a malicious segment inside an otherwise legal list is
+    /// refused, so the list form cannot be used to smuggle a path or a port
+    /// past the single-hostname checks.
+    #[test]
+    fn a_bad_segment_inside_a_certhostname_list_is_a_bad_request() {
+        for raw in [
+            "a.com,evil.com/path",
+            "a.com,evil.com:443",
+            "a.com,exa mple.com",
+            "a.com,evil.com\u{0}",
+            "a.com,..",
+            "a.com,*.*.evil.com",
+            "a.com,evil.com,",
+        ] {
+            let err = validate_cert_domain_list(raw).unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{raw:?}");
+        }
     }
 }
