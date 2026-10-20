@@ -772,24 +772,44 @@ impl Validate for LocationConf {
     }
 }
 
-/// Upper bound for `LocationConf::rewrite_path`, matching the control plane's
-/// route API. A replacement path longer than this is a configuration mistake.
+/// Upper bound for a `rewrite_path`, in **bytes**. A replacement path longer
+/// than this is a configuration mistake, so the rule is shared by every surface
+/// that accepts one: this crate (config file), `pingap-location`'s data plane
+/// (which re-exports this function), and the control plane's route API.
 pub const MAX_REWRITE_PATH_LEN: usize = 2048;
 
-/// Checks the shape of a `rewrite_path` value: an absolute path with no query
-/// string, fragment, whitespace or control character.
+/// The one `rewrite_path` rule: a non-blank absolute path of at most
+/// [`MAX_REWRITE_PATH_LEN`] bytes with no query string, fragment, whitespace or
+/// control character.
 ///
-/// `/` is valid (the whole path collapses to the origin root); the empty string
-/// is not, because "no rewrite" is expressed by leaving the field unset.
+/// `/` is valid (the whole path collapses to the origin root). The empty and
+/// the blank string are **not**: "no rewrite" is expressed by leaving the field
+/// unset, so a value that carries no path is a configuration mistake instead of
+/// a silent no-op. Nothing is trimmed here either — a padded value fails the
+/// whitespace check, because a caller who trims would accept a value the data
+/// plane then has to trim again.
+///
+/// The length is counted in bytes (`str::len`), the same unit the URI parser
+/// bounds its target in, and the same unit the control plane's route API
+/// checks.
 pub fn validate_rewrite_path(value: &str) -> std::result::Result<(), String> {
-    if !value.starts_with('/') {
-        return Err(format!("rewrite_path '{value}' must start with '/'"));
+    // An empty string means "not set" (the deserialiser keeps `Some("")` when
+    // a config writes `rewrite_path = ""`), which is the same as omitting the
+    // key. Only a non-empty value made of whitespace is an error: it looks
+    // configured but would silently do nothing.
+    if value.is_empty() {
+        return Ok(());
+    }
+    if value.trim().is_empty() {
+        return Err("rewrite_path must not be blank".to_string());
     }
     if value.len() > MAX_REWRITE_PATH_LEN {
         return Err(format!(
-            "rewrite_path must be at most {MAX_REWRITE_PATH_LEN} characters"
+            "rewrite_path must be at most {MAX_REWRITE_PATH_LEN} bytes"
         ));
     }
+    // The character check comes before the "absolute" one so a padded value
+    // (" /v2") is reported as the whitespace it is, not as a missing slash.
     if let Some(bad) = value
         .chars()
         .find(|c| matches!(c, '?' | '#') || c.is_whitespace() || c.is_control())
@@ -798,6 +818,9 @@ pub fn validate_rewrite_path(value: &str) -> std::result::Result<(), String> {
             "rewrite_path must not contain '{bad}' (query, fragment, \
              whitespace and control characters are not allowed)"
         ));
+    }
+    if !value.starts_with('/') {
+        return Err(format!("rewrite_path '{value}' must start with '/'"));
     }
     Ok(())
 }
@@ -971,24 +994,27 @@ impl LocationConf {
 
     /// Validates the route-level path rewriting knobs:
     ///
-    /// - `rewrite_path` must be an absolute path (`/...`) without a query,
-    ///   fragment, whitespace or control character, at most
-    ///   [`MAX_REWRITE_PATH_LEN`] bytes. The client's query string is appended
-    ///   verbatim, which is why `?` is rejected here.
+    /// - `rewrite_path` must pass [`validate_rewrite_path`]: an absolute path
+    ///   (`/...`) without a query, fragment, whitespace or control character,
+    ///   at most [`MAX_REWRITE_PATH_LEN`] bytes, and not blank. The client's
+    ///   query string is appended verbatim, which is why `?` is rejected here.
+    ///   A blank value is an error rather than "unset": silently dropping it
+    ///   is how a configured rewrite stops being applied without anyone
+    ///   noticing. Leave the key out to mean "no rewrite".
     /// - `strip_prefix` needs a prefix `path` to strip; an `=exact` or
     ///   `~regex` location has no prefix, and neither has a location without a
     ///   `path`, so both are configuration errors instead of silent no-ops.
     ///
     /// The control plane's route API (`pingwaf-server/src/api/sites.rs`)
     /// enforces the same shape before storing a route; that crate cannot
-    /// depend on this one, so the rule is mirrored there.
+    /// depend on this one, so the rule is mirrored there. The data plane
+    /// (`pingap-location`) calls this very function and, because its input
+    /// comes from the agent's cache rather than from a file a human edited,
+    /// logs and ignores a value this rejects instead of failing the load.
     fn validate_path_rewrite(&self) -> Result<()> {
         if let Some(value) = self.rewrite_path.as_deref() {
-            let value = value.trim();
-            if !value.is_empty() {
-                validate_rewrite_path(value)
-                    .map_err(|message| Error::Invalid { message })?;
-            }
+            validate_rewrite_path(value)
+                .map_err(|message| Error::Invalid { message })?;
         }
         if self.strip_prefix.unwrap_or_default() {
             let path = self.path.as_deref().unwrap_or_default().trim();
@@ -2612,6 +2638,84 @@ h1_upgrade = "preserve"
         conf.rewrite = Some(r"^/api /".to_string());
         let result = conf.validate_with_upstream(Some(&upstream_names));
         assert_eq!(true, result.is_ok());
+    }
+
+    /// A blank `rewrite_path` is a configuration error, not "unset": the
+    /// absence of a rewrite is expressed by omitting the key, and treating a
+    /// blank value as absent is how a configured rewrite silently stops being
+    /// applied. A padded value fails too — nothing is trimmed here, so the
+    /// value validated is the value the data plane receives.
+    #[test]
+    fn location_rewrite_path_rejects_blank_and_padded_values() {
+        let validate =
+            |path: Option<&str>, strip: bool, rewrite: Option<&str>| {
+                LocationConf {
+                    path: path.map(str::to_string),
+                    strip_prefix: strip.then_some(true),
+                    rewrite_path: rewrite.map(str::to_string),
+                    ..Default::default()
+                }
+                .validate()
+                .map_err(|err| err.to_string())
+            };
+
+        // Unset is the way to say "no rewrite".
+        assert_eq!(Ok(()), validate(Some("/api"), false, None));
+        // A real replacement on any match type needs no prefix.
+        assert_eq!(Ok(()), validate(Some("/api"), false, Some("/v2")));
+        assert_eq!(Ok(()), validate(Some("=/api"), false, Some("/")));
+        assert_eq!(
+            Ok(()),
+            validate(Some("/api"), true, Some("/v2")),
+            "rewrite_path wins over strip_prefix, both may be set"
+        );
+
+        // An empty string means "unset" (a config may clear the key by
+        // writing ""); only non-empty whitespace is an error, with the
+        // message the control plane shows as a 400.
+        assert_eq!(
+            Ok(()),
+            validate(Some("/api"), false, Some("")),
+            "an empty rewrite_path means unset"
+        );
+        for blank in ["   ", "\t\n"] {
+            let err = validate(Some("/api"), false, Some(blank))
+                .expect_err("a blank rewrite_path must fail validation");
+            assert!(
+                err.contains("must not be blank"),
+                "{blank:?} must fail as blank, got: {err}"
+            );
+        }
+
+        // Padded values are not normalised into acceptance.
+        let err = validate(Some("/api"), false, Some(" /v2"))
+            .expect_err("a padded rewrite_path must fail validation");
+        assert!(err.contains("must not contain"), "{err}");
+
+        // The rest of the shared rule reaches the config file unchanged.
+        for bad in ["v2", "/v2?x=1", "/v2#frag", "/v 2", "/v\n2"] {
+            assert!(
+                validate(Some("/api"), false, Some(bad)).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+        assert!(
+            validate(
+                Some("/api"),
+                false,
+                Some(&format!("/{}", "a".repeat(2048)))
+            )
+            .expect_err("2049 bytes exceeds the ceiling")
+            .contains("at most 2048 bytes")
+        );
+        assert_eq!(
+            Ok(()),
+            validate(
+                Some("/api"),
+                false,
+                Some(&format!("/{}", "a".repeat(2047)))
+            )
+        );
     }
 
     #[test]

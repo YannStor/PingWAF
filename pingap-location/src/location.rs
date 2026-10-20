@@ -20,6 +20,7 @@ use http::HeaderValue;
 use ipnet::IpNet;
 use pingap_config::Hashable;
 use pingap_config::LocationConf;
+use pingap_config::validate_rewrite_path;
 use pingap_core::new_internal_error;
 use pingap_core::{HttpHeader, convert_headers, resolve_static_header_value};
 use pingap_core::{LocationInstance, NamedPlugin, PluginProvider};
@@ -665,6 +666,31 @@ impl Location {
             }
         }
 
+        // A `rewrite_path` the data plane cannot apply is dropped, not fatal:
+        // the value arrives through the agent's rule cache, so one bad field
+        // must not take the whole site's config down with it. The rule itself
+        // is the config file's (`pingap_config::validate_rewrite_path`), and
+        // the control plane's route API enforces the same one before storing —
+        // this is only the last line of defence.
+        let rewrite_path = conf
+            .rewrite_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .and_then(|value| match validate_rewrite_path(value) {
+                Ok(()) => Some(value.to_string()),
+                Err(err) => {
+                    warn!(
+                        target: LOG_TARGET,
+                        location = name,
+                        rewrite_path = value,
+                        error = %err,
+                        "ignoring an invalid rewrite_path"
+                    );
+                    None
+                },
+            });
+
         let location = Location {
             name: name.into(),
             key,
@@ -679,14 +705,10 @@ impl Location {
             upstream,
             reg_rewrite,
             // An empty `rewrite_path` means "unset": the control plane sends
-            // every field as a string, so blank is the absent value.
+            // every field as a string, so blank is the absent value on the
+            // wire even though the config file rejects it.
             strip_prefix: conf.strip_prefix.unwrap_or_default(),
-            rewrite_path: conf
-                .rewrite_path
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string),
+            rewrite_path,
             plugins: conf.plugins.as_ref().map(|list| {
                 list.iter().map(|name| Arc::from(name.as_str())).collect()
             }),
@@ -1582,6 +1604,138 @@ mod tests {
             RequestHeader::build("GET", b"/api/users?x=1", None).unwrap();
         lo.rewrite_upstream_path(&mut header);
         assert_eq!(header.uri.to_string(), "/?x=1");
+    }
+
+    /// The `rewrite_path` rule the data plane shares with the config file: one
+    /// implementation, re-exported by this crate, so the loader and
+    /// [`Location::new`] cannot disagree about what they accept.
+    #[test]
+    fn validate_rewrite_path_is_shared_with_the_config_layer() {
+        let check = crate::validate_rewrite_path;
+
+        // Valid: an absolute path, and the root itself (the whole path
+        // collapses to the origin root).
+        for good in ["/", "/v2", "/a/b", "/a%20b"] {
+            assert_eq!(Ok(()), check(good), "{good:?} is a valid rewrite path");
+        }
+
+        // An empty string is "unset"; non-empty whitespace is an error,
+        // because it looks configured while doing nothing.
+        assert_eq!(Ok(()), check(""), "an empty value means unset");
+        for blank in [" ", "   ", "\t", "\n"] {
+            let err = check(blank).expect_err("blank must be rejected");
+            assert!(
+                err.contains("must not be blank"),
+                "{blank:?} must fail as blank, got: {err}"
+            );
+        }
+
+        // Absolute only, and nothing is trimmed into acceptance.
+        assert!(
+            check("v2")
+                .expect_err("relative path")
+                .contains("must start with '/'")
+        );
+        assert!(
+            check(" /v2")
+                .expect_err("padded")
+                .contains("must not contain")
+        );
+
+        // `?` and `#` are rejected because the client's query string is
+        // appended to the replacement verbatim; whitespace and control
+        // characters would not survive the URI parser either.
+        for bad in ["/v2?x=1", "/v2#frag", "/a b", "/v2\n", "/v2\t", "/v2\u{7}"]
+        {
+            assert!(check(bad).is_err(), "{bad:?} must be rejected");
+        }
+
+        // The ceiling is 2048 **bytes**, not characters.
+        let at_limit =
+            format!("/{}", "a".repeat(crate::MAX_REWRITE_PATH_LEN - 1));
+        assert_eq!(Ok(()), check(&at_limit));
+        let over = format!("/{}", "a".repeat(crate::MAX_REWRITE_PATH_LEN));
+        assert!(
+            check(&over)
+                .expect_err("over the ceiling")
+                .contains("at most 2048 bytes")
+        );
+        // 1025 characters, 2049 bytes: a character-count check would pass this.
+        let multibyte = format!("/{}", "é".repeat(1024));
+        assert_eq!(multibyte.len(), crate::MAX_REWRITE_PATH_LEN + 1);
+        assert!(check(&multibyte).is_err(), "the ceiling counts bytes");
+    }
+
+    /// A `rewrite_path` the data plane cannot apply is logged and dropped: the
+    /// location still loads and forwards the original path, because one bad
+    /// field from the rule cache must not take the site's config down.
+    #[test]
+    fn location_ignores_an_invalid_rewrite_path() {
+        let build = |rewrite_path: String| {
+            Location::new(
+                "lo",
+                &LocationConf {
+                    upstream: Some("api".to_string()),
+                    path: Some("/api".to_string()),
+                    rewrite_path: Some(rewrite_path),
+                    ..Default::default()
+                },
+            )
+            .expect("an invalid rewrite_path must not fail the location")
+        };
+
+        for bad in [
+            "v2".to_string(),
+            "/v2?x=1".to_string(),
+            "/v2#frag".to_string(),
+            "/v 2".to_string(),
+            format!("/{}", "a".repeat(crate::MAX_REWRITE_PATH_LEN)),
+        ] {
+            let location = build(bad.clone());
+            assert_eq!(
+                None,
+                location.rewrite_path(),
+                "{bad:?} must be dropped, not applied"
+            );
+            // Nothing is stripped or replaced: the client's path is forwarded.
+            let mut header =
+                RequestHeader::build("GET", b"/api/users?x=1", None).unwrap();
+            location.rewrite_upstream_path(&mut header);
+            assert_eq!("/api/users?x=1", header.uri.to_string());
+        }
+
+        // Blank is the wire's "unset" (the control plane sends every field as
+        // a string) and is dropped without a complaint; padding is trimmed the
+        // same way, and a valid value applies.
+        assert_eq!(None, build("   ".to_string()).rewrite_path());
+        assert_eq!(Some("/v2"), build("  /v2  ".to_string()).rewrite_path());
+    }
+
+    /// A target the URI parser rejects leaves the request header alone:
+    /// forwarding the unstripped path beats failing the request. The paths this
+    /// runs on are normally a `strip_prefix` result or a validated
+    /// `rewrite_path`, so this is the guard for everything else — a regex
+    /// rewrite's output, a value that lost its leading slash.
+    #[test]
+    fn set_request_path_keeps_the_original_when_the_uri_is_invalid() {
+        let mut header =
+            RequestHeader::build("GET", b"/api/users?x=1", None).unwrap();
+
+        // A space is not a uri character; without the leading slash the target
+        // is not origin-form.
+        for bad in ["/a b", "v2"] {
+            assert_eq!(
+                false,
+                set_request_path(&mut header, bad),
+                "{bad:?} is not a valid uri"
+            );
+            assert_eq!("/api/users?x=1", header.uri.to_string());
+        }
+
+        // The same call with a usable target rewrites the path and keeps the
+        // query string.
+        assert_eq!(true, set_request_path(&mut header, "/v2"));
+        assert_eq!("/v2?x=1", header.uri.to_string());
     }
 
     /// Nothing configured is the common case: the header must come back

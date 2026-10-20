@@ -188,15 +188,18 @@ struct ModuleCounters {
     calls: AtomicU64,
 }
 
-static MODULES: [ModuleCounters; 7] = [
-    ModuleCounters::new(),
-    ModuleCounters::new(),
-    ModuleCounters::new(),
-    ModuleCounters::new(),
-    ModuleCounters::new(),
-    ModuleCounters::new(),
-    ModuleCounters::new(),
-];
+/// One slot per [`Module`], indexed by discriminant — which is only sound while
+/// the length tracks [`Module::ALL`], so it is taken from there instead of
+/// being written out. With a literal, adding a module to `ALL` left the table
+/// short and the first `record_cpu` for the new variant panicked inside the
+/// request path (a `#[repr(usize)]` cast is an unchecked index).
+///
+/// The residual hole — a variant added to the enum but not to `ALL` — cannot be
+/// closed without a derive macro (`ALL` cannot enumerate itself); the unit
+/// tests pin `ALL`'s order and the module roll-up of every call site, so a
+/// misordered or forgotten entry fails there rather than in production.
+static MODULES: [ModuleCounters; Module::ALL.len()] =
+    [const { ModuleCounters::new() }; Module::ALL.len()];
 
 impl ModuleCounters {
     const fn new() -> Self {
@@ -223,16 +226,10 @@ impl MethodCounters {
 }
 
 /// One slot per [`Method`], indexed by discriminant: recording is a bounds
-/// check plus two relaxed adds.
-static METHODS: [MethodCounters; 7] = [
-    MethodCounters::new(),
-    MethodCounters::new(),
-    MethodCounters::new(),
-    MethodCounters::new(),
-    MethodCounters::new(),
-    MethodCounters::new(),
-    MethodCounters::new(),
-];
+/// check plus two relaxed adds. Sized from [`Method::ALL`] for the reason given
+/// on [`MODULES`].
+static METHODS: [MethodCounters; Method::ALL.len()] =
+    [const { MethodCounters::new() }; Method::ALL.len()];
 
 /// Accumulates wall-clock time (nanoseconds) attributed to `module`.
 ///
@@ -655,6 +652,34 @@ mod tests {
             "db::persist_heartbeat"
         );
         assert_eq!(Method::ControlHttp.as_str(), "control::http");
+    }
+
+    /// A module's slot is its discriminant, so `Module::ALL` must be complete
+    /// and in order: the tables are sized from it, a forgotten variant would
+    /// index past the end on the request path, and a misordered one would
+    /// attribute its time to another module's row.
+    #[test]
+    fn module_all_covers_every_slot_in_order() {
+        assert_eq!(MODULES.len(), Module::ALL.len());
+        for (index, module) in Module::ALL.iter().enumerate() {
+            assert_eq!(
+                module.index(),
+                index,
+                "{} is out of discriminant order",
+                module.key()
+            );
+        }
+        // The last discriminant has a slot: `ALL` did not stop short.
+        assert!(
+            Module::ALL.len() > Module::Other.index(),
+            "Module::ALL is missing a variant; MODULES would be indexed out of bounds"
+        );
+        // The method table is sized the same way.
+        assert_eq!(METHODS.len(), Method::ALL.len());
+        assert!(
+            Method::ALL.len() > Method::Other.index(),
+            "Method::ALL is missing a variant; METHODS would be indexed out of bounds"
+        );
     }
 
     /// One timer, two rows: the module total must be exactly the sum of the

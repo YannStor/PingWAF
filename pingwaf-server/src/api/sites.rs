@@ -32,9 +32,15 @@ use crate::models::{
     trusted_header,
 };
 
-/// Longest accepted route `rewrite_path`, matching
-/// `pingap_config::MAX_REWRITE_PATH_LEN` — the data plane rejects anything
-/// longer, so storing it would only fail later, on the agent side.
+/// Longest accepted route `rewrite_path`, in **bytes**, mirroring
+/// `pingap_config::MAX_REWRITE_PATH_LEN` — the data plane drops anything longer,
+/// so storing it would only lose the route's rewrite later, on the agent side.
+///
+/// The rule has one implementation (`pingap_config::validate_rewrite_path`,
+/// re-exported by `pingap-location`) that this crate cannot call: the control
+/// plane does not depend on the pingap crates, and pulling their graph (pingora
+/// included) into it for one predicate is not worth it. So the checks below are
+/// a mirror, and `route_rewrite_fields_are_validated` keeps them honest.
 const MAX_ROUTE_REWRITE_PATH_LEN: usize = 2048;
 
 /// Public representation of a site.
@@ -2195,6 +2201,19 @@ fn validate_route(
                 "route path must not start with '=' or '~'".to_string(),
             ));
         }
+        // `path = "/"` has nothing to strip: removing `/` from `/users` puts
+        // the separator back, so the path sent upstream is the path received —
+        // the flag would be a silent no-op. Name the flag rather than the
+        // routing conflict the operator cannot see (a `/` prefix route is
+        // refused by the check right below).
+        if strip_prefix && path == "/" && match_type == route_match_type::PREFIX
+        {
+            return Err(ApiError::BadRequest(
+                "strip_prefix has no effect on path '/', remove it or give \
+                 the route a longer prefix"
+                    .to_string(),
+            ));
+        }
         if match_type == route_match_type::PREFIX && path == "/" {
             return Err(ApiError::BadRequest(
                 "a prefix route on '/' conflicts with the default pool \
@@ -2213,21 +2232,27 @@ fn validate_route(
     // `rewrite_path` replaces the whole path, so it is only meaningful as an
     // absolute one; the client's query string is appended to it verbatim, which
     // is why `?`, `#`, whitespace and control characters are rejected rather
-    // than escaped. Mirrors `validate_rewrite_path` in
-    // `pingap-config/src/common.rs`, which guards the config-file path — this
-    // crate cannot depend on that one.
+    // than escaped. Mirrors `pingap_config::validate_rewrite_path` — including
+    // its blank rule and its byte ceiling — which guards the config file and
+    // (via `pingap-location`) the data plane.
     if let Some(rewrite_path) = rewrite_path {
-        if !rewrite_path.starts_with('/') {
+        // The handlers map a blank payload to `None`, so a blank reaching here
+        // is a value already stored (or sent straight through by a caller of
+        // this function): reject it instead of writing it again, because
+        // "unset" is the only way to say "no rewrite".
+        if rewrite_path.trim().is_empty() {
             return Err(ApiError::BadRequest(
-                "route rewrite path must start with '/'".to_string(),
+                "route rewrite path must not be blank".to_string(),
             ));
         }
         if rewrite_path.len() > MAX_ROUTE_REWRITE_PATH_LEN {
             return Err(ApiError::BadRequest(format!(
                 "route rewrite path must be at most \
-                 {MAX_ROUTE_REWRITE_PATH_LEN} characters"
+                 {MAX_ROUTE_REWRITE_PATH_LEN} bytes"
             )));
         }
+        // Same order as the shared function: a padded value is reported as the
+        // whitespace it is rather than as a missing slash.
         if let Some(bad) = rewrite_path.chars().find(|c| {
             matches!(c, '?' | '#') || c.is_whitespace() || c.is_control()
         }) {
@@ -2235,6 +2260,11 @@ fn validate_route(
                 "route rewrite path must not contain '{bad}' (query, fragment, \
                  whitespace and control characters are not allowed)"
             )));
+        }
+        if !rewrite_path.starts_with('/') {
+            return Err(ApiError::BadRequest(
+                "route rewrite path must start with '/'".to_string(),
+            ));
         }
     }
     // Stripping needs a prefix to strip: an exact or regex route matches a
@@ -2770,9 +2800,15 @@ mod tests {
     /// after storing breaks the site's whole data-plane config.
     #[test]
     fn route_rewrite_fields_are_validated() {
-        let check = |match_type: &str, strip: bool, rewrite: Option<&str>| {
-            validate_route("api", match_type, "/api", None, strip, rewrite)
+        let with_path = |path: &str,
+                         match_type: &str,
+                         strip: bool,
+                         rewrite: Option<&str>| {
+            validate_route("api", match_type, path, None, strip, rewrite)
                 .map_err(|err| (err.code(), err.to_string()))
+        };
+        let check = |match_type: &str, strip: bool, rewrite: Option<&str>| {
+            with_path("/api", match_type, strip, rewrite)
         };
 
         // Accepted: no rewrite at all, a prefix route stripping its prefix,
@@ -2794,11 +2830,31 @@ mod tests {
             .1
             .contains("must not contain"));
 
-        // The length ceiling matches the data plane's (2048 bytes).
+        // Blank is not "unset": the handlers map a blank payload to `None`
+        // before getting here, so a blank at this point is a stored value that
+        // says nothing. It must be rejected, not written back.
+        for blank in ["", " ", "   "] {
+            let err = check("prefix", false, Some(blank))
+                .expect_err("a blank rewrite path must be rejected");
+            assert_eq!("bad_request", err.0);
+            assert!(
+                err.1.contains("must not be blank"),
+                "{blank:?} must fail as blank, got: {}",
+                err.1
+            );
+        }
+
+        // The length ceiling matches the data plane's: 2048 **bytes**.
         let at_limit = format!("/{}", "a".repeat(2047));
         assert_eq!(check("prefix", false, Some(&at_limit)), Ok(()));
         let too_long = format!("/{}", "a".repeat(2048));
-        assert!(check("prefix", false, Some(&too_long)).is_err());
+        assert!(check("prefix", false, Some(&too_long))
+            .unwrap_err()
+            .1
+            .contains("at most 2048 bytes"));
+        // 1025 characters but 2049 bytes: a character count would let it pass.
+        let multibyte = format!("/{}", "é".repeat(1024));
+        assert!(check("prefix", false, Some(&multibyte)).is_err());
 
         // Stripping needs a prefix to strip: exact and regex routes are
         // rejected rather than silently forwarding the full path.
@@ -2807,6 +2863,39 @@ mod tests {
             assert_eq!("bad_request", err.0);
             assert!(err.1.contains("needs a prefix route"));
         }
+    }
+
+    /// `strip_prefix` on `path = "/"` is a silent no-op — stripping `/` from
+    /// `/users` puts the separator back — so the pair is rejected with a
+    /// message naming the flag. The `/` prefix route is refused on its own
+    /// (it would swallow the default pool fallback), so the strip message has
+    /// to come first to be the one the operator sees.
+    #[test]
+    fn strip_prefix_on_the_root_path_is_rejected() {
+        let check = |path: &str, match_type: &str, strip: bool| {
+            validate_route("api", match_type, path, None, strip, None)
+                .map_err(|err| (err.code(), err.to_string()))
+        };
+
+        let err = check("/", "prefix", true).expect_err("strip on '/'");
+        assert_eq!("bad_request", err.0, "a 400, not a stored no-op");
+        assert!(
+            err.1.contains("strip_prefix has no effect on path '/'"),
+            "the message must name the flag: {}",
+            err.1
+        );
+
+        // The same path without the flag keeps its own, more specific error:
+        // the route itself is refused for the routing conflict.
+        let err = check("/", "prefix", false).expect_err("'/' prefix route");
+        assert!(err.1.contains("default pool fallback"), "{}", err.1);
+
+        // A deeper prefix still strips, so the check must not reject it.
+        assert_eq!(check("/api", "prefix", true), Ok(()));
+        // An exact route on `/` is not a prefix at all: the generic
+        // "needs a prefix route" rule stays the one reported for it.
+        let err = check("/", "exact", true).expect_err("exact on '/'");
+        assert!(err.1.contains("needs a prefix route"), "{}", err.1);
     }
 
     /// `update_route` merges the rewrite fields with the stored row, which is

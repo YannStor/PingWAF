@@ -39,3 +39,16 @@ mod regex;
 
 pub use host_index::*;
 pub use location::*;
+
+/// The route-level `rewrite_path` rule, re-exported so the data plane has one
+/// entry point for it.
+///
+/// The implementation lives in `pingap-config` because that is the lower layer
+/// (this crate depends on it, never the other way round) and because the config
+/// file has to be validated with the exact rule the data plane applies: a value
+/// the loader accepts and [`Location::new`] then has to drop would be a config
+/// that loads and does not do what it says. [`Location::new`] calls this and
+/// ignores a value it rejects — its input comes from the agent's rule cache,
+/// not from a file a human just wrote, so one bad field must not stop the rest
+/// of the site's config from loading.
+pub use pingap_config::{MAX_REWRITE_PATH_LEN, validate_rewrite_path};
