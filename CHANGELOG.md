@@ -36,7 +36,7 @@ verbatim for reference and attribution, and is not maintained here.
   length), and the control-plane CPU bar uses host CPU so a >100% process
   reading no longer renders a full bar.
 
-## [Unreleased]
+## [PingWAF 0.28.3] — 2026-10-21
 
 ### Added
 
