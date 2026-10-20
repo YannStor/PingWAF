@@ -4868,6 +4868,7 @@ dependencies = [
  "ctor",
  "dashmap 6.2.1",
  "fancy-regex",
+ "flate2",
  "glob",
  "hex",
  "hickory-resolver",

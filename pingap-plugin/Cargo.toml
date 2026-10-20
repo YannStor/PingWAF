@@ -42,6 +42,7 @@ ctor = { workspace = true }
 crc32fast = { workspace = true }
 dashmap = { workspace = true }
 fancy-regex = { workspace = true }
+flate2 = { workspace = true }
 glob = { workspace = true }
 hex = { workspace = true }
 hickory-resolver = { workspace = true }

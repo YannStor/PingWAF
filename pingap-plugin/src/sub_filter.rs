@@ -16,6 +16,9 @@ use super::{Error, get_hash_key, get_str_conf, get_str_slice_conf};
 use async_trait::async_trait;
 use bstr::ByteSlice;
 use bytes::{Bytes, BytesMut};
+use flate2::Compression;
+use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
+use flate2::write::{GzEncoder, ZlibEncoder};
 use pingap_config::{PluginCategory, PluginConf};
 use pingap_core::{
     Ctx, HTTP_HEADER_TRANSFER_CHUNKED, ModifyResponseBody, Plugin,
@@ -26,6 +29,7 @@ use pingora::proxy::Session;
 use regex::Regex;
 use regex::bytes::RegexBuilder;
 use std::borrow::Cow;
+use std::io::{Read, Write};
 use std::sync::LazyLock;
 use tracing::{debug, warn};
 
@@ -134,6 +138,97 @@ fn parse_subs_filter(rule: &str) -> Option<SubFilterParams> {
 /// lever (2026-10-18 audit).
 const MAX_SUB_FILTER_BYTES: usize = 8 * 1024 * 1024;
 
+/// The content encodings the replacer can transparently decompress, replace
+/// and recompress. Anything else (`br`, `zstd`, multi-value encodings, ...)
+/// makes the whole response pass through untouched.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum ContentEncoding {
+    /// No meaningful encoding: run the replacement on the raw bytes.
+    #[default]
+    Plain,
+    /// `gzip` / `x-gzip`.
+    Gzip,
+    /// `deflate` (zlib wrapper; raw deflate is attempted as a fallback).
+    Deflate,
+}
+
+/// Classifies the `Content-Encoding` of a response.
+///
+/// Returns `None` when the encoding exists but cannot be handled: the caller
+/// must leave the response completely untouched (headers included) rather
+/// than corrupt it.
+fn classify_content_encoding(
+    headers: &http::HeaderMap,
+) -> Option<ContentEncoding> {
+    let value = headers
+        .get(http::header::CONTENT_ENCODING)?
+        .to_str()
+        .ok()?
+        .trim();
+    match value.to_ascii_lowercase().as_str() {
+        "" | "identity" => Some(ContentEncoding::Plain),
+        "gzip" | "x-gzip" => Some(ContentEncoding::Gzip),
+        "deflate" => Some(ContentEncoding::Deflate),
+        // `br`, `zstd`, multi-value (`gzip, br`) or anything unknown.
+        _ => None,
+    }
+}
+
+/// Makes the response headers consistent with a body that will be rewritten:
+/// the length can no longer be known up front, validators describing the old
+/// body must be weakened or dropped, and caches have to know the body varies
+/// with `Accept-Encoding` (the recompressed body differs from the origin's).
+/// `Content-Encoding` itself is kept: the body is recompressed with the same
+/// algorithm it arrived with.
+fn make_headers_consistent(header: &mut ResponseHeader) {
+    // The body length changes after the rewrite, and is unknowable before
+    // the compression finishes anyway.
+    header.remove_header(&http::header::CONTENT_LENGTH);
+    // An entity tag describing the origin body is wrong once the body is
+    // rewritten: weaken it (`W/`) instead of dropping it so conditional
+    // requests keep functioning.
+    if let Some(etag) = header
+        .headers
+        .get(http::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        && !etag.starts_with("W/")
+        && let Ok(value) = http::HeaderValue::from_str(&format!("W/{etag}"))
+    {
+        let _ = header.insert_header(http::header::ETAG, value);
+    }
+    // Integrity digests of the old body can no longer be correct.
+    header.remove_header("Content-MD5");
+    header.remove_header("Digest");
+    // The recompressed body differs from what the origin sent for other
+    // `Accept-Encoding` values, so every cache must key on it.
+    match header
+        .headers
+        .get(http::header::VARY)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+    {
+        None => {
+            let _ = header.insert_header(
+                http::header::VARY,
+                http::HeaderValue::from_static("Accept-Encoding"),
+            );
+        },
+        Some(vary) => {
+            let has = vary.split(',').any(|part| {
+                part.trim().eq_ignore_ascii_case("accept-encoding")
+            });
+            if !has
+                && let Ok(value) = http::HeaderValue::from_str(&format!(
+                    "{vary}, Accept-Encoding"
+                ))
+            {
+                let _ = header.insert_header(http::header::VARY, value);
+            }
+        },
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 struct SubFilterReplacer {
     filters: Vec<SubFilterParams>,
@@ -147,6 +242,9 @@ struct SubFilterReplacer {
     /// unreplaced: the response is already in flight, so the only alternative
     /// would be truncating it.
     passthrough: bool,
+    /// The upstream encoding of the buffered bytes, decided by
+    /// [`SubFilter::handle_response`] before the body arrives.
+    encoding: ContentEncoding,
 }
 
 impl ModifyResponseBody for SubFilterReplacer {
@@ -192,37 +290,134 @@ impl ModifyResponseBody for SubFilterReplacer {
         if !end_of_stream {
             return Ok(());
         }
-        let mut data = self.buffer.to_vec();
+        let raw = std::mem::take(&mut self.buffer);
+        match self.encoding {
+            ContentEncoding::Plain => {
+                let mut data = raw.to_vec();
+                self.apply_filters(&mut data);
+                *body = Some(Bytes::from(data));
+                Ok(())
+            },
+            ContentEncoding::Gzip | ContentEncoding::Deflate => {
+                // Decompress, replace, recompress. Every failure path falls
+                // back to the original compressed bytes with their
+                // `Content-Encoding` intact: the client can always decode
+                // the response, just without the replacement.
+                let Some(plaintext) = self.decompress(&raw) else {
+                    warn!(
+                        target: PLUGIN_ID,
+                        encoding = ?self.encoding,
+                        size = raw.len(),
+                        "failed to decompress the response body; \
+                         passing the compressed bytes through"
+                    );
+                    *body = Some(raw.freeze());
+                    return Ok(());
+                };
+                // The decompressed cap guards against compression bombs: a
+                // few MiB of gzip can expand to gigabytes, so the plaintext
+                // is bounded by the same cap as the raw buffer.
+                if plaintext.len() > MAX_SUB_FILTER_BYTES {
+                    warn!(
+                        target: PLUGIN_ID,
+                        size = plaintext.len(),
+                        "decompressed body exceeded the sub-filter cap; \
+                         passing the compressed bytes through"
+                    );
+                    *body = Some(raw.freeze());
+                    return Ok(());
+                }
+                let mut data = plaintext.clone();
+                self.apply_filters(&mut data);
+                if data == plaintext {
+                    // No rule matched: emit the origin bytes verbatim so the
+                    // response is byte-identical (ETag, digests, signatures).
+                    *body = Some(raw.freeze());
+                    return Ok(());
+                }
+                *body = Some(self.recompress(&data).unwrap_or_else(|_| {
+                    warn!(
+                        target: PLUGIN_ID,
+                        encoding = ?self.encoding,
+                        "failed to recompress the replaced body; \
+                         passing the compressed bytes through"
+                    );
+                    raw.clone().freeze()
+                }));
+                Ok(())
+            },
+        }
+    }
+    fn name(&self) -> &str {
+        "sub_filter"
+    }
+}
+
+impl SubFilterReplacer {
+    /// Runs every configured filter over `data` in order.
+    fn apply_filters(&self, data: &mut Vec<u8>) {
         for item in self.filters.iter() {
             if let Some(regex_pattern) = &item.regex_pattern {
                 // Handle regex-based replacement (subs_filter)
                 if item.flags.contains(&'g') {
                     // Global replacement - replace all occurrences
-                    data = regex_pattern
-                        .replace_all(&data, &item.replacement)
+                    *data = regex_pattern
+                        .replace_all(&data[..], &item.replacement)
                         .to_vec();
                 } else {
                     // Replace first occurrence only
-                    data = regex_pattern
-                        .replace(&data, &item.replacement)
+                    *data = regex_pattern
+                        .replace(&data[..], &item.replacement)
                         .to_vec();
                 }
             } else {
                 // Handle literal string replacement (sub_filter)
                 if item.flags.contains(&'g') {
                     // Global replacement
-                    data = data.replace(&item.pattern, &item.replacement);
+                    *data = data.replace(&item.pattern, &item.replacement);
                 } else {
                     // Replace first occurrence only
-                    data = data.replacen(&item.pattern, &item.replacement, 1);
+                    *data = data.replacen(&item.pattern, &item.replacement, 1);
                 }
             }
         }
-        *body = Some(Bytes::from(data));
-        Ok(())
     }
-    fn name(&self) -> &str {
-        "sub_filter"
+    /// Decompresses the buffered bytes into plaintext, or `None` when the
+    /// stream cannot be decoded. `deflate` is ambiguous in the wild, so the
+    /// zlib-wrapped form is tried first and raw deflate second.
+    fn decompress(&self, raw: &[u8]) -> Option<Vec<u8>> {
+        let decode = |decoder: &mut dyn Read| -> Option<Vec<u8>> {
+            let mut plaintext = Vec::new();
+            decoder.read_to_end(&mut plaintext).ok().map(|_| plaintext)
+        };
+        match self.encoding {
+            ContentEncoding::Plain => Some(raw.to_vec()),
+            ContentEncoding::Gzip => decode(&mut GzDecoder::new(raw)),
+            ContentEncoding::Deflate => decode(&mut ZlibDecoder::new(raw))
+                .or_else(|| decode(&mut DeflateDecoder::new(raw))),
+        }
+    }
+    /// Recompresses the replaced plaintext with the same algorithm the body
+    /// arrived with.
+    fn recompress(&self, plaintext: &[u8]) -> std::io::Result<Bytes> {
+        let bytes = match self.encoding {
+            ContentEncoding::Plain => plaintext.to_vec(),
+            ContentEncoding::Gzip => {
+                let mut encoder =
+                    GzEncoder::new(Vec::new(), Compression::default());
+                encoder.write_all(plaintext)?;
+                encoder.finish()?
+            },
+            ContentEncoding::Deflate => {
+                // flate2's `Zlib*` types are the zlib-wrapped `deflate`
+                // encoding; the raw form was handled by the decoder above.
+                let mut encoder =
+                    ZlibEncoder::new(Vec::new(), Compression::default());
+                encoder.write_all(plaintext)?;
+                encoder.finish()?
+            },
+        };
+        Ok(Bytes::from(bytes))
     }
 }
 
@@ -279,6 +474,9 @@ impl TryFrom<&PluginConf> for SubFilter {
                 // (`ctx.add_modify_body_handler(.., self.replacer.clone())`),
                 // so the passthrough latch never leaks across requests.
                 passthrough: false,
+                // Decided per-response in `handle_response`; the clone the
+                // handler registry takes inherits it.
+                encoding: ContentEncoding::Plain,
             },
             hash_value,
             status_codes,
@@ -334,6 +532,19 @@ impl Plugin for SubFilter {
         }
 
         if is_matched {
+            // Encodings the plugin cannot round-trip (`br`, `zstd`,
+            // multi-value) must pass through untouched: rewriting the
+            // headers would leave a response the client can still decode
+            // but whose bytes were never substituted anyway.
+            let Some(encoding) =
+                classify_content_encoding(&upstream_response.headers)
+            else {
+                debug!(
+                    target: PLUGIN_ID,
+                    "unsupported content encoding, passing through"
+                );
+                return Ok(ResponsePluginResult::Unchanged);
+            };
             // Oversized responses are passed through: the replacer buffers
             // the whole body and copies it once per rule.
             if let Some(value) =
@@ -348,9 +559,9 @@ impl Plugin for SubFilter {
                 );
                 return Ok(ResponsePluginResult::Unchanged);
             }
-            // Remove content-length since we're modifying the body
-            upstream_response.remove_header(&http::header::CONTENT_LENGTH);
-            // Switch to chunked transfer encoding
+            make_headers_consistent(upstream_response);
+            // Switch to chunked transfer encoding: the final length is only
+            // known once the (re)compression finishes.
             let _ = upstream_response.insert_header(
                 http::header::TRANSFER_ENCODING,
                 HTTP_HEADER_TRANSFER_CHUNKED.1.clone(),
@@ -358,7 +569,10 @@ impl Plugin for SubFilter {
             // Set up the response body modifier
             ctx.add_modify_body_handler(
                 PLUGIN_ID,
-                Box::new(self.replacer.clone()),
+                Box::new(SubFilterReplacer {
+                    encoding,
+                    ..self.replacer.clone()
+                }),
             );
             return Ok(ResponsePluginResult::Modified);
         }
@@ -416,6 +630,7 @@ mod tests {
             filters: vec![parse_subs_filter(rule).expect("the rule parses")],
             buffer: BytesMut::new(),
             passthrough: false,
+            encoding: ContentEncoding::Plain,
         }
     }
 
@@ -498,6 +713,244 @@ mod tests {
             body,
             Some(Bytes::from_static(b"Pingap")),
             "the tail is forwarded, never rewritten"
+        );
+    }
+
+    /// Compresses `data` with gzip (or zlib-wrapped deflate) for tests.
+    fn gzip(data: &[u8]) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn deflate(data: &[u8]) -> Vec<u8> {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn gunzip(data: &[u8]) -> Vec<u8> {
+        let mut decoder = GzDecoder::new(data);
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).unwrap();
+        out
+    }
+
+    fn zlib_decode(data: &[u8]) -> Vec<u8> {
+        let mut decoder = ZlibDecoder::new(data);
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).unwrap();
+        out
+    }
+
+    /// Feeds the whole `raw` body through the replacer at end of stream.
+    fn run(replacer: &mut SubFilterReplacer, raw: &[u8]) -> Bytes {
+        let session = test_session();
+        let mut body = Some(Bytes::copy_from_slice(raw));
+        replacer
+            .handle(&session, &mut body, true)
+            .expect("the body is handled");
+        body.expect("the body is emitted")
+    }
+
+    /// gzip body: decompressed, replaced, recompressed as gzip.
+    #[test]
+    fn gzip_bodies_are_decompressed_replaced_and_recompressed() {
+        let mut replacer = new_replacer("sub_filter 'Google' 'PingWAF' g");
+        replacer.encoding = ContentEncoding::Gzip;
+        let raw = gzip(b"Hello Google");
+        let out = run(&mut replacer, &raw);
+        assert_ne!(out, raw, "the body is rewritten, not passed through");
+        assert_eq!(gunzip(&out), b"Hello PingWAF");
+    }
+
+    /// No rule hit: the origin compressed bytes go out byte-identical, so
+    /// ETags and digests of the origin body stay valid.
+    #[test]
+    fn gzip_bodies_without_matches_pass_through_byte_identical() {
+        let mut replacer = new_replacer("sub_filter 'Nomatch' 'PingWAF' g");
+        replacer.encoding = ContentEncoding::Gzip;
+        let raw = gzip(b"Hello Google");
+        assert_eq!(run(&mut replacer, &raw), raw);
+    }
+
+    /// A body that claims gzip but is not decodable must reach the client
+    /// exactly as it arrived, `Content-Encoding` still claiming gzip.
+    #[test]
+    fn corrupt_gzip_is_passed_through_with_its_encoding() {
+        let mut replacer = new_replacer("sub_filter 'Google' 'PingWAF' g");
+        replacer.encoding = ContentEncoding::Gzip;
+        let raw = vec![0xde, 0xad, 0xbe, 0xef, 0x00, 0xff];
+        assert_eq!(run(&mut replacer, &raw), raw);
+    }
+
+    /// `deflate` (zlib wrapper) bodies round-trip the same way as gzip.
+    #[test]
+    fn deflate_bodies_are_replaced() {
+        let mut replacer = new_replacer("sub_filter 'Google' 'PingWAF' g");
+        replacer.encoding = ContentEncoding::Deflate;
+        let raw = deflate(b"Hello Google");
+        let out = run(&mut replacer, &raw);
+        assert_eq!(zlib_decode(&out), b"Hello PingWAF");
+    }
+
+    /// Raw deflate (no zlib header) is tried as the fallback for `deflate`.
+    #[test]
+    fn raw_deflate_bodies_are_replaced() {
+        let mut encoder = flate2::read::DeflateEncoder::new(
+            &b"Hello Google"[..],
+            Compression::default(),
+        );
+        let mut raw = Vec::new();
+        encoder.read_to_end(&mut raw).unwrap();
+        let mut replacer = new_replacer("sub_filter 'Google' 'PingWAF' g");
+        replacer.encoding = ContentEncoding::Deflate;
+        assert_eq!(zlib_decode(&run(&mut replacer, &raw)), b"Hello PingWAF");
+    }
+
+    /// A response header with the given `Content-Encoding`.
+    fn header_with_encoding(encoding: &str) -> ResponseHeader {
+        let mut header =
+            ResponseHeader::build(200, None).expect("the header builds");
+        header
+            .insert_header("Content-Encoding", encoding)
+            .expect("the header is valid");
+        header
+    }
+
+    /// Runs `handle_response` synchronously on a stub response.
+    fn run_handle_response(
+        plugin: &SubFilter,
+        header: &mut ResponseHeader,
+    ) -> ResponsePluginResult {
+        let mut session = test_session();
+        let mut ctx = Ctx::new();
+        tokio::runtime::Runtime::new()
+            .expect("the test runtime starts")
+            .block_on(plugin.handle_response(&mut session, &mut ctx, header))
+            .expect("the response is handled")
+    }
+
+    /// Encodings the plugin cannot round-trip must leave the response —
+    /// headers included — completely alone.
+    #[test]
+    fn brotli_bodies_are_not_touched() {
+        let plugin =
+            SubFilter::new(&PluginConf::default()).expect("the conf parses");
+        let mut header = header_with_encoding("br");
+        let result = run_handle_response(&plugin, &mut header);
+        assert_eq!(result, ResponsePluginResult::Unchanged);
+        assert_eq!(
+            header
+                .headers
+                .get(http::header::CONTENT_LENGTH)
+                .map(|v| v.to_str().unwrap()),
+            None,
+            "no header must be rewritten for an unsupported encoding"
+        );
+    }
+
+    /// A multi-value encoding (`gzip, br`) is equally unsupported.
+    #[test]
+    fn multi_value_encoding_is_not_touched() {
+        let plugin =
+            SubFilter::new(&PluginConf::default()).expect("the conf parses");
+        let mut header = header_with_encoding("gzip, br");
+        let result = run_handle_response(&plugin, &mut header);
+        assert_eq!(result, ResponsePluginResult::Unchanged);
+    }
+
+    /// A compressed body whose plaintext would blow the cap falls back to
+    /// the original compressed bytes: never a truncated response.
+    #[test]
+    fn decompressed_size_cap_falls_back_to_the_compressed_bytes() {
+        let plaintext = vec![0u8; 9 * 1024 * 1024];
+        let raw = gzip(&plaintext);
+        assert!(
+            raw.len() <= MAX_SUB_FILTER_BYTES,
+            "the compressed bytes must fit the cap for the test to isolate \
+             the decompressed check"
+        );
+        let mut replacer = new_replacer("sub_filter 'Nomatch' 'PingWAF' g");
+        replacer.encoding = ContentEncoding::Gzip;
+        assert_eq!(run(&mut replacer, &raw), raw);
+    }
+
+    /// After a rewrite the header set must be consistent: weakened ETag,
+    /// no stale digests, a `Vary: Accept-Encoding`, the encoding preserved
+    /// and the (now stale) length removed.
+    #[test]
+    fn headers_are_made_consistent_after_a_rewrite() {
+        let mut header = header_with_encoding("gzip");
+        header
+            .insert_header("Content-Length", "123")
+            .expect("the header is valid");
+        header
+            .insert_header("ETag", "\"abc123\"")
+            .expect("the header is valid");
+        header
+            .insert_header("Content-MD5", "ZGVhZGJlZg==")
+            .expect("the header is valid");
+        make_headers_consistent(&mut header);
+        assert!(
+            header.headers.get(http::header::CONTENT_LENGTH).is_none(),
+            "the stale length is removed"
+        );
+        assert_eq!(
+            header
+                .headers
+                .get(http::header::ETAG)
+                .and_then(|v| v.to_str().ok()),
+            Some("W/\"abc123\""),
+            "the entity tag is weakened"
+        );
+        assert!(header.headers.get("Content-MD5").is_none());
+        assert!(
+            header
+                .headers
+                .get(http::header::VARY)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.split(',').any(|part| part
+                    .trim()
+                    .eq_ignore_ascii_case("accept-encoding"))),
+            "Vary gains Accept-Encoding"
+        );
+        assert_eq!(
+            header
+                .headers
+                .get(http::header::CONTENT_ENCODING)
+                .and_then(|v| v.to_str().ok()),
+            Some("gzip"),
+            "the encoding is preserved: the body is recompressed"
+        );
+    }
+
+    /// An already-weak ETag is not double-weakened.
+    #[test]
+    fn weak_etags_are_left_alone() {
+        let mut header =
+            ResponseHeader::build(200, None).expect("the header builds");
+        header
+            .insert_header("ETag", "W/\"abc\"")
+            .expect("the header is valid");
+        header
+            .insert_header("Vary", "Accept-Encoding, User-Agent")
+            .expect("the header is valid");
+        make_headers_consistent(&mut header);
+        assert_eq!(
+            header
+                .headers
+                .get(http::header::ETAG)
+                .and_then(|v| v.to_str().ok()),
+            Some("W/\"abc\"")
+        );
+        assert_eq!(
+            header
+                .headers
+                .get(http::header::VARY)
+                .and_then(|v| v.to_str().ok()),
+            Some("Accept-Encoding, User-Agent"),
+            "an existing Accept-Encoding in Vary is not duplicated"
         );
     }
 }
