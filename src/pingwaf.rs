@@ -659,6 +659,16 @@ fn cached_rules_to_pingap_config(
                 // never said", and the global switch could no longer reach a
                 // pool that was created before it existed.
                 verify_cert: up.verify_cert,
+                // The pool's address family, in the only spelling
+                // `UpstreamConf` has: `ipv4` pins IPv4, while `auto` and
+                // `ipv6` leave it unset. `auto` then prefers IPv4 in the data
+                // plane - which is what fixes the 503 on a host without an
+                // IPv6 route. A true IPv6-only pin needs its own
+                // `UpstreamConf` field; see the delivery note.
+                ipv4_only: (up.address_family == "ipv4").then_some(true),
+                // Keep the three-value spelling too: `ipv6` must reach the
+                // data plane as a pin, and `auto` stays auto.
+                address_family: Some(up.address_family.clone()),
                 connection_timeout: if up.connection_timeout_ms > 0 {
                     Some(Duration::from_millis(up.connection_timeout_ms as u64))
                 } else {
@@ -1864,6 +1874,7 @@ mod tests {
             algo: String::new(),
             sni: String::new(),
             verify_cert: None,
+            address_family: "auto".to_string(),
             is_default: false,
         }
     }

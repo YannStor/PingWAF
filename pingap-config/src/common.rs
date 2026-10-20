@@ -342,6 +342,12 @@ pub struct UpstreamConf {
     /// Whether to only use IPv4 addresses
     pub ipv4_only: Option<bool>,
 
+    /// Address family for a domain upstream: `auto` (prefer IPv4, fall back to
+    /// IPv6), `ipv4`, or `ipv6`. Newer spelling of [`Self::ipv4_only`]; when
+    /// both are present this one wins.
+    #[serde(default)]
+    pub address_family: Option<String>,
+
     /// Enable request tracing
     pub enable_tracer: Option<bool>,
 
@@ -1030,6 +1036,18 @@ impl LocationConf {
                         "strip_prefix needs a prefix path, '{path}' is an \
                          exact or regex match"
                     ),
+                });
+            }
+            // `path = "/"` matches everything and stripping it leaves an empty
+            // path that normalises back to `/`, so the switch would silently
+            // do nothing. The API rejects the combination; config files are
+            // rejected here for the same reason (2026-10-20 follow-up).
+            if path == "/" {
+                return Err(Error::Invalid {
+                    message:
+                        "strip_prefix has no effect on path '/', remove it or \
+                              give the location a longer prefix"
+                            .to_string(),
                 });
             }
         }

@@ -718,6 +718,11 @@ message UpstreamConfig {
   string sni = 10;
   optional bool verify_cert = 11;
   bool is_default = 12;
+  // Address family the data plane may resolve this pool's origin names to:
+  // "auto" (default, prefer IPv4), "ipv4" (A records only) or "ipv6" (AAAA
+  // records only). Empty is treated as "auto" by the agent, so an older
+  // control plane that never sets it keeps the IPv4-first behaviour.
+  string address_family = 13;
 }
 
 message UpstreamPeer {

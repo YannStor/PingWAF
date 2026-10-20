@@ -45,7 +45,19 @@ pub mod agents {
         pub version: Option<String>,
         pub os_info: Option<String>,
         pub cpu_cores: Option<i32>,
+        /// Legacy single figure. Written with the capacity at registration and
+        /// with the usage from the first heartbeat on, which is exactly the
+        /// ambiguity `total_memory_bytes` and `used_memory_bytes` exist to
+        /// remove. Kept — and still written by both paths — for
+        /// readers that have not moved to the split columns.
         pub memory_bytes: Option<i64>,
+        /// RAM the node has, as reported by the registration RPC. `None` on a
+        /// row that has not re-registered since migration 000064 and has no
+        /// retained probe sample to backfill from.
+        pub total_memory_bytes: Option<i64>,
+        /// RAM in use on the node, as reported by the last heartbeat. `None`
+        /// until the first heartbeat after migration 000064.
+        pub used_memory_bytes: Option<i64>,
         pub status: String,
         pub api_key_id: Option<Uuid>,
         pub config_hash: Option<String>,

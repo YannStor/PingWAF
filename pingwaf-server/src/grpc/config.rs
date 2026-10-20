@@ -696,6 +696,10 @@ fn pools_to_proto(
             // `RuleBundle.origin_verify_cert`.
             verify_cert: pool.verify_cert.or(site_default),
             is_default: pool.is_default,
+            // Passed through verbatim: the column carries the same three
+            // values the data plane parses, and the CHECK constraint keeps
+            // anything else out of the row.
+            address_family: pool.address_family.clone(),
         });
     }
     configs
@@ -1980,6 +1984,7 @@ mod tests {
             health_check_timeout_ms: 3000,
             health_check_unhealthy_threshold: 2,
             health_check_healthy_threshold: 1,
+            address_family: "auto".into(),
             is_default,
             created_at: Utc::now(),
         }

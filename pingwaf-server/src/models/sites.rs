@@ -176,6 +176,12 @@ pub mod site_upstream_pools {
         pub health_check_unhealthy_threshold: i32,
         /// Consecutive successful probes before a node is marked healthy.
         pub health_check_healthy_threshold: i32,
+        /// Address family the agent may resolve this pool's origin names to:
+        /// `auto` (default) prefers IPv4 and keeps IPv6 only for a host
+        /// without an A record, `ipv4`/`ipv6` pin one family. An IP literal
+        /// origin ignores it. The DB CHECK constraint accepts exactly these
+        /// three values.
+        pub address_family: String,
         pub is_default: bool,
         pub created_at: DateTimeUtc,
     }

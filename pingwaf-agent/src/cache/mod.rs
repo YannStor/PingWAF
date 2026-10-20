@@ -902,8 +902,21 @@ pub struct UpstreamConfig {
     /// pin this pool regardless of that switch.
     #[serde(default)]
     pub verify_cert: Option<bool>,
+    /// Address family the data plane may resolve this pool's origin names to:
+    /// `auto` (prefer IPv4, keep IPv6 only for a host without an A record),
+    /// `ipv4` or `ipv6`. Defaulted so a `sites.json` written before the field
+    /// existed still loads, and so does a bundle from a control plane that
+    /// does not send it.
+    #[serde(default = "default_address_family")]
+    pub address_family: String,
     #[serde(default)]
     pub is_default: bool,
+}
+
+/// The family an upstream uses when nothing pins one. Same default the column
+/// carries, so an upgraded agent and an un-upgraded control plane agree.
+fn default_address_family() -> String {
+    "auto".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2726,6 +2739,14 @@ impl RuleCache {
             // here would pin every pool to lenient and make the global
             // switch unreachable.
             verify_cert: u.verify_cert,
+            // An older control plane sends nothing, and an empty string is
+            // not a family: both fall back to the default instead of
+            // reaching the data plane as an unparsable value.
+            address_family: if u.address_family.is_empty() {
+                default_address_family()
+            } else {
+                u.address_family.clone()
+            },
             is_default: u.is_default,
         }
     }
@@ -3338,6 +3359,7 @@ mod tests {
                         algo: "hash:header:x-user".to_string(),
                         sni: "origin.example.com".to_string(),
                         verify_cert: Some(false),
+                        address_family: "auto".to_string(),
                         is_default: true,
                     }],
                     routes: vec![RouteConfig {
@@ -3629,6 +3651,42 @@ mod tests {
         u.algo = "hash:cookie:session".to_string();
         let converted = RuleCache::convert_upstream_config(&u);
         assert_eq!(converted.algo, "hash:cookie:session");
+    }
+
+    /// The address family survives the wire, and both an older control plane
+    /// (empty field) and a cache written before the field existed land on
+    /// `auto` rather than on an unparsable empty string.
+    #[test]
+    fn proto_address_family_defaults_to_auto() {
+        let mut u = proto::UpstreamConfig::default();
+        assert_eq!(
+            "auto",
+            RuleCache::convert_upstream_config(&u).address_family
+        );
+
+        u.address_family = "ipv6".to_string();
+        assert_eq!(
+            "ipv6",
+            RuleCache::convert_upstream_config(&u).address_family
+        );
+    }
+
+    /// A pool cached before `address_family` existed must still load, and
+    /// must come back as `auto` - the family that fixed the IPv6 503.
+    #[test]
+    fn cached_upstream_without_address_family_is_auto() {
+        let json = r#"{
+            "name": "default",
+            "peers": [],
+            "algorithm": "LbRoundRobin",
+            "health_check": null,
+            "connection_timeout_ms": 0,
+            "read_timeout_ms": 0,
+            "write_timeout_ms": 0
+        }"#;
+        let upstream: UpstreamConfig =
+            serde_json::from_str(json).expect("an old cache entry must load");
+        assert_eq!("auto", upstream.address_family);
     }
 
     // ─── Crash injection: torn writes, tampering, backup fallback ───

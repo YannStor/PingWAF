@@ -17,6 +17,7 @@ use snafu::Snafu;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod address_family;
 mod backend_circuit_state;
 mod backend_stats;
 mod hash_strategy;
@@ -108,6 +109,7 @@ pub trait UpstreamProvider: Send + Sync {
     }
 }
 
+pub use address_family::{AddressFamily, select_family};
 pub use backend_stats::{BackendStats, WindowStats};
 pub use hash_strategy::HashStrategy;
 pub use upstream::*;

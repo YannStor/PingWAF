@@ -347,10 +347,45 @@ pub struct CreatePoolRequest {
     /// Default 1.
     #[serde(default)]
     pub health_check_healthy_threshold: Option<i32>,
+    /// Address family the agent may resolve this pool's origin names to:
+    /// `auto` (default) prefers IPv4, `ipv4`/`ipv6` pin one family.
+    #[serde(default)]
+    pub address_family: Option<String>,
 }
 
 fn default_lb_algorithm() -> String {
     "round_robin".to_string()
+}
+
+/// The `address_family` values the API accepts; mirrors the data plane's
+/// `pingap_upstream::AddressFamily`.
+const ADDRESS_FAMILY_AUTO: &str = "auto";
+const ADDRESS_FAMILY_IPV4: &str = "ipv4";
+const ADDRESS_FAMILY_IPV6: &str = "ipv6";
+
+/// Validates and normalizes a pool's `address_family`.
+///
+/// `None` (field absent) means "keep what is stored", so create and update
+/// share this: the caller passes the value it is about to persist.
+fn normalize_address_family(
+    value: Option<&str>,
+) -> Result<Option<String>, ApiError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim().to_ascii_lowercase();
+    if ![
+        ADDRESS_FAMILY_AUTO,
+        ADDRESS_FAMILY_IPV4,
+        ADDRESS_FAMILY_IPV6,
+    ]
+    .contains(&value.as_str())
+    {
+        return Err(ApiError::BadRequest(format!(
+            "address_family '{value}' is invalid; expected auto, ipv4 or ipv6"
+        )));
+    }
+    Ok(Some(value))
 }
 
 /// Deserializes a present-but-nullable field into `Option<Option<T>>`.
@@ -400,6 +435,23 @@ pub struct UpdatePoolRequest {
     pub health_check_unhealthy_threshold: Option<i32>,
     #[serde(default)]
     pub health_check_healthy_threshold: Option<i32>,
+    /// `None` leaves the stored family alone; an empty or unknown value is
+    /// rejected rather than treated as "unset", because "no family" is not a
+    /// state the data plane can act on.
+    #[serde(default)]
+    pub address_family: Option<String>,
+}
+
+/// A pool plus its origin nodes, as `list_pools` returns them.
+///
+/// The members are inlined under `upstreams` so the console can render a
+/// pool's nodes without a second request per pool; `flatten` keeps the
+/// response shape a superset of the bare pool row the other endpoints return.
+#[derive(Debug, Serialize)]
+pub(crate) struct PoolWithMembers {
+    #[serde(flatten)]
+    pool: site_upstream_pools::Model,
+    upstreams: Vec<site_upstreams::Model>,
 }
 
 /// A pool's health check posture with defaults applied, ready for storage
@@ -1040,6 +1092,10 @@ async fn create(
         health_check_timeout_ms: Set(defaults.timeout_ms),
         health_check_unhealthy_threshold: Set(defaults.unhealthy_threshold),
         health_check_healthy_threshold: Set(defaults.healthy_threshold),
+        // The same default a pool created through the API gets: IPv4 first,
+        // which is what makes a domain origin reachable on a host without an
+        // IPv6 route.
+        address_family: Set(ADDRESS_FAMILY_AUTO.to_string()),
         is_default: Set(true),
         created_at: Set(timestamp),
     }
@@ -1501,7 +1557,7 @@ async fn list_pools(
     State(state): State<AppState>,
     current: AuthUser,
     Path(site_id): Path<String>,
-) -> Result<Json<Vec<site_upstream_pools::Model>>, ApiError> {
+) -> Result<Json<Vec<PoolWithMembers>>, ApiError> {
     let id = parse_uuid(&site_id, "site id")?;
     load_site_read(&state.db, id, &current).await?;
 
@@ -1514,7 +1570,31 @@ async fn list_pools(
     // `ORDER BY is_default DESC` puts the default first on PostgreSQL; the
     // in-memory pass keeps that guarantee independent of SQL boolean order.
     rows.sort_by_key(|row| !row.is_default);
-    Ok(Json(rows))
+
+    // One `pool_id IN (...)` query for every pool's nodes rather than one
+    // query per pool: a site with twelve pools would otherwise run thirteen
+    // round trips to render a single page.
+    let mut members: HashMap<Uuid, Vec<site_upstreams::Model>> = HashMap::new();
+    if !rows.is_empty() {
+        let pool_ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
+        let nodes = site_upstreams::Entity::find()
+            .filter(site_upstreams::Column::PoolId.is_in(pool_ids))
+            .order_by_asc(site_upstreams::Column::CreatedAt)
+            .all(&state.db)
+            .await?;
+        for node in nodes {
+            members.entry(node.pool_id).or_default().push(node);
+        }
+    }
+
+    let payload = rows
+        .into_iter()
+        .map(|pool| {
+            let upstreams = members.remove(&pool.id).unwrap_or_default();
+            PoolWithMembers { pool, upstreams }
+        })
+        .collect();
+    Ok(Json(payload))
 }
 
 /// `POST /api/v1/sites/{site_id}/upstream-pools`
@@ -1530,7 +1610,12 @@ async fn create_pool(
     let name = payload.name.trim().to_string();
     let lb_algorithm = payload.lb_algorithm.trim().to_string();
     let sni = non_empty(&payload.sni);
-    validate_pool(&name, &lb_algorithm, sni.as_deref())?;
+    // Omitted means `auto`: the family that fixes the IPv6-unreachable 503
+    // without every existing pool having to opt in.
+    let address_family =
+        normalize_address_family(payload.address_family.as_deref())?
+            .unwrap_or_else(|| ADDRESS_FAMILY_AUTO.to_string());
+    validate_pool(&name, &lb_algorithm, sni.as_deref(), &address_family)?;
 
     let mut health_check = PoolHealthCheck::default_values();
     health_check.enabled = payload.health_check_enabled.unwrap_or(false);
@@ -1568,6 +1653,7 @@ async fn create_pool(
         health_check_timeout_ms: Set(health_check.timeout_ms),
         health_check_unhealthy_threshold: Set(health_check.unhealthy_threshold),
         health_check_healthy_threshold: Set(health_check.healthy_threshold),
+        address_family: Set(address_family),
         is_default: Set(false),
         created_at: Set(Utc::now()),
     }
@@ -1630,6 +1716,11 @@ async fn update_pool(
         // deployment default.
         active.verify_cert = Set(verify_cert);
     }
+    if let Some(address_family) =
+        normalize_address_family(payload.address_family.as_deref())?
+    {
+        active.address_family = Set(address_family);
+    }
     active.health_check_enabled = Set(health_check.enabled);
     active.health_check_path = Set(health_check.path);
     active.health_check_interval_seconds = Set(health_check.interval_seconds);
@@ -1643,6 +1734,7 @@ async fn update_pool(
         &updated.name,
         &updated.lb_algorithm,
         updated.sni.as_deref(),
+        &updated.address_family,
     )?;
 
     tracing::info!(site_id = %id, pool = %target, "origin pool updated");
@@ -2207,7 +2299,12 @@ fn validate_pool(
     name: &str,
     lb_algorithm: &str,
     sni: Option<&str>,
+    address_family: &str,
 ) -> Result<(), ApiError> {
+    // Rejects anything the data plane would have to guess at; a stored value
+    // always passes because it was normalized on the way in (and the column
+    // carries the same three-value CHECK constraint).
+    normalize_address_family(Some(address_family))?;
     if name.is_empty() || name.len() > 100 {
         return Err(ApiError::BadRequest(
             "pool name must be 1-100 characters".to_string(),
@@ -2799,6 +2896,117 @@ pub async fn touch_site(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three accepted families, their normalization, and a rejection for
+    /// anything else - including the empty string, which must not silently
+    /// mean "unset": the data plane has no address family for it.
+    #[test]
+    fn pool_address_family_accepts_three_values_only() {
+        assert_eq!(
+            Some("auto".to_string()),
+            normalize_address_family(Some("auto")).expect("auto is valid")
+        );
+        assert_eq!(
+            Some("ipv4".to_string()),
+            normalize_address_family(Some(" IPv4 ")).expect("padding and case")
+        );
+        assert_eq!(
+            Some("ipv6".to_string()),
+            normalize_address_family(Some("ipv6")).expect("ipv6 is valid")
+        );
+        assert_eq!(None, normalize_address_family(None).expect("absent"));
+
+        for invalid in ["", "dual", "ipv4_only", "6"] {
+            let err = normalize_address_family(Some(invalid))
+                .expect_err("must be rejected");
+            assert!(
+                matches!(err, ApiError::BadRequest(_)),
+                "{invalid:?} must be a 400, got {err:?}"
+            );
+        }
+    }
+
+    /// A create request without the field keeps the column default, and an
+    /// invalid value never reaches the insert.
+    #[test]
+    fn create_pool_request_address_family() {
+        let absent: CreatePoolRequest =
+            serde_json::from_str(r#"{"name":"origin"}"#)
+                .expect("name is the only required field");
+        assert_eq!(None, absent.address_family);
+        // Absent is not a family the helper invents; `create_pool` turns it
+        // into the column default, which is the same string.
+        assert_eq!(
+            None,
+            normalize_address_family(absent.address_family.as_deref())
+                .expect("absent is valid")
+        );
+
+        let invalid: CreatePoolRequest = serde_json::from_str(
+            r#"{"name":"origin","address_family":"dual"}"#,
+        )
+        .expect("deserialization is not the validator");
+        assert!(normalize_address_family(invalid.address_family.as_deref())
+            .is_err());
+    }
+
+    /// `list_pools` returns each pool with its nodes inlined under
+    /// `upstreams`, and the pool's own fields stay at the top level (the
+    /// response is a superset of the bare pool row).
+    #[test]
+    fn pool_with_members_inlines_upstreams() {
+        let pool_id = Uuid::new_v4();
+        let payload = PoolWithMembers {
+            pool: site_upstream_pools::Model {
+                id: pool_id,
+                site_id: Uuid::nil(),
+                name: "origin".into(),
+                lb_algorithm: "round_robin".into(),
+                sni: None,
+                verify_cert: None,
+                health_check_enabled: false,
+                health_check_path: "/".into(),
+                health_check_interval_seconds: 10,
+                health_check_timeout_ms: 3000,
+                health_check_unhealthy_threshold: 2,
+                health_check_healthy_threshold: 1,
+                address_family: "ipv4".into(),
+                is_default: true,
+                created_at: Utc::now(),
+            },
+            upstreams: vec![site_upstreams::Model {
+                id: Uuid::new_v4(),
+                site_id: Uuid::nil(),
+                pool_id,
+                name: "node".into(),
+                address: "127.0.0.1:8080".into(),
+                weight: 1,
+                tls: false,
+                health_status: "unknown".into(),
+                created_at: Utc::now(),
+            }],
+        };
+        let json = serde_json::to_value(&payload).expect("serializes");
+        // The pool's fields are at the top level, not nested under `pool`.
+        assert_eq!(Some("origin"), json.get("name").and_then(|v| v.as_str()));
+        assert_eq!(
+            Some("ipv4"),
+            json.get("address_family").and_then(|v| v.as_str())
+        );
+        assert_eq!(
+            Some(true),
+            json.get("is_default").and_then(|v| v.as_bool())
+        );
+        let upstreams = json
+            .get("upstreams")
+            .and_then(|v| v.as_array())
+            .expect("members are inlined under `upstreams`");
+        assert_eq!(1, upstreams.len());
+        assert_eq!(
+            Some("127.0.0.1:8080"),
+            upstreams[0].get("address").and_then(|v| v.as_str())
+        );
+    }
 
     /// Three-state semantics of the nullable site field: a missing key must
     /// leave the stored value alone, a present `null` clears the site's
