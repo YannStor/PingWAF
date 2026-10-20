@@ -68,10 +68,13 @@ verbatim for reference and attribution, and is not maintained here.
   syntax delimits them with `'`), regexes must compile, status codes
   100–599; `rules: []` counts as "no policy". The policy becomes a per-site
   `sub_filter` plugin instance in the generated agent configuration.
-  Known limitations: the plugin does not inspect `content-encoding`, so
-  `gzip`/`br` responses are not rewritten (patterns cannot match compressed
-  bytes and the body is re-chunked); responses larger than 8 MiB pass
-  through untouched.
+  Historical limitation: the plugin did not inspect `content-encoding`, so
+  `gzip`/`br` responses were not rewritten (patterns could not match
+  compressed bytes and the body was re-chunked), and responses larger than
+  8 MiB passed through untouched. Superseded in
+  [Unreleased](#unreleased): `gzip`/`deflate` are now decoded, filtered and
+  re-encoded (the 8 MiB cap now bounds the **decompressed** plaintext);
+  `br`/`zstd` still pass through.
 
 ### Changed
 

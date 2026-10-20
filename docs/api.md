@@ -585,10 +585,33 @@ List origin pools for a site, default pool first. Each pool:
   "lb_algorithm": "round_robin",
   "sni": null,
   "verify_cert": null,
+  "address_family": "auto",
   "is_default": true,
-  "created_at": "2024-01-01T00:00:00Z"
+  "created_at": "2024-01-01T00:00:00Z",
+  "upstreams": []
 }
 ```
+
+`address_family` — which address family the agent may resolve this pool's
+origin names to:
+
+| Value | Meaning |
+|---|---|
+| `auto` (default) | Prefer IPv4, fall back to IPv6 only when the host has no A record; an IP-literal origin ignores it |
+| `ipv4` | Pin IPv4 |
+| `ipv6` | Pin IPv6 |
+
+It is the three-valued replacement for the legacy boolean `ipv4_only` in the
+generated agent configuration (where the old switch is still accepted and kept
+in sync by the builders; when both are present `address_family` wins). The pool
+API itself only accepts `address_family`. Create and update share the same
+three-value validation — an empty or unknown value is rejected with `400`
+rather than treated as "unset".
+
+`upstreams` is an inline member array: each pool's origin nodes are embedded in
+the pool object, so the console can render a pool's members without a second
+request per pool. It is also how you inspect the members you must drain before
+a delete — removing a pool is refused with `409` while origin nodes remain in it.
 
 ### POST /sites/{site_id}/upstream-pools
 
