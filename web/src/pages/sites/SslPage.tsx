@@ -30,6 +30,7 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { SkeletonRows, SkeletonStat } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
+import { CertWarningsBadge } from '@/components/ssl/CertWarnings'
 import { sslApi, sslKeys, daysUntilExpiry, expiryTone } from '@/api/ssl'
 import { MtlsMaterial } from '@/pages/sites/MtlsMaterial'
 import { useCanWrite, useNow } from '@/hooks'
@@ -435,6 +436,7 @@ export function SslPage() {
                   {t('pages.ssl.current')}
                 </Badge>
               )}
+              <CertWarningsBadge warnings={c.warnings} />
             </div>
             <p className="truncate text-xs text-fg-subtle">
               {c.issuer || t('pages.ssl.unknownIssuer')}
@@ -961,6 +963,20 @@ export function SslPage() {
         {details && (
           <dl className="grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-2">
             <Detail label={t('pages.ssl.domain')} value={details.domain} mono />
+            {details.warnings && details.warnings.length > 0 && (
+              <div className="sm:col-span-2">
+                <p className="text-[13px] font-medium text-fg-warning">
+                  {details.warnings.length > 1
+                    ? t('pages.ssl.certDomainWarnings', { count: details.warnings.length })
+                    : t('pages.ssl.certDomainWarning')}
+                </p>
+                <ul className="mt-1 list-inside list-disc text-xs text-fg-subtle">
+                  {details.warnings.map((warning) => (
+                    <li key={warning}>{warning}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <Detail label={t('pages.ssl.issuer')} value={details.issuer || '—'} />
             <Detail label={t('pages.ssl.expires')} value={formatDateTime(details.expires_at)} />
             <Detail

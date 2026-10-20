@@ -39,6 +39,7 @@ export function defaultWafSettings(): WafSettings {
     mode: 'off',
     paranoia_level: 2,
     advanced_mode: false,
+    body_stage_timeout_secs: 30,
     monitor_categories: [],
     monitor_stacks: [],
     monitor_managed_rules: [],

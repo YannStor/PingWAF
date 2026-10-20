@@ -523,6 +523,8 @@ export interface WafSettings {
   /** Detection sensitivity 1-4; decoupled from rule severity. */
   paranoia_level: number
   advanced_mode: boolean
+  /** Body-stage inspection budget in seconds (1-30); 0/missing means 30. */
+  body_stage_timeout_secs: number
   monitor_categories: WafCategory[] | string[]
   monitor_stacks: WafStack[] | string[]
   monitor_managed_rules: string[]
@@ -539,6 +541,7 @@ export interface UpdateWafSettingsRequest {
   mode?: WafMode | string
   paranoia_level?: number
   advanced_mode?: boolean
+  body_stage_timeout_secs?: number
   monitor_categories?: string[]
   monitor_stacks?: string[]
   monitor_managed_rules?: string[]
@@ -1345,6 +1348,11 @@ export interface SslCertificate {
   failure_reason: string | null
   has_certificate: boolean
   has_private_key: boolean
+  /**
+   * Non-fatal notices from the server (e.g. a SAN not served by this site).
+   * Saving is never rejected because of these.
+   */
+  warnings?: string[]
   created_at: string
   updated_at: string
 }

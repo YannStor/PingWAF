@@ -2,17 +2,18 @@ import { useEffect, useState } from 'react'
 import { Navigate, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Cloud, Gauge, Lightning, ShieldCheck, Sliders, Warning } from '@phosphor-icons/react'
+import { Cloud, Gauge, Lightning, ShieldCheck, Sliders, Timer, Warning } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Tabs } from '@/components/ui/Tabs'
 import { Switch } from '@/components/ui/Switch'
 import { Card, CardBody } from '@/components/ui/Card'
 import { SkeletonCard } from '@/components/ui/Skeleton'
+import { Input } from '@/components/ui/Input'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { useToast } from '@/components/ui/Toast'
 import { challengeApi, challengeKeys } from '@/api/challenge'
 import { wafSettingsApi, wafSettingsKeys } from '@/api/wafSettings'
-import { RULE_MODES, type RuleMode } from '@/api/types'
+import { RULE_MODES, type RuleMode, type WafSettings } from '@/api/types'
 import { useCanWrite, useWafSettingsMutation } from '@/hooks'
 import { cn } from '@/lib/utils'
 import { PostureOverview, type PostureTarget } from './PostureOverview'
@@ -21,6 +22,18 @@ import { CustomRulesPanel } from './CustomRulesPanel'
 import { MitigationPanel } from './MitigationPanel'
 
 type ProtectionTab = 'managed' | 'custom' | 'cc'
+
+/** Body-stage inspection budget bounds — must match the server contract. */
+const BODY_STAGE_TIMEOUT_MIN = 1
+const BODY_STAGE_TIMEOUT_MAX = 30
+const BODY_STAGE_TIMEOUT_DEFAULT = 30
+
+function clampBodyStageTimeout(value: number): number {
+  return Math.min(
+    Math.max(Math.round(value), BODY_STAGE_TIMEOUT_MIN),
+    BODY_STAGE_TIMEOUT_MAX,
+  )
+}
 
 const PROTECTION_TABS: ProtectionTab[] = ['managed', 'custom', 'cc']
 
@@ -332,6 +345,12 @@ export function ProtectionPage() {
             </span>
           </div>
         )}
+        <BodyStageTimeoutCard
+          settings={settings}
+          canWrite={canWrite}
+          pending={updateSettings.isPending}
+          onCommit={(secs) => updateSettings.mutate({ body_stage_timeout_secs: secs })}
+        />
         </div>
       </section>
 
@@ -492,6 +511,77 @@ function EnforcementModeCard() {
         </div>
       </CardBody>
     </Card>
+  )
+}
+
+/**
+ * Body-stage inspection budget — how long the data plane may hold a request
+ * while inspecting its body before failing open. Not a downstream timeout.
+ */
+function BodyStageTimeoutCard({
+  settings,
+  canWrite,
+  pending,
+  onCommit,
+}: {
+  settings?: WafSettings
+  canWrite: boolean
+  pending: boolean
+  onCommit: (secs: number) => void
+}) {
+  const { t } = useTranslation()
+  const serverValue = settings?.body_stage_timeout_secs
+  const committed = serverValue && serverValue > 0 ? serverValue : BODY_STAGE_TIMEOUT_DEFAULT
+  const [draft, setDraft] = useState<string>(String(committed))
+
+  useEffect(() => {
+    setDraft(String(committed))
+  }, [committed])
+
+  const commit = () => {
+    const parsed = Number(draft)
+    if (!Number.isFinite(parsed)) {
+      setDraft(String(committed))
+      return
+    }
+    const next = clampBodyStageTimeout(parsed)
+    setDraft(String(next))
+    if (next !== committed) onCommit(next)
+  }
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-line bg-elevated px-4 py-3">
+      <span className="flex min-w-0 items-center gap-3">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-recessed text-fg-subtle">
+          <Timer weight="duotone" className="h-5 w-5" />
+        </span>
+        <span className="min-w-0">
+          <span className="block text-sm font-semibold text-fg-strong">
+            {t('pages.waf.bodyStageTimeout')}
+          </span>
+          <span className="mt-0.5 block max-w-md text-[13px] text-fg-subtle">
+            {t('pages.waf.bodyStageTimeoutHint')}
+          </span>
+        </span>
+      </span>
+      <Input
+        type="number"
+        className="w-24 text-right"
+        min={BODY_STAGE_TIMEOUT_MIN}
+        max={BODY_STAGE_TIMEOUT_MAX}
+        step={1}
+        disabled={!canWrite || pending}
+        aria-label={t('pages.waf.bodyStageTimeout')}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.currentTarget.blur()
+          }
+        }}
+      />
+    </div>
   )
 }
 

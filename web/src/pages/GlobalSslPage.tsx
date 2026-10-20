@@ -13,6 +13,7 @@ import {
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { ErrorState } from '@/components/ErrorState'
+import { CertWarningsBadge } from '@/components/ssl/CertWarnings'
 import { Badge, type BadgeTone } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
@@ -162,6 +163,12 @@ export function GlobalSslPage() {
       setDialogOpen(false)
       setForm(emptyForm())
       invalidate()
+      if (cert.warnings && cert.warnings.length > 0) {
+        toast.warning(
+          t('pages.ssl.certDomainWarnings', { count: cert.warnings.length }),
+          cert.warnings.join('\n'),
+        )
+      }
     },
     onError: (e) => setFormError(errorMessage(e)),
   })
@@ -286,7 +293,10 @@ export function GlobalSslPage() {
       sortable: true,
       cell: (r) => (
         <div className="flex flex-col gap-0.5">
-          <span className="font-medium text-fg-strong">{r.domain}</span>
+          <span className="flex items-center gap-2 font-medium text-fg-strong">
+            {r.domain}
+            <CertWarningsBadge warnings={r.warnings} />
+          </span>
           <span className="text-xs text-fg-subtle">
             {t(`pages.sslGlobal.status_${r.status}`, { defaultValue: r.status })}
           </span>
