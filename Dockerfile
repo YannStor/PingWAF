@@ -31,7 +31,7 @@ RUN npm run build
 
 # ─── Stage 2: Rust Builder ───────────────────────────────────────────────────
 # 改进：版本从 1.98.0 升至 1.98.1，与 release.yml 的 dtolnay/rust-toolchain@1.98.1 对齐
-FROM mirror.gcr.io/library/rust:1.98.1-bookworm AS builder
+FROM mirror.gcr.io/library/rust:1.99.1-bookworm AS builder
 
 # SYNC: keep this list in lockstep with ci.yml / release.yml
 RUN apt-get update && apt-get install -y --no-install-recommends \
