@@ -65,6 +65,14 @@ pub struct AgentResponse {
     pub site_id: Option<Uuid>,
     pub site_domain: Option<String>,
     pub hostname: String,
+    /// Display name of the node.
+    ///
+    /// The inventory stores one identity per row — `hostname` — and has no
+    /// separate name column, so this mirrors it. It is emitted because the
+    /// node view (`GET /system/nodes`) names the field `name`; carrying both
+    /// keeps one shape for the console without breaking callers that already
+    /// read `hostname`.
+    pub name: String,
     pub ip_address: String,
     /// Egress address as seen from the public internet, empty when unknown.
     pub public_ip: Option<String>,
@@ -78,6 +86,9 @@ pub struct AgentResponse {
     pub api_key_id: Option<Uuid>,
     pub config_hash: Option<String>,
     pub last_heartbeat: Option<DateTime<Utc>>,
+    /// Same instant as `last_heartbeat`, under the name the node view
+    /// (`GET /system/nodes`) uses. `null` = the agent has never heartbeated.
+    pub last_seen: Option<DateTime<Utc>>,
     /// When the agent last applied a full site config; null = never synced.
     pub last_config_sync_at: Option<DateTime<Utc>>,
     /// When the agent last applied a per-site rule bundle; null = never.
@@ -516,6 +527,7 @@ async fn enrich(
             id: row.id,
             site_domain: row.site_id.and_then(|id| domains.get(&id).cloned()),
             site_id: row.site_id,
+            name: row.hostname.clone(),
             hostname: row.hostname,
             ip_address: row.ip_address,
             public_ip: row.public_ip,
@@ -528,6 +540,7 @@ async fn enrich(
             api_key_id: row.api_key_id,
             config_hash: row.config_hash,
             last_heartbeat: row.last_heartbeat,
+            last_seen: row.last_heartbeat,
             last_config_sync_at: row.last_config_sync_at,
             last_policy_sync_at: row.last_policy_sync_at,
             registered_at: row.registered_at,
