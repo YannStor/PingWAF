@@ -371,6 +371,9 @@ pub(crate) async fn purge_target_agents(
         Some(id) => Condition::any()
             .add(agent::Column::SiteId.eq(id))
             .add(agent::Column::SiteId.is_null()),
+        // Reserved for a future global purge: no HTTP caller passes `None`
+        // today (`POST /cache/purge` requires `site_id`). Kept because a
+        // global endpoint would select exactly this set.
         None => Condition::any().add(agent::Column::SiteId.is_null()),
     };
     Ok(agent::Entity::find().filter(condition).all(db).await?)

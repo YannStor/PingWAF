@@ -160,10 +160,11 @@ Set via: `Sites → [site] → Web Protection → Custom rules`
 
 ### Rule modes
 
-Every rule has its own `mode`: `off` (not enforced — today the edge treats a
-rule-level `off` like `monitor`), `monitor` (detect and record, never enforce)
-or `block` (enforce the rule's action); `enabled: false` is what takes a rule
-out of evaluation. A brand-new site is seeded with the built-in rule set in
+Every rule has its own `mode`: `off` (fully disabled — the rule is not
+compiled, not evaluated and produces no security event or log entry),
+`monitor` (detect and record, never enforce) or `block` (enforce the rule's
+action); `enabled: false` is equivalent to `off` and also takes the rule out
+of evaluation. A brand-new site is seeded with the built-in rule set in
 `block`, so switching the WAF on protects it immediately; restored defaults on
 an existing site come back as `monitor` so a repair never starts blocking
 traffic that site was serving unfiltered.

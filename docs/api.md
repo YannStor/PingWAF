@@ -1267,7 +1267,7 @@ values as the site mode:
 
 | `mode` | Behaviour |
 |--------|-----------|
-| `off` | Not enforced. The edge currently treats a rule-level `off` exactly like `monitor` (detected, scored and logged, never blocked); to take a rule out of evaluation entirely use `enabled: false`. |
+| `off` | Fully disabled: the rule is **not compiled, not evaluated, and produces no security event or log entry**. `enabled: false` is equivalent — the rule is skipped when the compiled rule set is built. To observe a rule without enforcing it, use `monitor` instead. |
 | `monitor` | The rule still evaluates and its match is recorded, but it never blocks or challenges. |
 | `block` | The rule enforces the action in its `action` field. |
 
@@ -1472,6 +1472,16 @@ Purge cached content.
   "pattern": "/images/*"
 }
 ```
+
+**Delivery scope (D09).** `site_id` is required. The command reaches the
+agents **bound to that site plus the global (unbound) agents** (the latter
+serve the site through their key's owner). An agent bound to *another* site
+is never included, so one tenant's purge cannot spill onto another tenant's
+edges.
+
+There is no request form that purges "everything on every edge": the
+`purge_target_agents(None)` branch inside the control plane is reserved for a
+future global endpoint and has no HTTP caller today.
 
 ### GET /cache/rules
 

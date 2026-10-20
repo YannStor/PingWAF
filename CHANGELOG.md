@@ -8,6 +8,31 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+### Changed
+
+- **Rule-level `off` is now truly off.** A custom or built-in rule set to
+  `mode: "off"` is no longer compiled, evaluated or logged at the edge — it
+  produces no verdict, no security event and no matching cost. Previously an
+  `off` rule behaved like `monitor` (detected and logged, never blocked);
+  `enabled: false` keeps its existing meaning and is equivalent to `off`.
+  Operators who relied on `off` rules appearing in the security event stream
+  should switch those rules to `monitor` instead.
+- **Error pages stop echoing internals.** The built-in 502/503/504 error page
+  no longer renders the internal error chain (`context`/`cause`), plugin names
+  or upstream addresses; it shows a fixed classification (Upstream Timeout /
+  Upstream Unavailable / Upstream Connection Error / Upstream Protocol Error /
+  Internal Server Error) plus the `request_id`. The original error is written
+  to the server log only — debug incidents by matching the `request_id`
+  against the log.
+- **Cache purge targeting is scoped (D09 follow-up).** `site_id` is required;
+  the command is delivered to the agents bound to that site plus the global
+  (unbound) agents. An agent bound to another site is never included, so one
+  tenant's purge cannot spill onto another tenant's edges. There is no
+  "purge every edge" request form today (the internal unbound-only branch has
+  no HTTP caller).
+
 ## [PingWAF 0.27.10] — 2026-10-19
 
 ### Fixed

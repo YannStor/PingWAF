@@ -701,6 +701,31 @@ psql "postgres://pingwaf:password@localhost:5432/pingwaf" -c "SELECT 1"
   ([System observation](./profiling.md#get-apiv1systemmetrics)) to see whether
   it is process RSS or the host that is under pressure
 
+### Error pages & debugging
+
+When the edge cannot serve a request through the upstream (502/503/504, …),
+the built-in error page shows a fixed, category-level message only:
+
+- `Upstream Timeout` — upstream read/write/connect timeout
+- `Upstream Unavailable` — connection refused / unreachable / TLS handshake failure
+- `Upstream Connection Error` — upstream read/write failure
+- `Upstream Protocol Error` — HTTP/2 protocol violation
+- `Internal Server Error` — anything else
+
+The page also renders the `request_id`, and the response carries the error
+class in the `X-Pingap-EType` header. It **never** shows the internal error
+chain, plugin names or upstream addresses — the original error goes to the
+server log only. To debug, take the `request_id` from the page and grep the
+server log with it:
+
+```bash
+grep "<request_id>" /var/log/pingwaf/server.log
+```
+
+The log line holds the original error text, the error type and the site, which
+is enough to tell a slow origin from a dead one without exposing internals to
+visitors.
+
 ### Health check endpoint
 
 ```bash
