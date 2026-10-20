@@ -8,6 +8,29 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.27.12] — 2026-10-20
+
+### Added
+
+- **Per-site WAF body-stage timeout.** `waf_settings.body_stage_timeout_secs`
+  (1–30, default 30; `0` on the API resets it) bounds how long the data
+  plane may withhold a request body while inspecting it; the deadline is
+  resolved per request from that site's `SiteContext` (unset falls back to
+  the plugin-conf value, then 30), so sites never share a window. Downstream
+  connection timeouts remain listener-level — they cannot vary per host.
+  The WAF protection page exposes the field.
+- **Certificate hostname warnings.** Certificate write and read responses
+  carry `warnings` for every hostname the certificate covers that the site
+  does not serve (`site.domain` + `alternate_domains`, wildcards honoured:
+  a site wildcard covers any depth, a certificate wildcard only one label).
+  Saving is never blocked; the console shows a warning badge and a toast.
+
+### Changed
+
+- Upgrading to 0.27.12 materialises `waf_settings.body_stage_timeout_secs = 30`
+  into existing rows (the column default). Shorten it per site if a smaller
+  window is needed.
+
 ## [PingWAF 0.27.11] — 2026-10-20
 
 ### Changed
