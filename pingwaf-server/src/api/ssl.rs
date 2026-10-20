@@ -65,6 +65,14 @@ pub struct CertificateResponse {
     pub failure_reason: Option<String>,
     pub has_certificate: bool,
     pub has_private_key: bool,
+    /// Advisory only: certificate hostnames this site does not serve. Filled
+    /// in on the create/update responses, where a mismatched certificate is a
+    /// likely operator mistake — but never turned into a rejection, since
+    /// uploading the certificate before adding its hostname (or for another
+    /// site) is a legitimate workflow. Omitted from the read endpoints, which
+    /// have no single site to compare against.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<Vec<String>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -87,6 +95,7 @@ impl From<site_certificates::Model> for CertificateResponse {
             failure_reason: m.failure_reason,
             has_certificate: m.cert_pem.is_some(),
             has_private_key: m.key_pem.is_some(),
+            warnings: None,
             created_at: m.created_at,
             updated_at: m.updated_at,
         }
@@ -209,6 +218,103 @@ fn split_domains(value: &str) -> Vec<String> {
         .split(',')
         .map(|part| part.trim().to_string())
         .filter(|part| !part.is_empty())
+        .collect()
+}
+
+/// True when the wildcard `cert` (`*.example.com`) matches the concrete
+/// hostname `host` under the usual single-label rule: a certificate wildcard
+/// covers exactly one label, never `a.b.example.com`. Both inputs are already
+/// lower-cased.
+fn wildcard_covers(cert: &str, host: &str) -> bool {
+    let Some(parent) = cert.strip_prefix("*.") else {
+        return false;
+    };
+    // The wildcard label itself never matches its own parent
+    // (`*.example.com` does not cover `example.com`).
+    let Some(label) = host.strip_suffix(parent).and_then(|head| {
+        head.strip_suffix('.').filter(|label| !label.is_empty())
+    }) else {
+        return false;
+    };
+    // Exactly one label, and not a wildcard: `a.b.example.com` and
+    // `*.example.com` are both outside a `*.example.com` certificate.
+    !label.is_empty() && !label.contains('.') && !label.contains('*')
+}
+
+/// Whether `served` (a hostname the site answers for) is covered by the
+/// certificate hostname `cert`. The two directions are not symmetric: a
+/// wildcard on the certificate side covers any single label under it, and a
+/// wildcard on the site side covers a concrete hostname the certificate
+/// names (the site serves `*.example.com`, so `api.example.com` is served).
+fn cert_name_covers_site_name(cert: &str, served: &str) -> bool {
+    cert == served
+        || wildcard_covers(cert, served)
+        || wildcard_covers(served, cert)
+}
+
+/// Certificate hostnames the site does not serve.
+///
+/// The control plane attaches a certificate to whatever hostnames it names,
+/// but the site only answers for `site.domain` plus its `alternate_domains`.
+/// A certificate carrying a hostname outside that set is almost always a
+/// mistake — the wrong site, or a copy-pasted SAN — and used to be saved
+/// silently. It is reported as a warning rather than rejected: naming a host
+/// the operator is about to add, or one served through a separate site, is a
+/// legitimate workflow, and taking HTTPS down over it would be worse.
+///
+/// Returns the uncovered certificate hostnames in certificate order with
+/// duplicates removed (both sides are de-duplicated and lower-cased before
+/// the comparison).
+fn uncovered_certificate_domains(
+    cert_domain: &str,
+    site_domain: &str,
+    alternate: &[String],
+) -> Vec<String> {
+    let served: Vec<String> = std::iter::once(site_domain.to_ascii_lowercase())
+        .chain(alternate.iter().map(|domain| domain.to_ascii_lowercase()))
+        .filter(|domain| !domain.is_empty())
+        .collect();
+
+    let mut uncovered: Vec<String> = Vec::new();
+    for name in split_domains(cert_domain) {
+        let name = name.to_ascii_lowercase();
+        if served
+            .iter()
+            .any(|host| cert_name_covers_site_name(&name, host))
+        {
+            continue;
+        }
+        if !uncovered.iter().any(|existing| existing == &name) {
+            uncovered.push(name);
+        }
+    }
+    uncovered
+}
+
+/// Builds the advisory warnings for a saved certificate, logging each one.
+/// Never fails and never blocks the save.
+fn certificate_warnings(
+    site_id: Uuid,
+    site: &site::Model,
+    cert_domain: &str,
+) -> Vec<String> {
+    let warnings = uncovered_certificate_domains(
+        cert_domain,
+        &site.domain,
+        &site.alternate_domains,
+    );
+    for domain in &warnings {
+        tracing::warn!(
+            site_id = %site_id,
+            domain = %domain,
+            "certificate covers hosts the site does not serve"
+        );
+    }
+    warnings
+        .iter()
+        .map(|domain| {
+            format!("certificate domain {domain} is not served by this site")
+        })
         .collect()
 }
 
@@ -412,10 +518,12 @@ async fn create_certificate(
 
     let model = insert_certificate(&state.db, &site, payload).await?;
     announce_certificate_created(&state, &model, Some(&current.email)).await;
-    Ok(
-        (StatusCode::CREATED, Json(CertificateResponse::from(model)))
-            .into_response(),
-    )
+    // Advisory only: a certificate naming hosts this site does not serve is
+    // saved anyway, with the mismatch reported back to the operator.
+    let warnings = certificate_warnings(site.id, &site, &model.domain);
+    let mut response = CertificateResponse::from(model);
+    response.warnings = Some(warnings);
+    Ok((StatusCode::CREATED, Json(response)).into_response())
 }
 
 /// Validates and stores one certificate row.
@@ -703,7 +811,13 @@ async fn update_certificate(
     touch_site(&state, id).await?;
     notify_config_changed(&state, id, Some(&current.email)).await;
 
-    Ok(Json(CertificateResponse::from(updated)))
+    // The warning is evaluated against the certificate as it is stored now,
+    // not against the payload alone: an update that only replaces the PEM
+    // still has to surface a hostname mismatch introduced earlier.
+    let warnings = certificate_warnings(site.id, &site, &updated.domain);
+    let mut response = CertificateResponse::from(updated);
+    response.warnings = Some(warnings);
+    Ok(Json(response))
 }
 
 /// `DELETE /api/v1/sites/{site_id}/certificates/{cert_id}`
@@ -990,10 +1104,10 @@ async fn create_global_certificate(
         tracing::info!(site_id = %site_id, cert_id = %model.id, "certificate activated");
     }
 
-    Ok(
-        (StatusCode::CREATED, Json(CertificateResponse::from(model)))
-            .into_response(),
-    )
+    let warnings = certificate_warnings(site_id, &site, &model.domain);
+    let mut response = CertificateResponse::from(model);
+    response.warnings = Some(warnings);
+    Ok((StatusCode::CREATED, Json(response)).into_response())
 }
 
 /// `GET /api/v1/certificates/{cert_id}`
@@ -1500,5 +1614,125 @@ mod tests {
             let err = validate_cert_domain_list(raw).unwrap_err();
             assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{raw:?}");
         }
+    }
+
+    /* ── Certificate / site hostname mismatch warnings ─────────────── */
+
+    fn warnings_for(cert: &str, site: &str, alternate: &[&str]) -> Vec<String> {
+        let alternate: Vec<String> =
+            alternate.iter().map(|d| (*d).to_string()).collect();
+        uncovered_certificate_domains(cert, site, &alternate)
+    }
+
+    /// A certificate whose hostnames are a subset of the site's must not warn:
+    /// this is the overwhelmingly common case and a false positive here would
+    /// train operators to ignore the field.
+    #[test]
+    fn a_certificate_inside_the_site_hostnames_warns_about_nothing() {
+        assert!(
+            warnings_for("api.example.com", "api.example.com", &[]).is_empty()
+        );
+        assert!(warnings_for(
+            "api.example.com,www.example.com",
+            "api.example.com",
+            &["www.example.com"]
+        )
+        .is_empty());
+        // Same name on both sides, in any order.
+        assert!(warnings_for(
+            "www.example.com,api.example.com",
+            "api.example.com",
+            &["www.example.com"]
+        )
+        .is_empty());
+    }
+
+    /// A certificate covering a hostname the site does not serve is reported
+    /// but never rejected — the caller saves it and decides.
+    #[test]
+    fn a_superset_certificate_warns_about_each_extra_hostname() {
+        assert_eq!(
+            warnings_for(
+                "api.example.com,api.other.com",
+                "api.example.com",
+                &[]
+            ),
+            vec!["api.other.com".to_string()]
+        );
+        // Certificate order is preserved, duplicates collapse.
+        assert_eq!(
+            warnings_for(
+                "b.other.com,a.other.com,b.other.com",
+                "api.example.com",
+                &[]
+            ),
+            vec!["b.other.com".to_string(), "a.other.com".to_string()]
+        );
+    }
+
+    /// `*` covers exactly one label — a certificate wildcard over the site's
+    /// concrete hostname, and a site wildcard over a concrete certificate
+    /// hostname.
+    #[test]
+    fn a_wildcard_covers_exactly_one_label_in_both_directions() {
+        // Certificate wildcard, concrete site hostname: covered.
+        assert!(warnings_for("*.example.com", "a.example.com", &[]).is_empty());
+        // ... but not the parent itself, and not a deeper name.
+        assert_eq!(
+            warnings_for("*.example.com", "example.com", &[]),
+            vec!["*.example.com".to_string()]
+        );
+        assert_eq!(
+            warnings_for("*.example.com", "a.b.example.com", &[]),
+            vec!["*.example.com".to_string()]
+        );
+        // Site wildcard, concrete certificate hostname: covered (the site
+        // serves every single-label host under its wildcard).
+        assert!(warnings_for("a.example.com", "*.example.com", &[]).is_empty());
+        assert!(warnings_for("*.example.com", "*.example.com", &[]).is_empty());
+        // A different parent is never covered.
+        assert_eq!(
+            warnings_for("*.example.com", "a.other.com", &[]),
+            vec!["*.example.com".to_string()]
+        );
+        // Alternate hostnames widen the site side just like the primary one.
+        assert!(warnings_for(
+            "api.example.com",
+            "other.com",
+            &["*.example.com"]
+        )
+        .is_empty());
+    }
+
+    /// Hostnames are compared case-insensitively: a certificate stored in
+    /// mixed case must not produce a warning against a lower-case site.
+    #[test]
+    fn hostname_comparison_is_case_insensitive() {
+        assert!(
+            warnings_for("API.Example.COM", "api.example.com", &[]).is_empty()
+        );
+        assert!(
+            warnings_for("api.example.com", "API.EXAMPLE.COM", &[]).is_empty()
+        );
+        assert!(warnings_for("*.Example.com", "a.example.com", &[]).is_empty());
+        // A real mismatch still reports the normalised (lower-case) name.
+        assert_eq!(
+            warnings_for("API.Other.COM", "api.example.com", &[]),
+            vec!["api.other.com".to_string()]
+        );
+    }
+
+    /// `split_domains` (not a single-hostname parse) feeds the comparison, so
+    /// a comma-separated certificate list is checked hostname by hostname.
+    #[test]
+    fn a_certificate_list_is_checked_hostname_by_hostname() {
+        assert_eq!(
+            warnings_for(
+                "api.example.com, api.other.com ,www.other.com",
+                "api.example.com",
+                &[]
+            ),
+            vec!["api.other.com".to_string(), "www.other.com".to_string()]
+        );
     }
 }
