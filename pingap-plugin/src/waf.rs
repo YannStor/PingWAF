@@ -299,6 +299,11 @@ struct SiteContext {
     /// Site-level deep body inspection (advanced mode): inspect request
     /// bodies even when the plugin-level `inspect_body` switch is off.
     inspect_body: bool,
+    /// Seconds this site's withheld-body stage may run (1..=30, 0/unset
+    /// → 30). Snapshotted per site so concurrent requests on sites with
+    /// different settings never share a value (see
+    /// [`effective_body_stage_timeout`]).
+    body_stage_timeout_secs: u32,
     /// Sites behind a CDN/proxy: derive the client IP from a forwarded
     /// header instead of the TCP peer; IP rules, rate limits and logs all
     /// key on the resolved address.
@@ -346,6 +351,10 @@ impl SiteContext {
             inspect_body: waf_cfg
                 .filter(|cfg| cfg.enabled)
                 .is_some_and(|cfg| cfg.advanced_mode),
+            body_stage_timeout_secs: effective_body_stage_timeout(
+                waf_cfg.map(|cfg| cfg.body_stage_timeout_secs),
+                None,
+            ),
             proxy_trust: ProxyTrust::new(
                 site_rules.proxy_trust.enabled,
                 site_rules.proxy_trust.effective_header(),
@@ -1717,6 +1726,27 @@ fn stage_deadline_timeout(configured: Option<Duration>) -> Duration {
     configured
         .unwrap_or(Duration::from_secs(DEFERRED_BODY_MAX_STAGE_SECS))
         .min(Duration::from_secs(DEFERRED_BODY_MAX_STAGE_SECS))
+}
+
+/// Resolves the seconds a withheld-body stage may run for one request.
+///
+/// The site value wins; the plugin's global conf value is the fallback and
+/// "neither" means the 30s default. A 0 site value counts as unset (the
+/// proto defines it that way), and anything above the 30s ceiling is
+/// clamped. Pure so the per-site resolution is unit-testable.
+fn effective_body_stage_timeout(site: Option<u32>, global: Option<i64>) -> u32 {
+    let max = DEFERRED_BODY_MAX_STAGE_SECS as u32;
+    let resolve = |secs: Option<u64>| {
+        secs.filter(|v| *v > 0)
+            .map_or(max, |v| v.min(max as u64) as u32)
+    };
+    // A 0 site value means "unset" on the wire: fall back to the global
+    // conf, else the 30s default.
+    let site = site.filter(|v| *v > 0);
+    match site {
+        Some(site) => resolve(Some(site as u64)),
+        None => resolve(global.map(|g| g.max(0) as u64)),
+    }
 }
 
 /// Concurrent withheld-body staging is capped: each entry may hold the whole
@@ -3417,7 +3447,13 @@ impl Plugin for WafPlugin {
                         request_data: request_data.clone(),
                     }),
                     created_at: Instant::now(),
-                    deadline: Instant::now() + self.body_stage_timeout,
+                    // Per-site stage timeout, snapshotted from the request's
+                    // own site context (fallback: the plugin's global value).
+                    deadline: Instant::now()
+                        + Duration::from_secs(effective_body_stage_timeout(
+                            context.as_ref().map(|c| c.body_stage_timeout_secs),
+                            Some(self.body_stage_timeout.as_secs() as i64),
+                        ) as u64),
                 },
             );
         }
@@ -3924,6 +3960,39 @@ ml_threshold = 0.75
             monitor_categories,
             monitor_stacks,
             monitor_managed_rules: Vec::new(),
+            body_stage_timeout_secs: 30,
+        }
+    }
+
+    /// A minimal site: the WAF config carries the knobs under test,
+    /// everything else is empty/disabled.
+    fn site_rules(waf: Option<CacheWafConfig>) -> CacheSiteRules {
+        CacheSiteRules {
+            site_id: "site-1".into(),
+            domain: "example.com".into(),
+            alternate_domains: Vec::new(),
+            status: pingwaf_agent::cache::site_status::ACTIVE.into(),
+            waf_config: waf,
+            rate_limit_rules: Vec::new(),
+            ip_access_rules: Vec::new(),
+            geo_config: None,
+            cache_rules: Vec::new(),
+            challenge_config: None,
+            rewrite_rules: Vec::new(),
+            error_pages: Vec::new(),
+            ssl_config: None,
+            upstreams: Vec::new(),
+            routes: Vec::new(),
+            bot_protection: None,
+            basic_auth: None,
+            observation_mode: false,
+            cache_settings: None,
+            proxy_trust: pingwaf_agent::cache::ProxyTrustConfig {
+                enabled: false,
+                header: String::new(),
+                last_hop_only: true,
+                trusted_ranges: Vec::new(),
+            },
         }
     }
 
@@ -4472,6 +4541,65 @@ inspect_body = true"###,
             Duration::from_secs(10),
             stage_deadline_timeout(Some(Duration::from_secs(10)))
         );
+    }
+
+    #[test]
+    fn two_sites_keep_their_own_body_stage_timeout() {
+        // Two sites compiled from their own configs resolve their own
+        // stage deadline: the value lives in each site's context, not in
+        // shared state, so the requests never leak into each other.
+        let mut cfg_a = cache_waf_config(false, Vec::new(), Vec::new());
+        cfg_a.body_stage_timeout_secs = 5;
+        let mut cfg_b = cache_waf_config(false, Vec::new(), Vec::new());
+        cfg_b.body_stage_timeout_secs = 30;
+
+        let site_a = SiteContext::build(&site_rules(Some(cfg_a)));
+        let site_b = SiteContext::build(&site_rules(Some(cfg_b)));
+        assert_eq!(5, site_a.body_stage_timeout_secs);
+        assert_eq!(30, site_b.body_stage_timeout_secs);
+
+        // The deadline each site's staged body gets is derived from its
+        // own context value; the global plugin conf does not override it.
+        let global = Some(10i64);
+        assert_eq!(
+            Duration::from_secs(5),
+            Duration::from_secs(effective_body_stage_timeout(
+                Some(site_a.body_stage_timeout_secs),
+                global
+            ) as u64)
+        );
+        assert_eq!(
+            Duration::from_secs(30),
+            Duration::from_secs(effective_body_stage_timeout(
+                Some(site_b.body_stage_timeout_secs),
+                global
+            ) as u64)
+        );
+    }
+
+    #[test]
+    fn unset_site_timeout_falls_back_to_the_global_default() {
+        // No site config at all -> the site context carries the 30s
+        // default, which wins over the global conf.
+        let site = SiteContext::build(&site_rules(None));
+        assert_eq!(30, site.body_stage_timeout_secs);
+        assert_eq!(
+            30,
+            effective_body_stage_timeout(
+                Some(site.body_stage_timeout_secs),
+                Some(10)
+            )
+        );
+        // A request with no site context falls back to the global plugin
+        // conf value; else the 30s default.
+        assert_eq!(10, effective_body_stage_timeout(None, Some(10)));
+        // A site value of 0 means "unset" on the wire -> global, else 30.
+        assert_eq!(10, effective_body_stage_timeout(Some(0), Some(10)));
+        assert_eq!(30, effective_body_stage_timeout(Some(0), None));
+        // Neither site nor global -> the 30s default.
+        assert_eq!(30, effective_body_stage_timeout(None, None));
+        // Above the ceiling -> clamped to 30s.
+        assert_eq!(30, effective_body_stage_timeout(Some(120), Some(5)));
     }
 
     #[tokio::test]

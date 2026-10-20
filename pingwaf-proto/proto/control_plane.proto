@@ -439,6 +439,12 @@ message WafConfig {
   // Individual managed rule ids (e.g. "PINGWAF-1010") downgraded to
   // monitor-only at this site. Unknown ids are ignored by the data plane.
   repeated string monitor_managed_rules = 44;
+
+  // How long the data plane may withhold a request body while inspecting it
+  // (seconds, 1-30). 0/unset means "use the data-plane default" (30). This is
+  // a per-site WAF setting, not a downstream connection timeout: downstream
+  // timeouts belong to the listener and cannot vary per host.
+  uint32 body_stage_timeout_secs = 45;
 }
 
 enum WafMode {

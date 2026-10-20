@@ -314,6 +314,11 @@ pub mod site_status {
     pub const PENDING: &str = "pending";
 }
 
+/// Default body-withholding window, matching the data-plane default.
+fn default_body_stage_timeout() -> u32 {
+    30
+}
+
 fn default_site_status() -> String {
     site_status::ACTIVE.to_string()
 }
@@ -353,6 +358,10 @@ pub struct WafConfig {
     pub ml_model_path: String,
     pub ml_threshold: f64,
     pub anomaly_threshold: u32,
+    /// Seconds the data plane may withhold a body while inspecting it.
+    /// Caches written before this field existed default to 30.
+    #[serde(default = "default_body_stage_timeout")]
+    pub body_stage_timeout_secs: u32,
     /// Site-level WAF grading. Defaults keep old on-disk caches (written
     /// before these fields existed) enforcing everything.
     #[serde(default)]
@@ -2427,6 +2436,12 @@ impl RuleCache {
             ml_model_path: w.ml_model_path.clone(),
             ml_threshold: w.ml_threshold,
             anomaly_threshold: w.anomaly_threshold,
+            // 0 means "unset" on the wire; keep the data-plane default.
+            body_stage_timeout_secs: if w.body_stage_timeout_secs == 0 {
+                30
+            } else {
+                w.body_stage_timeout_secs
+            },
             advanced_mode: w.advanced_mode,
             monitor_categories: w.monitor_categories.clone(),
             monitor_stacks: w.monitor_stacks.clone(),

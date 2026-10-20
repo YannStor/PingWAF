@@ -1,5 +1,5 @@
-//! Site-level WAF grading settings: advanced mode and per-category/stack
-//! monitor lists.
+//! Site-level WAF grading settings: advanced mode, per-category/stack monitor
+//! lists and the body-withholding window used by body inspection.
 
 use axum::extract::{Path, State};
 use axum::routing::get;
@@ -27,6 +27,27 @@ pub const CATEGORIES: [&str; 9] = [
 /// with `StackSet::parse_name` in `pingwaf-waf`.
 pub const STACKS: [&str; 4] = ["java", "php", "python", "node"];
 
+/// Default (and maximum) number of seconds the data plane may withhold a
+/// request body while inspecting it. Also the value reported for a site that
+/// has no posture row yet, matching both the column default and the
+/// data-plane default.
+pub const DEFAULT_BODY_STAGE_TIMEOUT_SECS: i32 = 30;
+
+/// Upper bound for the body-withholding window. Holding a body longer than
+/// this turns a trickling client into a connection-exhaustion vector, so 30s
+/// is the ceiling rather than a suggestion.
+pub const MAX_BODY_STAGE_TIMEOUT_SECS: i32 = 30;
+
+/// Clamps a stored/wire value into the accepted `1..=30` window. `0` (and any
+/// other out-of-band value) is read as "unset" and maps to the default, so a
+/// hand-edited row can neither disable the bound nor exceed it.
+pub fn clamp_body_stage_timeout_secs(raw: i32) -> i32 {
+    if raw <= 0 {
+        return DEFAULT_BODY_STAGE_TIMEOUT_SECS;
+    }
+    raw.min(MAX_BODY_STAGE_TIMEOUT_SECS)
+}
+
 /// Built-in managed rules a site can downgrade to monitor-only, by id.
 /// Mirrors `pingwaf_waf::MANAGED_RULE_IDS` (whitelisted through the crate so
 /// a new managed rule cannot be configured before the engine knows it).
@@ -48,6 +69,52 @@ pub struct UpdateWafSettingsRequest {
     pub monitor_stacks: Option<Vec<String>>,
     #[serde(default)]
     pub monitor_managed_rules: Option<Vec<String>>,
+    /// Seconds the data plane may withhold a request body while inspecting
+    /// it; 1-30, anything else is a bad request.
+    #[serde(default)]
+    pub body_stage_timeout_secs: Option<i32>,
+}
+
+/// Dashboard-facing view of a `waf_settings` row.
+///
+/// Mirrors the model, with the body-withholding window normalised: a row that
+/// predates the column (or carries an out-of-band `0`) reports the default
+/// rather than a value the data plane would never run with. The raw model is
+/// deliberately not serialised directly so that every response — including
+/// the lazily created row — goes through that normalisation.
+#[derive(Debug, serde::Serialize)]
+pub struct WafSettingsResponse {
+    pub waf_enabled: bool,
+    pub mode: String,
+    pub paranoia_level: i32,
+    pub advanced_mode: bool,
+    pub monitor_categories: Vec<String>,
+    pub monitor_stacks: Vec<String>,
+    pub monitor_managed_rules: Vec<String>,
+    /// Seconds the data plane may withhold a request body while inspecting
+    /// it (1-30). Defaults to 30.
+    pub body_stage_timeout_secs: i32,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<waf_settings::Model> for WafSettingsResponse {
+    fn from(row: waf_settings::Model) -> Self {
+        Self {
+            waf_enabled: row.waf_enabled,
+            mode: row.mode,
+            paranoia_level: row.paranoia_level,
+            advanced_mode: row.advanced_mode,
+            monitor_categories: row.monitor_categories,
+            monitor_stacks: row.monitor_stacks,
+            monitor_managed_rules: row.monitor_managed_rules,
+            body_stage_timeout_secs: clamp_body_stage_timeout_secs(
+                row.body_stage_timeout_secs,
+            ),
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
 }
 
 /// Dashboard-facing metadata for one built-in managed rule.
@@ -104,12 +171,12 @@ async fn get_waf_settings(
     State(state): State<AppState>,
     current: AuthUser,
     Path(site_id): Path<String>,
-) -> Result<Json<waf_settings::Model>, ApiError> {
+) -> Result<Json<WafSettingsResponse>, ApiError> {
     let id = parse_uuid(&site_id, "site id")?;
     load_site_read(&state.db, id, &current).await?;
 
     let row = find_or_create(&state, id).await?;
-    Ok(Json(row))
+    Ok(Json(row.into()))
 }
 
 /// `PUT /api/v1/sites/{site_id}/waf/settings`
@@ -120,7 +187,7 @@ async fn update_waf_settings(
     current: AuthUser,
     Path(site_id): Path<String>,
     Json(payload): Json<UpdateWafSettingsRequest>,
-) -> Result<Json<waf_settings::Model>, ApiError> {
+) -> Result<Json<WafSettingsResponse>, ApiError> {
     let id = parse_uuid(&site_id, "site id")?;
     load_site_write(&state.db, id, &current).await?;
 
@@ -160,6 +227,14 @@ async fn update_waf_settings(
         active.monitor_managed_rules =
             Set(normalise_rule_ids(&rules, "monitor_managed_rules")?);
     }
+    if let Some(secs) = payload.body_stage_timeout_secs {
+        if !(1..=MAX_BODY_STAGE_TIMEOUT_SECS).contains(&secs) {
+            return Err(ApiError::BadRequest(format!(
+                "body_stage_timeout_secs must be between 1 and {MAX_BODY_STAGE_TIMEOUT_SECS}"
+            )));
+        }
+        active.body_stage_timeout_secs = Set(secs);
+    }
     // An update whose every field stays unchanged is silently dropped by
     // SeaORM; touching updated_at guarantees the row round-trips.
     active.updated_at = Set(chrono::Utc::now());
@@ -169,7 +244,7 @@ async fn update_waf_settings(
     touch_site(&state, id).await?;
     notify_config_changed(&state, id, Some(&current.email)).await;
 
-    Ok(Json(updated))
+    Ok(Json(updated.into()))
 }
 
 /* ── Effective posture ────────────────────────────────────────────── */
@@ -472,6 +547,7 @@ async fn find_or_create(
         monitor_categories: Set(Vec::new()),
         monitor_stacks: Set(Vec::new()),
         monitor_managed_rules: Set(Vec::new()),
+        body_stage_timeout_secs: Set(DEFAULT_BODY_STAGE_TIMEOUT_SECS),
         created_at: Set(now),
         updated_at: Set(now),
     }
@@ -550,6 +626,96 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("off|monitor|block"), "{message}");
         assert!(message.contains("use 'block'"), "{message}");
+    }
+
+    /// Validation of the request field, mirroring the arm in
+    /// `update_waf_settings`. Pulled out as a plain function so the bounds are
+    /// testable without a database.
+    fn validate_body_stage_timeout(raw: i32) -> Result<i32, ApiError> {
+        if !(1..=MAX_BODY_STAGE_TIMEOUT_SECS).contains(&raw) {
+            return Err(ApiError::BadRequest(format!(
+                "body_stage_timeout_secs must be between 1 and {MAX_BODY_STAGE_TIMEOUT_SECS}"
+            )));
+        }
+        Ok(raw)
+    }
+
+    fn row_with_timeout(secs: i32) -> waf_settings::Model {
+        waf_settings::Model {
+            id: Uuid::new_v4(),
+            site_id: Uuid::new_v4(),
+            waf_enabled: true,
+            mode: crate::models::mode::MONITOR.to_string(),
+            paranoia_level: 2,
+            advanced_mode: false,
+            monitor_categories: Vec::new(),
+            monitor_stacks: Vec::new(),
+            monitor_managed_rules: Vec::new(),
+            body_stage_timeout_secs: secs,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn body_stage_timeout_defaults_to_30() {
+        // A row that predates the column (0 after a hand-rolled read) and a
+        // lazily created row both report the data-plane default.
+        assert_eq!(
+            clamp_body_stage_timeout_secs(0),
+            DEFAULT_BODY_STAGE_TIMEOUT_SECS
+        );
+        assert_eq!(DEFAULT_BODY_STAGE_TIMEOUT_SECS, 30);
+        let response = WafSettingsResponse::from(row_with_timeout(0));
+        assert_eq!(response.body_stage_timeout_secs, 30);
+    }
+
+    #[test]
+    fn body_stage_timeout_accepts_the_documented_range() {
+        // Both ends of 1..=30 are legal.
+        assert_eq!(validate_body_stage_timeout(1).unwrap(), 1);
+        assert_eq!(validate_body_stage_timeout(30).unwrap(), 30);
+        assert_eq!(
+            WafSettingsResponse::from(row_with_timeout(1))
+                .body_stage_timeout_secs,
+            1
+        );
+        assert_eq!(
+            WafSettingsResponse::from(row_with_timeout(30))
+                .body_stage_timeout_secs,
+            30
+        );
+    }
+
+    #[test]
+    fn body_stage_timeout_rejects_values_outside_the_range() {
+        for bad in [0, 31, -1, i32::MAX] {
+            let err = validate_body_stage_timeout(bad).unwrap_err();
+            assert!(
+                matches!(err, ApiError::BadRequest(_)),
+                "{bad} must be a bad request, got {err:?}"
+            );
+            assert!(
+                err.to_string().contains("between 1 and 30"),
+                "{bad}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn body_stage_timeout_response_clamps_out_of_band_rows() {
+        // The column is bounded by the API, but a row edited behind its back
+        // must not report a window the data plane would never run with.
+        assert_eq!(
+            WafSettingsResponse::from(row_with_timeout(31))
+                .body_stage_timeout_secs,
+            30
+        );
+        assert_eq!(
+            WafSettingsResponse::from(row_with_timeout(-1))
+                .body_stage_timeout_secs,
+            30
+        );
     }
 
     #[test]

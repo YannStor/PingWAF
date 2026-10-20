@@ -32,6 +32,12 @@ pub struct Model {
     pub monitor_categories: Vec<String>,
     pub monitor_stacks: Vec<String>,
     pub monitor_managed_rules: Vec<String>,
+    /// How long (seconds) the data plane may withhold a request body while
+    /// inspecting it. Bounded to 1-30 by the API and the control plane; a
+    /// missing row means the data-plane default (30). 0 is never stored, but
+    /// is read as "use the default" so an out-of-band row cannot disable the
+    /// bound altogether.
+    pub body_stage_timeout_secs: i32,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }

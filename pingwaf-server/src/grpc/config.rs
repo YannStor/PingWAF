@@ -29,6 +29,10 @@ use uuid::Uuid;
 use crate::api::challenge::challenge_level;
 use crate::api::ip_rules::ip_action;
 use crate::api::site_basic_auth as site_basic_auth_api;
+use crate::api::waf_settings::{
+    clamp_body_stage_timeout_secs, DEFAULT_BODY_STAGE_TIMEOUT_SECS,
+    MAX_BODY_STAGE_TIMEOUT_SECS,
+};
 use crate::models::{
     acme_challenge, action, bot_protection, cache_rules, challenge_settings,
     characteristic, client_cert_status, defense_settings, error_pages,
@@ -799,6 +803,7 @@ fn waf_config_to_proto(
         monitor_categories,
         monitor_stacks,
         monitor_managed_rules,
+        body_stage_timeout_secs,
     ) = settings
         .map(|s| {
             (
@@ -808,10 +813,23 @@ fn waf_config_to_proto(
                 s.monitor_categories.clone(),
                 s.monitor_stacks.clone(),
                 s.monitor_managed_rules.clone(),
+                // A row written before the column existed (or edited
+                // out of band) can carry 0 or exceed the ceiling; clamp it
+                // here as well so the data plane never receives a window
+                // outside 1-30, whatever the row says.
+                clamp_body_stage_timeout_secs(s.body_stage_timeout_secs),
             )
         })
         .unwrap_or_else(|| {
-            (true, false, 2, Vec::new(), Vec::new(), Vec::new())
+            (
+                true,
+                false,
+                2,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                DEFAULT_BODY_STAGE_TIMEOUT_SECS,
+            )
         });
 
     // The engine switch is explicit; rules only feed the mode fallback and
@@ -859,6 +877,13 @@ fn waf_config_to_proto(
         monitor_categories,
         monitor_stacks,
         monitor_managed_rules,
+        // The body-withholding window is a site-level WAF setting, not a
+        // downstream connection timeout: it bounds how long a body may be
+        // held while it is being inspected, which the listener cannot vary
+        // per host.
+        body_stage_timeout_secs: body_stage_timeout_secs
+            .clamp(1, MAX_BODY_STAGE_TIMEOUT_SECS)
+            as u32,
     }
 }
 
@@ -1672,6 +1697,7 @@ mod tests {
             monitor_categories: categories,
             monitor_stacks: stacks,
             monitor_managed_rules: managed_rules,
+            body_stage_timeout_secs: DEFAULT_BODY_STAGE_TIMEOUT_SECS,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -1842,6 +1868,55 @@ mod tests {
         row.paranoia_level = 9;
         let config = waf_config_to_proto(&rules, &[], Some(&row));
         assert_eq!(config.paranoia_level, 4);
+    }
+
+    #[test]
+    fn body_stage_timeout_defaults_to_30_without_a_settings_row() {
+        // No posture row: the data plane's own default is the only sane
+        // answer, and it must travel explicitly rather than as the wire's
+        // "unset" 0 — the agent reads 0 as "use my default", which would
+        // hide a control-plane/agent default mismatch.
+        let config = waf_config_to_proto(&[], &[], None);
+        assert_eq!(config.body_stage_timeout_secs, 30);
+
+        // A row created by the API carries the same default.
+        let row = waf_settings_row(Uuid::nil(), false, Vec::new(), Vec::new());
+        let config = waf_config_to_proto(&[], &[], Some(&row));
+        assert_eq!(config.body_stage_timeout_secs, 30);
+    }
+
+    #[test]
+    fn body_stage_timeout_is_carried_and_clamped() {
+        let mut row =
+            waf_settings_row(Uuid::nil(), false, Vec::new(), Vec::new());
+
+        // A site-level value flows through unchanged inside 1..=30.
+        row.body_stage_timeout_secs = 1;
+        let config = waf_config_to_proto(&[], &[], Some(&row));
+        assert_eq!(config.body_stage_timeout_secs, 1);
+
+        row.body_stage_timeout_secs = 30;
+        let config = waf_config_to_proto(&[], &[], Some(&row));
+        assert_eq!(config.body_stage_timeout_secs, 30);
+
+        // Out-of-band rows (a hand-edited database, a row written before the
+        // column existed) can never widen or zero the window: 0 reads as
+        // unset, anything above the ceiling is clamped.
+        row.body_stage_timeout_secs = 0;
+        let config = waf_config_to_proto(&[], &[], Some(&row));
+        assert_eq!(config.body_stage_timeout_secs, 30);
+
+        row.body_stage_timeout_secs = -5;
+        let config = waf_config_to_proto(&[], &[], Some(&row));
+        assert_eq!(config.body_stage_timeout_secs, 30);
+
+        row.body_stage_timeout_secs = 31;
+        let config = waf_config_to_proto(&[], &[], Some(&row));
+        assert_eq!(config.body_stage_timeout_secs, 30);
+
+        row.body_stage_timeout_secs = 3600;
+        let config = waf_config_to_proto(&[], &[], Some(&row));
+        assert_eq!(config.body_stage_timeout_secs, 30);
     }
 
     fn pool_model(
