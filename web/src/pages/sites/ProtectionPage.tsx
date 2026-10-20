@@ -528,17 +528,16 @@ function BodyStageTimeoutCard({
   const { t } = useTranslation()
   const serverValue = settings?.body_stage_timeout_secs
   const committed = serverValue && serverValue > 0 ? serverValue : BODY_STAGE_TIMEOUT_DEFAULT
-  const [draft, setDraft] = useState<string>(String(committed))
-
-  useEffect(() => {
-    setDraft(String(committed))
-  }, [committed])
+  // `draft === null` means "no local edit": the field renders the committed
+  // value, so a settings refresh is reflected without a syncing effect.
+  const [draft, setDraft] = useState<string | null>(null)
+  const shown = draft ?? String(committed)
 
   const commit = () => {
-    const next = normaliseBodyStageTimeout(draft, committed)
+    const next = normaliseBodyStageTimeout(shown, committed)
     if (next === null) {
       // Empty or non-numeric input: revert to the committed value, no mutation.
-      setDraft(String(committed))
+      setDraft(null)
       return
     }
     setDraft(String(next))
@@ -568,7 +567,7 @@ function BodyStageTimeoutCard({
         step={1}
         disabled={!canWrite || pending}
         aria-label={t('pages.waf.bodyStageTimeout')}
-        value={draft}
+        value={shown}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={commit}
         onKeyDown={(e) => {
