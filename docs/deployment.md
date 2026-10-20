@@ -713,7 +713,9 @@ the built-in error page shows a fixed, category-level message only:
 - `Internal Server Error` — anything else
 
 The page also renders the `request_id`, and the response carries the error
-class in the `X-Pingap-EType` header. It **never** shows the internal error
+class in the `X-Pingap-EType` header (only pingora's built-in error types are
+echoed; a custom type reported by a third-party plugin is collapsed to
+`internal`, so a plugin-supplied string never reaches the response). It **never** shows the internal error
 chain, plugin names or upstream addresses — the original error goes to the
 server log only. To debug, take the `request_id` from the page and grep the
 server log with it:

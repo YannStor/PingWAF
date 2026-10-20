@@ -344,6 +344,10 @@ pub struct WafConfig {
     pub ssrf_detection: bool,
     pub bot_detection: bool,
     pub custom_rules: Vec<WafRule>,
+    /// Missing on caches written before the override field existed; an old
+    /// agent reading such a cache must default to "no overrides" instead of
+    /// failing deserialisation.
+    #[serde(default)]
     pub managed_overrides: Vec<RuleOverride>,
     pub ml_enabled: bool,
     pub ml_model_path: String,
