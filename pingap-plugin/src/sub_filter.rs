@@ -160,11 +160,13 @@ enum ContentEncoding {
 fn classify_content_encoding(
     headers: &http::HeaderMap,
 ) -> Option<ContentEncoding> {
-    let value = headers
-        .get(http::header::CONTENT_ENCODING)?
-        .to_str()
-        .ok()?
-        .trim();
+    // No header at all is the overwhelmingly common case and means the body
+    // is plain: `?` here would classify every uncompressed response as
+    // "unsupported" and skip the filter (2026-10-21 regression).
+    let Some(raw) = headers.get(http::header::CONTENT_ENCODING) else {
+        return Some(ContentEncoding::Plain);
+    };
+    let value = raw.to_str().ok()?.trim();
     match value.to_ascii_lowercase().as_str() {
         "" | "identity" => Some(ContentEncoding::Plain),
         "gzip" | "x-gzip" => Some(ContentEncoding::Gzip),
@@ -605,6 +607,17 @@ register_plugin!("sub_filter", SubFilter);
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    /// A response without `Content-Encoding` is plain, not "unsupported":
+    /// treating the missing header as `None` skipped the filter for every
+    /// uncompressed response (2026-10-21 regression found in E2E).
+    #[test]
+    fn missing_content_encoding_is_plain() {
+        assert_eq!(
+            Some(ContentEncoding::Plain),
+            classify_content_encoding(&http::HeaderMap::new())
+        );
+    }
 
     #[test]
     fn test_parse_subs_filter() {

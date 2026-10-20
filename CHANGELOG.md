@@ -8,6 +8,17 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.28.4] — 2026-10-21
+
+### Fixed
+
+- **Uncompressed responses skipped the rewrite entirely.** The gzip work
+  classified a response without a `Content-Encoding` header as "unsupported"
+  instead of plain, so every response that was not compressed bypassed the
+  filter (found in the demo E2E: a plain Google page came back unrewritten
+  while the gzip one was rewritten). A missing header now means plain, with a
+  regression test.
+
 ## [PingWAF 0.28.3] — 2026-10-21
 
 ### Added
