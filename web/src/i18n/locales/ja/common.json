@@ -1,4 +1,35 @@
 {
+  "system": {
+    "title": "システム監視",
+    "subtitle": "コントロールプレーンの経過時間（ウォールクロック）帰属 — 占有率は CPU ではなく経過時間の割合です。",
+    "collectedAt": "{{time}} に収集",
+    "refresh": "更新",
+    "processCpu": "プロセス CPU",
+    "hostCpu": "ホスト CPU",
+    "cores": "コア数",
+    "containerMemory": "コンテナメモリ",
+    "overview": "概要",
+    "memoryDetail": "メモリ詳細",
+    "modules": "モジュール別帰属",
+    "topMethods": "上位メソッド",
+    "rss": "RSS",
+    "rssPeak": "RSS ピーク",
+    "virtual": "仮想メモリ",
+    "swap": "スワップ（使用 / 合計）",
+    "available": "空きメモリ",
+    "usagePercent": "メモリ使用率",
+    "pageFaults": "ページフォールト（minor / major）",
+    "cached": "Cached",
+    "buffers": "Buffers",
+    "share": "経過時間占有率",
+    "held": "保持メモリ",
+    "calls": "呼び出し数",
+    "avgTime": "平均時間",
+    "empty": "サンプルはまだありません。",
+    "loadError": "システムデータの読み込みに失敗しました。",
+    "method": "メソッド",
+    "elapsed": "経過時間"
+  },
   "app": {
     "name": "PingWAF",
     "tagline": "Web アプリケーションファイアウォール コントロールプレーン"
@@ -256,6 +287,12 @@
     "featureAnalytics": "リアルタイム分析"
   },
   "pages": {
+    "routes": {
+      "stripPrefix": "プレフィックス除去",
+      "stripPrefixHint": "一致したプレフィックスを上流リクエストパスから取り除きます。",
+      "rewritePath": "パス書き換え",
+      "rewritePathHint": "上流リクエストパスを指定テンプレートで置き換えます。"
+    },
     "dashboard": {
       "title": "ダッシュボード",
       "description": "保護対象サイト、エージェント、リアルタイムの脅威アクティビティの概要。",

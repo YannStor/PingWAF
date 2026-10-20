@@ -213,6 +213,12 @@ pub mod site_routes {
         pub pool_id: Uuid,
         /// IP group whose ranges gate this route; `None` matches every client.
         pub ip_group_id: Option<Uuid>,
+        /// Strip the matched prefix from the path forwarded upstream. Only a
+        /// prefix route can strip; the API rejects it for exact/regex.
+        pub strip_prefix: bool,
+        /// Fixed path replacing the whole upstream path; wins over
+        /// `strip_prefix`. `None` forwards the (possibly stripped) path.
+        pub rewrite_path: Option<String>,
         pub created_at: DateTimeUtc,
     }
 

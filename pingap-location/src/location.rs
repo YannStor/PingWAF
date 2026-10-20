@@ -32,7 +32,7 @@ use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::time::Duration;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 const LOG_TARGET: &str = "pingap::location";
 
@@ -190,6 +190,72 @@ pub(crate) fn host_matches_suffix(host: &str, domain: &str) -> bool {
     dot > 0
         && host[dot] == b'.'
         && host[dot + 1..].eq_ignore_ascii_case(domain.as_bytes())
+}
+
+/// The path an upstream should receive for `path`, or `None` when it is
+/// forwarded unchanged.
+///
+/// `rewrite` wins: it replaces the whole path, whatever `prefix` says. Without
+/// it, `prefix` (from the location's `PathSelector::Prefix`) is stripped from
+/// the front — `/api/users` with `prefix` `/api` becomes `/users`. The result is
+/// always an absolute path: an exact hit on the prefix (`/api`) and a prefix
+/// that consumed everything (`/` on `/`) collapse to `/`, and a prefix without
+/// a trailing slash that leaves no separator (`/api/` on `/api/users`, `/` on
+/// `/users`) gets one back.
+///
+/// The query string is not part of `path`; the caller keeps it. Matching is
+/// byte-exact, the same comparison [`PathSelector::is_match`] uses, so a path
+/// that did not match the prefix cannot be rewritten here either.
+pub(crate) fn stripped_path(
+    path: &str,
+    prefix: Option<&str>,
+    rewrite: Option<&str>,
+) -> Option<String> {
+    let new_path = match rewrite {
+        Some(rewrite) => rewrite.to_string(),
+        None => {
+            let rest = path.strip_prefix(prefix?)?;
+            if rest.is_empty() {
+                "/".to_string()
+            } else if rest.starts_with('/') {
+                rest.to_string()
+            } else {
+                format!("/{rest}")
+            }
+        },
+    };
+    (new_path != path).then_some(new_path)
+}
+
+/// Points `header` at `new_path`, keeping the query string it already carries.
+/// Returns whether the target was replaced; a target the URI parser rejects
+/// leaves the original in place, because forwarding the unstripped path is
+/// better than failing the request.
+fn set_request_path(header: &mut RequestHeader, new_path: &str) -> bool {
+    let query = header.uri.query();
+    let mut target = String::with_capacity(
+        new_path.len() + query.map_or(0, |q| q.len() + 1),
+    );
+    target.push_str(new_path);
+    if let Some(query) = query {
+        target.push('?');
+        target.push_str(query);
+    }
+    match target.parse::<http::Uri>() {
+        Ok(uri) => {
+            header.set_uri(uri);
+            true
+        },
+        Err(e) => {
+            warn!(
+                target: LOG_TARGET,
+                error = %e,
+                path = new_path,
+                "upstream path rewrite is not a valid uri, keeping the original path"
+            );
+            false
+        },
+    }
 }
 
 /// Classification of a single host pattern for the routing index.
@@ -443,6 +509,16 @@ pub struct Location {
     /// - replacement string with optional capture group references
     reg_rewrite: Option<RegexRewrite>,
 
+    /// Strip the matched prefix from the path sent upstream (`strip_prefix`).
+    /// Only a `PathSelector::Prefix` gives `path_prefix()` a value, so this is
+    /// inert for exact/regex locations. Never applied to the session's own
+    /// request header — see [`Location::rewrite_upstream_path`].
+    strip_prefix: bool,
+
+    /// Fixed path replacing the whole upstream path (`rewrite_path`); wins
+    /// over `strip_prefix`.
+    rewrite_path: Option<String>,
+
     /// Headers to set or append on proxied requests
     pub headers: Option<Vec<(HeaderName, HeaderValue, bool)>>,
     /// Host header sent to the upstream; `None` keeps the client's Host.
@@ -602,6 +678,15 @@ impl Location {
             ip_conditions,
             upstream,
             reg_rewrite,
+            // An empty `rewrite_path` means "unset": the control plane sends
+            // every field as a string, so blank is the absent value.
+            strip_prefix: conf.strip_prefix.unwrap_or_default(),
+            rewrite_path: conf
+                .rewrite_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
             plugins: conf.plugins.as_ref().map(|list| {
                 list.iter().map(|name| Arc::from(name.as_str())).collect()
             }),
@@ -684,6 +769,65 @@ impl Location {
     #[inline]
     pub fn support_grpc_web(&self) -> bool {
         self.grpc_web
+    }
+
+    /// Whether the location strips its matched prefix from the upstream path.
+    #[inline]
+    pub fn strip_prefix(&self) -> bool {
+        self.strip_prefix
+    }
+
+    /// The fixed path replacing the upstream path, when one is configured.
+    #[inline]
+    pub fn rewrite_path(&self) -> Option<&str> {
+        self.rewrite_path.as_deref()
+    }
+
+    /// The prefix this location matches requests on: `Some` only for a prefix
+    /// location, `None` for `=exact`, `~regex` and match-everything, which have
+    /// no prefix to strip.
+    #[inline]
+    pub fn path_prefix(&self) -> Option<&str> {
+        match &self.path_selector {
+            PathSelector::Prefix(value) => Some(value.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Rewrites `header`'s request target to the path the upstream should see:
+    /// `rewrite_path` when configured, otherwise the path with the matched
+    /// prefix stripped. The query string survives untouched.
+    ///
+    /// The proxy calls this on the copy of the request header it sends upstream
+    /// (see `pingap-proxy`'s `upstream_request_filter`), so plugins — the WAF
+    /// among them — the access log and the cache key all see the client's own
+    /// path. Without `strip_prefix` and `rewrite_path` this is one flattened
+    /// check and returns without allocating.
+    pub fn rewrite_upstream_path(&self, header: &mut RequestHeader) {
+        if self.rewrite_path.is_none() && !self.strip_prefix {
+            return;
+        }
+        let path = header.uri.path();
+        // Only origin-form targets carry a path to rewrite. `CONNECT` uses
+        // authority-form and `OPTIONS *` asterisk-form; turning either into a
+        // path would change what the request means.
+        if !path.starts_with('/') {
+            return;
+        }
+        let Some(new_path) = stripped_path(
+            path,
+            self.path_prefix(),
+            self.rewrite_path.as_deref(),
+        ) else {
+            return;
+        };
+        debug!(
+            target: LOG_TARGET,
+            location = self.name.as_ref(),
+            new_path,
+            "rewrite upstream path"
+        );
+        set_request_path(header, &new_path);
     }
 
     /// Validates that the request's Content-Length header does not exceed the configured maximum
@@ -839,6 +983,9 @@ impl LocationInstance for Location {
     }
     fn upstream(&self) -> &str {
         self.upstream.as_ref()
+    }
+    fn rewrite_upstream_path(&self, header: &mut RequestHeader) {
+        Location::rewrite_upstream_path(self, header);
     }
     fn on_response(&self) {
         self.processing.fetch_sub(1, Ordering::Relaxed);
@@ -1321,6 +1468,153 @@ mod tests {
         // whitespace runs and a blank rule are fine
         assert_eq!(None, build("^/a   /b"));
         assert_eq!(None, build("  "));
+    }
+
+    /// The strip/replace arithmetic, isolated from any location: the origin
+    /// gets an absolute path, an exact hit on the prefix collapses to `/`, and
+    /// a path that does not carry the prefix is left alone.
+    #[test]
+    fn stripped_path_rewrites_the_prefix_only() {
+        let strip =
+            |path: &str, prefix: &str| stripped_path(path, Some(prefix), None);
+        assert_eq!(strip("/api/users", "/api"), Some("/users".to_string()));
+        // exact hit on the prefix: the origin root
+        assert_eq!(strip("/api", "/api"), Some("/".to_string()));
+        // prefix with a trailing slash still yields an absolute path
+        assert_eq!(strip("/api/users", "/api/"), Some("/users".to_string()));
+        // a `/` prefix consumes the separator and puts it back: no change
+        assert_eq!(strip("/users", "/"), None);
+        assert_eq!(strip("/", "/"), None);
+        // not the configured prefix
+        assert_eq!(strip("/other", "/api"), None);
+        // no prefix (exact/regex location)
+        assert_eq!(stripped_path("/api", None, None), None);
+
+        // `rewrite_path` wins over the prefix and ignores it entirely
+        assert_eq!(
+            stripped_path("/api/users", Some("/api"), Some("/v2")),
+            Some("/v2".to_string())
+        );
+        assert_eq!(
+            stripped_path("/api/users", None, Some("/v2")),
+            Some("/v2".to_string())
+        );
+        // the root itself is a valid replacement
+        assert_eq!(
+            stripped_path("/api/users", None, Some("/")),
+            Some("/".to_string())
+        );
+        // a replacement equal to the current path is no rewrite
+        assert_eq!(stripped_path("/v2", None, Some("/v2")), None);
+    }
+
+    /// A prefix route strips what it matched, keeps the query string, and
+    /// rewrites only the header it is handed — the session's own header is what
+    /// plugins and the access log read.
+    #[test]
+    fn rewrite_upstream_path_strips_the_prefix_and_keeps_the_query() {
+        let lo = Location::new(
+            "lo",
+            &LocationConf {
+                upstream: Some("api".to_string()),
+                path: Some("/api".to_string()),
+                strip_prefix: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(lo.strip_prefix());
+        assert_eq!(lo.rewrite_path(), None);
+        assert_eq!(lo.path_prefix(), Some("/api"));
+
+        let mut header =
+            RequestHeader::build("GET", b"/api/users?x=1&y=2", None).unwrap();
+        lo.rewrite_upstream_path(&mut header);
+        assert_eq!(header.uri.path(), "/users");
+        assert_eq!(header.uri.query(), Some("x=1&y=2"));
+
+        // an exact hit reaches the origin root
+        let mut header = RequestHeader::build("GET", b"/api", None).unwrap();
+        lo.rewrite_upstream_path(&mut header);
+        assert_eq!(header.uri.path(), "/");
+
+        // another location's path is untouched
+        let mut header =
+            RequestHeader::build("GET", b"/other/users", None).unwrap();
+        lo.rewrite_upstream_path(&mut header);
+        assert_eq!(header.uri.path(), "/other/users");
+    }
+
+    /// `rewrite_path` replaces the whole path whatever the match type is, and
+    /// keeps the query.
+    #[test]
+    fn rewrite_upstream_path_replaces_the_whole_path() {
+        let lo = Location::new(
+            "lo",
+            &LocationConf {
+                upstream: Some("api".to_string()),
+                path: Some("=/api".to_string()),
+                rewrite_path: Some("/v2".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(lo.rewrite_path(), Some("/v2"));
+        // an exact location has no prefix to report
+        assert_eq!(lo.path_prefix(), None);
+
+        let mut header =
+            RequestHeader::build("GET", b"/api/users?x=1", None).unwrap();
+        lo.rewrite_upstream_path(&mut header);
+        assert_eq!(header.uri.to_string(), "/v2?x=1");
+
+        // The root is a valid replacement and keeps the query too.
+        let lo = Location::new(
+            "lo",
+            &LocationConf {
+                path: Some("/api".to_string()),
+                rewrite_path: Some("/".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut header =
+            RequestHeader::build("GET", b"/api/users?x=1", None).unwrap();
+        lo.rewrite_upstream_path(&mut header);
+        assert_eq!(header.uri.to_string(), "/?x=1");
+    }
+
+    /// Nothing configured is the common case: the header must come back
+    /// untouched, and an exact/regex location ignores `strip_prefix` because it
+    /// has no prefix to strip.
+    #[test]
+    fn rewrite_upstream_path_is_inert_without_a_usable_rule() {
+        let plain = Location::new(
+            "lo",
+            &LocationConf {
+                path: Some("/api".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut header =
+            RequestHeader::build("GET", b"/api/users?x=1", None).unwrap();
+        plain.rewrite_upstream_path(&mut header);
+        assert_eq!(header.uri.to_string(), "/api/users?x=1");
+
+        let exact = Location::new(
+            "lo",
+            &LocationConf {
+                path: Some("=/api".to_string()),
+                strip_prefix: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut header =
+            RequestHeader::build("GET", b"/api/users?x=1", None).unwrap();
+        exact.rewrite_upstream_path(&mut header);
+        assert_eq!(header.uri.to_string(), "/api/users?x=1");
     }
 
     /// A rule whose output equals the input is no rewrite: nothing is set

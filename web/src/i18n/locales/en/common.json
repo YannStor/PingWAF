@@ -1,4 +1,35 @@
 {
+  "system": {
+    "title": "System observability",
+    "subtitle": "Wall-clock time attribution for the control plane — shares are elapsed-time percentages, not CPU.",
+    "collectedAt": "Collected {{time}}",
+    "refresh": "Refresh",
+    "processCpu": "Process CPU",
+    "hostCpu": "Host CPU",
+    "cores": "Cores",
+    "containerMemory": "Container memory",
+    "overview": "Overview",
+    "memoryDetail": "Memory detail",
+    "modules": "Module attribution",
+    "topMethods": "Top methods",
+    "rss": "RSS",
+    "rssPeak": "RSS peak",
+    "virtual": "Virtual memory",
+    "swap": "Swap (used / total)",
+    "available": "Available memory",
+    "usagePercent": "Memory usage",
+    "pageFaults": "Page faults (minor / major)",
+    "cached": "Cached",
+    "buffers": "Buffers",
+    "share": "Elapsed share",
+    "held": "Memory held",
+    "calls": "Calls",
+    "avgTime": "Avg time",
+    "empty": "No samples yet.",
+    "loadError": "Failed to load system data.",
+    "method": "Method",
+    "elapsed": "Elapsed"
+  },
   "app": {
     "name": "PingWAF",
     "tagline": "Web Application Firewall Control Plane"
@@ -256,6 +287,12 @@
     "featureAnalytics": "Real-time analytics"
   },
   "pages": {
+    "routes": {
+      "stripPrefix": "Strip prefix",
+      "stripPrefixHint": "Remove the matched prefix from the upstream request path.",
+      "rewritePath": "Rewrite path",
+      "rewritePathHint": "Replace the upstream request path with the given template."
+    },
     "dashboard": {
       "title": "Dashboard",
       "description": "Overview of your protected sites, agents and live threat activity.",

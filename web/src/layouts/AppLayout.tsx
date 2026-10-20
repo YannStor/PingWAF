@@ -12,6 +12,7 @@ import {
   Translate,
   ShieldCheck,
   Sparkle,
+  Pulse,
 } from '@phosphor-icons/react'
 import { cn } from '@/lib/utils'
 import { Sidebar } from '@/components/ui/Sidebar'
@@ -50,6 +51,7 @@ const crumbKeys: Record<string, string> = {
   'error-pages': 'pages.errorPages.title',
   account: 'pages.account.title',
   profile: 'pages.profile.title',
+  system: 'system.title',
   settings: 'pages.settings.title',
   logs: 'pages.logs.title',
   assistant: 'pages.assistant.title',
@@ -68,6 +70,7 @@ export function AppLayout() {
   const navigate = useNavigate()
   const { resolved, toggle } = useThemeStore()
   const user = useAuthStore((s) => s.user)
+  const isAdmin = user?.role === 'admin'
   const logout = useAuthStore((s) => s.logout)
   const toggleAssistant = useAssistantWidgetStore((s) => s.toggle)
 
@@ -342,6 +345,20 @@ export function AppLayout() {
                   >
                     {t('user.account')}
                   </DropdownItem>
+                  {/* System observability — admin-only (server also enforces AdminUser). */}
+                  {isAdmin && (
+                    <DropdownItem
+                      role="menuitem"
+                      icon={<Pulse weight="duotone" className="h-4 w-4" />}
+                      onClick={() => {
+                        setUserMenuOpen(false)
+                        userBtnRef.current?.focus()
+                        navigate('/system')
+                      }}
+                    >
+                      {t('system.title')}
+                    </DropdownItem>
+                  )}
                   <DropdownItem
                     icon={<SignOut className="h-4 w-4" />}
                     onClick={() => {

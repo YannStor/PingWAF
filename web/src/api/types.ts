@@ -210,6 +210,10 @@ export interface Route {
   pool_id: string
   /** When set, the route only matches clients inside this IP group. */
   ip_group_id: string | null
+  /** Strip the matched `path` prefix before proxying (prefix match only). */
+  strip_prefix?: boolean
+  /** When set, replaces the upstream path entirely; wins over `strip_prefix`. */
+  rewrite_path?: string | null
   created_at: string
 }
 
@@ -342,6 +346,10 @@ export interface CreateRouteRequest {
   pool_id: string
   /** Client IPs outside the group cannot reach this route. */
   ip_group_id?: string | null
+  /** Strip the matched `path` prefix before proxying (prefix match only). */
+  strip_prefix?: boolean
+  /** `null` clears the rewrite; validated like the server (`/`-rooted, no `?`/`#`/space). */
+  rewrite_path?: string | null
 }
 
 export interface UpdateRouteRequest {
@@ -354,6 +362,10 @@ export interface UpdateRouteRequest {
   pool_id?: string
   /** `null` clears the gate so every client matches again. */
   ip_group_id?: string | null
+  /** Strip the matched `path` prefix before proxying (prefix match only). */
+  strip_prefix?: boolean
+  /** `null` clears the rewrite; validated like the server (`/`-rooted, no `?`/`#`/space). */
+  rewrite_path?: string | null
 }
 
 export interface UpsertSslRequest {

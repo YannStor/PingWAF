@@ -51,6 +51,32 @@ export interface SystemMemoryMetrics {
   container_memory_limit?: string | null
   /** `"cgroup_v1" | "cgroup_v2"`；容器外为 null。 */
   container_memory_scope?: string | null
+  /** 进程 RSS 历史峰值（字节）。 */
+  rss_peak_bytes: number
+  /** `rss_peak_bytes` 的人类可读形式。 */
+  rss_peak: string
+  /** Swap 已用量（字节）；无 swap 时为 0。 */
+  swap_used_bytes: number
+  /** Swap 总量（字节）。 */
+  swap_total_bytes: number
+  /** `swap_used_bytes` 的人类可读形式。 */
+  swap_used: string
+  /** `swap_total_bytes` 的人类可读形式。 */
+  swap_total: string
+  /** 主机可用内存（字节）。 */
+  mem_available_bytes: number
+  /** `mem_available_bytes` 的人类可读形式。 */
+  mem_available: string
+  /** 主机内存使用率（0.0-1.0）。 */
+  memory_used_percent: number
+  /** 次要缺页次数（累计）。 */
+  page_faults_minor: number
+  /** 主要缺页次数（累计）。 */
+  page_faults_major: number
+  /** 主机页缓存（字节）；不可用时为 0。 */
+  cached_bytes: number
+  /** 主机 Buffer（字节）；不可用时为 0。 */
+  buffers_bytes: number
 }
 
 /** `GET /api/v1/system/metrics` 响应。 */
@@ -68,6 +94,10 @@ export interface SystemProfileModule {
   mem_bytes: number
   /** 占总内存的比例（0.0-1.0）。 */
   mem_share: number
+  /** 墙钟耗时（毫秒）。⚠️ 口径为墙钟，非 CPU。 */
+  elapsed_ms: number
+  /** 墙钟耗时占比（0.0-1.0）。⚠️ 口径为墙钟，非 CPU。 */
+  elapsed_share: number
   calls: number
   /** 平均单次调用耗时（微秒）。 */
   avg_us: number
@@ -77,6 +107,8 @@ export interface SystemProfileModule {
 export interface SystemProfileMethod {
   method: string
   cpu_ms: number
+  /** 墙钟耗时（毫秒）。⚠️ 口径为墙钟，非 CPU。 */
+  elapsed_ms: number
   calls: number
   avg_us: number
 }

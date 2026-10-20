@@ -65,8 +65,9 @@ const RANGE_OPTIONS = [
   { value: '720', label: '30d' },
 ]
 
-/** 30s polling cadence, matching the dashboard's "live" promise. */
-const REFRESH_MS = 30_000
+/** 60s polling cadence — keep dashboard refresh light; staleTime is half the period. */
+const REFRESH_MS = 60_000
+const REFRESH_STALE_MS = REFRESH_MS / 2
 
 /** Stroke palette for the per-site traffic lines (capped at 8 sites server-side). */
 const SITE_LINE_COLORS = [
@@ -135,30 +136,35 @@ export function DashboardPage() {
     queryKey: analyticsKeys.summary(range),
     queryFn: () => analyticsApi.summary(range),
     refetchInterval: REFRESH_MS,
+    staleTime: REFRESH_STALE_MS,
   })
 
   const traffic = useQuery({
     queryKey: analyticsKeys.traffic(range),
     queryFn: () => analyticsApi.requestsOverTime(range),
     refetchInterval: REFRESH_MS,
+    staleTime: REFRESH_STALE_MS,
   })
 
   const bandwidth = useQuery({
     queryKey: analyticsKeys.bandwidth({ ...range, step: trafficStepFor(hours) }),
     queryFn: () => analyticsApi.traffic({ ...range, step: trafficStepFor(hours) }),
     refetchInterval: REFRESH_MS,
+    staleTime: REFRESH_STALE_MS,
   })
 
   const topIps = useQuery({
     queryKey: analyticsKeys.topIps(range),
     queryFn: () => analyticsApi.topIps({ ...range, limit: 8 }),
     refetchInterval: REFRESH_MS,
+    staleTime: REFRESH_STALE_MS,
   })
 
   const topRules = useQuery({
     queryKey: analyticsKeys.topRules(range),
     queryFn: () => analyticsApi.topRules({ ...range, limit: 6 }),
     refetchInterval: REFRESH_MS,
+    staleTime: REFRESH_STALE_MS,
   })
 
   // Per-site series only make sense across sites, so the chart is hidden
@@ -167,6 +173,7 @@ export function DashboardPage() {
     queryKey: analyticsKeys.sitesOverTime(range),
     queryFn: () => analyticsApi.sitesOverTime(range),
     refetchInterval: REFRESH_MS,
+    staleTime: REFRESH_STALE_MS,
     enabled: !siteId,
   })
 
@@ -174,12 +181,14 @@ export function DashboardPage() {
     queryKey: analyticsKeys.topPaths(range),
     queryFn: () => analyticsApi.topPaths({ ...range, limit: 8 }),
     refetchInterval: REFRESH_MS,
+    staleTime: REFRESH_STALE_MS,
   })
 
   const statusCodes = useQuery({
     queryKey: analyticsKeys.statusCodes(range),
     queryFn: () => analyticsApi.statusCodes(range),
     refetchInterval: REFRESH_MS,
+    staleTime: REFRESH_STALE_MS,
   })
 
   const agents = useQuery({
@@ -187,6 +196,7 @@ export function DashboardPage() {
     queryFn: () => agentsApi.list(),
     select: (page) => page.items,
     refetchInterval: REFRESH_MS,
+    staleTime: REFRESH_STALE_MS,
   })
 
   const siteOptions = useMemo(
@@ -847,7 +857,7 @@ export function DashboardPage() {
 }
 
 /**
- * Admin-only「System 观测」CPU 卡片，数据来自 `/api/v1/system/metrics`（15s 轮询，
+ * Admin-only「System 观测」CPU 卡片，数据来自 `/api/v1/system/metrics`（30s 轮询，
  * 静默失败）。大字显示进程 CPU%，辅以主机 CPU%、cores 与 RSS 小字。
  */
 function SystemCpuCard() {
@@ -855,7 +865,8 @@ function SystemCpuCard() {
   const metrics = useQuery({
     queryKey: debugKeys.metrics(),
     queryFn: fetchSystemMetrics,
-    refetchInterval: 15_000,
+    refetchInterval: 30_000,
+    staleTime: 15_000,
     retry: false,
   })
 

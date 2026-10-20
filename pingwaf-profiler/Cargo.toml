@@ -6,7 +6,6 @@ license = "Apache-2.0"
 description = "Module- and method-level CPU/memory attribution for PingWAF. Plain Rust atomics and tracing spans: no sampling, no stack unwinding, no allocator hook and no external profiling tool."
 
 [dependencies]
-dashmap = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
 

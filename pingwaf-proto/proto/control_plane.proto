@@ -710,6 +710,13 @@ message RouteConfig {
   // CIDR ranges the client IP must fall into for this route to match; empty
   // matches every client, entries come from the route's IP group.
   repeated string ip_ranges = 9;
+  // Strip the matched prefix `path` from the request forwarded upstream, so a
+  // route on `/api` reaches an origin that only serves `/users`. Only a
+  // prefix route strips; false (the default) forwards the path unchanged.
+  bool strip_prefix = 10;
+  // Fixed path replacing the whole request path before proxying; wins over
+  // `strip_prefix`. Empty disables it. The query string is preserved.
+  string rewrite_path = 11;
 }
 
 enum LoadBalanceAlgorithm {

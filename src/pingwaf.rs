@@ -703,6 +703,11 @@ fn cached_rules_to_pingap_config(
                     // matches clients inside those ranges.
                     match_ip_ranges: (!route.ip_ranges.is_empty())
                         .then(|| route.ip_ranges.clone()),
+                    // What the origin receives, when the route rewrites the
+                    // path: an empty `rewrite_path` on the wire means "unset".
+                    strip_prefix: route.strip_prefix.then_some(true),
+                    rewrite_path: (!route.rewrite_path.trim().is_empty())
+                        .then(|| route.rewrite_path.trim().to_string()),
                     plugins: Some(site_plugins.clone()),
                     ..Default::default()
                 },
@@ -1779,6 +1784,8 @@ mod tests {
             enabled: true,
             pool_id: pool_id.to_string(),
             ip_ranges: vec![],
+            strip_prefix: false,
+            rewrite_path: String::new(),
         }
     }
 
@@ -2169,6 +2176,51 @@ mod tests {
             .get("site1_route_r5")
             .expect("orphan route falls back to the default pool");
         assert_eq!(orphan.upstream.as_deref(), Some("pool-a"));
+    }
+
+    /// The route's path-rewrite knobs reach the location the data plane
+    /// builds. An empty `rewrite_path` on the wire means "no replacement", so
+    /// it must not become `Some("")` in the generated config.
+    #[test]
+    fn route_path_rewrite_reaches_the_location_config() {
+        let mut site = site_rules("site1", "a.example.com");
+        site.upstreams = vec![pool("pool-a", vec![peer("10.0.0.1:8080")])];
+
+        let mut strip = route("r1", "prefix", "/api", "pool-a");
+        strip.strip_prefix = true;
+        let mut replace = route("r2", "exact", "/legacy", "pool-a");
+        replace.rewrite_path = "  /v2  ".to_string();
+        let plain = route("r3", "prefix", "/static", "pool-a");
+        let blank = route("r4", "prefix", "/blank", "pool-a");
+        site.routes = vec![strip, replace, plain, blank];
+
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+
+        let loc = config
+            .locations
+            .get("site1_route_r1")
+            .expect("strip route location");
+        assert_eq!(loc.strip_prefix, Some(true));
+        assert_eq!(loc.rewrite_path, None);
+
+        let loc = config
+            .locations
+            .get("site1_route_r2")
+            .expect("replace route location");
+        // Only `rewrite_path` is set: stripping stays unset, not `Some(false)`,
+        // so a config that never opted in keeps the historical behaviour.
+        assert_eq!(loc.strip_prefix, None);
+        assert_eq!(loc.rewrite_path.as_deref(), Some("/v2"));
+
+        for name in ["site1_route_r3", "site1_route_r4"] {
+            let loc = config.locations.get(name).expect("plain route location");
+            assert_eq!(loc.strip_prefix, None, "{name} must not strip");
+            assert_eq!(loc.rewrite_path, None, "{name} must not replace");
+        }
     }
 
     #[test]

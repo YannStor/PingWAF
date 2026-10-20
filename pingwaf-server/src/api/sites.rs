@@ -32,6 +32,11 @@ use crate::models::{
     trusted_header,
 };
 
+/// Longest accepted route `rewrite_path`, matching
+/// `pingap_config::MAX_REWRITE_PATH_LEN` — the data plane rejects anything
+/// longer, so storing it would only fail later, on the agent side.
+const MAX_ROUTE_REWRITE_PATH_LEN: usize = 2048;
+
 /// Public representation of a site.
 #[derive(Debug, Clone, Serialize)]
 pub struct SiteResponse {
@@ -464,6 +469,15 @@ pub struct CreateRouteRequest {
     /// Gate the route on an IP group's ranges; `None` matches every client.
     #[serde(default)]
     pub ip_group_id: Option<Uuid>,
+    /// Strip the matched `path` prefix from the request forwarded upstream, so
+    /// a route on `/api` reaches an origin serving `/users`. Only a prefix
+    /// route may strip; `false` (the default) forwards the path as is.
+    #[serde(default)]
+    pub strip_prefix: bool,
+    /// Replace the whole path with this fixed value; wins over `strip_prefix`.
+    /// The query string is preserved.
+    #[serde(default)]
+    pub rewrite_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -484,6 +498,13 @@ pub struct UpdateRouteRequest {
     /// An empty string clears the gate; the field must be present to change it.
     #[serde(default)]
     pub ip_group_id: Option<Option<Uuid>>,
+    /// `Some(false)` turns stripping off; absent leaves it untouched.
+    #[serde(default)]
+    pub strip_prefix: Option<bool>,
+    /// Tri-state like `verify_cert`: absent leaves the stored replacement
+    /// alone, `null` (or a blank string) clears it, a value sets it.
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    pub rewrite_path: Option<Option<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1640,7 +1661,15 @@ async fn create_route(
     let name = payload.name.trim().to_string();
     let match_type = payload.match_type.trim().to_string();
     let path = payload.path.trim().to_string();
-    validate_route(&name, &match_type, &path, payload.priority)?;
+    let rewrite_path = non_empty(&payload.rewrite_path);
+    validate_route(
+        &name,
+        &match_type,
+        &path,
+        payload.priority,
+        payload.strip_prefix,
+        rewrite_path.as_deref(),
+    )?;
     ensure_pool_can_serve(&state, id, payload.pool_id).await?;
     if let Some(group_id) = payload.ip_group_id {
         ensure_route_ip_group(&state, group_id).await?;
@@ -1656,6 +1685,8 @@ async fn create_route(
         enabled: Set(payload.enabled),
         pool_id: Set(payload.pool_id),
         ip_group_id: Set(payload.ip_group_id),
+        strip_prefix: Set(payload.strip_prefix),
+        rewrite_path: Set(rewrite_path),
         created_at: Set(Utc::now()),
     }
     .insert(&state.db)
@@ -1694,19 +1725,46 @@ async fn update_route(
         ensure_route_ip_group(&state, group_id).await?;
     }
 
+    // Merged over the stored row first, validated, and only then written: the
+    // path-rewrite rules cross-check `strip_prefix` against `match_type`, and a
+    // route that fails validation must never reach the agents' rule bundle. A
+    // rejected shape persisted here would break the site's whole data-plane
+    // configuration, not just this route.
+    let name = non_empty(&payload.name).unwrap_or_else(|| row.name.clone());
+    let match_type = non_empty(&payload.match_type)
+        .unwrap_or_else(|| row.match_type.clone());
+    let path = non_empty(&payload.path).unwrap_or_else(|| row.path.clone());
+    let priority = payload
+        .priority
+        // `0` is outside the valid range and means "back to auto weight".
+        .map(|priority| (priority > 0).then_some(priority))
+        .unwrap_or(row.priority);
+    let strip_prefix = payload.strip_prefix.unwrap_or(row.strip_prefix);
+    let rewrite_path = match payload.rewrite_path.as_ref() {
+        Some(value) => non_empty(value),
+        None => row.rewrite_path.clone(),
+    };
+    validate_route(
+        &name,
+        &match_type,
+        &path,
+        priority,
+        strip_prefix,
+        rewrite_path.as_deref(),
+    )?;
+
     let mut active: site_routes::ActiveModel = row.into();
-    if let Some(name) = non_empty(&payload.name) {
+    if payload.name.is_some() {
         active.name = Set(name);
     }
-    if let Some(match_type) = non_empty(&payload.match_type) {
+    if payload.match_type.is_some() {
         active.match_type = Set(match_type);
     }
-    if let Some(path) = non_empty(&payload.path) {
+    if payload.path.is_some() {
         active.path = Set(path);
     }
-    if let Some(priority) = payload.priority {
-        // `0` is outside the valid range and means "back to auto weight".
-        active.priority = Set((priority > 0).then_some(priority));
+    if payload.priority.is_some() {
+        active.priority = Set(priority);
     }
     if let Some(enabled) = payload.enabled {
         active.enabled = Set(enabled);
@@ -1717,14 +1775,14 @@ async fn update_route(
     if let Some(ip_group_id) = payload.ip_group_id {
         active.ip_group_id = Set(ip_group_id);
     }
+    if payload.strip_prefix.is_some() {
+        active.strip_prefix = Set(strip_prefix);
+    }
+    if payload.rewrite_path.is_some() {
+        active.rewrite_path = Set(rewrite_path);
+    }
 
     let updated = active.update(&state.db).await?;
-    validate_route(
-        &updated.name,
-        &updated.match_type,
-        &updated.path,
-        updated.priority,
-    )?;
 
     tracing::info!(site_id = %id, route = %target, "route updated");
     touch_site(&state, id).await?;
@@ -2102,6 +2160,8 @@ fn validate_route(
     match_type: &str,
     path: &str,
     priority: Option<i32>,
+    strip_prefix: bool,
+    rewrite_path: Option<&str>,
 ) -> Result<(), ApiError> {
     if name.is_empty() || name.len() > 100 {
         return Err(ApiError::BadRequest(
@@ -2149,6 +2209,43 @@ fn validate_route(
                 "route priority must be between 1 and 60000".to_string(),
             ));
         }
+    }
+    // `rewrite_path` replaces the whole path, so it is only meaningful as an
+    // absolute one; the client's query string is appended to it verbatim, which
+    // is why `?`, `#`, whitespace and control characters are rejected rather
+    // than escaped. Mirrors `validate_rewrite_path` in
+    // `pingap-config/src/common.rs`, which guards the config-file path — this
+    // crate cannot depend on that one.
+    if let Some(rewrite_path) = rewrite_path {
+        if !rewrite_path.starts_with('/') {
+            return Err(ApiError::BadRequest(
+                "route rewrite path must start with '/'".to_string(),
+            ));
+        }
+        if rewrite_path.len() > MAX_ROUTE_REWRITE_PATH_LEN {
+            return Err(ApiError::BadRequest(format!(
+                "route rewrite path must be at most \
+                 {MAX_ROUTE_REWRITE_PATH_LEN} characters"
+            )));
+        }
+        if let Some(bad) = rewrite_path.chars().find(|c| {
+            matches!(c, '?' | '#') || c.is_whitespace() || c.is_control()
+        }) {
+            return Err(ApiError::BadRequest(format!(
+                "route rewrite path must not contain '{bad}' (query, fragment, \
+                 whitespace and control characters are not allowed)"
+            )));
+        }
+    }
+    // Stripping needs a prefix to strip: an exact or regex route matches a
+    // whole pattern, not a prefix, so `strip_prefix` there would be a silent
+    // no-op. Rejecting it tells the operator instead of quietly forwarding the
+    // full path.
+    if strip_prefix && match_type != route_match_type::PREFIX {
+        return Err(ApiError::BadRequest(format!(
+            "strip_prefix needs a prefix route, '{match_type}' has no prefix \
+             to strip"
+        )));
     }
     Ok(())
 }
@@ -2665,5 +2762,97 @@ mod tests {
 
         // Nothing above touched the database: the checks are pure, which is
         // what lets the handler run them before `active.update()`.
+    }
+
+    /// The rewrite knobs are validated against the shape the data plane can
+    /// apply, and `validate_route` rejects them before the write: these rows
+    /// are what the agents turn into location config, so a value rejected only
+    /// after storing breaks the site's whole data-plane config.
+    #[test]
+    fn route_rewrite_fields_are_validated() {
+        let check = |match_type: &str, strip: bool, rewrite: Option<&str>| {
+            validate_route("api", match_type, "/api", None, strip, rewrite)
+                .map_err(|err| (err.code(), err.to_string()))
+        };
+
+        // Accepted: no rewrite at all, a prefix route stripping its prefix,
+        // and a fixed replacement on any match type (it needs no prefix).
+        assert_eq!(check("prefix", false, None), Ok(()));
+        assert_eq!(check("prefix", true, None), Ok(()));
+        assert_eq!(check("prefix", false, Some("/v2")), Ok(()));
+        assert_eq!(check("exact", false, Some("/v2")), Ok(()));
+        assert_eq!(check("regex", false, Some("/")), Ok(()));
+
+        // Rejected shapes: relative, query, fragment, whitespace, newline.
+        for bad in ["v2", "/v2?x=1", "/v2#frag", "/v 2", "/v\n2"] {
+            let err = check("prefix", false, Some(bad))
+                .expect_err("rewrite path must be rejected");
+            assert_eq!("bad_request", err.0, "{bad} is a 400");
+        }
+        assert!(check("prefix", false, Some("/v2?x=1"))
+            .unwrap_err()
+            .1
+            .contains("must not contain"));
+
+        // The length ceiling matches the data plane's (2048 bytes).
+        let at_limit = format!("/{}", "a".repeat(2047));
+        assert_eq!(check("prefix", false, Some(&at_limit)), Ok(()));
+        let too_long = format!("/{}", "a".repeat(2048));
+        assert!(check("prefix", false, Some(&too_long)).is_err());
+
+        // Stripping needs a prefix to strip: exact and regex routes are
+        // rejected rather than silently forwarding the full path.
+        for match_type in ["exact", "regex"] {
+            let err = check(match_type, true, None).expect_err("no prefix");
+            assert_eq!("bad_request", err.0);
+            assert!(err.1.contains("needs a prefix route"));
+        }
+    }
+
+    /// `update_route` merges the rewrite fields with the stored row, which is
+    /// what makes "absent = no change" and an explicit clear distinguishable.
+    #[test]
+    fn update_route_rewrite_fields_are_three_state() {
+        let absent: UpdateRouteRequest =
+            serde_json::from_str(r#"{}"#).expect("absent keys");
+        assert_eq!(absent.strip_prefix, None);
+        assert_eq!(absent.rewrite_path, None);
+
+        let cleared: UpdateRouteRequest =
+            serde_json::from_str(r#"{"rewrite_path": null}"#)
+                .expect("explicit null");
+        assert_eq!(cleared.rewrite_path, Some(None), "null clears the field");
+
+        let off: UpdateRouteRequest =
+            serde_json::from_str(r#"{"strip_prefix": false}"#)
+                .expect("explicit false");
+        assert_eq!(off.strip_prefix, Some(false));
+
+        let set: UpdateRouteRequest =
+            serde_json::from_str(r#"{"rewrite_path": "  /v2  "}"#)
+                .expect("value");
+        // The handler normalises through `non_empty`, which trims.
+        assert_eq!(non_empty(&set.rewrite_path.flatten()), Some("/v2".into()));
+
+        // A blank string is "no replacement", not a replacement with "".
+        let blank: UpdateRouteRequest =
+            serde_json::from_str(r#"{"rewrite_path": "   "}"#)
+                .expect("blank value");
+        assert_eq!(non_empty(&blank.rewrite_path.flatten()), None);
+
+        // Wrong types are rejected rather than coerced.
+        assert!(serde_json::from_str::<UpdateRouteRequest>(
+            r#"{"strip_prefix": "yes"}"#
+        )
+        .is_err());
+
+        // Create defaults to forwarding the path unchanged.
+        let create: CreateRouteRequest = serde_json::from_str(
+            r#"{"name":"api","match_type":"prefix","path":"/api",
+                "pool_id":"00000000-0000-0000-0000-000000000000"}"#,
+        )
+        .expect("create payload without the new fields");
+        assert!(!create.strip_prefix);
+        assert_eq!(create.rewrite_path, None);
     }
 }

@@ -228,6 +228,16 @@ pub trait LocationInstance: Send + Sync {
         header: &mut RequestHeader,
         variables: &mut Option<AHashMap<String, String>>,
     ) -> bool;
+    /// Rewrites the request target the upstream receives, for routes that
+    /// strip their prefix or replace the path wholesale. The query string is
+    /// preserved.
+    ///
+    /// Applied to the copy of the request header pingora sends upstream rather
+    /// than to the session's, so plugins, the access log and the cache key keep
+    /// the client's path, and a retry starts from a fresh copy instead of
+    /// stripping an already stripped path. The default forwards the path as is
+    /// and costs nothing.
+    fn rewrite_upstream_path(&self, _header: &mut RequestHeader) {}
     /// Returns the proxy header to upstream
     fn headers(&self) -> Option<&Vec<(HeaderName, HeaderValue, bool)>>;
     /// Host header to send upstream. `None` (the default) keeps the client's

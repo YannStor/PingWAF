@@ -16,7 +16,7 @@ import type {
   UpdateRouteRequest,
   UpstreamPool,
 } from '@/api/types'
-import { emptyRouteForm, type RouteFormState } from './types'
+import { emptyRouteForm, isValidRewritePath, type RouteFormState } from './types'
 
 export type RouteDialogRequest =
   | { mode: 'create'; poolId: string }
@@ -53,6 +53,8 @@ export function RouteDialog({
           poolId: request.route.pool_id,
           ipGroupId: request.route.ip_group_id ?? '',
           enabled: request.route.enabled,
+          rewritePath: request.route.rewrite_path ?? '',
+          stripPrefix: request.route.strip_prefix ?? false,
         }
       : emptyRouteForm(request.poolId),
   )
@@ -124,6 +126,17 @@ export function RouteDialog({
       return
     }
 
+    const rewrite = form.rewritePath.trim()
+    if (rewrite && !isValidRewritePath(rewrite)) {
+      setError(t('errors.validation'))
+      return
+    }
+    // The rewrite wins over stripping, and both only apply to prefix matches
+    // (the server rejects `strip_prefix` on other match types with a 400).
+    const rewritePath = form.matchType === 'prefix' && rewrite ? rewrite : null
+    const stripPrefix =
+      form.matchType === 'prefix' && !rewritePath && form.stripPrefix
+
     if (editing) {
       save.mutate({
         id: editing.id,
@@ -136,6 +149,8 @@ export function RouteDialog({
           enabled: form.enabled,
           pool_id: form.poolId,
           ip_group_id: form.ipGroupId === '' ? null : form.ipGroupId,
+          strip_prefix: stripPrefix,
+          rewrite_path: rewritePath,
         },
       })
       return
@@ -150,6 +165,8 @@ export function RouteDialog({
         enabled: form.enabled,
         pool_id: form.poolId,
         ip_group_id: form.ipGroupId === '' ? null : form.ipGroupId,
+        strip_prefix: stripPrefix,
+        rewrite_path: rewritePath,
       },
     })
   }
@@ -243,6 +260,26 @@ export function RouteDialog({
           ]}
           hint={t('pages.basic.ipGroupHint')}
           onChange={(e) => setForm((f) => ({ ...f, ipGroupId: e.target.value }))}
+        />
+        <Input
+          label={t('pages.routes.rewritePath')}
+          value={form.rewritePath}
+          placeholder="/v1"
+          hint={t('pages.routes.rewritePathHint')}
+          className="pw-mono"
+          disabled={form.matchType !== 'prefix'}
+          onChange={(e) => setForm((f) => ({ ...f, rewritePath: e.target.value }))}
+        />
+        <Switch
+          checked={form.stripPrefix}
+          onCheckedChange={(stripPrefix) => setForm((f) => ({ ...f, stripPrefix }))}
+          disabled={form.matchType !== 'prefix' || form.rewritePath.trim() !== ''}
+          label={t('pages.routes.stripPrefix')}
+          description={
+            form.rewritePath.trim() !== ''
+              ? t('pages.routes.rewritePathHint')
+              : t('pages.routes.stripPrefixHint')
+          }
         />
         <Switch
           checked={form.enabled}

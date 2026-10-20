@@ -89,8 +89,10 @@ pub const DEFAULT_BODY_LIMIT_BYTES: usize = 10 * 1024 * 1024;
 /// Attributes one control-plane request to the `control` module. The timer
 /// is a relaxed atomic add on drop, so the middleware costs nanoseconds.
 async fn record_control_module(request: Request, next: Next) -> Response {
-    let _profile = pingwaf_profiler::timed(pingwaf_profiler::Module::Control);
-    let _profile_method = pingwaf_profiler::timed_method("control::http");
+    // Method attribution (see pingwaf-profiler): the timer books the
+    // `control` module row as well.
+    let _profile =
+        pingwaf_profiler::timed_method(pingwaf_profiler::Method::ControlHttp);
     next.run(request).await
 }
 
@@ -153,7 +155,13 @@ pub fn build_router(state: AppState) -> Router {
         // The limiter covers the whole API surface but only ever matches the
         // credential endpoints (see `bucket_for`), which is also what keeps
         // passkey logins — registered by a different module — covered.
-        .layer(middleware::from_fn(rate_limit::auth_rate_limit));
+        .layer(middleware::from_fn(rate_limit::auth_rate_limit))
+        // Attribution for the REST surface only: mounted on the `/api/v1`
+        // group so MCP, `/healthz` and the SPA fallback do not inflate the
+        // `control` row. Outermost here, so it also covers the two
+        // middlewares above (both cheap) but not CORS/compression/security
+        // headers, which wrap the root router.
+        .layer(middleware::from_fn(record_control_module));
 
     let mut root = Router::new()
         .nest(API_PREFIX, api)
@@ -180,8 +188,8 @@ pub fn build_router(state: AppState) -> Router {
     // Global body-size backstop (S1): applies to everything below — the
     // nested `/api/v1` router, the MCP routes and the frontend fallback —
     // while route-level `DefaultBodyLimit`s (MCP, GeoIP upload) still take
-    // precedence as the inner, more specific bounds.
-    .layer(middleware::from_fn(record_control_module))
+    // precedence as the inner, more specific bounds. Not part of the
+    // `control` attribution: `record_control_module` lives on `/api/v1`.
     .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT_BYTES))
     .layer(build_cors(&config.cors_origins))
     // Global security headers. Applied as `if_not_present` so a handler

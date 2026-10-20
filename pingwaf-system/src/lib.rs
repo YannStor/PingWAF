@@ -4,8 +4,9 @@
 //!
 //! * [`cpu_snapshot`] — this process's CPU usage and the machine average
 //!   (sysinfo, 1 s reuse so concurrent pollers share one refresh).
-//! * [`memory_snapshot`] — process RSS/virtual, host RAM, and the container
-//!   memory accounting when a cgroup limit applies.
+//! * [`memory_snapshot`] — process RSS/virtual, `/proc` peak RSS and page
+//!   faults, host RAM/swap/cache, and the container memory accounting when a
+//!   cgroup limit applies.
 //! * [`memory_guard`] — best-effort available-memory estimation and the
 //!   admission floor callers can gate expensive work on.
 //!
@@ -20,7 +21,7 @@ pub mod memory;
 pub mod memory_guard;
 
 pub use cpu::{cpu_snapshot, CpuLiveStats};
-pub use memory::{memory_snapshot, MemorySnapshot};
+pub use memory::{memory_snapshot, MemInfo, MemorySnapshot};
 pub use memory_guard::{
     available_bytes, ensure_admission, memory_pressure_now, total_bytes, Error,
     MIN_AVAILABLE_BYTES,

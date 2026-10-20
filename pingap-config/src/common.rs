@@ -772,6 +772,36 @@ impl Validate for LocationConf {
     }
 }
 
+/// Upper bound for `LocationConf::rewrite_path`, matching the control plane's
+/// route API. A replacement path longer than this is a configuration mistake.
+pub const MAX_REWRITE_PATH_LEN: usize = 2048;
+
+/// Checks the shape of a `rewrite_path` value: an absolute path with no query
+/// string, fragment, whitespace or control character.
+///
+/// `/` is valid (the whole path collapses to the origin root); the empty string
+/// is not, because "no rewrite" is expressed by leaving the field unset.
+pub fn validate_rewrite_path(value: &str) -> std::result::Result<(), String> {
+    if !value.starts_with('/') {
+        return Err(format!("rewrite_path '{value}' must start with '/'"));
+    }
+    if value.len() > MAX_REWRITE_PATH_LEN {
+        return Err(format!(
+            "rewrite_path must be at most {MAX_REWRITE_PATH_LEN} characters"
+        ));
+    }
+    if let Some(bad) = value
+        .chars()
+        .find(|c| matches!(c, '?' | '#') || c.is_whitespace() || c.is_control())
+    {
+        return Err(format!(
+            "rewrite_path must not contain '{bad}' (query, fragment, \
+             whitespace and control characters are not allowed)"
+        ));
+    }
+    Ok(())
+}
+
 /// Configuration for a location/route that handles incoming requests
 #[derive(Debug, Default, Deserialize, Clone, Serialize, Hash)]
 pub struct LocationConf {
@@ -812,6 +842,17 @@ pub struct LocationConf {
 
     /// Headers to add to proxied requests (appends to existing)
     pub proxy_add_headers: Option<Vec<String>>,
+
+    /// Strip the matched path prefix from the request forwarded upstream, so a
+    /// location on `/api` reaches an origin that only serves `/users`. Only a
+    /// prefix `path` can strip (`=exact` / `~regex` are rejected by
+    /// validation); the query string is preserved.
+    pub strip_prefix: Option<bool>,
+
+    /// Fixed path replacing the whole request path before proxying; wins over
+    /// `strip_prefix`. Must start with `/` and carry no query or fragment,
+    /// because the client's query string is appended as is.
+    pub rewrite_path: Option<String>,
 
     /// URL rewrite rule in format "pattern replacement"
     pub rewrite: Option<String>,
@@ -923,6 +964,49 @@ impl LocationConf {
                 Regex::new(arr[0]).map_err(|e| Error::Regex { source: e })?;
         }
 
+        self.validate_path_rewrite()?;
+
+        Ok(())
+    }
+
+    /// Validates the route-level path rewriting knobs:
+    ///
+    /// - `rewrite_path` must be an absolute path (`/...`) without a query,
+    ///   fragment, whitespace or control character, at most
+    ///   [`MAX_REWRITE_PATH_LEN`] bytes. The client's query string is appended
+    ///   verbatim, which is why `?` is rejected here.
+    /// - `strip_prefix` needs a prefix `path` to strip; an `=exact` or
+    ///   `~regex` location has no prefix, and neither has a location without a
+    ///   `path`, so both are configuration errors instead of silent no-ops.
+    ///
+    /// The control plane's route API (`pingwaf-server/src/api/sites.rs`)
+    /// enforces the same shape before storing a route; that crate cannot
+    /// depend on this one, so the rule is mirrored there.
+    fn validate_path_rewrite(&self) -> Result<()> {
+        if let Some(value) = self.rewrite_path.as_deref() {
+            let value = value.trim();
+            if !value.is_empty() {
+                validate_rewrite_path(value)
+                    .map_err(|message| Error::Invalid { message })?;
+            }
+        }
+        if self.strip_prefix.unwrap_or_default() {
+            let path = self.path.as_deref().unwrap_or_default().trim();
+            if path.is_empty() {
+                return Err(Error::Invalid {
+                    message: "strip_prefix requires a path prefix to strip"
+                        .to_string(),
+                });
+            }
+            if path.starts_with('=') || path.starts_with('~') {
+                return Err(Error::Invalid {
+                    message: format!(
+                        "strip_prefix needs a prefix path, '{path}' is an \
+                         exact or regex match"
+                    ),
+                });
+            }
+        }
         Ok(())
     }
 

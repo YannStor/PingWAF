@@ -660,6 +660,22 @@ Upgrading to 0.27.12 fills `waf_settings.body_stage_timeout_secs` with 30
 from an operator-chosen 30, and both behave identically. If you want a shorter
 body-withholding window, set 1–29 in the site's WAF settings.
 
+Migration 58 adds two columns to site routes: `strip_prefix`
+(`NOT NULL DEFAULT FALSE`) and `rewrite_path` (nullable). Both default to
+off, so after upgrading every route keeps forwarding the request path to the
+origin unchanged — behaviour is identical. If a backend lives under a
+stripped prefix (a route on `/api` whose origins serve `/users`), edit that
+route afterwards and enable **Strip path prefix** (`strip_prefix: true`, so
+`/api/users` is forwarded as `/users`) or set a fixed **Rewrite path**
+(`rewrite_path`), both of which were previously impossible.
+
+The System observation UI moved: the card on the settings page is gone, and
+the full view (overview, memory detail, module attribution, top methods)
+now lives on the dedicated `/system` page — admin-only, reachable from the
+account dropdown in the top-right corner ("System observation"). The
+underlying endpoints (`GET /api/v1/system/metrics`,
+`GET /api/v1/system/profile`) are unchanged.
+
 ### Rolling Upgrade (Distributed)
 
 1. Upgrade the control plane server first

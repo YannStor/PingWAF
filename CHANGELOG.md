@@ -8,6 +8,57 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+### Added
+
+- **Extended memory metrics.** `GET /api/v1/system/metrics` reports more of
+  what the OS already keeps: `rss_peak_bytes` / `rss_peak` (process RSS
+  high-water mark, `/proc/self/status` `VmHWM`), `swap_used_bytes` /
+  `swap_total_bytes` (+ human-readable forms), `mem_available_bytes` /
+  `mem_available` (`MemAvailable`), `memory_used_percent`
+  (used/total × 100), cumulative `page_faults_minor` / `page_faults_major`,
+  and `cached_bytes` / `buffers_bytes` (page cache and block-device
+  buffers). All fields come from `/proc` or the cgroup equivalent; a
+  counter the platform does not expose is reported as `0`.
+- **Site route path rewriting.** Route rules gained `strip_prefix`
+  (default `false`; removes the matched `path` prefix, so a rule on `/api`
+  forwards `/api/users` as `/users` and `/api` as `/`) and `rewrite_path`
+  (nullable; replaces the whole forwarded path, wins over `strip_prefix`).
+  Both are prefix-route features with validation (`rewrite_path`: starts
+  with `/`, ≤ 2048 chars, no `?` / `#` / whitespace / control characters;
+  `strip_prefix` rejected with `400` on non-prefix routes); the query
+  string is preserved. The route editor exposes a "strip path prefix"
+  switch and a "rewrite path" input.
+- **Dedicated System observation page.** The observation UI moved from a
+  settings-page card to `/system` (admin-only): overview, memory detail,
+  module attribution and top methods, entered from the account dropdown's
+  "System observation" item (visible to admins only).
+
+### Changed
+
+- **`control` attribution is now correct, not smaller.** The control-plane
+  request timer previously recorded the `control` module row twice (once
+  via the module timer, once via the method timer), inflating its share;
+  one timer now fills both the module row and the `control::http` method
+  row. `GET /api/v1/system/profile` also publishes every time figure under
+  `elapsed_ms` / `elapsed_share` (and `total_elapsed_ms`) alongside the
+  historical `cpu_ms` / `cpu_share` names — all of them are **wall-clock**
+  time, not CPU time, and both pairs always carry the same value. Method
+  names come from a compile-time static enumeration, so per-request cost
+  drops to two relaxed atomic adds (previously two module updates plus a
+  method-map hash). If the `control` share drops noticeably after
+  upgrading, that is the accounting fix, not a performance regression.
+- **Console polling reduced.** The dashboard refresh interval went from
+  30 s to 60 s, and the admin process-CPU card from 15 s to 30 s.
+
+### Fixed
+
+- Site routes always forwarded the original request path upstream, so a
+  backend mounted under a different prefix (a route on `/api` whose origin
+  serves `/users`) received the full path and answered 404. Routes can now
+  strip the matched prefix or rewrite the path (see Added above).
+
 ## [PingWAF 0.27.13] — 2026-10-20
 
 ### Fixed

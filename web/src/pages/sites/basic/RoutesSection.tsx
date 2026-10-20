@@ -110,7 +110,20 @@ export function RoutesSection({
       key: 'path',
       header: t('pages.basic.routePath'),
       accessor: (r) => r.path,
-      cell: (r) => <span className="pw-mono text-[13px] text-fg">{r.path}</span>,
+      cell: (r) => (
+        <span className="pw-mono text-[13px] text-fg">
+          {r.path}
+          {r.rewrite_path ? (
+            <Badge tone="brand" size="sm" className="ml-1.5">
+              → {r.rewrite_path}
+            </Badge>
+          ) : r.strip_prefix ? (
+            <Badge tone="brand" size="sm" className="ml-1.5">
+              {t('pages.routes.stripPrefix')}
+            </Badge>
+          ) : null}
+        </span>
+      ),
     },
     {
       key: 'priority',

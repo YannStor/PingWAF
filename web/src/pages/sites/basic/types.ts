@@ -259,6 +259,9 @@ export interface RouteFormState {
   /** Empty string gates the route to no group (every client matches). */
   ipGroupId: string
   enabled: boolean
+  /** Empty string means no rewrite (`rewrite_path: null` in the API). */
+  rewritePath: string
+  stripPrefix: boolean
 }
 
 export const emptyRouteForm = (poolId: string): RouteFormState => ({
@@ -269,7 +272,19 @@ export const emptyRouteForm = (poolId: string): RouteFormState => ({
   poolId,
   ipGroupId: '',
   enabled: true,
+  rewritePath: '',
+  stripPrefix: false,
 })
+
+/**
+ * Mirrors the server's `rewrite_path` validation (`/`-rooted, ≤2048 bytes,
+ * no `?`/`#`/whitespace). Returns true when the raw input can be submitted.
+ */
+export function isValidRewritePath(raw: string): boolean {
+  const path = raw.trim()
+  if (!path.startsWith('/') || /[\s?#]/.test(path)) return false
+  return new TextEncoder().encode(path).length <= 2048
+}
 
 /* ── Trusted proxy helpers ────────────────────────────────────────── */
 

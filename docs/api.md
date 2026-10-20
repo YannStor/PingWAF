@@ -583,6 +583,8 @@ List path-based routes for a site, highest priority first. Each route:
   "pool_id": "uuid",
   "ip_group_id": null,
   "ip_group_name": null,
+  "strip_prefix": false,
+  "rewrite_path": null,
   "created_at": "2024-01-01T00:00:00Z"
 }
 ```
@@ -600,11 +602,44 @@ Create a route.
   "priority": 512,
   "enabled": true,
   "pool_id": "uuid",
-  "ip_group_id": "uuid"
+  "ip_group_id": "uuid",
+  "strip_prefix": false,
+  "rewrite_path": null
 }
 ```
 
 `match_type` is `prefix`, `exact` or `regex`; `priority` (1-60000) is optional and defaults to the auto weight. `ip_group_id` is optional and must name an existing, enabled IP group visible to the caller whose membership is not empty; `ip_group_name` is filled in on responses.
+
+#### Path rewriting (`strip_prefix` / `rewrite_path`)
+
+Two optional fields control what path the origin receives; both default to
+off, so existing routes keep forwarding the request path unchanged.
+
+- `strip_prefix` (boolean, default `false`) — remove the matched `path`
+  prefix from the forwarded path. With a rule on `/api`, `/api/users` is
+  forwarded as `/users` and `/api` itself as `/`; the query string is kept.
+- `rewrite_path` (string or `null`) — replace the **whole** forwarded path
+  with this fixed value; the query string is kept. It wins over
+  `strip_prefix` when both are set.
+
+`strip_prefix` takes effect only for `match_type: "prefix"` routes — on an
+`exact` or `regex` route there is no prefix to strip, so the combination is
+rejected with `400`. `rewrite_path` works with any match type: it replaces
+the whole path of every request the route matched. Validation for
+`rewrite_path`: must start with `/`, at most 2048 characters, and must not
+contain `?`, `#`, whitespace or control characters (the client's query
+string is appended verbatim, so those would be ambiguous). Saving fails
+with `400` on violation.
+
+On `PUT`, `strip_prefix` is tri-state (`true`/`false` set it, absent leaves
+it); `rewrite_path` follows the same pattern — absent leaves the stored
+value, `null` or a blank string clears it, a value sets it.
+
+Example: to point a site's `/api` traffic at a pool that serves `/users`
+without the prefix, create a `prefix` route on `/api` with
+`strip_prefix: true` — `/api/users` reaches the origin as `/users`. To send
+everything under `/legacy` to a fixed upstream path instead, set
+`rewrite_path: "/v2"`.
 
 A route with an IP group only matches clients whose address is inside one of the
 group's CIDR ranges. Both conditions are ANDed, so the route above sends
@@ -3295,7 +3330,22 @@ and answers immediately.
     "container_memory_limit_bytes": 1073741824,
     "container_memory_used": "805.3 MB",
     "container_memory_limit": "1.0 GB",
-    "container_memory_scope": "cgroup_v2"
+    "container_memory_scope": "cgroup_v2",
+    "rss_peak_bytes": 154140467,
+    "rss_peak": "154.1 MB",
+    "swap_used_bytes": 0,
+    "swap_total_bytes": 2147483648,
+    "swap_used": "0 B",
+    "swap_total": "2.0 GB",
+    "mem_available_bytes": 6442450944,
+    "mem_available": "6.0 GB",
+    "memory_used_percent": 56.3,
+    "page_faults_minor": 482113,
+    "page_faults_major": 1024,
+    "cached_bytes": 3221225472,
+    "buffers_bytes": 268435456,
+    "cached": "3.0 GB",
+    "buffers": "256.0 MB"
   }
 }
 ```
@@ -3306,6 +3356,14 @@ figures, marked by `used_memory_scope: "system"` vs
 `process_memory_scope: "process"` for `rss`. The `container_memory_*` fields
 are present only when a container memory limit applies and match what
 `docker stats` reports — prefer them over the host totals in that case.
+The remaining `memory.*` fields come from `/proc` (or the cgroup equivalent):
+`rss_peak_bytes` is the high-water mark (`VmHWM`), `swap_*` the configured
+and in-use swap, `mem_available_bytes` the kernel's estimate of memory
+available for new work, `memory_used_percent` the host used/total ratio,
+`page_faults_*` the process's cumulative minor/major fault counts, and
+`cached_bytes` / `buffers_bytes` the kernel page cache and block-device
+buffers. A counter the platform does not expose (e.g. non-Linux, or a kernel
+without `MemAvailable`) is reported as `0`.
 
 ```bash
 curl -k -H "Authorization: Bearer $TOKEN" \
@@ -3314,13 +3372,23 @@ curl -k -H "Authorization: Bearer $TOKEN" \
 
 ### GET /system/profile
 
-CPU and memory attribution by module and method — pure Rust instrumentation
-(`pingwaf-profiler`), not a sampled profile: module-level atomic counters
-(`cpu_ns` / `mem_bytes` / `calls`) plus `timed_method` timers on instrumented
+Wall-clock time and memory attribution by module and method — pure Rust
+instrumentation (`pingwaf-profiler`), not a sampled profile: module-level
+atomic counters plus compile-time-registered method timers on instrumented
 hot paths. No sampling, no stack unwinding, no allocator hook, no external
-tool or image; the overhead is one relaxed atomic add per recording point.
-Counters are cumulative since process start; take two snapshots and compare
-deltas for a live view.
+tool or image. Counters are cumulative since process start; take two
+snapshots and compare deltas for a live view.
+
+> **These numbers are wall-clock time, not CPU time.** Every timer is
+> `Instant`-based: a scope that awaits a database query, a lock or the
+> upstream reports that wait too. Shares are "of the attributed wall time",
+> not "of the CPU the process burned" — reading `cpu_ms` as CPU seconds is
+> the mistake that once made `control::http` look like 90 % CPU when it was
+> mostly waiting. Each figure is therefore published twice: under the
+> historical `cpu_ms` / `cpu_share` names (kept so existing dashboards keep
+> parsing) and under `elapsed_ms` / `elapsed_share`, which say what is
+> measured. Both pairs always carry the same value; prefer `elapsed_*` in
+> new consumers.
 
 **Response (200):**
 
@@ -3328,26 +3396,41 @@ deltas for a live view.
 {
   "collected_at_ms": 1760000000000,
   "total_cpu_ms": 48213.4,
+  "total_elapsed_ms": 48213.4,
   "modules": [
-    { "module": "proxy",  "cpu_ms": 30102.1, "cpu_share": 0.62, "mem_bytes": 41943040, "mem_share": 0.55, "calls": 102341, "avg_us": 294.1 },
-    { "module": "waf",    "cpu_ms": 11101.2, "cpu_share": 0.23, "mem_bytes": 8388608,  "mem_share": 0.11, "calls": 98111,  "avg_us": 113.1 }
+    { "module": "proxy",  "cpu_ms": 30102.1, "cpu_share": 0.62, "elapsed_ms": 30102.1, "elapsed_share": 0.62, "mem_bytes": 41943040, "mem_share": 0.55, "calls": 102341, "avg_us": 294.1 },
+    { "module": "waf",    "cpu_ms": 11101.2, "cpu_share": 0.23, "elapsed_ms": 11101.2, "elapsed_share": 0.23, "mem_bytes": 8388608,  "mem_share": 0.11, "calls": 98111,  "avg_us": 113.1 }
   ],
   "methods": [
-    { "method": "waf::evaluate",  "cpu_ms": 9200.4, "calls": 98111, "avg_us": 93.8 },
-    { "method": "proxy::forward", "cpu_ms": 7100.9, "calls": 88430, "avg_us": 80.3 }
+    { "method": "waf::handle_request",  "cpu_ms": 9200.4, "elapsed_ms": 9200.4, "calls": 98111, "avg_us": 93.8 },
+    { "method": "proxy::request_filter", "cpu_ms": 7100.9, "elapsed_ms": 7100.9, "calls": 88430, "avg_us": 80.3 }
   ]
 }
 ```
 
 - `modules` — always exactly 7 rows in fixed order: `proxy`, `waf`, `cache`,
   `plugin`, `db`, `control`, `other` (anything not yet instrumented).
-  `cpu_share` is the share of `total_cpu_ms`; `mem_bytes` is bytes the module
-  currently reports as held (reported, not intercepted — no allocator hook),
-  with `mem_share` its share of the total; `calls` / `avg_us` are the timed
-  operation count and average microseconds per operation.
-- `methods` — named call sites, hottest first, capped at 40 rows, same
-  semantics as the module rows.
+  `cpu_share` / `elapsed_share` are the share of the total attributed
+  wall-clock time (`total_cpu_ms` / `total_elapsed_ms`, always equal);
+  `mem_bytes` is bytes the module currently reports as held (reported, not
+  intercepted — no allocator hook), with `mem_share` its share of the total;
+  `calls` / `avg_us` are the timed operation count and average microseconds
+  per operation.
+- `methods` — named call sites, hottest first, capped at 40 rows. Method
+  names come from a compile-time static enumeration (the instrumented call
+  sites: `proxy::request_filter`, `waf::handle_request`,
+  `cache::handle_request`, `plugin::rewrite`, `db::persist_heartbeat`,
+  `control::http`), so recording costs two relaxed atomic adds per request —
+  no hash lookup. Otherwise the same semantics as the module rows.
 - `collected_at_ms` — Unix epoch milliseconds of the snapshot.
+
+**What the `control` row covers.** The control-plane timer books every
+`/api/v1` request once — the same timer fills both the `control` module row
+and the `control::http` method row (a previous release recorded the module
+twice, which inflated its share; that is an accounting fix, not a sudden
+performance change). The timer sits *inside* the CORS, compression,
+security-header and body-limit layers, so those middleware costs are not
+part of `control`.
 
 The response is bounded by construction (7 module rows, at most 40 method
 rows, KB-scale JSON) and computed from atomics, so polling it is cheap. See

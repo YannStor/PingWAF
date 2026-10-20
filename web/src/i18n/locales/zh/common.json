@@ -1,4 +1,35 @@
 {
+  "system": {
+    "title": "System 观测",
+    "subtitle": "控制面的墙钟耗时归因——占比为墙钟耗时占比，非 CPU 占比。",
+    "collectedAt": "采集于 {{time}}",
+    "refresh": "刷新",
+    "processCpu": "进程 CPU",
+    "hostCpu": "主机 CPU",
+    "cores": "核心数",
+    "containerMemory": "容器内存",
+    "overview": "概览",
+    "memoryDetail": "内存明细",
+    "modules": "模块归因",
+    "topMethods": "Top 方法",
+    "rss": "RSS",
+    "rssPeak": "RSS 峰值",
+    "virtual": "虚拟内存",
+    "swap": "Swap（已用 / 总量）",
+    "available": "可用内存",
+    "usagePercent": "内存使用率",
+    "pageFaults": "缺页（minor / major）",
+    "cached": "Cached",
+    "buffers": "Buffers",
+    "share": "耗时占比",
+    "held": "内存持有",
+    "calls": "调用数",
+    "avgTime": "平均耗时",
+    "empty": "暂无采样",
+    "loadError": "系统数据加载失败。",
+    "method": "方法",
+    "elapsed": "耗时"
+  },
   "app": {
     "name": "PingWAF",
     "tagline": "Web 应用防火墙控制平面"
@@ -256,6 +287,12 @@
     "featureAnalytics": "实时分析"
   },
   "pages": {
+    "routes": {
+      "stripPrefix": "去除前缀",
+      "stripPrefixHint": "将匹配到的前缀从上游请求路径中移除。",
+      "rewritePath": "重写路径",
+      "rewritePathHint": "用给定模板替换上游请求路径。"
+    },
     "dashboard": {
       "title": "概览",
       "description": "受保护站点、节点与实时威胁活动的总览。",

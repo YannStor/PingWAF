@@ -890,6 +890,14 @@ pub struct RouteConfig {
     /// CIDR ranges the client IP must fall into; empty matches every client.
     #[serde(default)]
     pub ip_ranges: Vec<String>,
+    /// Strip the matched prefix `path` from the path sent upstream. Snapshots
+    /// written before this field existed load with `false` (forward as is).
+    #[serde(default)]
+    pub strip_prefix: bool,
+    /// Fixed path replacing the whole upstream path; empty disables it. Also
+    /// defaulted so an old `sites.json` keeps loading.
+    #[serde(default)]
+    pub rewrite_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2147,8 +2155,9 @@ impl RuleCache {
                             Ok(())
                         },
                         Err(backup_err) => {
-                            let reason =
-                                format!("primary: {primary_err:#}; backup: {backup_err:#}");
+                            let reason = format!(
+                                "primary: {primary_err:#}; backup: {backup_err:#}"
+                            );
                             warn!(
                                 reason = %reason,
                                 "Rule cache unusable; running with empty rules until the control plane re-pushes"
@@ -2684,6 +2693,8 @@ impl RuleCache {
             enabled: r.enabled,
             pool_id: r.pool_id.clone(),
             ip_ranges: r.ip_ranges.clone(),
+            strip_prefix: r.strip_prefix,
+            rewrite_path: r.rewrite_path.clone(),
         }
     }
 }
@@ -3269,6 +3280,8 @@ mod tests {
                         enabled: true,
                         pool_id: "pool-1".to_string(),
                         ip_ranges: vec!["10.0.0.0/8".to_string()],
+                        strip_prefix: true,
+                        rewrite_path: "/v2".to_string(),
                     }],
                     bot_protection: None,
                 }),

@@ -66,7 +66,6 @@ import { aiApi, aiKeys } from '@/api/ai'
 import { mcpApi, mcpKeys } from '@/api/mcp'
 import { ipGroupKeys, ipGroupsApi } from '@/api/ipGroups'
 import { systemApi } from '@/api/system'
-import { fetchSystemMetrics, fetchSystemProfile, debugKeys } from '@/api/debug'
 import { ApiError } from '@/api/client'
 import { errorMessage, handleApiError } from '@/api/errors'
 import { useAuthStore } from '@/stores/authStore'
@@ -74,7 +73,7 @@ import { useCanWrite } from '@/hooks'
 import { useThemeStore, type ThemeMode } from '@/stores/themeStore'
 import { supportedLanguages } from '@/i18n'
 import { cn } from '@/lib/utils'
-import { formatDateTime, formatSize } from '@/lib/format'
+import { formatDateTime } from '@/lib/format'
 import type {
   AiSettings,
   AiTestResult,
@@ -198,7 +197,6 @@ export function SettingsPage() {
           </section>
           <section id="about" className="scroll-mt-6 flex flex-col gap-4">
             <AboutCard />
-            {isAdmin && <SystemObservabilityCard />}
           </section>
         </div>
       </div>
@@ -2709,162 +2707,6 @@ function AboutCard() {
             </div>
           </>
         )}
-      </CardBody>
-    </Card>
-  )
-}
-
-/* ── System 观测（metrics + profile） ───────────────────────────────── */
-
-/**
- * Admin-only System 观测卡片，聚合两个只读端点：
- * - `/api/v1/system/metrics`：进程/主机 CPU、cores、RSS 与容器内存（有则显示）。
- * - `/api/v1/system/profile`：模块归因（固定 7 行）与热点方法 Top 10。
- * 两者均 30s 轮询且静默失败——诊断数据缺失不应打扰设置页。
- */
-function SystemObservabilityCard() {
-  const { t } = useTranslation()
-  const metrics = useQuery({
-    queryKey: debugKeys.metrics(),
-    queryFn: fetchSystemMetrics,
-    refetchInterval: 30_000,
-    retry: false,
-  })
-  const profile = useQuery({
-    queryKey: debugKeys.profile(),
-    queryFn: fetchSystemProfile,
-    refetchInterval: 30_000,
-    retry: false,
-  })
-
-  const mem = metrics.data?.memory
-  const cpu = metrics.data?.cpu
-  const container = mem?.container_memory_scope != null && mem.container_memory_used_bytes != null
-
-  return (
-    <Card>
-      <CardHeader
-        title={t('pages.settings.systemObs.title')}
-        description={t('pages.settings.systemObs.description')}
-      />
-      <CardBody className="flex flex-col gap-4">
-        {/* CPU / 内存速览 */}
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          <div className="rounded-lg bg-bg-subtle px-3 py-2">
-            <p className="text-[11px] text-fg-subtle">{t('pages.settings.systemObs.processCpu')}</p>
-            <p className="text-lg font-semibold text-fg-strong tabular-nums">
-              {cpu ? `${cpu.process_cpu_percent.toFixed(1)}%` : '—'}
-            </p>
-          </div>
-          <div className="rounded-lg bg-bg-subtle px-3 py-2">
-            <p className="text-[11px] text-fg-subtle">{t('pages.settings.systemObs.hostCpu')}</p>
-            <p className="text-lg font-semibold text-fg-strong tabular-nums">
-              {cpu ? `${cpu.host_cpu_percent.toFixed(1)}%` : '—'}
-            </p>
-          </div>
-          <div className="rounded-lg bg-bg-subtle px-3 py-2">
-            <p className="text-[11px] text-fg-subtle">{t('pages.settings.systemObs.cores')}</p>
-            <p className="text-lg font-semibold text-fg-strong tabular-nums">{cpu?.cores ?? '—'}</p>
-          </div>
-          <div className="rounded-lg bg-bg-subtle px-3 py-2">
-            <p className="text-[11px] text-fg-subtle">{t('pages.settings.systemObs.rss')}</p>
-            <p className="text-lg font-semibold text-fg-strong tabular-nums">{mem?.rss ?? '—'}</p>
-          </div>
-        </div>
-        {container && (
-          <p className="rounded-lg bg-bg-subtle px-3 py-2 text-xs text-fg-subtle tabular-nums">
-            {t('pages.settings.systemObs.containerMemory', { scope: mem?.container_memory_scope })}:{' '}
-            <span className="font-medium text-fg-strong">
-              {mem?.container_memory_used} / {mem?.container_memory_limit}
-            </span>
-          </p>
-        )}
-
-        {/* 模块归因表：固定 7 行 proxy/waf/cache/plugin/db/control/other */}
-        <div>
-          <p className="mb-2 text-[13px] font-medium text-fg-strong">
-            {t('pages.settings.systemObs.modules')}
-            {profile.data && (
-              <span className="ml-2 text-xs font-normal text-fg-subtle tabular-nums">
-                {t('pages.settings.systemObs.totalCpuMs', { value: profile.data.total_cpu_ms })}
-              </span>
-            )}
-          </p>
-          <div className="overflow-hidden rounded-lg border border-line">
-            <table className="w-full text-[13px]">
-              <thead>
-                <tr className="border-b border-line bg-bg-subtle text-left text-xs text-fg-subtle">
-                  <th className="px-3 py-1.5 font-medium">{t('pages.settings.systemObs.module')}</th>
-                  <th className="px-3 py-1.5 text-right font-medium">{t('pages.settings.systemObs.cpuMs')}</th>
-                  <th className="px-3 py-1.5 text-right font-medium">{t('pages.settings.systemObs.cpuShare')}</th>
-                  <th className="px-3 py-1.5 text-right font-medium">{t('pages.settings.systemObs.memBytes')}</th>
-                  <th className="px-3 py-1.5 text-right font-medium">{t('pages.settings.systemObs.calls')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(profile.data?.modules ?? []).slice(0, 7).map((m) => (
-                  <tr key={m.module} className="border-b border-line/60 last:border-0">
-                    <td className="px-3 py-1.5 font-medium text-fg">{m.module}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{m.cpu_ms.toFixed(1)}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{(m.cpu_share * 100).toFixed(1)}%</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{formatSize(m.mem_bytes)}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{m.calls}</td>
-                  </tr>
-                ))}
-                {profile.data && profile.data.modules.length === 0 && (
-                  <tr>
-                    <td colSpan={5} className="px-3 py-3 text-center text-xs text-fg-subtle">
-                      {t('pages.settings.systemObs.noData')}
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* Top 方法表：最多 10 行，按 cpu_ms 降序 */}
-        <div>
-          <p className="mb-2 text-[13px] font-medium text-fg-strong">
-            {t('pages.settings.systemObs.topMethods')}
-          </p>
-          <div className="overflow-hidden rounded-lg border border-line">
-            <table className="w-full text-[13px]">
-              <thead>
-                <tr className="border-b border-line bg-bg-subtle text-left text-xs text-fg-subtle">
-                  <th className="px-3 py-1.5 font-medium">{t('pages.settings.systemObs.method')}</th>
-                  <th className="px-3 py-1.5 text-right font-medium">{t('pages.settings.systemObs.cpuMs')}</th>
-                  <th className="px-3 py-1.5 text-right font-medium">{t('pages.settings.systemObs.calls')}</th>
-                  <th className="px-3 py-1.5 text-right font-medium">{t('pages.settings.systemObs.avgUs')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(profile.data?.methods ?? []).slice(0, 10).map((m) => (
-                  <tr key={m.method} className="border-b border-line/60 last:border-0">
-                    <td className="pw-mono max-w-[280px] truncate px-3 py-1.5 text-fg" title={m.method}>
-                      {m.method}
-                    </td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{m.cpu_ms.toFixed(1)}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{m.calls}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{m.avg_us.toFixed(1)}</td>
-                  </tr>
-                ))}
-                {profile.data && profile.data.methods.length === 0 && (
-                  <tr>
-                    <td colSpan={4} className="px-3 py-3 text-center text-xs text-fg-subtle">
-                      {t('pages.settings.systemObs.noData')}
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <p className="flex items-start gap-2 text-xs leading-relaxed text-fg-subtle">
-          <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0" />
-          {t('pages.settings.systemObs.hint')}
-        </p>
       </CardBody>
     </Card>
   )

@@ -56,7 +56,22 @@ curl -k -H "Authorization: Bearer $TOKEN" \
     "container_memory_limit_bytes": 1073741824,
     "container_memory_used": "805.3 MB",
     "container_memory_limit": "1.0 GB",
-    "container_memory_scope": "cgroup_v2"
+    "container_memory_scope": "cgroup_v2",
+    "rss_peak_bytes": 154140467,
+    "rss_peak": "154.1 MB",
+    "swap_used_bytes": 0,
+    "swap_total_bytes": 2147483648,
+    "swap_used": "0 B",
+    "swap_total": "2.0 GB",
+    "mem_available_bytes": 6442450944,
+    "mem_available": "6.0 GB",
+    "memory_used_percent": 56.3,
+    "page_faults_minor": 482113,
+    "page_faults_major": 1024,
+    "cached_bytes": 3221225472,
+    "buffers_bytes": 268435456,
+    "cached": "3.0 GB",
+    "buffers": "256.0 MB"
   }
 }
 ```
@@ -84,6 +99,18 @@ curl -k -H "Authorization: Bearer $TOKEN" \
 | `container_memory_used_bytes` / `container_memory_limit_bytes` | cgroup usage and limit, present **only** when a container memory limit applies (`null` otherwise) |
 | `container_memory_used` / `container_memory_limit` | Human-readable container usage and limit |
 | `container_memory_scope` | Which cgroup version produced the container numbers (`"cgroup_v1"` / `"cgroup_v2"`) |
+| `rss_peak_bytes` / `rss_peak` | Peak process RSS since process start, `/proc/self/status` `VmHWM` (bytes / human-readable) — `0` when the counter is unavailable (non-Linux) |
+| `swap_used_bytes` / `swap_used` | Swap in use: `/proc/meminfo` `SwapTotal` − `SwapFree` — `0` on hosts with swap disabled |
+| `swap_total_bytes` / `swap_total` | Configured swap, `/proc/meminfo` `SwapTotal` |
+| `mem_available_bytes` / `mem_available` | Memory the kernel estimates as available for new work without swapping, `/proc/meminfo` `MemAvailable` (kernel 3.14+; `0` before that) |
+| `memory_used_percent` | `used_memory_bytes / total_memory_bytes * 100`, one decimal place; carries the host (`"system"`) scope |
+| `page_faults_minor` | Minor page faults (served without I/O), cumulative for the process — `/proc/self/stat` field 10 |
+| `page_faults_major` | Major page faults (required I/O), cumulative for the process — `/proc/self/stat` field 12 |
+| `cached_bytes` / `cached` | Page cache excluding swap cache, `/proc/meminfo` `Cached` |
+| `buffers_bytes` / `buffers` | Block-device buffers, `/proc/meminfo` `Buffers` |
+
+The fields above are read from `/proc` (or the cgroup equivalent); a counter
+the platform does not expose is reported as `0`.
 
 When the container fields are present they match what `docker stats` reports
 and should be preferred over the host totals.
@@ -94,9 +121,9 @@ endpoint that works in every build.
 
 ## `GET /api/v1/system/profile`
 
-CPU and memory attribution by module and method. This is **not** a sampled
-profile — it is pure Rust instrumentation (`pingwaf-profiler`): the code that
-knows what it is doing accounts for itself.
+Wall-clock time and memory attribution by module and method. This is **not**
+a sampled profile — it is pure Rust instrumentation (`pingwaf-profiler`): the
+code that knows what it is doing accounts for itself.
 
 ```bash
 curl -k -H "Authorization: Bearer $TOKEN" \
@@ -109,23 +136,56 @@ curl -k -H "Authorization: Bearer $TOKEN" \
 {
   "collected_at_ms": 1760000000000,
   "total_cpu_ms": 48213.4,
+  "total_elapsed_ms": 48213.4,
   "modules": [
-    { "module": "proxy",   "cpu_ms": 30102.1, "cpu_share": 0.62, "mem_bytes": 41943040, "mem_share": 0.55, "calls": 102341, "avg_us": 294.1 },
-    { "module": "waf",     "cpu_ms": 11101.2, "cpu_share": 0.23, "mem_bytes": 8388608,  "mem_share": 0.11, "calls": 98111,  "avg_us": 113.1 },
-    { "module": "cache",   "cpu_ms": 4000.8,  "cpu_share": 0.08, "mem_bytes": 15728640, "mem_share": 0.21, "calls": 44120,  "avg_us": 90.7 },
-    { "module": "plugin",  "cpu_ms": 1500.1,  "cpu_share": 0.03, "mem_bytes": 2097152,  "mem_share": 0.03, "calls": 30112,  "avg_us": 49.8 },
-    { "module": "db",      "cpu_ms": 1000.6,  "cpu_share": 0.02, "mem_bytes": 1048576,  "mem_share": 0.01, "calls": 2140,   "avg_us": 467.6 },
-    { "module": "control", "cpu_ms": 400.2,   "cpu_share": 0.01, "mem_bytes": 524288,   "mem_share": 0.01, "calls": 980,    "avg_us": 408.4 },
-    { "module": "other",   "cpu_ms": 108.4,   "cpu_share": 0.00, "mem_bytes": 0,        "mem_share": 0.00, "calls": 210,    "avg_us": 516.2 }
+    { "module": "proxy",   "cpu_ms": 30102.1, "cpu_share": 0.62, "elapsed_ms": 30102.1, "elapsed_share": 0.62, "mem_bytes": 41943040, "mem_share": 0.55, "calls": 102341, "avg_us": 294.1 },
+    { "module": "waf",     "cpu_ms": 11101.2, "cpu_share": 0.23, "elapsed_ms": 11101.2, "elapsed_share": 0.23, "mem_bytes": 8388608,  "mem_share": 0.11, "calls": 98111,  "avg_us": 113.1 },
+    { "module": "cache",   "cpu_ms": 4000.8,  "cpu_share": 0.08, "elapsed_ms": 4000.8,  "elapsed_share": 0.08, "mem_bytes": 15728640, "mem_share": 0.21, "calls": 44120,  "avg_us": 90.7 },
+    { "module": "plugin",  "cpu_ms": 1500.1,  "cpu_share": 0.03, "elapsed_ms": 1500.1,  "elapsed_share": 0.03, "mem_bytes": 2097152,  "mem_share": 0.03, "calls": 30112,  "avg_us": 49.8 },
+    { "module": "db",      "cpu_ms": 1000.6,  "cpu_share": 0.02, "elapsed_ms": 1000.6,  "elapsed_share": 0.02, "mem_bytes": 1048576,  "mem_share": 0.01, "calls": 2140,   "avg_us": 467.6 },
+    { "module": "control", "cpu_ms": 400.2,   "cpu_share": 0.01, "elapsed_ms": 400.2,   "elapsed_share": 0.01, "mem_bytes": 524288,   "mem_share": 0.01, "calls": 980,    "avg_us": 408.4 },
+    { "module": "other",   "cpu_ms": 108.4,   "cpu_share": 0.00, "elapsed_ms": 108.4,   "elapsed_share": 0.00, "mem_bytes": 0,        "mem_share": 0.00, "calls": 210,    "avg_us": 516.2 }
   ],
   "methods": [
-    { "method": "waf::evaluate",     "cpu_ms": 9200.4, "calls": 98111, "avg_us": 93.8 },
-    { "method": "proxy::forward",    "cpu_ms": 7100.9, "calls": 88430, "avg_us": 80.3 }
+    { "method": "waf::handle_request",   "cpu_ms": 9200.4, "elapsed_ms": 9200.4, "calls": 98111, "avg_us": 93.8 },
+    { "method": "proxy::request_filter", "cpu_ms": 7100.9, "elapsed_ms": 7100.9, "calls": 88430, "avg_us": 80.3 }
   ]
 }
 ```
 
 (Values are illustrative.)
+
+### 口径 — what the numbers are, and what they are not
+
+- **Wall time, not CPU time.** Every timer is `Instant`-based, so it
+  measures the elapsed time spent inside the timed scope. A scope that
+  awaits a database query, a lock or the upstream reports that wait too;
+  when the executor deschedules the task the clock keeps running. Treat
+  every share as "of the attributed wall time", not "of the CPU the process
+  burned" — reading `cpu_ms` as CPU seconds is the mistake that once made
+  `control::http` look like 90 % CPU when it was mostly waiting.
+- **`cpu_*` is a deprecated alias of `elapsed_*`.** The snapshot publishes
+  each figure twice: under the historical `cpu_ms` / `cpu_share` names —
+  kept so existing dashboards keep parsing — and under `elapsed_ms` /
+  `elapsed_share`, which say what is measured. Both pairs always carry the
+  same value (`total_cpu_ms` == `total_elapsed_ms`). New consumers should
+  use `elapsed_*`.
+- **Instrumentation scope.** The seven module rows are fed by timers on
+  instrumented hot paths — the data-plane request pipeline, WAF evaluation,
+  cache and rewrite rules, plus two control-plane scopes (the agent
+  heartbeat persistence and `/api/v1` requests). The `/api/v1` timer sits
+  *inside* the CORS, compression, security-header and body-limit layers, so
+  those middleware costs are not part of the `control` row. The same timer
+  fills both the `control` module row and the `control::http` method row —
+  a previous release recorded the module twice, which inflated its share;
+  if `control` drops noticeably after upgrading, that is the accounting
+  fix, not a sudden performance change.
+- **Method names are a compile-time static enumeration.** The instrumented
+  call sites are fixed at build time (`proxy::request_filter`,
+  `waf::handle_request`, `cache::handle_request`, `plugin::rewrite`,
+  `db::persist_heartbeat`, `control::http`); recording is array indexing
+  plus two relaxed atomic adds per request — no hash lookup, no allocation.
+  A method that never ran gets no row.
 
 ### How attribution works
 
@@ -134,9 +194,10 @@ curl -k -H "Authorization: Bearer $TOKEN" \
   with one `fetch_add`; the seven modules always appear in the response:
   `proxy`, `waf`, `cache`, `plugin`, `db`, `control`, `other` (anything not
   yet instrumented).
-- **Methods** — named call sites (e.g. `"proxy::forward"`, `"waf::evaluate"`)
-  are timed with `timed_method` and kept in a concurrent map. Only the hot
-  paths are instrumented, since a map lookup is the expensive part.
+- **Methods** — named call sites are timed with `timed_method`. The set of
+  call sites is a compile-time static enumeration (see
+  [口径](#口径--what-the-numbers-are-and-what-they-are-not)), so recording
+  is two relaxed atomic adds per request — no hash lookup, no allocation.
 - **Memory** — *reported*, not intercepted. Modules that own large structures
   (cache capacity, WAF body buffers, log batches) publish their current byte
   count; nothing hooks the allocator, so this works with any allocator and on
@@ -148,29 +209,32 @@ curl -k -H "Authorization: Bearer $TOKEN" \
 | Field | Meaning |
 | --- | --- |
 | `collected_at_ms` | Unix epoch milliseconds at which the snapshot was taken |
-| `total_cpu_ms` | Total CPU time attributed across all modules, in milliseconds |
+| `total_cpu_ms` / `total_elapsed_ms` | Total wall-clock time attributed across all modules, in milliseconds (always equal; `total_elapsed_ms` is the name that matches the measurement) |
 | `modules` | Exactly 7 rows, one per module, in fixed order (`proxy`, `waf`, `cache`, `plugin`, `db`, `control`, `other`) |
 | `modules[].module` | Module key |
-| `modules[].cpu_ms` | Cumulative CPU time attributed to the module (ms) |
-| `modules[].cpu_share` | Share of `total_cpu_ms`, 0.0–1.0 |
+| `modules[].cpu_ms` / `elapsed_ms` | Cumulative **wall-clock** time attributed to the module (ms); the two fields always carry the same value |
+| `modules[].cpu_share` / `elapsed_share` | Share of the total attributed wall-clock time, 0.0–1.0 |
 | `modules[].mem_bytes` / `mem_share` | Bytes the module currently reports as held, and its share of the total |
 | `modules[].calls` / `avg_us` | Number of timed operations and average microseconds per operation |
 | `methods` | Method rows, hottest first, capped at 40 |
-| `methods[].method` | Call-site name |
-| `methods[].cpu_ms` / `calls` / `avg_us` | Same semantics as the module rows |
+| `methods[].method` | Call-site name (from the compile-time static enumeration) |
+| `methods[].cpu_ms` / `elapsed_ms` / `calls` / `avg_us` | Same semantics as the module rows |
 
 Counters are **cumulative since process start** (they reset only when the
 process restarts), so read them as "where has the time gone since boot",
 not "what is hot this second". For a live question, take two snapshots some
-seconds apart and compare the deltas of `cpu_ms` — the largest positive delta
-is your current hotspot. Typical interesting rows: `waf` (rule evaluation),
-`proxy` (upstream forwarding), `cache` (cache lookups).
+seconds apart and compare the deltas of `elapsed_ms` (`cpu_ms` is the same
+number) — the largest positive delta is your current hotspot. Typical
+interesting rows: `waf` (rule evaluation), `proxy` (upstream forwarding),
+`cache` (cache lookups).
 
 ### Overhead
 
-Recording is a few relaxed atomic adds per instrumented scope: no sampling
-signal, no stack unwinding, no symbolisation, no allocation on the hot path
-beyond the method map lookup. The same accounting works in a debug build on a
+Recording is a few relaxed atomic adds per instrumented scope (two per
+request for the method-plus-module update): no sampling signal, no stack
+unwinding, no symbolisation, no allocation and no hash lookup on the hot
+path — method slots are fixed array entries. The same accounting works in a
+debug build on a
 laptop and a stripped release build in a container, which is why the endpoint
 has no platform restriction, no feature flag and no diagnostic image. The
 endpoint itself is bounded by construction — 7 module rows, at most 40 method

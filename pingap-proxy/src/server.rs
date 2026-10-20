@@ -1435,10 +1435,12 @@ impl ProxyHttp for Server {
     {
         debug!(target: LOG_TARGET, "--> request filter");
         defer!(debug!(target: LOG_TARGET, "<-- request filter"););
-        // Module attribution (see pingwaf-profiler): one relaxed add on drop.
-        let _profile = pingwaf_profiler::timed(pingwaf_profiler::Module::Proxy);
-        let _profile_method =
-            pingwaf_profiler::timed_method("proxy::request_filter");
+        // Method attribution (see pingwaf-profiler): four relaxed adds on
+        // drop, no hash, no lock. The module row (`proxy`) is booked by the
+        // same timer, so one instrumentation point covers both tables.
+        let _profile = pingwaf_profiler::timed_method(
+            pingwaf_profiler::Method::ProxyRequestFilter,
+        );
         // pingora cannot stop after early_request_filter, so a plugin that
         // answered at the EarlyRequest step arrives here with its response
         // already on the wire. Nothing else writes one before this point,
@@ -1668,6 +1670,17 @@ impl ProxyHttp for Server {
         debug!(target: LOG_TARGET, "--> upstream request filter");
         defer!(debug!(target: LOG_TARGET, "<-- upstream request filter"););
         set_append_proxy_headers(session, ctx, upstream_response);
+        // Route-level path rewriting (`strip_prefix` / `rewrite_path`). This
+        // runs on the copy of the request header pingora sends upstream —
+        // `proxy_1to1` / `proxy_to_h2_upstream` re-clone it for every attempt —
+        // and not on the session's, which is what makes it safe to apply here:
+        // the WAF plugin, the access log and the cache key keep the path the
+        // client asked for, and a retry rewrites a fresh copy instead of
+        // stripping an already stripped path. Doing it in `upstream_peer`
+        // would strip twice on the retries that re-enter it.
+        if let Some(location) = &ctx.upstream.location_instance {
+            location.rewrite_upstream_path(upstream_response);
+        }
         Ok(())
     }
     /// Filters request body chunks before sending upstream.
@@ -2304,6 +2317,74 @@ mod tests {
         let result = get_digest_detail(&digest);
         assert_eq!(10000, result.tcp_established);
         assert_eq!("1.3", result.tls_version.unwrap_or_default());
+    }
+
+    /// A route-level path rewrite the data plane cannot apply is a
+    /// configuration error, not a silently ignored field: `/v2?x=1` would
+    /// smuggle a query into the path the client's own query is appended to, a
+    /// relative value would make the rebuilt target relative, and
+    /// `strip_prefix` needs a prefix path that only a prefix location has.
+    #[test]
+    fn test_location_path_rewrite_validation() {
+        let load = |path: Option<&str>, extra: &str| {
+            let path = path
+                .map(|p| format!("path = \"{p}\"\n"))
+                .unwrap_or_default();
+            let toml = format!(
+                r#"
+[upstreams.api]
+addrs = ["127.0.0.1:8080"]
+
+[locations.lo]
+upstream = "api"
+{path}{extra}
+"#
+            );
+            PingapConfig::new(toml.as_bytes(), false)
+                .and_then(|conf| conf.validate().map(|()| conf))
+        };
+
+        // Accepted shapes: an absolute replacement (the root included), and an
+        // empty one, which the data plane treats as "no replacement".
+        for rewrite in ["/v2", "/", "/api/v1/users"] {
+            let conf =
+                load(Some("/api"), &format!("rewrite_path = \"{rewrite}\""))
+                    .expect("a valid rewrite_path should load");
+            assert_eq!(
+                conf.locations
+                    .get("lo")
+                    .and_then(|l| l.rewrite_path.clone()),
+                Some(rewrite.to_string())
+            );
+        }
+        assert!(load(Some("/api"), "rewrite_path = \"\"").is_ok());
+
+        // Rejected shapes.
+        for bad in ["/v2?x=1", "/v2#frag", "v2", "/v 2", "/v2/ x"] {
+            assert!(
+                load(Some("/api"), &format!("rewrite_path = \"{bad}\""))
+                    .is_err(),
+                "{bad} must be rejected"
+            );
+        }
+
+        // Control characters are checked too; a TOML document cannot carry
+        // them, so the field is exercised directly.
+        let conf = pingap_config::LocationConf {
+            path: Some("/api".to_string()),
+            rewrite_path: Some("/v\u{7}2".to_string()),
+            ..Default::default()
+        };
+        assert!(pingap_config::Validate::validate(&conf).is_err());
+
+        // `strip_prefix` only makes sense for a prefix location.
+        assert!(load(Some("/api"), "strip_prefix = true").is_ok());
+        assert!(load(Some("=/api"), "strip_prefix = true").is_err());
+        assert!(load(Some("~/api.*"), "strip_prefix = true").is_err());
+        assert!(load(None, "strip_prefix = true").is_err());
+        // ... and false is always fine, including on the fallback `/`.
+        assert!(load(None, "strip_prefix = false").is_ok());
+        assert!(load(Some("/"), "strip_prefix = false").is_ok());
     }
 
     const TEST_TOML: &str = r###"

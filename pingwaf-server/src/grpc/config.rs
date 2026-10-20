@@ -746,6 +746,8 @@ fn routes_to_proto(
                 enabled: route.enabled,
                 pool_id: route.pool_id.to_string(),
                 ip_ranges,
+                strip_prefix: route.strip_prefix,
+                rewrite_path: route.rewrite_path.clone().unwrap_or_default(),
             })
         })
         .collect()
@@ -2158,6 +2160,8 @@ mod tests {
             enabled,
             pool_id,
             ip_group_id: None,
+            strip_prefix: false,
+            rewrite_path: None,
             created_at: Utc::now(),
         }
     }

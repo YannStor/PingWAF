@@ -21,6 +21,7 @@ import { SettingsPage } from '@/pages/SettingsPage'
 import { NotificationsPage } from '@/pages/NotificationsPage'
 import { AccountPage } from '@/pages/AccountPage'
 import { ProfilePage } from '@/pages/ProfilePage'
+import { SystemPage } from '@/pages/SystemPage'
 import { BotPage as BotProtectionPage } from '@/pages/sites/BotPage'
 import {
   ProtectionPage,
@@ -151,6 +152,8 @@ export const router = createBrowserRouter([
       // Personal settings (profile, password, passkeys) — reached from the
       // top-right user menu, deliberately absent from the sidebar.
       { path: 'profile', element: <ProfilePage /> },
+      // System observability — admin-only read-only metrics from the user menu.
+      { path: 'system', element: <RequireAdmin><SystemPage /></RequireAdmin> },
       { path: 'notifications', element: <NotificationsPage /> },
       { path: 'settings', element: <SettingsPage /> },
       { path: '*', element: <NotFoundPage /> },

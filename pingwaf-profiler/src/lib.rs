@@ -1,14 +1,16 @@
-//! Module- and method-level CPU/memory attribution for PingWAF.
+//! Module- and method-level **wall-clock** attribution for PingWAF.
 //!
 //! The alternative to a profiler that samples stacks: the code that knows
 //! what it is doing accounts for itself.
 //!
 //! * **Modules** are the seven functional areas of the process — proxy, waf,
-//!   cache, plugin, db, control — recorded in a fixed array of atomics, so
-//!   recording costs one relaxed add and no allocation.
-//! * **Methods** are named call sites (`"proxy::handle_request"`, …) kept in
-//!   a concurrent map; instrument only the hot paths that matter, since a
-//!   map lookup is the expensive part.
+//!   cache, plugin, db, control, other — recorded in a fixed array of
+//!   atomics, so recording costs one relaxed add and no allocation.
+//! * **Methods** are the instrumented call sites (`"proxy::request_filter"`,
+//!   …). The set is fixed at compile time ([`Method`]), so recording a method
+//!   is an array index — no hash, no lock, no allocation. A method also rolls
+//!   up into its [`Module`], so a call site is instrumented once and two rows
+//!   are accounted for.
 //! * **Memory** is *reported*, not intercepted: modules that own large
 //!   structures (cache capacity, WAF body buffers, log batches) publish
 //!   their current byte count with [`set_memory`]/[`add_memory`]. Nothing
@@ -19,31 +21,49 @@
 //! nanoseconds and works the same in a debug build on a laptop and a release
 //! build in a container, which is exactly what the removed pprof path could
 //! not offer.
+//!
+//! # What the numbers are — and what they are not
+//!
+//! Every timer here is [`Instant`]-based, so it measures **wall-clock time
+//! spent inside the timed scope**, not CPU cycles. A scope that awaits a
+//! database query, a lock or the upstream reports that wait as well; when the
+//! executor deschedules the task the clock keeps running. Reading `cpu_ms` as
+//! "CPU time" is what made `control::http` look like 90 % CPU when it was
+//! really "90 % of the attributed wall time, most of it waiting".
+//!
+//! The snapshot therefore publishes each figure twice: under the historical
+//! `cpu_ms` / `cpu_share` names — kept so existing dashboards keep parsing —
+//! and under `elapsed_ms` / `elapsed_share`, which say what is measured. Both
+//! pairs always carry the same value; the `cpu_*` pair is a deprecated alias
+//! waiting for its consumers to migrate.
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::LazyLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use dashmap::DashMap;
 use serde::Serialize;
 
 /// The functional areas attribution is grouped into.
+///
+/// `#[repr(usize)]` on purpose: [`Module::index`] is then a cast, and
+/// [`Module::ALL`] is written in discriminant order so a slot's index is its
+/// position in the snapshot.
+#[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Module {
     /// Request intake, connection handling, upstream forwarding.
-    Proxy,
+    Proxy = 0,
     /// WAF rule evaluation, body inspection, decisions.
-    Waf,
+    Waf = 1,
     /// Cache lookup, storage, eviction and purge.
-    Cache,
+    Cache = 2,
     /// The plugin chain around WAF (rewrite, headers, compression, …).
-    Plugin,
+    Plugin = 3,
     /// Database queries issued through the control plane.
-    Db,
+    Db = 4,
     /// Control-plane HTTP/gRPC handlers.
-    Control,
+    Control = 5,
     /// Anything not yet instrumented.
-    Other,
+    Other = 6,
 }
 
 impl Module {
@@ -71,22 +91,99 @@ impl Module {
         }
     }
 
+    /// Slot of the module's counters in [`MODULES`].
+    #[inline]
     fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// The instrumented call sites.
+///
+/// A closed set, deliberately: the previous string-keyed map cost a hash and
+/// a `DashMap` shard lock per recorded call site (per request, on the hot
+/// path), and bought an extensibility nobody used — every call site in the
+/// workspace is listed here. Adding one is a variant plus an entry in
+/// [`Method::ALL`]; [`Method::Other`] is the escape hatch for a scope that
+/// does not deserve a variant.
+#[repr(usize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Method {
+    /// `pingap-proxy` `request_filter` — the whole per-request pipeline.
+    ProxyRequestFilter = 0,
+    /// `pingap-plugin` WAF `handle_request` — rule evaluation and decision.
+    WafHandleRequest = 1,
+    /// `pingap-plugin` cache `handle_request` — lookup, PURGE, settings.
+    CacheHandleRequest = 2,
+    /// `pingap-plugin` rewrite `handle_request` — rule evaluation and rewrite.
+    PluginRewrite = 3,
+    /// Control plane `persist_heartbeat` — the agent heartbeat write.
+    DbPersistHeartbeat = 4,
+    /// Control-plane REST request (`/api/v1`), recorded by the middleware.
+    ControlHttp = 5,
+    /// Reserved: a scope without a named call site. Rolls up into
+    /// [`Module::Other`] and is never recorded today; it exists so the slot
+    /// layout is complete and a new call site has a home before it earns a
+    /// variant.
+    Other = 6,
+}
+
+impl Method {
+    /// Every method, in slot order. Length must stay `<=`
+    /// [`ProfileSnapshot::MAX_METHODS`] or the snapshot truncates rows.
+    pub const ALL: [Method; 7] = [
+        Method::ProxyRequestFilter,
+        Method::WafHandleRequest,
+        Method::CacheHandleRequest,
+        Method::PluginRewrite,
+        Method::DbPersistHeartbeat,
+        Method::ControlHttp,
+        Method::Other,
+    ];
+
+    /// Call-site name used in the snapshot.
+    ///
+    /// These strings are the ones the string-keyed table used, so a dashboard
+    /// that matches on `"waf::handle_request"` keeps working unchanged.
+    pub fn as_str(self) -> &'static str {
         match self {
-            Module::Proxy => 0,
-            Module::Waf => 1,
-            Module::Cache => 2,
-            Module::Plugin => 3,
-            Module::Db => 4,
-            Module::Control => 5,
-            Module::Other => 6,
+            Method::ProxyRequestFilter => "proxy::request_filter",
+            Method::WafHandleRequest => "waf::handle_request",
+            Method::CacheHandleRequest => "cache::handle_request",
+            Method::PluginRewrite => "plugin::rewrite",
+            Method::DbPersistHeartbeat => "db::persist_heartbeat",
+            Method::ControlHttp => "control::http",
+            Method::Other => "other::unattributed",
         }
+    }
+
+    /// The module this call site rolls up into.
+    pub fn module(self) -> Module {
+        match self {
+            Method::ProxyRequestFilter => Module::Proxy,
+            Method::WafHandleRequest => Module::Waf,
+            Method::CacheHandleRequest => Module::Cache,
+            Method::PluginRewrite => Module::Plugin,
+            Method::DbPersistHeartbeat => Module::Db,
+            Method::ControlHttp => Module::Control,
+            Method::Other => Module::Other,
+        }
+    }
+
+    /// Slot of the method's counters in [`METHODS`].
+    #[inline]
+    fn index(self) -> usize {
+        self as usize
     }
 }
 
 #[derive(Default)]
 struct ModuleCounters {
-    cpu_ns: AtomicU64,
+    /// Wall-clock nanoseconds accumulated from the module's timers.
+    ///
+    /// Named `elapsed_` rather than `cpu_`: see the crate docs — an
+    /// [`Instant`] measures time, not cycles.
+    elapsed_ns: AtomicU64,
     mem_bytes: AtomicI64,
     calls: AtomicU64,
 }
@@ -104,7 +201,7 @@ static MODULES: [ModuleCounters; 7] = [
 impl ModuleCounters {
     const fn new() -> Self {
         Self {
-            cpu_ns: AtomicU64::new(0),
+            elapsed_ns: AtomicU64::new(0),
             mem_bytes: AtomicI64::new(0),
             calls: AtomicU64::new(0),
         }
@@ -112,20 +209,44 @@ impl ModuleCounters {
 }
 
 struct MethodCounters {
-    cpu_ns: AtomicU64,
+    elapsed_ns: AtomicU64,
     calls: AtomicU64,
 }
 
-static METHODS: LazyLock<DashMap<&'static str, MethodCounters>> =
-    LazyLock::new(DashMap::new);
+impl MethodCounters {
+    const fn new() -> Self {
+        Self {
+            elapsed_ns: AtomicU64::new(0),
+            calls: AtomicU64::new(0),
+        }
+    }
+}
 
-/// Accumulates CPU time (nanoseconds) attributed to `module`.
+/// One slot per [`Method`], indexed by discriminant: recording is a bounds
+/// check plus two relaxed adds.
+static METHODS: [MethodCounters; 7] = [
+    MethodCounters::new(),
+    MethodCounters::new(),
+    MethodCounters::new(),
+    MethodCounters::new(),
+    MethodCounters::new(),
+    MethodCounters::new(),
+    MethodCounters::new(),
+];
+
+/// Accumulates wall-clock time (nanoseconds) attributed to `module`.
+///
+/// The name is historical — this records elapsed time, not CPU time (see the
+/// crate docs). [`MethodTimer`] performs the same module-slot updates inline
+/// in its `Drop` (it cannot go through here: the zero-length guard has to
+/// agree across both rows), which is what makes a module's totals the sum of
+/// its methods.
 pub fn record_cpu(module: Module, ns: u64) {
     if ns == 0 {
         return;
     }
     MODULES[module.index()]
-        .cpu_ns
+        .elapsed_ns
         .fetch_add(ns, Ordering::Relaxed);
     MODULES[module.index()]
         .calls
@@ -153,6 +274,10 @@ pub fn add_memory(module: Module, delta: i64) {
 }
 
 /// Times the scope it lives in and attributes it to `module` on drop.
+///
+/// For a scope that *is* a known call site prefer [`timed_method`]: it books
+/// the module row as well, so one instrumentation point covers both. Keep
+/// this for a module-level scope that has no method of its own.
 pub struct Timer {
     module: Module,
     started: Instant,
@@ -172,9 +297,10 @@ pub fn timed(module: Module) -> Timer {
     }
 }
 
-/// Times the scope it lives in and attributes it to a named method.
+/// Times the scope it lives in and attributes it to a [`Method`] — and to
+/// that method's [`Module`] — on drop.
 pub struct MethodTimer {
-    name: &'static str,
+    method: Method,
     started: Instant,
 }
 
@@ -184,42 +310,35 @@ impl Drop for MethodTimer {
         if ns == 0 {
             return;
         }
-        // `get` (read lock) is enough: every field is atomic. `get_mut`
-        // takes the shard's write lock, serialising every thread on a hot
-        // call site (2026-10-19 review).
-        match METHODS.get(self.name) {
-            Some(counters) => {
-                counters.cpu_ns.fetch_add(ns, Ordering::Relaxed);
-                counters.calls.fetch_add(1, Ordering::Relaxed);
-            },
-            None => {
-                // First observation of this call site: insert once, then the
-                // hot path only takes the shard write lock above.
-                METHODS.insert(
-                    self.name,
-                    MethodCounters {
-                        cpu_ns: AtomicU64::new(ns),
-                        calls: AtomicU64::new(1),
-                    },
-                );
-            },
-        }
+        // Four relaxed adds, no hash and no lock. The named-method slot is
+        // the detail row; the module slot is the roll-up the module table
+        // shows. Booking both here is what removes the second timer the
+        // middleware used to run over the same scope: two clocks and two sets
+        // of atomics per request bought nothing, because the two tables were
+        // always fed the same nanoseconds (2026-10 attribution review).
+        let method = &METHODS[self.method.index()];
+        method.elapsed_ns.fetch_add(ns, Ordering::Relaxed);
+        method.calls.fetch_add(1, Ordering::Relaxed);
+        let module = &MODULES[self.method.module().index()];
+        module.elapsed_ns.fetch_add(ns, Ordering::Relaxed);
+        module.calls.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 /// Starts a method timer; bind it to `_timer` so it lives for the scope.
-pub fn timed_method(name: &'static str) -> MethodTimer {
+#[inline]
+pub fn timed_method(method: Method) -> MethodTimer {
     MethodTimer {
-        name,
+        method,
         started: Instant::now(),
     }
 }
 
-/// Times `$body` as a method named `$name` (a `&'static str`).
+/// Times `$body` as `$method` (a [`Method`]).
 #[macro_export]
 macro_rules! profile_method {
-    ($name:literal, $body:block) => {{
-        let _timer = $crate::timed_method($name);
+    ($method:expr, $body:block) => {{
+        let _timer = $crate::timed_method($method);
         $body
     }};
 }
@@ -229,10 +348,22 @@ macro_rules! profile_method {
 pub struct ModuleView {
     /// Module key (`proxy`, `waf`, …).
     pub module: &'static str,
-    /// Cumulative CPU time attributed to the module, in milliseconds.
+    /// Cumulative **wall-clock** time attributed to the module, in
+    /// milliseconds.
+    ///
+    /// Historical name: this is elapsed time, not CPU time — see the crate
+    /// docs. Same value as [`Self::elapsed_ms`].
     pub cpu_ms: f64,
-    /// Share of the total attributed CPU time, 0.0–1.0.
+    /// Share of the total attributed wall-clock time, 0.0–1.0. Same value as
+    /// [`Self::elapsed_share`].
     pub cpu_share: f64,
+    /// Cumulative wall-clock time attributed to the module, in milliseconds.
+    /// Same value as [`Self::cpu_ms`], under the name that matches what is
+    /// measured.
+    pub elapsed_ms: f64,
+    /// Share of the total attributed wall-clock time, 0.0–1.0. Same value as
+    /// [`Self::cpu_share`].
+    pub elapsed_share: f64,
     /// Bytes the module currently reports as held.
     pub mem_bytes: u64,
     /// Share of the total held bytes across modules, 0.0–1.0.
@@ -246,10 +377,22 @@ pub struct ModuleView {
 /// One method row of a snapshot.
 #[derive(Debug, Clone, Serialize)]
 pub struct MethodView {
-    /// Call-site name.
+    /// Call-site name ([`Method::as_str`]).
     pub method: &'static str,
-    /// Cumulative CPU time in milliseconds.
+    /// Cumulative **wall-clock** time in milliseconds.
+    ///
+    /// Historical name: this is elapsed time, not CPU time — see the crate
+    /// docs. Same value as [`Self::elapsed_ms`].
     pub cpu_ms: f64,
+    /// Share of the total attributed wall-clock time, 0.0–1.0. Same value as
+    /// [`Self::elapsed_share`].
+    pub cpu_share: f64,
+    /// Cumulative wall-clock time in milliseconds. Same value as
+    /// [`Self::cpu_ms`].
+    pub elapsed_ms: f64,
+    /// Share of the total attributed wall-clock time, 0.0–1.0. Same value as
+    /// [`Self::cpu_share`].
+    pub elapsed_share: f64,
     /// Number of timed calls.
     pub calls: u64,
     /// Average microseconds per call.
@@ -257,92 +400,123 @@ pub struct MethodView {
 }
 
 /// Bounded, allocation-light view of the accounting tables.
+///
+/// Every time figure is **wall-clock** (`Instant`-based), not CPU: a handler
+/// that waits on the database contributes its wait. Treat the shares as "of
+/// the time we attributed", not "of the CPU the process burned".
 #[derive(Debug, Clone, Serialize)]
 pub struct ProfileSnapshot {
     /// Unix epoch milliseconds at which the snapshot was taken.
     pub collected_at_ms: u64,
-    /// Total attributed CPU time across modules, in milliseconds.
+    /// Total attributed wall-clock time across modules, in milliseconds.
+    ///
+    /// Historical name: see the crate docs. Same value as
+    /// [`Self::total_elapsed_ms`].
     pub total_cpu_ms: f64,
+    /// Total attributed wall-clock time across modules, in milliseconds.
+    /// Same value as [`Self::total_cpu_ms`].
+    pub total_elapsed_ms: f64,
     /// Module rows (all modules, hottest first is left to the caller).
     pub modules: Vec<ModuleView>,
-    /// Method rows, hottest first, capped at [`Self::MAX_METHODS`].
+    /// Method rows, hottest first, capped at [`Self::MAX_METHODS`]. A method
+    /// that never ran has no row.
     pub methods: Vec<MethodView>,
 }
 
 impl ProfileSnapshot {
-    /// How many method rows a snapshot carries: enough to find a hotspot,
-    /// small enough that the JSON stays KB-scale.
+    /// How many method rows a snapshot carries. With the method set fixed at
+    /// compile time this is a ceiling that cannot be reached today (asserted
+    /// in the tests); it stays so growing [`Method`] past it truncates
+    /// predictably instead of inflating the JSON.
     pub const MAX_METHODS: usize = 40;
 
     /// Reads the accounting tables into a snapshot.
     pub fn collect() -> Self {
         let mut modules = Vec::with_capacity(Module::ALL.len());
-        let mut total_cpu_ns = 0u64;
+        let mut total_elapsed_ns = 0u64;
         let mut total_mem = 0u64;
         for module in Module::ALL {
             let counters = &MODULES[module.index()];
-            let cpu_ns = counters.cpu_ns.load(Ordering::Relaxed);
-            total_cpu_ns = total_cpu_ns.saturating_add(cpu_ns);
-            total_mem = total_mem.saturating_add(
-                counters.mem_bytes.load(Ordering::Relaxed).max(0) as u64,
-            );
+            let elapsed_ns = counters.elapsed_ns.load(Ordering::Relaxed);
+            total_elapsed_ns = total_elapsed_ns.saturating_add(elapsed_ns);
+            let mem_bytes =
+                counters.mem_bytes.load(Ordering::Relaxed).max(0) as u64;
+            total_mem = total_mem.saturating_add(mem_bytes);
             let calls = counters.calls.load(Ordering::Relaxed);
+            let elapsed_ms = elapsed_ns as f64 / 1_000_000.0;
             modules.push(ModuleView {
                 module: module.key(),
-                cpu_ms: cpu_ns as f64 / 1_000_000.0,
+                cpu_ms: elapsed_ms,
                 cpu_share: 0.0,
-                mem_bytes: counters.mem_bytes.load(Ordering::Relaxed).max(0)
-                    as u64,
+                elapsed_ms,
+                elapsed_share: 0.0,
+                mem_bytes,
                 mem_share: 0.0,
                 calls,
                 avg_us: if calls == 0 {
                     0.0
                 } else {
-                    cpu_ns as f64 / calls as f64 / 1_000.0
+                    elapsed_ns as f64 / calls as f64 / 1_000.0
                 },
             });
         }
         for row in &mut modules {
-            row.cpu_share = if total_cpu_ns == 0 {
+            let share = if total_elapsed_ns == 0 {
                 0.0
             } else {
-                row.cpu_ms * 1_000_000.0 / total_cpu_ns as f64
+                row.elapsed_ms * 1_000_000.0 / total_elapsed_ns as f64
             };
+            row.cpu_share = share;
+            row.elapsed_share = share;
             row.mem_share = if total_mem == 0 {
                 0.0
             } else {
                 row.mem_bytes as f64 / total_mem as f64
             };
         }
-        let mut methods: Vec<MethodView> = METHODS
+        let mut methods: Vec<MethodView> = Method::ALL
             .iter()
-            .map(|entry| {
-                let cpu_ns = entry.value().cpu_ns.load(Ordering::Relaxed);
-                let calls = entry.value().calls.load(Ordering::Relaxed);
-                MethodView {
-                    method: entry.key(),
-                    cpu_ms: cpu_ns as f64 / 1_000_000.0,
-                    calls,
-                    avg_us: if calls == 0 {
-                        0.0
-                    } else {
-                        cpu_ns as f64 / calls as f64 / 1_000.0
-                    },
+            .filter_map(|method| {
+                let counters = &METHODS[method.index()];
+                let calls = counters.calls.load(Ordering::Relaxed);
+                // `Drop` skips a zero-length measurement, so `calls == 0`
+                // means "never observed": no row, exactly like the old
+                // string-keyed table which only held recorded names.
+                if calls == 0 {
+                    return None;
                 }
+                let elapsed_ns = counters.elapsed_ns.load(Ordering::Relaxed);
+                let elapsed_ms = elapsed_ns as f64 / 1_000_000.0;
+                let share = if total_elapsed_ns == 0 {
+                    0.0
+                } else {
+                    elapsed_ms * 1_000_000.0 / total_elapsed_ns as f64
+                };
+                Some(MethodView {
+                    method: method.as_str(),
+                    cpu_ms: elapsed_ms,
+                    cpu_share: share,
+                    elapsed_ms,
+                    elapsed_share: share,
+                    calls,
+                    avg_us: elapsed_ns as f64 / calls as f64 / 1_000.0,
+                })
             })
             .collect();
         methods.sort_by(|a, b| {
-            b.cpu_ms
-                .partial_cmp(&a.cpu_ms)
+            b.elapsed_ms
+                .partial_cmp(&a.elapsed_ms)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         methods.truncate(Self::MAX_METHODS);
+        let total_elapsed_ms = total_elapsed_ns as f64 / 1_000_000.0;
         Self {
             collected_at_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|duration| duration.as_millis() as u64)
                 .unwrap_or_default(),
-            total_cpu_ms: total_cpu_ns as f64 / 1_000_000.0,
+            total_cpu_ms: total_elapsed_ms,
+            total_elapsed_ms,
             modules,
             methods,
         }
@@ -352,11 +526,14 @@ impl ProfileSnapshot {
     /// "start a fresh window".
     pub fn reset() {
         for counters in &MODULES {
-            counters.cpu_ns.store(0, Ordering::Relaxed);
+            counters.elapsed_ns.store(0, Ordering::Relaxed);
             counters.mem_bytes.store(0, Ordering::Relaxed);
             counters.calls.store(0, Ordering::Relaxed);
         }
-        METHODS.clear();
+        for counters in &METHODS {
+            counters.elapsed_ns.store(0, Ordering::Relaxed);
+            counters.calls.store(0, Ordering::Relaxed);
+        }
     }
 }
 
@@ -391,6 +568,11 @@ mod tests {
             .expect("waf row");
         assert_eq!(waf.calls, 1);
         assert!(waf.cpu_ms > 0.0, "timer recorded time");
+        // The elapsed_* aliases carry the same numbers: the rename is a
+        // labelling fix, not a change of measurement.
+        assert_eq!(waf.elapsed_ms, waf.cpu_ms);
+        assert_eq!(waf.elapsed_share, waf.cpu_share);
+        assert_eq!(snapshot.total_elapsed_ms, snapshot.total_cpu_ms);
         // Round-tripping ns → ms → share is exact mathematically but not in
         // binary floating point; EPSILON is too tight for a platform-neutral
         // assertion (it flipped between toolchains).
@@ -420,21 +602,128 @@ mod tests {
         assert!((cache.mem_share - 0.5).abs() < 1e-9);
     }
 
+    /// A method row's slot, its snapshot name and its module must all line up
+    /// with [`Method::ALL`]: the array index *is* the identity here, so a
+    /// misordered variant would silently attribute one call site's time to
+    /// another's name.
+    #[test]
+    fn method_indices_are_stable_and_unique() {
+        assert_eq!(Method::ALL.len(), 7);
+        let mut names = std::collections::HashSet::new();
+        for (index, method) in Method::ALL.iter().enumerate() {
+            assert_eq!(
+                method.index(),
+                index,
+                "Method::ALL must be in discriminant order at {}",
+                method.as_str()
+            );
+            assert!(names.insert(method.as_str()), "duplicate method name");
+            assert_eq!(
+                method.module().index(),
+                Module::ALL
+                    .iter()
+                    .position(|module| module == &method.module())
+                    .expect("module is listed in Module::ALL"),
+                "module slot must match the module's position"
+            );
+        }
+
+        // The roll-up each call site reports into, one by one: this is the
+        // contract the `/system/profile` module table relies on.
+        assert_eq!(Method::ProxyRequestFilter.module(), Module::Proxy);
+        assert_eq!(Method::WafHandleRequest.module(), Module::Waf);
+        assert_eq!(Method::CacheHandleRequest.module(), Module::Cache);
+        assert_eq!(Method::PluginRewrite.module(), Module::Plugin);
+        assert_eq!(Method::DbPersistHeartbeat.module(), Module::Db);
+        assert_eq!(Method::ControlHttp.module(), Module::Control);
+        assert_eq!(Method::Other.module(), Module::Other);
+
+        // Names are the ones the string-keyed table published, so existing
+        // dashboards keep matching rows.
+        assert_eq!(
+            Method::ProxyRequestFilter.as_str(),
+            "proxy::request_filter"
+        );
+        assert_eq!(Method::WafHandleRequest.as_str(), "waf::handle_request");
+        assert_eq!(
+            Method::CacheHandleRequest.as_str(),
+            "cache::handle_request"
+        );
+        assert_eq!(Method::PluginRewrite.as_str(), "plugin::rewrite");
+        assert_eq!(
+            Method::DbPersistHeartbeat.as_str(),
+            "db::persist_heartbeat"
+        );
+        assert_eq!(Method::ControlHttp.as_str(), "control::http");
+    }
+
+    /// One timer, two rows: the module total must be exactly the sum of the
+    /// methods that rolled up into it — otherwise `control` would either lose
+    /// the handler time or double it (the bug the double instrumentation had).
+    #[test]
+    fn module_totals_equal_the_sum_of_its_methods() {
+        let _guard = serial();
+        ProfileSnapshot::reset();
+        for _ in 0..3 {
+            let _timer = timed_method(Method::ControlHttp);
+            std::thread::sleep(std::time::Duration::from_micros(200));
+        }
+        let snapshot = ProfileSnapshot::collect();
+        let control = snapshot
+            .modules
+            .iter()
+            .find(|row| row.module == "control")
+            .expect("control row");
+        let rows: Vec<&MethodView> = snapshot
+            .methods
+            .iter()
+            .filter(|row| row.method == Method::ControlHttp.as_str())
+            .collect();
+        assert_eq!(rows.len(), 1, "one row per method, not one per call");
+        assert_eq!(control.calls, 3);
+        assert_eq!(rows[0].calls, control.calls);
+        assert!((rows[0].elapsed_ms - control.elapsed_ms).abs() < 1e-9);
+        // Nothing else was timed, so control is all of the attributed time.
+        assert!((control.elapsed_share - 1.0).abs() < 1e-9);
+    }
+
     #[test]
     fn method_rows_are_sorted_and_capped() {
         let _guard = serial();
         ProfileSnapshot::reset();
-        for index in 0..(ProfileSnapshot::MAX_METHODS + 10) {
-            let name: &'static str =
-                Box::leak(format!("m{index}").into_boxed_str());
-            let _timer = timed_method(name);
+        // The method set is closed, so the cap can only ever be approached.
+        // Assert the invariant that keeps it unreachable instead of pushing
+        // 50 fake names through the table.
+        assert!(
+            Method::ALL.len() <= ProfileSnapshot::MAX_METHODS,
+            "MAX_METHODS must cover every instrumented method"
+        );
+        for method in [
+            Method::ProxyRequestFilter,
+            Method::WafHandleRequest,
+            Method::CacheHandleRequest,
+        ] {
+            let _timer = timed_method(method);
             // Every call site needs a non-zero measurement: `Drop` skips a
-            // timer that stops inside the same clock tick, so the row count
-            // was flaky when half the iterations slept and half did not.
+            // timer that stops inside the same clock tick.
             std::thread::sleep(std::time::Duration::from_micros(200));
         }
         let snapshot = ProfileSnapshot::collect();
-        assert_eq!(snapshot.methods.len(), ProfileSnapshot::MAX_METHODS);
-        assert!(snapshot.methods[0].cpu_ms >= snapshot.methods[1].cpu_ms);
+        assert_eq!(snapshot.methods.len(), 3);
+        // Non-increasing by construction; asserting the order rather than a
+        // particular winner keeps the test off the scheduler.
+        let mut previous = f64::INFINITY;
+        for row in &snapshot.methods {
+            assert!(row.elapsed_ms <= previous, "rows are hottest-first");
+            assert_eq!(row.elapsed_ms, row.cpu_ms);
+            assert_eq!(row.elapsed_share, row.cpu_share);
+            assert!(row.calls >= 1);
+            previous = row.elapsed_ms;
+        }
+        // A method that never ran gets no row.
+        assert!(snapshot
+            .methods
+            .iter()
+            .all(|row| row.method != Method::Other.as_str()));
     }
 }

@@ -1519,9 +1519,11 @@ impl Plugin for RewritePlugin {
         if step != self.plugin_step {
             return Ok(RequestPluginResult::Skipped);
         }
-        let _profile =
-            pingwaf_profiler::timed(pingwaf_profiler::Module::Plugin);
-        let _profile_method = pingwaf_profiler::timed_method("plugin::rewrite");
+        // Method attribution (see pingwaf-profiler): the timer books the
+        // `plugin` module row as well.
+        let _profile = pingwaf_profiler::timed_method(
+            pingwaf_profiler::Method::PluginRewrite,
+        );
         let host = get_host(session.req_header())
             .unwrap_or_default()
             .to_string();
