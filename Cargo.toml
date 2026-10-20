@@ -320,7 +320,7 @@ derive_more = { version = "2.1.1", default-features = false, features = [
 ] }
 diff = "0.1.13"
 dirs = "7.0.0"
-etcd-client = "0.20.0"
+etcd-client = "0.21.0"
 fancy-regex = "0.19.1"
 flate2 = "1.1.10"
 futures = "0.3.34"
