@@ -391,7 +391,7 @@ export function OriginPoolsSection({
           <div className="rounded-md border border-line bg-recessed px-3 py-2">
             <p className="text-[13px] font-medium text-fg-strong">{pendingDeletePool.name}</p>
             <p className="mt-0.5 text-xs text-fg-subtle">
-              {(nodesByPool.get(pendingDeletePool.id) ?? []).length}{' '}
+              {(nodesByPool.get(pendingDeletePool.id) ?? pendingDeletePool.upstreams ?? []).length}{' '}
               {t('pages.basic.nodesCount')}
             </p>
           </div>

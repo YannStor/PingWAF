@@ -75,6 +75,33 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Changed
 
+- **`sub_filter` now rewrites `gzip` / `deflate` responses.** A response
+  with `Content-Encoding: gzip` (or `x-gzip`) or `deflate` (zlib wrapper,
+  raw deflate as fallback) is decompressed, filtered and recompressed with
+  the same algorithm, so `Content-Encoding` is preserved; the
+  8 MiB cap now bounds the **decompressed** plaintext, and a body over the
+  cap — or one that fails to decompress — is passed through as the original
+  compressed bytes. Handled responses are re-chunked and a strong `ETag`
+  weakened even when no rule matched; `br`, `zstd` and multi-value
+  encodings still pass through untouched. This is a **behaviour change**:
+  `gzip` responses were previously passed through with their compressed
+  bytes unfiltered.
+- **Origin pools gained `address_family`.** A three-valued setting —
+  `auto` (default; prefers IPv4, falls back to IPv6), `ipv4` or `ipv6`
+  (pin one family) — replaces the boolean `ipv4_only` for pool semantics;
+  the legacy switch is still accepted and kept in sync by the builders.
+  Migration 63 adds the column with a CHECK constraint; the default keeps
+  existing behaviour while letting IPv6-capable domain origins resolve.
+- **Node metrics are split by meaning.** Migration 64 separates the agent
+  memory figure that previously flipped semantics — registration reported
+  total RAM, the heartbeat reported used RAM, into the same column — into
+  `total_memory_bytes` (capacity) and `used_memory_bytes` (usage), with
+  `memory_bytes` kept unchanged for existing readers. The node view
+  (`GET /api/v1/system/nodes`) reports CPU and memory from the newest
+  stored probe sample, connections from the `agent_metrics` gauge, and
+  `rps` only while the agent's heartbeat stream is open (`null` for an
+  offline agent — the counter is retained nowhere else).
+
 - **Cache attribution: memory and disk are separate figures.**
   `GET /api/v1/system/profile` module rows gained `disk_bytes` /
   `disk_share`; the cache module's `mem_bytes` now reports real memory —

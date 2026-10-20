@@ -59,14 +59,40 @@ When the plugin applies, it removes `Content-Length`, switches the response to
 `Transfer-Encoding: chunked`, buffers the whole body, applies the filters at end
 of stream and emits the result.
 
+### Compressed responses
+
+The plugin understands `Content-Encoding: gzip` (and `x-gzip`) and
+`Content-Encoding: deflate` (zlib wrapper; raw deflate is attempted as a
+fallback). For those responses it decompresses the body, runs the filters on
+the plaintext, and recompresses with the same algorithm before emitting it:
+
+- `Content-Encoding` is kept (the body is recompressed the same way it
+  arrived), `Content-Length` is removed and the response is sent as
+  `Transfer-Encoding: chunked`.
+- A strong `ETag` is weakened to `W/…` because it described the origin body;
+  `Content-MD5` and `Digest` are removed for the same reason; `Vary` gains
+  `Accept-Encoding` (the recompressed body differs from what the origin sent
+  for other `Accept-Encoding` values).
+- **Cap: 8 MiB on the decompressed plaintext** (a few MiB of gzip can expand
+  to gigabytes, so capping the raw bytes alone would not stop a compression
+  bomb). Above the cap, or when decompression fails, the original compressed
+  bytes are passed through as-is.
+- **No rule matched:** the origin's compressed bytes are emitted verbatim —
+  byte-identical output, no recompression.
+
+Encodings the plugin cannot round-trip — `br`, `zstd`, multi-value values
+such as `gzip, br`, or anything unknown — leave the response completely
+untouched (body *and* headers), and a debug line is logged.
+
 ## Usage notes
 
 - **The entire response body is buffered in memory** before substitution. Scope
   the plugin with `path` and `status_codes` and keep it away from large files or
   streaming endpoints.
-- Compressed upstream responses are opaque bytes here: if the upstream returns
-  gzip, the filters will not match. Either ask the upstream not to compress, or
-  compress in Pingap with [`compression`](compression.md) after this plugin.
+- Even when no rule matches, a response the plugin has already taken over is
+  converted to chunked transfer encoding and its `ETag` weakened. This is a
+  known trade-off of the streaming design: the final length is only known once
+  the end of stream is reached.
 - A rule that fails to parse is a startup error, so `pingap -t` catches quoting
   mistakes. Patterns and replacements must be wrapped in single quotes and cannot
   themselves contain a single quote.

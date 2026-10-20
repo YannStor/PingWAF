@@ -423,12 +423,13 @@ or replacement may **not contain a single quote**, and neither side may be
 empty. Clearing the policy is done with `null` — or an empty `rules` list,
 which counts as "no policy".
 
-**Compressed responses are not rewritten.** The replacement runs on the raw
-response bytes and does not check `content-encoding`: for `gzip` / `br`
-responses the patterns do not match, so nothing is replaced (and the body is
-merely re-chunked). If the origin serves compressed bodies on paths you
-rewrite, disable that compression at the origin for those paths. Responses
-**larger than 8 MiB** are passed through untouched.
+**Compressed responses.** The replacement understands `gzip` / `x-gzip` and
+`deflate` responses: the body is decompressed, rewritten and recompressed with
+the same algorithm, so `Content-Encoding` is preserved. Responses with `br`,
+`zstd` or multi-value encodings (e.g. `gzip, br`) are passed through untouched.
+Note that even when no rule matches, a compressed response the plugin handles
+is re-chunked and its strong `ETag` weakened. Bodies **larger than 8 MiB after
+decompression** are passed through as the original compressed bytes.
 
 ## Custom Error Pages
 

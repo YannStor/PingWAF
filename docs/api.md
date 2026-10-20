@@ -515,10 +515,12 @@ cannot build would otherwise take down the whole agent configuration for the
 site. The policy becomes a per-site `sub_filter` plugin instance in the
 generated agent configuration.
 
-Known limitations: the replacement runs on the raw response bytes, so for
-**compressed** responses (`gzip` / `br`, where the plugin does not inspect
-`content-encoding`) the patterns do not match and the body is only re-chunked;
-responses **larger than 8 MiB** are passed through untouched.
+Known limitations: the plugin understands `gzip` / `x-gzip` and `deflate`
+responses and rewrites their decompressed bodies, then recompresses and keeps
+`Content-Encoding` — the body is re-chunked and a strong `ETag` is weakened even
+when nothing matched. Responses with `br`, `zstd` or multi-value encodings (e.g.
+`gzip, br`) are passed through untouched. Bodies **larger than 8 MiB after
+decompression** are passed through as the original compressed bytes.
 
 
 ### DELETE /sites/{site_id}

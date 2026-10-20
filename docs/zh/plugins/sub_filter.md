@@ -53,9 +53,20 @@ plugins = ["rewriteLinks"]
 
 插件生效时会移除 `Content-Length`，改为 `Transfer-Encoding: chunked`，缓冲整段正文，在流结束时应用过滤器并输出结果。
 
+### 压缩响应
+
+插件可识别 `Content-Encoding: gzip`（含 `x-gzip`）与 `Content-Encoding: deflate`（zlib 封装；解不开时回退尝试 raw deflate）。对这类响应，插件先解压正文，在明文上运行过滤器，再用相同算法重新压缩后输出：
+
+- 保留 `Content-Encoding`（以到达时的算法重新压缩），删除 `Content-Length`，响应改为 `Transfer-Encoding: chunked`。
+- 强 `ETag` 弱化为 `W/…`（它描述的是上游原始正文）；同理删除 `Content-MD5` 与 `Digest`；`Vary` 追加 `Accept-Encoding`（重压缩后的正文与上游发给其他 `Accept-Encoding` 的内容不同）。
+- **上限：解压后明文 8 MiB**（几 MiB 的 gzip 可膨胀到 GB 级，仅限制原始字节挡不住压缩炸弹）。超限或解压失败时，原样透传压缩字节。
+- **无规则命中：** 逐字节输出上游原始压缩字节——字节级一致，不做重压缩。
+
+插件无法往返处理的编码——`br`、`zstd`、多值（如 `gzip, br`）或其他未知值——响应完全不改动（正文与响应头均原样透传），并记录一条 debug 日志。
+
 ## 使用说明
 
 - **整段响应体先缓冲到内存**再替换。请用 `path` 与 `status_codes` 收窄范围，远离大文件或流式端点。
-- 压缩过的上游响应在此是不透明字节：上游若返回 gzip，过滤器不会匹配。请要求上游不压缩，或在本插件之后用 [`compression`](compression.md) 由 Pingap 压缩。
+- 即使最终没有任何规则命中，已被插件接管的响应也会转为 chunked 传输编码并弱化 `ETag`。这是流式设计的已知取舍：最终长度要到流结束才可知。
 - 解析失败的规则是启动错误，`pingap -t` 可捕获引号问题。模式与替换须用单引号包裹，且自身不能含单引号。
 - 替换在原始字节上进行；跨多字节 UTF-8 边界的正则匹配由正则引擎处理，但字面模式必须与正文中完全一致。
