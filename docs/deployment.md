@@ -655,6 +655,11 @@ back to the global default, which that migration seeds as `false` as well —
 behaviour is unchanged on upgrade. Review **Settings → Origin** afterwards and
 turn verification on where the origins can support it.
 
+Upgrading to 0.27.12 fills `waf_settings.body_stage_timeout_secs` with 30
+(the default) on every site; the migration has no way to tell a backfilled 30
+from an operator-chosen 30, and both behave identically. If you want a shorter
+body-withholding window, set 1–29 in the site's WAF settings.
+
 ### Rolling Upgrade (Distributed)
 
 1. Upgrade the control plane server first

@@ -705,6 +705,26 @@ role.
 
 List certificates for a site.
 
+### Certificate `warnings`
+
+Every response that returns a certificate — the create and update responses,
+and the list/show reads below — may carry a `warnings` array:
+
+```json
+"warnings": ["certificate domain api.other.com is not served by this site"]
+```
+
+The entries name certificate hostnames (from `domain`, a comma-separated list)
+that the certificate's **own** site does not serve, i.e. that match neither the
+site's `domain` nor its `alternate_domains` (wildcards cover exactly one label,
+in both directions, case-insensitively).
+
+**Advisory only — it never blocks anything.** A certificate naming a hostname
+the site does not serve is still saved, and `200`/`201` is still returned:
+uploading a certificate before adding its hostname, or for a site that serves
+it through another edge, are legitimate workflows, and refusing the save would
+take HTTPS down over a warning. An empty array means "checked, nothing wrong".
+
 ### POST /sites/{site_id}/certificates
 
 Add a certificate (manual upload or ACME request).
@@ -735,17 +755,35 @@ Add a certificate (manual upload or ACME request).
 
 `acme_challenge_type` is `http-01` or `dns-01`; `acme_dns_provider` is one of `cloudflare`, `route53`, `digitalocean`, `aliyun`, `dnspod`, `cloudxns`, `manual`.
 
+The response is the saved certificate, `warnings` included (see
+[Certificate `warnings`](#certificate-warnings)).
+
 ### GET /sites/{site_id}/certificates/{cert_id}
 
-Get certificate details.
+Get certificate details, `warnings` included.
 
 ### PUT /sites/{site_id}/certificates/{cert_id}
 
-Update certificate.
+Update certificate. The response carries `warnings` recomputed against the
+post-update hostnames.
 
 ### DELETE /sites/{site_id}/certificates/{cert_id}
 
 Remove certificate.
+
+### GET /certificates
+
+Certificate applications across every site the caller may see, newest first
+(paginated, optionally scoped with `site_id` and filtered with `status`). Each
+item is the certificate flattened together with its `site_id`/`site_domain`/
+`site_name`, and — like the per-site list — carries
+[`warnings`](#certificate-warnings) computed against the certificate's own
+site. Hostnames for the whole page are fetched in one query, so paging does not
+cost a lookup per row.
+
+### GET /certificates/{cert_id}
+
+Get certificate details across sites, `warnings` included.
 
 ### POST /sites/{site_id}/certificates/{cert_id}/renew
 
@@ -1183,7 +1221,8 @@ Patch semantics: omitted fields keep their current value.
   "advanced_mode": false,
   "monitor_categories": ["sqli"],
   "monitor_stacks": ["java"],
-  "monitor_managed_rules": ["930120"]
+  "monitor_managed_rules": ["930120"],
+  "body_stage_timeout_secs": 10
 }
 ```
 
@@ -1209,6 +1248,55 @@ accepted, and a request that sends one is rejected with
 that `block` is the enforcing value). A site without a settings row falls back
 to the aggregate mode of its enabled rules and, when it has none, to `monitor`
 — never to `off`, which is only ever an explicit choice.
+
+#### `body_stage_timeout_secs`
+
+Upper bound, in seconds, on how long the data plane may **withhold** a request
+body while body inspection runs. With `advanced_mode` on, the edge buffers the
+body before handing it to the WAF; this is the wall-clock budget for that wait
+— a slow client trickling bytes, or a large upload completing.
+
+| Value | Behaviour |
+|-------|-----------|
+| `1`–`30` | The window, in seconds. `30` is the default. |
+| `0` | **Reset to the default (30).** Accepted on write; the response reports `30`, and `30` is what is stored. |
+
+Anything outside `0..=30` is a `400 body_stage_timeout_secs must be between 0
+and 30 (0 resets to the default)` — out-of-range values are rejected rather
+than silently clamped, so a caller that sent `50` finds out instead of quietly
+running with 30.
+
+`0` meaning "unset / default" is the same rule the data plane applies: a row
+that has never been written reads as 30. There is no way to store a *different*
+default per site; set `1`–`29` for a shorter window.
+
+The window is a **fail-open** bound, not a block. Expiring it does not reject
+the request: the body is released to the upstream with whatever inspection
+completed, and the truncated inspection is the price of not letting a trickling
+client hold a connection. Keeping it small is therefore the security-relevant
+direction — 30s is the ceiling because holding a body longer than that turns
+every slowloris-style client into a connection-exhaustion vector.
+
+**Response (200)** — the same fields on `GET` and `PUT`:
+
+```json
+{
+  "waf_enabled": true,
+  "mode": "monitor",
+  "paranoia_level": 2,
+  "advanced_mode": false,
+  "monitor_categories": ["sqli"],
+  "monitor_stacks": ["java"],
+  "monitor_managed_rules": ["930120"],
+  "body_stage_timeout_secs": 30,
+  "created_at": "2025-01-01T00:00:00Z",
+  "updated_at": "2025-01-01T00:00:00Z"
+}
+```
+
+`body_stage_timeout_secs` in a response is always inside `1..=30`: a row
+edited behind the API's back (`0`, `-5`, `31`, ...) is reported as the default
+30 rather than as a value the data plane would never run with.
 
 ### GET /sites/{site_id}/waf/posture
 

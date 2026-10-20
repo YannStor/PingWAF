@@ -48,6 +48,24 @@ pub fn clamp_body_stage_timeout_secs(raw: i32) -> i32 {
     raw.min(MAX_BODY_STAGE_TIMEOUT_SECS)
 }
 
+/// Validates the request field for the body-withholding window.
+///
+/// `0` is an accepted *input* meaning "reset to the default" and is normalised
+/// to [`DEFAULT_BODY_STAGE_TIMEOUT_SECS`] here, so the stored row always holds
+/// a value the data plane can run with. The proto comment, the dashboard and
+/// the API therefore share one rule: `0` == "unset" == 30 seconds. Everything
+/// outside `0..=30` is a bad request rather than a silent clamp, so a caller
+/// that meant `5` and sent `50` finds out instead of quietly enforcing 30.
+pub fn validate_body_stage_timeout_secs(raw: i32) -> Result<i32, ApiError> {
+    if !(0..=MAX_BODY_STAGE_TIMEOUT_SECS).contains(&raw) {
+        return Err(ApiError::BadRequest(format!(
+            "body_stage_timeout_secs must be between 0 and \
+             {MAX_BODY_STAGE_TIMEOUT_SECS} (0 resets to the default)"
+        )));
+    }
+    Ok(clamp_body_stage_timeout_secs(raw))
+}
+
 /// Built-in managed rules a site can downgrade to monitor-only, by id.
 /// Mirrors `pingwaf_waf::MANAGED_RULE_IDS` (whitelisted through the crate so
 /// a new managed rule cannot be configured before the engine knows it).
@@ -70,7 +88,8 @@ pub struct UpdateWafSettingsRequest {
     #[serde(default)]
     pub monitor_managed_rules: Option<Vec<String>>,
     /// Seconds the data plane may withhold a request body while inspecting
-    /// it; 1-30, anything else is a bad request.
+    /// it; 1-30, or `0` to reset to the default (30). Anything else is a bad
+    /// request.
     #[serde(default)]
     pub body_stage_timeout_secs: Option<i32>,
 }
@@ -228,12 +247,10 @@ async fn update_waf_settings(
             Set(normalise_rule_ids(&rules, "monitor_managed_rules")?);
     }
     if let Some(secs) = payload.body_stage_timeout_secs {
-        if !(1..=MAX_BODY_STAGE_TIMEOUT_SECS).contains(&secs) {
-            return Err(ApiError::BadRequest(format!(
-                "body_stage_timeout_secs must be between 1 and {MAX_BODY_STAGE_TIMEOUT_SECS}"
-            )));
-        }
-        active.body_stage_timeout_secs = Set(secs);
+        // `0` means "reset to the default" and lands in the row as 30, so the
+        // stored value is always inside the 1..=30 window the data plane runs.
+        active.body_stage_timeout_secs =
+            Set(validate_body_stage_timeout_secs(secs)?);
     }
     // An update whose every field stays unchanged is silently dropped by
     // SeaORM; touching updated_at guarantees the row round-trips.
@@ -628,18 +645,6 @@ mod tests {
         assert!(message.contains("use 'block'"), "{message}");
     }
 
-    /// Validation of the request field, mirroring the arm in
-    /// `update_waf_settings`. Pulled out as a plain function so the bounds are
-    /// testable without a database.
-    fn validate_body_stage_timeout(raw: i32) -> Result<i32, ApiError> {
-        if !(1..=MAX_BODY_STAGE_TIMEOUT_SECS).contains(&raw) {
-            return Err(ApiError::BadRequest(format!(
-                "body_stage_timeout_secs must be between 1 and {MAX_BODY_STAGE_TIMEOUT_SECS}"
-            )));
-        }
-        Ok(raw)
-    }
-
     fn row_with_timeout(secs: i32) -> waf_settings::Model {
         waf_settings::Model {
             id: Uuid::new_v4(),
@@ -671,10 +676,30 @@ mod tests {
     }
 
     #[test]
+    fn body_stage_timeout_zero_resets_to_the_default() {
+        // H2: `0` is the documented "unset / reset to the default" input in the
+        // proto comment, the dashboard and the API. Sending it must be a 200
+        // that reports (and stores) 30, not a 400 that contradicts the docs.
+        assert_eq!(
+            validate_body_stage_timeout_secs(0).unwrap(),
+            DEFAULT_BODY_STAGE_TIMEOUT_SECS
+        );
+        assert_eq!(validate_body_stage_timeout_secs(0).unwrap(), 30);
+        // A row that carries the normalised 0 reports the default too.
+        assert_eq!(
+            WafSettingsResponse::from(row_with_timeout(
+                validate_body_stage_timeout_secs(0).unwrap()
+            ))
+            .body_stage_timeout_secs,
+            30
+        );
+    }
+
+    #[test]
     fn body_stage_timeout_accepts_the_documented_range() {
-        // Both ends of 1..=30 are legal.
-        assert_eq!(validate_body_stage_timeout(1).unwrap(), 1);
-        assert_eq!(validate_body_stage_timeout(30).unwrap(), 30);
+        // Both in-range ends (1 and 30) are legal and stored verbatim.
+        assert_eq!(validate_body_stage_timeout_secs(1).unwrap(), 1);
+        assert_eq!(validate_body_stage_timeout_secs(30).unwrap(), 30);
         assert_eq!(
             WafSettingsResponse::from(row_with_timeout(1))
                 .body_stage_timeout_secs,
@@ -689,15 +714,18 @@ mod tests {
 
     #[test]
     fn body_stage_timeout_rejects_values_outside_the_range() {
-        for bad in [0, 31, -1, i32::MAX] {
-            let err = validate_body_stage_timeout(bad).unwrap_err();
+        // Only `0..=30` is accepted; `31`/`-1` (and anything wilder) is a 400.
+        for bad in [31, -1, -30, i32::MIN, i32::MAX] {
+            let err = validate_body_stage_timeout_secs(bad).unwrap_err();
             assert!(
                 matches!(err, ApiError::BadRequest(_)),
                 "{bad} must be a bad request, got {err:?}"
             );
+            let message = err.to_string();
+            assert!(message.contains("between 0 and 30"), "{bad}: {message}");
             assert!(
-                err.to_string().contains("between 1 and 30"),
-                "{bad}: {err}"
+                message.contains("0 resets to the default"),
+                "{bad}: {message}"
             );
         }
     }
