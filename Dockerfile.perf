@@ -15,7 +15,7 @@
 # cargo profile (and the resulting target path) differ.
 
 # ─── Stage 1: Frontend ───────────────────────────────────────────────────────
-FROM mirror.gcr.io/library/node:22-alpine AS frontend-builder
+FROM mirror.gcr.io/library/node:26-alpine AS frontend-builder
 
 WORKDIR /app/web
 

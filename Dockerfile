@@ -14,7 +14,7 @@
 # library images): GitHub Actions runners share IP ranges and hit Docker
 # Hub's anonymous pull limit (HTTP 429) intermittently, which fails the
 # image resolve step before any layer cache can help.
-FROM mirror.gcr.io/library/node:22-alpine AS frontend-builder
+FROM mirror.gcr.io/library/node:26-alpine AS frontend-builder
 
 WORKDIR /app/web
 
