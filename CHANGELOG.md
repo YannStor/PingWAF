@@ -8,6 +8,57 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.28.1] — 2026-10-20
+
+### Fixed
+
+- **Memory usage no longer reads as a percentage of a percentage.** The
+  backend reports `memory_used_percent` as 0–100 (e.g. `56.3`); the
+  memory card clamped it as though it were 0–1 and then multiplied by
+  100 for the label, so the gauge sat permanently at 100% in the danger
+  colour and the text read `5630.0%`. A single helper now normalises
+  0–100 to 0–1 for the progress bar, the label prints the raw value, and
+  a client contract test pins the unit.
+- **Breadcrumbs show page names, not truncated path fragments.** Four
+  routes (`ip-groups`, `blocked-ips`, `notifications`,
+  `config-versions`) had no breadcrumb mapping, so they fell through to
+  the site-id branch and rendered as their first eight characters —
+  `ip-group`, `blocked-`, `config-v`, `notifica`. All four now use the
+  label the sidebar shows.
+- **The module column header is translated.** The attribution table
+  asked for `system.module`, but the locales only defined
+  `system.modules` (the section title), so the header rendered the raw
+  key. All three locales now define the singular as well.
+- **A route switched from prefix to exact can be saved again.** The
+  editor left `strip_prefix` at its stored `true` for a non-prefix
+  match, while the API answers `400` for that combination — and the
+  switch is disabled in the UI for non-prefix types, so the route could
+  not be saved at all. The submit payload now forces
+  `strip_prefix=false` and `rewrite_path=null` for non-prefix routes.
+- **One `rewrite_path` rule instead of three.** The validation lived in
+  the config layer, the data plane and the API mirror with different
+  blank handling. It is now a single function in the config layer
+  (re-exported for the data plane, mirrored in the API with a pointer to
+  it): an empty string means "unset", non-empty whitespace is an error,
+  and the length cap is counted in bytes. A `rewrite_path` the data
+  plane considers invalid is now logged and ignored instead of failing
+  the whole configuration load.
+- **`path='/'` with `strip_prefix` is rejected with `400`.** Stripping
+  the root prefix would be a no-op that silently forwards an empty path.
+
+### Changed
+
+- **`rewrite_path` is described in bytes, not characters.** Wherever the
+  2048 limit appears it now says bytes, noting that multi-byte
+  characters count as their UTF-8 length.
+- **The attribution text no longer claims the `control` row was
+  double-counted.** It was not: the module timer wrote the module row and
+  the method timer wrote the method row, one entry each. The share moves
+  for three real reasons — instrumentation narrowed from the root
+  listener to `/api/v1`, one `DashMap` hash and shard read lock removed
+  per request, and `cpu_ms` was always wall-clock (now also published as
+  `elapsed_*`).
+
 ## [PingWAF 0.28.0] — 2026-10-20
 
 ### Added
