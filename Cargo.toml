@@ -333,7 +333,7 @@ hmac = "0.13.0"
 # AES-256-GCM sealing of notification channel secrets at rest (secretbox).
 ring = "0.17"
 # Reads uploaded MaxMind-format mmdb files for login geolocation.
-maxminddb = "0.27"
+maxminddb = "0.32"
 # SMTP client for the notification system's e-mail channel. rustls keeps the
 # control plane free of OpenSSL, like every other TLS consumer in the tree.
 lettre = { version = "0.11", default-features = false, features = [
