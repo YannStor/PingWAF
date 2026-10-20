@@ -8,6 +8,15 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.27.13] — 2026-10-20
+
+### Fixed
+
+- The body-stage timeout field derived its display value instead of
+  mirroring it into local state with an effect (eslint
+  `react-hooks/set-state-in-effect` failed the Web lint job on 0.27.12;
+  behaviour is unchanged).
+
 ## [PingWAF 0.27.12] — 2026-10-20
 
 ### Added
