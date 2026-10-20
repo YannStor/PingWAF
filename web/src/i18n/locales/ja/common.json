@@ -45,6 +45,8 @@
       "status": "状態",
       "cpu": "CPU",
       "memory": "メモリ",
+      "memoryTotal": "合計メモリ",
+      "memoryUsed": "メモリ使用量",
       "connections": "接続数",
       "rps": "RPS",
       "sites": "サイト数",
@@ -312,6 +314,10 @@
     "featureAnalytics": "リアルタイム分析"
   },
   "pages": {
+    "origin": {
+      "poolNodes": "ノード",
+      "poolEmpty": "このプールにはノードがありません"
+    },
     "routes": {
       "stripPrefix": "プレフィックス除去",
       "stripPrefixHint": "一致したプレフィックスを上流リクエストパスから取り除きます。",

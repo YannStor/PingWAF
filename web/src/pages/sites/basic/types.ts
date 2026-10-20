@@ -280,14 +280,10 @@ export const emptyRouteForm = (poolId: string): RouteFormState => ({
 })
 
 /**
- * Mirrors the server's `rewrite_path` validation (`/`-rooted, ≤2048 bytes,
- * no `?`/`#`/whitespace). Returns true when the raw input can be submitted.
+ * Rewrite / Host validators live in `@/lib/routeRewrite` (the shared copy of
+ * the server's rules); re-exported here so existing imports keep working.
  */
-export function isValidRewritePath(raw: string): boolean {
-  const path = raw.trim()
-  if (!path.startsWith('/') || /[\s?#]/.test(path)) return false
-  return new TextEncoder().encode(path).length <= 2048
-}
+export { MAX_REWRITE_PATH_BYTES, isValidRewritePath, isValidUpstreamHost } from '@/lib/routeRewrite'
 
 /**
  * Route 请求体的 `strip_prefix`/`rewrite_path` 组装规则。
@@ -306,23 +302,6 @@ export function routeRewriteFlags(form: {
   const rewritePath = form.matchType === 'prefix' && rewrite ? rewrite : null
   const stripPrefix = form.matchType === 'prefix' && !rewritePath && form.stripPrefix
   return { strip_prefix: stripPrefix, rewrite_path: rewritePath }
-}
-
-/**
- * Mirrors the server's `upstream_host` validation: a bare host name — no
- * scheme, path, whitespace or control characters, at most 253 bytes.
- *
- * 控制字符范围与服务端 `char::is_control` 对齐：拒绝 C0（\u0000-\u001f）、
- * DEL+C1（\u007f-\u009f）以及 JS 行分隔符 \u2028/\u2029。
- */
-export function isValidUpstreamHost(raw: string): boolean {
-  const host = raw.trim()
-  if (!host || host.length > 253) return false
-  if (new TextEncoder().encode(host).byteLength > 253) return false
-  if (host.includes('/') || host.includes('://')) return false
-  // eslint-disable-next-line no-control-regex -- mirrors the server's control-char rejection
-  if (/[\s\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(host)) return false
-  return true
 }
 
 /* ── Trusted proxy helpers ────────────────────────────────────────── */

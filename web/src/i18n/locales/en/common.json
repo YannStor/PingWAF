@@ -45,6 +45,8 @@
       "status": "Status",
       "cpu": "CPU",
       "memory": "Memory",
+      "memoryTotal": "Total memory",
+      "memoryUsed": "Memory used",
       "connections": "Connections",
       "rps": "RPS",
       "sites": "Sites",
@@ -312,6 +314,10 @@
     "featureAnalytics": "Real-time analytics"
   },
   "pages": {
+    "origin": {
+      "poolNodes": "nodes",
+      "poolEmpty": "No nodes in this pool"
+    },
     "routes": {
       "stripPrefix": "Strip prefix",
       "stripPrefixHint": "Remove the matched prefix from the upstream request path.",

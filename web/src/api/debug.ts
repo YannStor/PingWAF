@@ -164,6 +164,10 @@ export interface SystemAgentNode {
   cpu_percent: number | null
   /** 节点内存占用（字节）；null = 无样本。 */
   memory_bytes: number | null
+  /** 节点物理内存总量（字节）；null = 从未上报。 */
+  total_memory_bytes: number | null
+  /** 节点内存占用（字节，与 `memory_bytes` 同义的新字段）；null = 无样本。 */
+  used_memory_bytes: number | null
   /** 边缘进程当前连接数；null = 从未上报。 */
   connections: number | null
   /** 边缘 RPS；null = 从未上报。 */

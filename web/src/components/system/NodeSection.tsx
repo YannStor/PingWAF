@@ -168,15 +168,26 @@ function AgentTable({
     },
     {
       key: 'memory_bytes',
-      header: t('system.nodes.memory'),
+      header: t('system.nodes.memoryUsed'),
       align: 'right',
-      accessor: (a: SystemAgentNode) => a.memory_bytes ?? -1,
-      cell: (a: SystemAgentNode) =>
-        a.memory_bytes === null || !Number.isFinite(a.memory_bytes) ? (
-          NULL_CELL
-        ) : (
-          <span className="tabular-nums">{formatSize(a.memory_bytes)}</span>
-        ),
+      accessor: (a: SystemAgentNode) => a.used_memory_bytes ?? a.memory_bytes ?? -1,
+      cell: (a: SystemAgentNode) => {
+        const used = a.used_memory_bytes ?? a.memory_bytes
+        if (used === null || !Number.isFinite(used)) return NULL_CELL
+        const total = a.total_memory_bytes
+        return (
+          <span
+            className="tabular-nums"
+            title={
+              total != null && Number.isFinite(total)
+                ? `${t('system.nodes.memoryTotal')}: ${formatSize(total)}`
+                : undefined
+            }
+          >
+            {formatSize(used)}
+          </span>
+        )
+      },
     },
     {
       key: 'connections',

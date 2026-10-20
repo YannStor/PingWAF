@@ -200,6 +200,11 @@ export interface UpstreamPool {
   health_check_healthy_threshold: number
   is_default: boolean
   created_at: string
+  /**
+   * Members inlined by `GET /sites/{id}/upstream-pools` (the list endpoints
+   * embed each pool's nodes). Absent from create/update responses.
+   */
+  upstreams?: Upstream[]
 }
 
 /** `models::sites::site_routes::Model` */
@@ -1000,6 +1005,10 @@ export interface Agent {
   version: string | null
   os_info: string | null
   cpu_cores: number | null
+  /** Total physical memory; null = the agent never reported it. */
+  total_memory_bytes: number | null
+  /** Used memory (kept as `memory_bytes` for compatibility). */
+  used_memory_bytes: number | null
   memory_bytes: number | null
   status: AgentStatus | string
   api_key_id: string | null

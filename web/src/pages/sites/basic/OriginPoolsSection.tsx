@@ -244,7 +244,9 @@ export function OriginPoolsSection({
       ) : (
         <div className="grid gap-4 xl:grid-cols-2">
           {pools.map((pool) => {
-            const nodes = nodesByPool.get(pool.id) ?? []
+            // Prefer the separately fetched upstreams; fall back to the list
+            // endpoint's inlined `pool.upstreams` when that query has no data.
+            const nodes = nodesByPool.get(pool.id) ?? pool.upstreams ?? []
             return (
               <Card key={pool.id}>
                 <CardHeader
@@ -263,6 +265,10 @@ export function OriginPoolsSection({
                       <span className="flex items-center gap-1">
                         <Network weight="duotone" className="h-3.5 w-3.5" />
                         {lbLabel(pool.lb_algorithm)}
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <Globe weight="duotone" className="h-3.5 w-3.5" />
+                        {nodes.length} {t('pages.origin.poolNodes')}
                       </span>
                       {pool.sni ? (
                         <span className="flex items-center gap-1">
@@ -314,7 +320,7 @@ export function OriginPoolsSection({
                     <EmptyState
                       className="border-0 py-8"
                       icon={<Globe weight="duotone" className="h-6 w-6" />}
-                      title={t('pages.basic.nodesEmpty')}
+                      title={t('pages.origin.poolEmpty')}
                       description={t('pages.basic.nodesEmptyDescription')}
                       action={
                         canWrite ? (

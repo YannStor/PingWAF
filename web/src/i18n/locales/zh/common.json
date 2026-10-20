@@ -45,6 +45,8 @@
       "status": "状态",
       "cpu": "CPU",
       "memory": "内存",
+      "memoryTotal": "内存总量",
+      "memoryUsed": "内存占用",
       "connections": "连接数",
       "rps": "RPS",
       "sites": "站点数",
@@ -312,6 +314,10 @@
     "featureAnalytics": "实时分析"
   },
   "pages": {
+    "origin": {
+      "poolNodes": "个节点",
+      "poolEmpty": "池内暂无节点"
+    },
     "routes": {
       "stripPrefix": "去除前缀",
       "stripPrefixHint": "将匹配到的前缀从上游请求路径中移除。",

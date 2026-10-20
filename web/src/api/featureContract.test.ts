@@ -13,7 +13,7 @@ vi.hoisted(() => {
   }
 })
 import type { SystemNodes } from '@/api/debug'
-import { isValidUpstreamHost } from '@/pages/sites/basic/types'
+import { isValidUpstreamHost } from '@/lib/routeRewrite'
 
 const read = (path: string) => readFileSync(resolve(process.cwd(), path), 'utf8')
 
@@ -36,6 +36,8 @@ describe('GET /api/v1/system/nodes contract', () => {
         status: 'online',
         cpu_percent: null,
         memory_bytes: null,
+        total_memory_bytes: 8589934592,
+        used_memory_bytes: 2147483648,
         connections: 12,
         rps: null,
         sites: 3,
@@ -56,6 +58,25 @@ describe('GET /api/v1/system/nodes contract', () => {
     expect(src).toContain("t('system.nodes.empty')")
     expect(src).toContain('—')
     expect(src).toContain('formatRelative(a.last_seen)')
+  })
+
+  it('agent memory column shows used_memory_bytes ?? memory_bytes with a total tooltip', () => {
+    const src = read('src/components/system/NodeSection.tsx')
+    expect(src).toContain('a.used_memory_bytes ?? a.memory_bytes')
+    expect(src).toContain("t('system.nodes.memoryTotal')")
+  })
+
+  it('locales carry the new memory and pool-node keys in every language', () => {
+    for (const lang of ['en', 'zh', 'ja']) {
+      const parsed = JSON.parse(read(`src/i18n/locales/${lang}/common.json`)) as {
+        system: { nodes: Record<string, string> }
+        pages: { origin: Record<string, string> }
+      }
+      expect(parsed.system.nodes.memoryTotal).toBeTruthy()
+      expect(parsed.system.nodes.memoryUsed).toBeTruthy()
+      expect(parsed.pages.origin.poolNodes).toBeTruthy()
+      expect(parsed.pages.origin.poolEmpty).toBeTruthy()
+    }
   })
 
   it('CPU bar uses host_cpu_percent only (process_cpu can exceed 100)', () => {
