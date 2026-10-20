@@ -258,8 +258,27 @@ fn agent_node(
     }
 }
 
-/// Newest host probe sample per agent, in one round trip.
+/// Newest host probe sample per agent, as one ordered index scan.
 ///
+/// `DISTINCT ON` is the cheapest "newest row per agent" on PostgreSQL and rides
+/// `idx_host_samples_agent_time (agent_id, sampled_at DESC)`: `agent_id =
+/// ANY($1)` is the index condition on the leading column and the index order is
+/// exactly `(agent_id, sampled_at DESC)`.
+///
+/// The trailing `id DESC` only breaks ties, but it is not optional. The agent
+/// buffers its 5-second probes and ships them as one batch, so several rows of
+/// one `agent_id` can carry the same `sampled_at`; without a tie-breaker
+/// `DISTINCT ON` returns whichever of them the scan reached first, which means
+/// a different CPU/memory reading on a different plan or after a `VACUUM`.
+/// `id` is the identity column, so it totally orders the tie group. The index
+/// still supplies `(agent_id, sampled_at DESC)`, and the extra key is resolved
+/// by an incremental sort inside each group — never over the table.
+const LATEST_SAMPLES_SQL: &str = "SELECT DISTINCT ON (agent_id) agent_id, \
+     cpu_usage_percent, memory_used_bytes \
+     FROM host_samples \
+     WHERE agent_id = ANY($1) \
+     ORDER BY agent_id, sampled_at DESC, id DESC";
+
 /// The probe is what the edge samples for `cpu_usage_percent` and
 /// `memory_usage_bytes`: the heartbeat's own copies of those two are not
 /// persisted, but the raw samples are, so the newest one is the same
@@ -269,15 +288,8 @@ async fn latest_samples(
     db: &DatabaseConnection,
     ids: &[Uuid],
 ) -> Result<HashMap<Uuid, HeartbeatMetrics>, ApiError> {
-    // `DISTINCT ON` is the cheapest "newest row per agent" on PostgreSQL and
-    // rides the `(agent_id, sampled_at DESC)` index.
-    const SQL: &str = "SELECT DISTINCT ON (agent_id) agent_id, \
-                       cpu_usage_percent, memory_used_bytes \
-                       FROM host_samples \
-                       WHERE agent_id = ANY($1) \
-                       ORDER BY agent_id, sampled_at DESC";
     let mut out = HashMap::with_capacity(ids.len());
-    for row in latest_rows(db, SQL, ids).await? {
+    for row in latest_rows(db, LATEST_SAMPLES_SQL, ids, Vec::new()).await? {
         let agent_id = required::<Uuid>(&row, "agent_id")?;
         let cpu_percent = optional::<f64>(&row, "cpu_usage_percent")?;
         // The column is a signed bigint; a negative count is a corrupt
@@ -296,24 +308,66 @@ async fn latest_samples(
     Ok(out)
 }
 
-/// Newest `pingwaf_active_connections` gauge per agent.
+/// Gauge the agent publishes as `active_connections`. Bound as `$2` rather than
+/// written into the statement: the query text then depends only on the shape,
+/// so the planner sees one prepared statement for every poll.
+const ACTIVE_CONNECTIONS_METRIC: &str = "pingwaf_active_connections";
+
+/// Newest `pingwaf_active_connections` gauge per agent, as one ordered index
+/// scan on `idx_agent_metrics_agent_name_time_desc` (migration
+/// `m20240101_000061`).
 ///
-/// The agent publishes this counter on the metrics stream, and it is built
-/// from the very value its heartbeat carries as `active_connections`. It is
-/// the only place that number survives: the heartbeat itself is not stored.
-/// A deployment that disables metric shipping leaves it `None`, which is why
-/// the field is nullable.
+/// The agent publishes this counter on the metrics stream, and it is built from
+/// the very value its heartbeat carries as `active_connections`. It is the only
+/// place that number survives: the heartbeat itself is not stored. A deployment
+/// that disables metric shipping leaves it `None`, which is why the field is
+/// nullable.
+///
+/// # Why this exact text
+///
+/// `agent_metrics` is high-write (batched metric points) and only swept after
+/// `metric_retention_days`, and `/system/nodes` runs this once per poll, so the
+/// statement has to be ordered by the index instead of sorting the retained
+/// rows every 15s.
+///
+/// * `agent_id = ANY($1) AND name = $2` are both equality restrictions and they
+///   lead the index, `(agent_id, name, recorded_at DESC)`. Writing them in
+///   index order is for the reader — the planner reorders predicates — but the
+///   index *column* order is what matters: with both as index conditions,
+///   `name` is a pseudoconstant and the index suffix is exactly the requested
+///   sort, `(agent_id, recorded_at DESC)`.
+/// * `recorded_at DESC` is the part the old `idx_agent_metrics_agent_name_time
+///   (agent_id, name, recorded_at)` could not deliver. It was already declared
+///   with the equality columns first; what it lacked was the direction. A
+///   b-tree yields a column pair all-ASC (forward) or all-DESC (backward), and
+///   `agent_id ASC, recorded_at DESC` is mixed, so neither scan direction
+///   matched and the planner had to `Sort` every matching row.
+/// * `id DESC` (M6) breaks the tie when one batch wrote two rows with the same
+///   `recorded_at`; without it `DISTINCT ON` picks an arbitrary row of the
+///   group. The index does not carry `id`, so the planner resolves it with an
+///   incremental sort over the same index — inside each `(agent_id,
+///   recorded_at)` group, one row per agent, not over the table:
+///
+/// ```text
+/// Unique                          <- DISTINCT ON (agent_id)
+///   ->  Sort (id DESC)            <- over |agents| rows
+///         ->  Index Scan using idx_agent_metrics_agent_name_time_desc
+///               Index Cond: (agent_id = ANY($1) AND name = $2)
+/// ```
+const LATEST_CONNECTIONS_SQL: &str =
+    "SELECT DISTINCT ON (agent_id) agent_id, value \
+     FROM agent_metrics \
+     WHERE agent_id = ANY($1) AND name = $2 \
+     ORDER BY agent_id, recorded_at DESC, id DESC";
+
 async fn latest_connections(
     db: &DatabaseConnection,
     ids: &[Uuid],
 ) -> Result<HashMap<Uuid, u64>, ApiError> {
-    const SQL: &str = "SELECT DISTINCT ON (agent_id) agent_id, value \
-                       FROM agent_metrics \
-                       WHERE name = 'pingwaf_active_connections' \
-                       AND agent_id = ANY($1) \
-                       ORDER BY agent_id, recorded_at DESC";
     let mut out = HashMap::with_capacity(ids.len());
-    for row in latest_rows(db, SQL, ids).await? {
+    let metric =
+        vec![sea_orm::Value::from(ACTIVE_CONNECTIONS_METRIC.to_owned())];
+    for row in latest_rows(db, LATEST_CONNECTIONS_SQL, ids, metric).await? {
         let agent_id = required::<Uuid>(&row, "agent_id")?;
         let value = required::<f64>(&row, "value")?;
         if let Some(connections) = gauge_to_u64(value) {
@@ -324,16 +378,23 @@ async fn latest_connections(
 }
 
 /// Runs one of the two "newest row per agent" queries with the fleet bound as
-/// a `uuid[]`, so the whole list costs one round trip.
+/// a `uuid[]` (`$1`), so the whole list costs one round trip.
+///
+/// `extra` carries the remaining parameters in order (`$2`, `$3`, …); only the
+/// metric query has one today.
 async fn latest_rows(
     db: &DatabaseConnection,
     sql: &str,
     ids: &[Uuid],
+    extra: Vec<sea_orm::Value>,
 ) -> Result<Vec<sea_orm::QueryResult>, ApiError> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    query_all(db, sql, vec![sea_orm::Value::from(ids.to_vec())]).await
+    let mut values = Vec::with_capacity(extra.len() + 1);
+    values.push(sea_orm::Value::from(ids.to_vec()));
+    values.extend(extra);
+    query_all(db, sql, values).await
 }
 
 /// Rounds a gauge to a whole count, refusing values no count can hold.
@@ -351,6 +412,9 @@ fn gauge_to_u64(value: f64) -> Option<u64> {
 /// serves every site of its API key's owner — `agent_visible_site_ids` in the
 /// config push applies the same rule, so the number here is what that agent
 /// actually receives, not a fleet-wide total.
+///
+/// Only the owners that matter are loaded, and only as a tally: the per-owner
+/// figure comes from [`site_count_query`], not from counting rows in memory.
 async fn agent_site_counts(
     db: &DatabaseConnection,
     rows: &[agent::Model],
@@ -361,16 +425,20 @@ async fn agent_site_counts(
         return Ok(rows.iter().map(|row| (row.id, 1)).collect());
     }
 
-    let owners: Vec<Uuid> = site::Entity::find()
-        .select_only()
-        .column(site::Column::UserId)
-        .into_tuple()
+    // Aggregated by the database: one row per *owner*, never one row per site.
+    // `/system/nodes` is polled every 15s, so shipping every `sites.user_id`
+    // just to count them here was a full column scan per poll.
+    let per_owner: HashMap<Uuid, u64> = site_count_query()
+        .into_tuple::<(Uuid, i64)>()
         .all(db)
-        .await?;
-    let mut per_owner: HashMap<Uuid, u64> = HashMap::new();
-    for owner in owners {
-        *per_owner.entry(owner).or_default() += 1;
-    }
+        .await?
+        .into_iter()
+        .filter_map(|(owner, count)| {
+            // COUNT(*) is non-negative; a negative reading means a corrupt row
+            // set, so it counts as "no sites" instead of wrapping to ~1.8e19.
+            u64::try_from(count).ok().map(|count| (owner, count))
+        })
+        .collect();
 
     let key_ids: Vec<Uuid> = rows
         .iter()
@@ -408,6 +476,20 @@ async fn agent_site_counts(
             (row.id, count)
         })
         .collect())
+}
+
+/// `SELECT user_id, COUNT(*) FROM sites GROUP BY user_id`.
+///
+/// Extracted so the statement can be asserted without a database: the
+/// regression this guards against (projecting every `sites.user_id` and
+/// tallying in memory) is visible in the SQL, and it is the difference between
+/// one row per owner and one row per site on every poll of `/system/nodes`.
+fn site_count_query() -> sea_orm::Select<site::Entity> {
+    site::Entity::find()
+        .select_only()
+        .column(site::Column::UserId)
+        .column_as(site::Column::Id.count(), "site_count")
+        .group_by(site::Column::UserId)
 }
 
 /// Reads a column the query always produces.
@@ -654,5 +736,106 @@ mod tests {
         assert_eq!(gauge_to_u64(-3.0), None);
         assert_eq!(gauge_to_u64(f64::NAN), None);
         assert_eq!(gauge_to_u64(f64::INFINITY), None);
+    }
+
+    /// B1 + M6: both "newest row per agent" statements are pinned to the shape
+    /// that makes them an ordered index scan, and to a total order.
+    ///
+    /// There is no database in a unit test, so the assertion is on the
+    /// statement text — which is the whole contract here:
+    ///
+    /// * the fleet is one bound `uuid[]` (`agent_id = ANY($1)`), never an
+    ///   interpolated id list, so the plan is reused and the index condition
+    ///   stays on the leading column;
+    /// * the metric name is bound (`$2`), matching
+    ///   `idx_agent_metrics_agent_name_time_desc (agent_id, name, recorded_at
+    ///   DESC)` — migration `m20240101_000061`;
+    /// * the sort is `…recorded_at DESC` / `…sampled_at DESC`, the direction
+    ///   the index declares. The old all-ASC index could not satisfy the mixed
+    ///   `agent_id ASC, recorded_at DESC`, which is what turned every poll into
+    ///   a full sort;
+    /// * `id DESC` closes the sort (M6): equal timestamps inside one batch
+    ///   would otherwise make `DISTINCT ON` pick an arbitrary row.
+    #[test]
+    fn latest_row_queries_are_index_ordered_and_deterministic() {
+        for sql in [LATEST_SAMPLES_SQL, LATEST_CONNECTIONS_SQL] {
+            assert!(sql.contains("DISTINCT ON (agent_id)"), "{sql}");
+            assert!(
+                sql.contains("FROM host_samples")
+                    || sql.contains("FROM agent_metrics"),
+                "{sql}"
+            );
+            assert!(
+                sql.contains("WHERE agent_id = ANY($1)"),
+                "the fleet is one bound array: {sql}"
+            );
+            // `DISTINCT ON` reads the leftmost ORDER BY expressions, and the
+            // index is ordered `(agent_id, …, DESC)`: the sort must start with
+            // the grouped column and then walk time backwards.
+            assert!(
+                sql.contains("ORDER BY agent_id, "),
+                "the sort starts with the index's leading column: {sql}"
+            );
+            assert!(
+                sql.trim_end().ends_with("DESC, id DESC"),
+                "the sort needs `id DESC` as its tie-breaker: {sql}"
+            );
+        }
+
+        // The two equality columns lead, in the index's order; the metric name
+        // is a parameter, so the statement text cannot drift per poll.
+        assert!(
+            LATEST_CONNECTIONS_SQL
+                .contains("WHERE agent_id = ANY($1) AND name = $2"),
+            "{LATEST_CONNECTIONS_SQL}"
+        );
+        assert!(
+            !LATEST_CONNECTIONS_SQL.contains(ACTIVE_CONNECTIONS_METRIC),
+            "the metric name is bound as $2, not interpolated"
+        );
+        assert_eq!(
+            LATEST_CONNECTIONS_SQL.matches('$').count(),
+            2,
+            "{LATEST_CONNECTIONS_SQL}"
+        );
+        assert_eq!(
+            LATEST_SAMPLES_SQL.matches('$').count(),
+            1,
+            "{LATEST_SAMPLES_SQL}"
+        );
+    }
+
+    /// M5: the per-owner site tally is one aggregate row per owner. Reading
+    /// every `sites.user_id` and counting in memory is what this replaces, and
+    /// the difference is visible in the statement SeaORM builds.
+    #[test]
+    fn site_counts_are_grouped_by_owner() {
+        use sea_orm::{DbBackend, QueryTrait};
+
+        let sql = site_count_query().build(DbBackend::Postgres).sql;
+        assert!(
+            sql.contains("GROUP BY \"sites\".\"user_id\""),
+            "the tally is grouped in the database: {sql}"
+        );
+        assert!(
+            sql.contains("COUNT("),
+            "the figure is an aggregate, not a row count: {sql}"
+        );
+        assert!(
+            sql.contains("FROM \"sites\""),
+            "the aggregate reads the sites table: {sql}"
+        );
+        // Nothing but the owner and its tally may be selected: an extra column
+        // would mean rows come back one per site again.
+        let projection = sql
+            .split_once("SELECT ")
+            .and_then(|(_, rest)| rest.split_once(" FROM "))
+            .map(|(cols, _)| cols)
+            .expect("a SELECT … FROM statement");
+        assert_eq!(
+            projection.matches(',').count(),
+            1,
+            "exactly two selected columns (user_id, count): {sql}"
+        );
     }
 }

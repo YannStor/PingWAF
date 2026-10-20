@@ -65,6 +65,8 @@ pub mod m20240101_000057_waf_body_stage_timeout;
 pub mod m20240101_000058_site_route_path_rewrite;
 pub mod m20240101_000059_site_route_upstream_host;
 pub mod m20240101_000060_site_response_replace;
+pub mod m20240101_000061_agent_metrics_desc_index;
+pub mod m20240101_000062_site_upstream_pool_address_unique;
 
 use sea_orm_migration::prelude::*;
 
@@ -141,6 +143,10 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000058_site_route_path_rewrite::Migration),
             Box::new(m20240101_000059_site_route_upstream_host::Migration),
             Box::new(m20240101_000060_site_response_replace::Migration),
+            Box::new(m20240101_000061_agent_metrics_desc_index::Migration),
+            Box::new(
+                m20240101_000062_site_upstream_pool_address_unique::Migration,
+            ),
         ]
     }
 }
@@ -152,7 +158,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 60);
+        assert_eq!(migrations.len(), 62);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();
