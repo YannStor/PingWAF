@@ -29,7 +29,31 @@
     "empty": "暂无采样",
     "loadError": "系统数据加载失败。",
     "method": "方法",
-    "elapsed": "耗时"
+    "elapsed": "耗时",
+    "nodes": {
+      "title": "节点",
+      "control": "控制面",
+      "agents": "Agent 节点",
+      "processCpu": "进程 CPU",
+      "hostCpu": "主机 CPU",
+      "cores": "核心数",
+      "rss": "RSS",
+      "rssPeak": "RSS 峰值",
+      "requests": "请求数",
+      "avgElapsed": "平均耗时",
+      "name": "名称",
+      "status": "状态",
+      "cpu": "CPU",
+      "memory": "内存",
+      "connections": "连接数",
+      "rps": "RPS",
+      "sites": "站点数",
+      "lastSeen": "末次心跳",
+      "empty": "暂无 agent 节点",
+      "loadError": "节点数据加载失败"
+    },
+    "disk": "磁盘",
+    "diskHint": "内存 = 索引 + 在读缓冲；磁盘 = 缓存文件占用。"
   },
   "app": {
     "name": "PingWAF",
@@ -292,7 +316,9 @@
       "stripPrefix": "去除前缀",
       "stripPrefixHint": "将匹配到的前缀从上游请求路径中移除。",
       "rewritePath": "重写路径",
-      "rewritePathHint": "用给定模板替换上游请求路径。"
+      "rewritePathHint": "用给定模板替换上游请求路径。",
+      "upstreamHost": "上游 Host 覆盖",
+      "upstreamHostHint": "留空 = 沿用客户端 Host；不得含 ://、/ 或空格，最长 253 字节。"
     },
     "dashboard": {
       "title": "概览",
@@ -411,7 +437,20 @@
       "pauseTitle": "暂停站点？",
       "pauseDescription": "暂停后边缘对所有请求返回 503 维护页，直到重新激活。TLS 证书、WAF 日志与流量统计不受影响。",
       "resumeTitle": "恢复站点？",
-      "resumeDescription": "流量将重新转发至源站，所有规则立即生效。"
+      "resumeDescription": "流量将重新转发至源站，所有规则立即生效。",
+      "responseReplace": {
+        "title": "响应内容替换",
+        "path": "路径过滤（正则）",
+        "statusCodes": "状态码",
+        "rules": "替换规则",
+        "pattern": "匹配内容",
+        "replacement": "替换为",
+        "isRegex": "正则",
+        "addRule": "添加规则",
+        "removeRule": "删除规则",
+        "gzipHint": "压缩响应（gzip/br）下替换不生效。",
+        "empty": "暂无替换规则，添加一条以开始替换响应内容。"
+      }
     },
     "siteDetail": {
       "title": "站点",

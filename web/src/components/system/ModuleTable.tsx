@@ -68,6 +68,29 @@ export function ModuleTable({
         cell: (m) => <span className="tabular-nums">{formatSize(m.mem_bytes)}</span>,
       },
       {
+        key: 'disk_bytes',
+        header: t('system.disk'),
+        accessor: (m) => m.disk_bytes,
+        align: 'right',
+        sortable: true,
+        cell: (m) => (
+          <div className="flex items-center justify-end gap-2">
+            <div className="h-1.5 w-16 overflow-hidden rounded-full bg-recessed">
+              <div
+                className="h-full rounded-full bg-success"
+                style={{ width: `${Math.min(100, (m.disk_share ?? 0) * 100)}%` }}
+              />
+            </div>
+            <span className="w-20 text-right tabular-nums">
+              {formatSize(m.disk_bytes)}
+              {m.disk_share > 0 ? (
+                <span className="ml-1 text-fg-subtle">{`${(m.disk_share * 100).toFixed(0)}%`}</span>
+              ) : null}
+            </span>
+          </div>
+        ),
+      },
+      {
         key: 'calls',
         header: t('system.calls'),
         accessor: (m) => m.calls,
@@ -88,15 +111,18 @@ export function ModuleTable({
   )
 
   return (
-    <Table
-      columns={columns}
-      data={modules ?? []}
-      rowKey={(m) => m.module}
-      loading={loading}
-      dense
-      empty={
-        <div className="py-10 text-center text-sm text-fg-subtle">{t('system.empty')}</div>
-      }
-    />
+    <div>
+      <Table
+        columns={columns}
+        data={modules ?? []}
+        rowKey={(m) => m.module}
+        loading={loading}
+        dense
+        empty={
+          <div className="py-10 text-center text-sm text-fg-subtle">{t('system.empty')}</div>
+        }
+      />
+      <p className="mt-2 text-xs text-fg-subtle">{t('system.diskHint')}</p>
+    </div>
   )
 }

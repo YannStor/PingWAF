@@ -11,6 +11,7 @@ import { useCanWrite } from '@/hooks'
 import type { IpGroupResponse } from '@/api/types'
 import { FailoverPanel } from '../FailoverPanel'
 import { ProxyTrustCard } from './ProxyTrustCard'
+import { ResponseReplaceCard } from './ResponseReplaceCard'
 import { OriginPoolsSection } from './OriginPoolsSection'
 import { RoutesSection } from './RoutesSection'
 import { PoolDialog, type PoolDialogRequest } from './PoolDialog'
@@ -138,6 +139,12 @@ export function BasicPage() {
 
       {/* Disconnected (failover) policy */}
       <FailoverPanel />
+
+      {siteQuery.data && (
+        <section className="mt-8">
+          <ResponseReplaceCard site={siteQuery.data.site} />
+        </section>
+      )}
 
       <section className="mt-8">
         <h2 className="text-sm font-semibold text-fg-strong">

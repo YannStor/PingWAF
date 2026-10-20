@@ -10,13 +10,16 @@ import { MetricCards, MetricPills } from '@/components/system/MetricCards'
 import { MemoryDetail } from '@/components/system/MemoryDetail'
 import { ModuleTable } from '@/components/system/ModuleTable'
 import { MethodTable } from '@/components/system/MethodTable'
-import { fetchSystemMetrics, fetchSystemProfile, debugKeys } from '@/api/debug'
+import { NodeSection } from '@/components/system/NodeSection'
+import { fetchSystemMetrics, fetchSystemNodes, fetchSystemProfile, debugKeys } from '@/api/debug'
 import { formatDateTime } from '@/lib/format'
 
 /** metrics 轮询周期（10s），staleTime 取一半。 */
 const METRICS_INTERVAL_MS = 10_000
 /** profile 轮询周期（60s），staleTime 取一半。 */
 const PROFILE_INTERVAL_MS = 60_000
+/** nodes 轮询周期（15s），staleTime 取一半。 */
+const NODES_INTERVAL_MS = 15_000
 
 /**
  * System 观测页 — `/api/v1/system/metrics` + `/api/v1/system/profile`（仅 Admin）。
@@ -40,6 +43,14 @@ export function SystemPage() {
     retry: false,
   })
 
+  const nodes = useQuery({
+    queryKey: debugKeys.nodes(),
+    queryFn: fetchSystemNodes,
+    refetchInterval: NODES_INTERVAL_MS,
+    staleTime: NODES_INTERVAL_MS / 2,
+    retry: false,
+  })
+
   const collectedAt = metrics.data?.cpu.collected_at_ms ?? metrics.data?.memory.collected_at_ms
 
   return (
@@ -60,12 +71,13 @@ export function SystemPage() {
               icon={
                 <ArrowClockwise
                   weight="duotone"
-                  className={`h-4 w-4 ${metrics.isFetching || profile.isFetching ? 'animate-spin-slow' : ''}`}
+                  className={`h-4 w-4 ${metrics.isFetching || profile.isFetching || nodes.isFetching ? 'animate-spin-slow' : ''}`}
                 />
               }
               onClick={() => {
                 void metrics.refetch()
                 void profile.refetch()
+                void nodes.refetch()
               }}
             >
               {t('system.refresh')}
@@ -100,6 +112,13 @@ export function SystemPage() {
           <MemoryDetail memory={metrics.data.memory} />
         </div>
       )}
+
+      <NodeSection
+        nodes={nodes.data}
+        error={nodes.isError ? nodes.error : null}
+        loading={nodes.isFetching}
+        onRetry={() => void nodes.refetch()}
+      />
 
       <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
         <Card>

@@ -94,6 +94,10 @@ export interface SystemProfileModule {
   mem_bytes: number
   /** 占总内存的比例（0.0-1.0）。 */
   mem_share: number
+  /** 模块缓存文件磁盘占用（字节）。 */
+  disk_bytes: number
+  /** 占总磁盘占用的比例（0.0-1.0）。 */
+  disk_share: number
   /** 墙钟耗时（毫秒）。⚠️ 口径为墙钟，非 CPU。 */
   elapsed_ms: number
   /** 墙钟耗时占比（0.0-1.0）。⚠️ 口径为墙钟，非 CPU。 */
@@ -131,6 +135,56 @@ export function fetchSystemProfile(): Promise<SystemProfile> {
   return apiClient.get<SystemProfile>('/system/profile')
 }
 
+/** `GET /api/v1/system/nodes` 控制面节点 — 服务请求的本进程。 */
+export interface SystemControlNode {
+  /** 本进程 CPU 使用率（单核百分比，可超 100）。 */
+  process_cpu_percent: number
+  /** 整机 CPU 使用率（百分比）。 */
+  host_cpu_percent: number
+  /** 逻辑核心数。 */
+  cores: number
+  /** 进程 RSS（字节）。 */
+  rss_bytes: number
+  /** 进程 RSS 历史峰值（字节；OS 不暴露时为 0）。 */
+  rss_peak_bytes: number
+  /** profiler 归因到 control 模块的请求数。 */
+  requests: number
+  /** 归因到 control 的请求平均墙钟耗时（毫秒）。 */
+  avg_elapsed_ms: number
+}
+
+/** `GET /api/v1/system/nodes` 单个 agent 节点 — 未知值一律为 null，禁止当 0 渲染。 */
+export interface SystemAgentNode {
+  id: string
+  /** 显示名（节点的 hostname）。 */
+  name: string
+  /** `online` / `offline` / `degraded` 等最近上报状态。 */
+  status: string
+  /** 节点 CPU（百分比）；null = 无样本。 */
+  cpu_percent: number | null
+  /** 节点内存占用（字节）；null = 无样本。 */
+  memory_bytes: number | null
+  /** 边缘进程当前连接数；null = 从未上报。 */
+  connections: number | null
+  /** 边缘 RPS；null = 从未上报。 */
+  rps: number | null
+  /** 节点承载的站点数。 */
+  sites: number
+  /** 末次心跳（RFC3339）；null = 从未心跳。 */
+  last_seen: string | null
+}
+
+/** `GET /api/v1/system/nodes` 响应。 */
+export interface SystemNodes {
+  control: SystemControlNode
+  agents: SystemAgentNode[]
+}
+
+/** `GET /api/v1/system/nodes`（AdminUser）。 */
+export function fetchSystemNodes(): Promise<SystemNodes> {
+  return apiClient.get<SystemNodes>('/system/nodes')
+}
+
 /**
  * `memory_used_percent` 量纲归一：后端按 0-100（1 位小数）上报，
  * 这里换算为 0-1 供进度条/阈值使用。⚠️ 全仓只允许在消费端调用本函数
@@ -144,4 +198,5 @@ export const debugKeys = {
   all: ['system'] as const,
   metrics: () => [...debugKeys.all, 'metrics'] as const,
   profile: () => [...debugKeys.all, 'profile'] as const,
+  nodes: () => [...debugKeys.all, 'nodes'] as const,
 }

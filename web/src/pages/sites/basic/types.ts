@@ -262,6 +262,8 @@ export interface RouteFormState {
   /** Empty string means no rewrite (`rewrite_path: null` in the API). */
   rewritePath: string
   stripPrefix: boolean
+  /** Empty string means follow the client Host (`upstream_host: null` in the API). */
+  upstreamHost: string
 }
 
 export const emptyRouteForm = (poolId: string): RouteFormState => ({
@@ -274,6 +276,7 @@ export const emptyRouteForm = (poolId: string): RouteFormState => ({
   enabled: true,
   rewritePath: '',
   stripPrefix: false,
+  upstreamHost: '',
 })
 
 /**
@@ -303,6 +306,19 @@ export function routeRewriteFlags(form: {
   const rewritePath = form.matchType === 'prefix' && rewrite ? rewrite : null
   const stripPrefix = form.matchType === 'prefix' && !rewritePath && form.stripPrefix
   return { strip_prefix: stripPrefix, rewrite_path: rewritePath }
+}
+
+/**
+ * Mirrors the server's `upstream_host` validation: a bare host name — no
+ * scheme, path, whitespace or control characters, at most 253 bytes.
+ */
+export function isValidUpstreamHost(raw: string): boolean {
+  const host = raw.trim()
+  if (!host || host.length > 253) return false
+  if (host.includes('/') || host.includes('://')) return false
+  // eslint-disable-next-line no-control-regex -- mirrors the server's control-char rejection
+  if (/[\s\u0000-\u001f\u007f]/.test(host)) return false
+  return true
 }
 
 /* ── Trusted proxy helpers ────────────────────────────────────────── */

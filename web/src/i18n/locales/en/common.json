@@ -29,7 +29,31 @@
     "empty": "No samples yet.",
     "loadError": "Failed to load system data.",
     "method": "Method",
-    "elapsed": "Elapsed"
+    "elapsed": "Elapsed",
+    "nodes": {
+      "title": "Nodes",
+      "control": "Control plane",
+      "agents": "Agent nodes",
+      "processCpu": "Process CPU",
+      "hostCpu": "Host CPU",
+      "cores": "Cores",
+      "rss": "RSS",
+      "rssPeak": "RSS peak",
+      "requests": "Requests",
+      "avgElapsed": "Avg. elapsed",
+      "name": "Name",
+      "status": "Status",
+      "cpu": "CPU",
+      "memory": "Memory",
+      "connections": "Connections",
+      "rps": "RPS",
+      "sites": "Sites",
+      "lastSeen": "Last seen",
+      "empty": "No agent nodes yet",
+      "loadError": "Failed to load nodes"
+    },
+    "disk": "Disk",
+    "diskHint": "Memory = index + in-flight read buffers; disk = cache file footprint."
   },
   "app": {
     "name": "PingWAF",
@@ -292,7 +316,9 @@
       "stripPrefix": "Strip prefix",
       "stripPrefixHint": "Remove the matched prefix from the upstream request path.",
       "rewritePath": "Rewrite path",
-      "rewritePathHint": "Replace the upstream request path with the given template."
+      "rewritePathHint": "Replace the upstream request path with the given template.",
+      "upstreamHost": "Upstream Host override",
+      "upstreamHostHint": "Leave empty to follow the client Host. No scheme, path or spaces; at most 253 bytes."
     },
     "dashboard": {
       "title": "Dashboard",
@@ -411,7 +437,20 @@
       "pauseTitle": "Pause site?",
       "pauseDescription": "The edge answers every request with a 503 maintenance page until the site is resumed. The TLS certificate, WAF logging and traffic counters keep running.",
       "resumeTitle": "Resume site?",
-      "resumeDescription": "Traffic is routed to the origin again and every rule takes effect immediately."
+      "resumeDescription": "Traffic is routed to the origin again and every rule takes effect immediately.",
+      "responseReplace": {
+        "title": "Response content replacement",
+        "path": "Path filter (regex)",
+        "statusCodes": "Status codes",
+        "rules": "Rules",
+        "pattern": "Pattern",
+        "replacement": "Replacement",
+        "isRegex": "Regex",
+        "addRule": "Add rule",
+        "removeRule": "Remove rule",
+        "gzipHint": "Replacements do not apply to compressed responses (gzip/br).",
+        "empty": "No replacement rules. Add one to start replacing response bodies."
+      }
     },
     "siteDetail": {
       "title": "Site",

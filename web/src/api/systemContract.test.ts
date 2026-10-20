@@ -72,6 +72,8 @@ const MODULE: SystemProfileModule = {
   cpu_share: 0.25,
   mem_bytes: 4096,
   mem_share: 0.1,
+  disk_bytes: 1048576,
+  disk_share: 0.2,
   elapsed_ms: 40,
   elapsed_share: 0.4,
   calls: 100,

@@ -16,7 +16,7 @@ import type {
   UpdateRouteRequest,
   UpstreamPool,
 } from '@/api/types'
-import { emptyRouteForm, isValidRewritePath, routeRewriteFlags, type RouteFormState } from './types'
+import { emptyRouteForm, isValidRewritePath, isValidUpstreamHost, routeRewriteFlags, type RouteFormState } from './types'
 
 export type RouteDialogRequest =
   | { mode: 'create'; poolId: string }
@@ -55,6 +55,7 @@ export function RouteDialog({
           enabled: request.route.enabled,
           rewritePath: request.route.rewrite_path ?? '',
           stripPrefix: request.route.strip_prefix ?? false,
+          upstreamHost: request.route.upstream_host ?? '',
         }
       : emptyRouteForm(request.poolId),
   )
@@ -133,6 +134,14 @@ export function RouteDialog({
     }
     const { strip_prefix: stripPrefix, rewrite_path: rewritePath } = routeRewriteFlags(form)
 
+    const upstreamHostRaw = form.upstreamHost.trim()
+    if (upstreamHostRaw && !isValidUpstreamHost(upstreamHostRaw)) {
+      setError(t('pages.routes.upstreamHostHint'))
+      return
+    }
+    // Empty input clears the override (`null`), never an empty string.
+    const upstream_host = upstreamHostRaw === '' ? null : upstreamHostRaw
+
     if (editing) {
       save.mutate({
         id: editing.id,
@@ -147,6 +156,7 @@ export function RouteDialog({
           ip_group_id: form.ipGroupId === '' ? null : form.ipGroupId,
           strip_prefix: stripPrefix,
           rewrite_path: rewritePath,
+          upstream_host: upstream_host,
         },
       })
       return
@@ -163,6 +173,7 @@ export function RouteDialog({
         ip_group_id: form.ipGroupId === '' ? null : form.ipGroupId,
         strip_prefix: stripPrefix,
         rewrite_path: rewritePath,
+        upstream_host: upstream_host,
       },
     })
   }
@@ -276,6 +287,14 @@ export function RouteDialog({
               ? t('pages.routes.rewritePathHint')
               : t('pages.routes.stripPrefixHint')
           }
+        />
+        <Input
+          label={t('pages.routes.upstreamHost')}
+          value={form.upstreamHost}
+          placeholder="www.example.com"
+          hint={t('pages.routes.upstreamHostHint')}
+          className="pw-mono"
+          onChange={(e) => setForm((f) => ({ ...f, upstreamHost: e.target.value }))}
         />
         <Switch
           checked={form.enabled}

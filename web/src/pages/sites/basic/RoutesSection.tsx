@@ -122,6 +122,11 @@ export function RoutesSection({
               {t('pages.routes.stripPrefix')}
             </Badge>
           ) : null}
+          {r.upstream_host && (
+            <Badge tone="neutral" size="sm" className="ml-1.5">
+              {`Host: ${r.upstream_host}`}
+            </Badge>
+          )}
         </span>
       ),
     },

@@ -151,6 +151,10 @@ export interface Site {
    * its own pin follows the deployment-wide `origin_settings.verify_cert`.
    */
   origin_verify_cert: boolean | null
+  /**
+   * Response body replacement policy; `null` when the site replaces nothing.
+   */
+  response_replace: ResponseReplaceConfig | null
   user_id: string
   created_at: string
   updated_at: string
@@ -214,6 +218,11 @@ export interface Route {
   strip_prefix?: boolean
   /** When set, replaces the upstream path entirely; wins over `strip_prefix`. */
   rewrite_path?: string | null
+  /**
+   * Bare host name overriding the origin request's `Host` header;
+   * `null`/absent follows the client's Host.
+   */
+  upstream_host?: string | null
   created_at: string
 }
 
@@ -283,6 +292,10 @@ export interface UpdateSiteRequest {
    * (pools follow the global default again).
    */
   origin_verify_cert?: boolean | null
+  /**
+   * Replaces the whole policy; `null` (or a config with no rules) clears it.
+   */
+  response_replace?: ResponseReplaceConfig | null
 }
 
 export interface CreateUpstreamRequest {
@@ -350,6 +363,8 @@ export interface CreateRouteRequest {
   strip_prefix?: boolean
   /** `null` clears the rewrite; validated like the server (`/`-rooted, no `?`/`#`/space). */
   rewrite_path?: string | null
+  /** Bare host name; validated like the server (no scheme/path/whitespace, ≤253 bytes). */
+  upstream_host?: string | null
 }
 
 export interface UpdateRouteRequest {
@@ -366,6 +381,26 @@ export interface UpdateRouteRequest {
   strip_prefix?: boolean
   /** `null` clears the rewrite; validated like the server (`/`-rooted, no `?`/`#`/space). */
   rewrite_path?: string | null
+  /** Bare host name; `null` clears the override. */
+  upstream_host?: string | null
+}
+
+/** One response-body replacement rule (maps onto pingap's `sub_filter`). */
+export interface ResponseReplaceRule {
+  /** Text (or regex when `is_regex`) searched in the response body. */
+  pattern: string
+  /** Non-empty replacement; `$1`/`$name` expand only for regex rules. */
+  replacement: string
+  is_regex: boolean
+}
+
+/** Site response-body replacement policy (`sites.response_replace` JSONB). */
+export interface ResponseReplaceConfig {
+  /** Regex the request path must match; empty applies to every path. */
+  path: string
+  /** Status codes the replacement applies to; empty applies to all. */
+  status_codes: number[]
+  rules: ResponseReplaceRule[]
 }
 
 export interface UpsertSslRequest {
