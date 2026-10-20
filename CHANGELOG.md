@@ -26,7 +26,8 @@ verbatim for reference and attribution, and is not maintained here.
   forwards `/api/users` as `/users` and `/api` as `/`) and `rewrite_path`
   (nullable; replaces the whole forwarded path, wins over `strip_prefix`).
   Both are prefix-route features with validation (`rewrite_path`: starts
-  with `/`, ≤ 2048 chars, no `?` / `#` / whitespace / control characters;
+  with `/`, ≤ 2048 bytes (multi-byte characters count as UTF-8 bytes), no
+  `?` / `#` / whitespace / control characters;
   `strip_prefix` rejected with `400` on non-prefix routes); the query
   string is preserved. The route editor exposes a "strip path prefix"
   switch and a "rewrite path" input.
@@ -37,18 +38,23 @@ verbatim for reference and attribution, and is not maintained here.
 
 ### Changed
 
-- **`control` attribution is now correct, not smaller.** The control-plane
-  request timer previously recorded the `control` module row twice (once
-  via the module timer, once via the method timer), inflating its share;
-  one timer now fills both the module row and the `control::http` method
-  row. `GET /api/v1/system/profile` also publishes every time figure under
-  `elapsed_ms` / `elapsed_share` (and `total_elapsed_ms`) alongside the
-  historical `cpu_ms` / `cpu_share` names — all of them are **wall-clock**
-  time, not CPU time, and both pairs always carry the same value. Method
-  names come from a compile-time static enumeration, so per-request cost
-  drops to two relaxed atomic adds (previously two module updates plus a
-  method-map hash). If the `control` share drops noticeably after
-  upgrading, that is the accounting fix, not a performance regression.
+- **`control` attribution, corrected.** The `control` module row was never
+  recorded twice: before the refactor the module timer wrote the module row
+  and the method timer wrote the `control::http` method row — one entry per
+  request each; a single `MethodTimer` now fills both rows from the same
+  measurement. If the `control` share drops noticeably after upgrading, the
+  real causes are: instrumentation narrowed from the root listener to
+  `/api/v1` requests (MCP, `/healthz` and the SPA fallback are no longer
+  attributed); each request now saves a DashMap string hash and its sharded
+  read lock (method names come from a compile-time static enumeration,
+  recorded by array index); and `cpu_ms` has always been wall-clock time —
+  the figures are now additionally published under `elapsed_ms` /
+  `elapsed_share` / `total_elapsed_ms` names that say what they measure
+  (both pairs always carry the same value). Per-request cost is four
+  relaxed atomic adds (two for the method rows, two for the module row) —
+  the same count as before — with one string hash and one sharded read
+  lock removed, not a drop from three adds to two; the share change is
+  accounting scope, not a performance regression.
 - **Console polling reduced.** The dashboard refresh interval went from
   30 s to 60 s, and the admin process-CPU card from 15 s to 30 s.
 

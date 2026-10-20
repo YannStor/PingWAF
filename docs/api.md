@@ -626,7 +626,8 @@ off, so existing routes keep forwarding the request path unchanged.
 `exact` or `regex` route there is no prefix to strip, so the combination is
 rejected with `400`. `rewrite_path` works with any match type: it replaces
 the whole path of every request the route matched. Validation for
-`rewrite_path`: must start with `/`, at most 2048 characters, and must not
+`rewrite_path`: must start with `/`, at most 2048 bytes (multi-byte
+characters count as UTF-8 bytes), and must not
 contain `?`, `#`, whitespace or control characters (the client's query
 string is appended verbatim, so those would be ambiguous). Saving fails
 with `400` on violation.
@@ -3420,15 +3421,21 @@ snapshots and compare deltas for a live view.
   names come from a compile-time static enumeration (the instrumented call
   sites: `proxy::request_filter`, `waf::handle_request`,
   `cache::handle_request`, `plugin::rewrite`, `db::persist_heartbeat`,
-  `control::http`), so recording costs two relaxed atomic adds per request —
-  no hash lookup. Otherwise the same semantics as the module rows.
+  `control::http`), so recording costs four relaxed atomic adds per request
+  (two for the method rows, two for the module row) — no hash lookup.
+  Otherwise the same semantics as the module rows.
 - `collected_at_ms` — Unix epoch milliseconds of the snapshot.
 
 **What the `control` row covers.** The control-plane timer books every
 `/api/v1` request once — the same timer fills both the `control` module row
-and the `control::http` method row (a previous release recorded the module
-twice, which inflated its share; that is an accounting fix, not a sudden
-performance change). The timer sits *inside* the CORS, compression,
+and the `control::http` method row. The module row was never recorded
+twice: before the refactor the module timer and the method timer each
+wrote their own row, one entry per request. If the `control` share drops
+noticeably after upgrading, the real causes are the narrowed
+instrumentation scope (root listener → `/api/v1` requests only, so MCP,
+`/healthz` and the SPA fallback are no longer attributed) and the removal
+of a per-request method-map hash — not a sudden performance change. The
+timer sits *inside* the CORS, compression,
 security-header and body-limit layers, so those middleware costs are not
 part of `control`.
 

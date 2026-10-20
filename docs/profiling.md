@@ -176,15 +176,20 @@ curl -k -H "Authorization: Bearer $TOKEN" \
   heartbeat persistence and `/api/v1` requests). The `/api/v1` timer sits
   *inside* the CORS, compression, security-header and body-limit layers, so
   those middleware costs are not part of the `control` row. The same timer
-  fills both the `control` module row and the `control::http` method row —
-  a previous release recorded the module twice, which inflated its share;
-  if `control` drops noticeably after upgrading, that is the accounting
-  fix, not a sudden performance change.
+  fills both the `control` module row and the `control::http` method row.
+  The module row was never recorded twice: before the refactor the module
+  timer and the method timer each wrote their own row, one entry per
+  request. If `control` drops noticeably after upgrading, the real causes
+  are the narrowed instrumentation scope (root listener → `/api/v1`
+  requests only, so MCP, `/healthz` and the SPA fallback are no longer
+  attributed) and the removal of a per-request method-map hash — not a
+  sudden performance change.
 - **Method names are a compile-time static enumeration.** The instrumented
   call sites are fixed at build time (`proxy::request_filter`,
   `waf::handle_request`, `cache::handle_request`, `plugin::rewrite`,
   `db::persist_heartbeat`, `control::http`); recording is array indexing
-  plus two relaxed atomic adds per request — no hash lookup, no allocation.
+  plus four relaxed atomic adds per request (two for the method rows, two
+  for the module row) — no hash lookup, no allocation.
   A method that never ran gets no row.
 
 ### How attribution works
@@ -197,7 +202,8 @@ curl -k -H "Authorization: Bearer $TOKEN" \
 - **Methods** — named call sites are timed with `timed_method`. The set of
   call sites is a compile-time static enumeration (see
   [口径](#口径--what-the-numbers-are-and-what-they-are-not)), so recording
-  is two relaxed atomic adds per request — no hash lookup, no allocation.
+  is four relaxed atomic adds per request (two for the method rows, two
+  for the module row) — no hash lookup, no allocation.
 - **Memory** — *reported*, not intercepted. Modules that own large structures
   (cache capacity, WAF body buffers, log batches) publish their current byte
   count; nothing hooks the allocator, so this works with any allocator and on
@@ -230,8 +236,8 @@ interesting rows: `waf` (rule evaluation), `proxy` (upstream forwarding),
 
 ### Overhead
 
-Recording is a few relaxed atomic adds per instrumented scope (two per
-request for the method-plus-module update): no sampling signal, no stack
+Recording is a few relaxed atomic adds per instrumented scope (four per
+request: two for the method rows, two for the module row): no sampling signal, no stack
 unwinding, no symbolisation, no allocation and no hash lookup on the hot
 path — method slots are fixed array entries. The same accounting works in a
 debug build on a
