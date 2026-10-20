@@ -20,20 +20,16 @@ import { PostureOverview, type PostureTarget } from './PostureOverview'
 import { ManagedRulesPanel } from './ManagedRulesPanel'
 import { CustomRulesPanel } from './CustomRulesPanel'
 import { MitigationPanel } from './MitigationPanel'
+import {
+  BODY_STAGE_TIMEOUT_DEFAULT,
+  BODY_STAGE_TIMEOUT_MAX,
+  BODY_STAGE_TIMEOUT_MIN,
+  normaliseBodyStageTimeout,
+} from '@/lib/bodyStageTimeout'
 
 type ProtectionTab = 'managed' | 'custom' | 'cc'
 
-/** Body-stage inspection budget bounds — must match the server contract. */
-const BODY_STAGE_TIMEOUT_MIN = 1
-const BODY_STAGE_TIMEOUT_MAX = 30
-const BODY_STAGE_TIMEOUT_DEFAULT = 30
-
-function clampBodyStageTimeout(value: number): number {
-  return Math.min(
-    Math.max(Math.round(value), BODY_STAGE_TIMEOUT_MIN),
-    BODY_STAGE_TIMEOUT_MAX,
-  )
-}
+/** Body-stage inspection budget — constants come from `@/lib/bodyStageTimeout`. */
 
 const PROTECTION_TABS: ProtectionTab[] = ['managed', 'custom', 'cc']
 
@@ -539,12 +535,12 @@ function BodyStageTimeoutCard({
   }, [committed])
 
   const commit = () => {
-    const parsed = Number(draft)
-    if (!Number.isFinite(parsed)) {
+    const next = normaliseBodyStageTimeout(draft, committed)
+    if (next === null) {
+      // Empty or non-numeric input: revert to the committed value, no mutation.
       setDraft(String(committed))
       return
     }
-    const next = clampBodyStageTimeout(parsed)
     setDraft(String(next))
     if (next !== committed) onCommit(next)
   }
