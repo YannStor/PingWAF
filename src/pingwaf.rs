@@ -354,6 +354,34 @@ fn health_check_url(upstream_name: &str, hc: &HealthCheckConfig) -> String {
     )
 }
 
+/// Hard ceiling for the withheld-body stage. Mirrors
+/// DEFERRED_BODY_MAX_STAGE_SECS in pingap-plugin/src/waf.rs: the plugin
+/// clamps to this ceiling itself, so a configuration stating a larger value
+/// would only hide the effective one.
+const WAF_BODY_STAGE_MAX_SECS: u64 = 30;
+
+/// Default withheld-body stage timeout, matching the plugin default so a
+/// generated configuration and an operator-written one agree.
+const WAF_BODY_STAGE_DEFAULT_SECS: u64 = 30;
+
+/// Resolves the `body_stage_timeout_secs` value written into the generated
+/// WAF plugin conf: `min(site downstream read timeout, 30s)`, with unset
+/// meaning 30s. That is the rule the plugin applies when the key is absent
+/// (pingap-plugin/src/waf.rs, the reader of `body_stage_timeout_secs`).
+///
+/// `site_read_timeout` is `None` for every site today: neither the `Site`
+/// protocol message nor the agent site cache carries a downstream timeout,
+/// and the generated listeners use pingap defaults. Keeping the resolver
+/// separate means exposing a site-level setting later only changes the
+/// argument, never the clamping rule. The value is whole seconds, so a
+/// sub-second site timeout rounds down to 0 (no withholding).
+fn waf_body_stage_timeout_secs(site_read_timeout: Option<Duration>) -> i64 {
+    site_read_timeout
+        .unwrap_or(Duration::from_secs(WAF_BODY_STAGE_DEFAULT_SECS))
+        .as_secs()
+        .min(WAF_BODY_STAGE_MAX_SECS) as i64
+}
+
 fn cached_rules_to_pingap_config(
     cached: &CachedRules,
     cache_dir: &Path,
@@ -383,11 +411,23 @@ fn cached_rules_to_pingap_config(
     // The WAF plugin is referenced from every location: this is what makes
     // the data plane enforce rules and emit access/security events.
     let mut plugins: HashMap<String, PluginConf> = HashMap::new();
-    plugins.insert(
-        WAF_PLUGIN_NAME.to_string(),
-        toml::from_str::<PluginConf>(r###"category = "waf""###)
-            .unwrap_or_default(),
+    let mut waf_conf = PluginConf::new();
+    waf_conf.insert(
+        "category".to_string(),
+        toml::Value::String("waf".to_string()),
     );
+    // The withheld-body stage deadline sits on the request path, so the
+    // generated configuration states it instead of leaving the value
+    // implicit. 30s is the effective value today: the plugin mirrors the
+    // site downstream_read_timeout but hard-caps it at 30s, and the control
+    // plane exposes no site-level downstream timeout yet (the generated
+    // listeners use pingap defaults). Exposing one later only has to feed
+    // waf_body_stage_timeout_secs below.
+    waf_conf.insert(
+        "body_stage_timeout_secs".to_string(),
+        toml::Value::Integer(waf_body_stage_timeout_secs(None)),
+    );
+    plugins.insert(WAF_PLUGIN_NAME.to_string(), waf_conf);
     plugins.insert(
         CHALLENGE_PLUGIN_NAME.to_string(),
         toml::from_str::<PluginConf>(r###"category = "challenge""###)
@@ -2315,6 +2355,70 @@ mod tests {
                 "location {name} must reference the waf and challenge plugins"
             );
         }
+    }
+
+    /// The generated WAF plugin states the withheld-body stage timeout, so the
+    /// value an operator reads is the one the plugin runs with. No site-level
+    /// downstream timeout exists yet, so it is the 30s default.
+    #[test]
+    fn waf_plugin_states_the_body_stage_timeout() {
+        let mut site = site_rules("site1", "a.example.com");
+        let mut default_pool = pool("pool1", vec![peer("10.0.0.1:8080")]);
+        default_pool.is_default = true;
+        site.upstreams = vec![default_pool];
+
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+
+        let timeout = config
+            .plugins
+            .get("pingwaf:waf")
+            .and_then(|conf| conf.get("body_stage_timeout_secs"))
+            .and_then(|value| value.as_integer())
+            .expect("the waf plugin must state body_stage_timeout_secs");
+
+        assert_eq!(timeout, 30, "an unset site timeout means 30s");
+        assert!(timeout <= 30, "the plugin hard-caps the stage at 30s");
+
+        // Read the value back through the very function the WAF plugin uses
+        // (pingap-plugin/src/waf.rs). The distinct fallback makes a typo in
+        // the key name fail here instead of silently reverting to the default
+        // on the data plane.
+        let conf = config
+            .plugins
+            .get("pingwaf:waf")
+            .expect("the waf plugin conf must exist");
+        assert_eq!(
+            pingap_plugin::get_int_conf_or_default(
+                conf,
+                "body_stage_timeout_secs",
+                7
+            ),
+            30,
+            "the generated key is exactly the one the waf plugin reads"
+        );
+    }
+
+    /// The resolver mirrors the plugin rule: unset means 30s, a shorter site
+    /// timeout wins, anything longer is clamped to the 30s ceiling.
+    #[test]
+    fn waf_body_stage_timeout_defaults_and_caps_at_30s() {
+        assert_eq!(waf_body_stage_timeout_secs(None), 30);
+        assert_eq!(
+            waf_body_stage_timeout_secs(Some(Duration::from_secs(5))),
+            5
+        );
+        assert_eq!(
+            waf_body_stage_timeout_secs(Some(Duration::from_secs(30))),
+            30
+        );
+        assert_eq!(
+            waf_body_stage_timeout_secs(Some(Duration::from_secs(120))),
+            30
+        );
     }
 
     fn cache_rule(enabled: bool) -> pingwaf_agent::cache::CacheRule {
