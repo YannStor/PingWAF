@@ -14,7 +14,9 @@ verbatim for reference and attribution, and is not maintained here.
 
 - **Rule-level `off` is now truly off.** A custom or built-in rule set to
   `mode: "off"` is no longer compiled, evaluated or logged at the edge — it
-  produces no verdict, no security event and no matching cost. Previously an
+  produces no verdict, no event of its own and no matching cost. (Site-level
+  signature detectors such as `sqli_detection` keep scoring independently;
+  their events are not rule hits.) Previously an
   `off` rule behaved like `monitor` (detected and logged, never blocked);
   `enabled: false` keeps its existing meaning and is equivalent to `off`.
   Operators who relied on `off` rules appearing in the security event stream

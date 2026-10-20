@@ -1199,7 +1199,7 @@ the same enum every rule carries (see [Rule modes](#rule-modes)):
 
 | `mode` | Behaviour at the edge |
 |--------|-----------------------|
-| `off` | The engine returns immediately: nothing is detected, no events are written. |
+| `off` | The engine returns immediately: nothing is detected, no events are written.; site-level signature detectors still score |
 | `monitor` | Everything is detected and recorded, nothing is blocked. A rule that asks to block is downgraded and the event says so (`downgraded=true`). |
 | `block` | Rules enforce their configured action. |
 
