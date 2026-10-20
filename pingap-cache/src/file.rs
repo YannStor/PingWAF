@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use super::http_cache::{
-    CacheObject, HttpCacheClearStats, HttpCacheStats, HttpCacheStorage,
+    CacheGauges, CacheObject, CachedEntry, CachedPayload, HttpCacheClearStats,
+    HttpCacheStats, HttpCacheStorage, INLINE_MAX_BYTES, InFlightGuard,
+    META_SIZE_LENGTH, STREAM_CHUNK_BYTES, parse_meta_sizes,
 };
 use super::tiny::{CacheMode, MemoryCache};
 #[cfg(feature = "tracing")]
@@ -28,10 +30,13 @@ use path_absolutize::*;
 use prometheus::Histogram;
 use scopeguard::defer;
 use serde::{Deserialize, Serialize};
+use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 use tokio::fs;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::{debug, error, info, warn};
 use walkdir::WalkDir;
 
@@ -68,10 +73,18 @@ pub struct FileCache {
     levels: Vec<u32>,
     /// Max total size of on-disk cache files in bytes; 0 means unlimited.
     max_size: u64,
-    /// Approximate current on-disk usage (bytes). Maintained on put/remove/clear
-    /// and initialised by a directory walk at construction time. Only kept
-    /// while `max_size` is set; without a budget nothing reads it.
+    /// Current on-disk usage (bytes). Maintained on put/remove/clear and
+    /// initialised by a directory walk at construction time.
+    ///
+    /// Kept whether or not a budget is configured: the budget reads it to
+    /// decide when to evict, and the profiler reads it to report the cache's
+    /// **disk** footprint (which used to be published as memory).
     current_size: AtomicU64,
+    /// Byte gauges mirrored into `pingwaf_profiler::Module::Cache`: index
+    /// metadata, in-flight read buffers and the on-disk footprint, each
+    /// attributed separately. `Arc` because an in-flight read is released by
+    /// a guard that outlives the borrow of this backend.
+    gauges: Arc<CacheGauges>,
     /// Set while a `put` is evicting for the budget. The others skip the
     /// walk and write, so a burst of writes over budget costs one directory
     /// walk, not one per write.
@@ -253,12 +266,10 @@ impl FileCache {
         }
         let max_size = params.max_size.map(|s| s.as_u64()).unwrap_or(0);
         // One-shot walk so the budget starts from real usage rather than zero
-        // (which would otherwise allow a large overshoot after restart).
-        let current_size = if max_size > 0 {
-            measure_dir_size(&params.directory)
-        } else {
-            0
-        };
+        // (which would otherwise allow a large overshoot after restart) and
+        // so the profiler reports the directory's real footprint from the
+        // first snapshot instead of zero until the first write.
+        let current_size = measure_dir_size(&params.directory);
         info!(
             target: LOG_TARGET,
             dir = params.directory,
@@ -279,7 +290,7 @@ impl FileCache {
         let cache = (params.cache_max > 0)
             .then(|| MemoryCache::new(CacheMode::Normal, params.cache_max));
 
-        Ok(FileCache {
+        let cache = FileCache {
             directory: params.directory,
             cache_file_max_weight: params
                 .cache_file_max_weight
@@ -301,8 +312,13 @@ impl FileCache {
             levels: params.levels,
             max_size,
             current_size: AtomicU64::new(current_size),
+            gauges: Arc::new(CacheGauges::new()),
             evicting: AtomicBool::new(false),
-        })
+        };
+        // Publish the measured footprint once, so the module row is right
+        // before the first write (and after a restart with a full directory).
+        cache.publish_disk();
+        Ok(cache)
     }
 
     /// Whether the on-disk budget is tracked at all.
@@ -311,37 +327,62 @@ impl FileCache {
         self.max_size > 0
     }
 
+    /// This backend's byte gauges: index metadata, in-flight read buffers and
+    /// the on-disk footprint — the same figures the `cache` module row reports,
+    /// per backend. `CacheGauges` is public so a future stats surface can read
+    /// them; nothing outside this backend constructs one.
+    #[cfg(test)]
+    #[inline]
+    fn gauges(&self) -> &CacheGauges {
+        &self.gauges
+    }
+
+    /// Reports this backend's on-disk footprint to the attribution tables.
+    ///
+    /// Disk, not memory: the footprint is what the filesystem holds. Folding
+    /// it into the memory gauge is what made the module table report "cache
+    /// memory ≈ cache disk usage".
+    #[inline]
+    fn publish_disk(&self) {
+        self.gauges
+            .set_disk(self.current_size.load(Ordering::Relaxed));
+    }
+
+    /// Bytes of in-process index metadata one hot-layer entry costs: the key
+    /// plus both metadata halves. The body is not counted — a hot-layer body
+    /// is admitted by TinyUFO's own weights, which the backend cannot observe.
+    #[inline]
+    fn hot_index_len(key: &str, meta: &(Bytes, Bytes)) -> u64 {
+        (key.len() + meta.0.len() + meta.1.len()) as u64
+    }
+
     /// Accounts `len` bytes leaving the disk. Saturating: the counter is an
     /// estimate (files can be removed behind our back) and must never wrap
     /// into a number that makes every write look over budget.
     fn track_removed(&self, len: u64) {
-        if !self.has_budget() {
-            return;
-        }
         let _ = self.current_size.try_update(
             Ordering::Relaxed,
             Ordering::Relaxed,
             |cur| Some(cur.saturating_sub(len)),
         );
+        self.publish_disk();
     }
 
     /// Accounts an object of `new_len` bytes replacing one of `old_len`.
     fn track_written(&self, old_len: u64, new_len: u64) {
-        if !self.has_budget() {
-            return;
-        }
         let _ = self.current_size.try_update(
             Ordering::Relaxed,
             Ordering::Relaxed,
             |cur| Some(cur.saturating_sub(old_len).saturating_add(new_len)),
         );
+        self.publish_disk();
     }
 
-    /// Size of the file at `path`, when the budget needs it.
+    /// Size of the file at `path`.
+    ///
+    /// Unconditional: the budget uses it to net out an overwrite, and the
+    /// disk gauge needs it whether or not a budget is configured.
     async fn tracked_len(&self, path: &Path) -> u64 {
-        if !self.has_budget() {
-            return 0;
-        }
         fs::metadata(path).await.map(|m| m.len()).unwrap_or(0)
     }
 
@@ -485,6 +526,13 @@ impl FileCache {
 
     /// Puts an object read from or written to disk into the hot layer,
     /// unless it is too large for it.
+    ///
+    /// Also maintains the index gauge: what the backend keeps in memory for
+    /// an admitted object is its key and metadata, and that figure is
+    /// decremented when the same key is overwritten or removed. Entries
+    /// TinyUFO drops on its own are not observable, so this is an upper bound
+    /// on the metadata held — bounded by the hot layer's own capacity, never
+    /// by the size of the directory.
     fn put_hot(&self, key: &str, obj: &CacheObject) {
         let Some(cache) = &self.cache else {
             return;
@@ -493,37 +541,35 @@ impl FileCache {
         if weight >= self.cache_file_max_weight {
             return;
         }
+        // The key may already be resident: replacing it must not count twice.
+        let previous = cache
+            .get(key)
+            .map(|old| Self::hot_index_len(key, &old.meta))
+            .unwrap_or(0);
         debug!(target: LOG_TARGET, key, weight, "put cache to tinyufo");
         cache.put(key, obj.clone(), weight);
+        let current = Self::hot_index_len(key, &obj.meta);
+        self.gauges.add_index(current as i64 - previous as i64);
     }
-}
 
-/// Returns the elapsed time in seconds (as f64) since the given SystemTime
-#[cfg(feature = "tracing")]
-#[inline]
-fn elapsed_second(time: SystemTime) -> f64 {
-    time.elapsed().unwrap_or_default().as_millis() as f64 / 1000.0
-}
+    /// Removes an object from the hot layer, keeping the index gauge honest.
+    fn remove_hot(&self, key: &str) -> Option<CacheObject> {
+        let cache = self.cache.as_ref()?;
+        let removed = cache.remove(key)?;
+        self.gauges
+            .add_index(-(Self::hot_index_len(key, &removed.meta) as i64));
+        Some(removed)
+    }
 
-#[async_trait]
-impl HttpCacheStorage for FileCache {
-    /// Retrieves a cache object by key and namespace.
+    /// Reads a hit without forcing a large body into memory.
     ///
-    /// First checks the in-memory TinyUfo cache, then falls back to file system if not found.
-    /// Enforces a maximum concurrent reading limit.
-    ///
-    /// # Returns
-    /// * `Ok(Some(CacheObject))` - If cache entry is found and valid
-    /// * `Ok(None)` - If entry doesn't exist, is invalid, or concurrent
-    ///   reads are over quota (treated as a miss so the request falls back
-    ///   to origin instead of 5xx)
-    /// * `Err(Error::Io)` - On file system errors
-    async fn get(
+    /// The hot layer first (always inline), then the file: a small object is
+    /// read whole, a large one is only opened and its metadata parsed.
+    async fn read_entry(
         &self,
         key: &str,
         namespace: &[u8],
-    ) -> Result<Option<CacheObject>> {
-        // Early return if found in cache
+    ) -> Result<Option<CachedEntry>> {
         if let Some(cache) = &self.cache
             && let Some(obj) = cache.get(key)
         {
@@ -531,7 +577,10 @@ impl HttpCacheStorage for FileCache {
                 target: LOG_TARGET,
                 key, namespace, "get cache from tinyufo"
             );
-            return Ok(Some(obj));
+            return Ok(Some(CachedEntry {
+                meta: obj.meta,
+                payload: CachedPayload::Inline(obj.body),
+            }));
         }
 
         #[cfg(feature = "tracing")]
@@ -551,34 +600,24 @@ impl HttpCacheStorage for FileCache {
             );
             return Ok(None);
         }
-        let result = fs::read(&file).await;
+        let entry = self.read_file_entry(key, &file).await?;
         #[cfg(feature = "tracing")]
         self.read_time.observe(elapsed_second(start));
 
-        let obj = match result {
-            Ok(buf) => match CacheObject::try_from(Bytes::from(buf)) {
-                Ok(obj) => Some(obj),
-                // A truncated file (crash or full disk mid write) is a miss,
-                // not an error: an error would surface as a 5xx on every hit of
-                // this key while the file kept lying on disk. Remove it so the
-                // next request re-fetches and rewrites it.
-                Err(e) => {
-                    warn!(
-                        target: LOG_TARGET,
-                        key,
-                        error = %e,
-                        "remove corrupt cache file"
-                    );
-                    let _ = self.remove_tracked(&file).await;
-                    None
-                },
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(Error::Io { source: e }),
-        };
         // cache get from file, but not in tinyufo, put it to tinyufo
-        if let Some(obj) = &obj {
-            self.put_hot(key, obj);
+        if let Some(entry) = &entry {
+            // Only an in-memory body is worth admitting: a streamed hit would
+            // have to be read back into the heap, which is what streaming
+            // exists to avoid.
+            if let CachedPayload::Inline(body) = &entry.payload {
+                self.put_hot(
+                    key,
+                    &CacheObject {
+                        meta: entry.meta.clone(),
+                        body: body.clone(),
+                    },
+                );
+            }
             // LRU clock of the per-domain quota ledger. One hash lookup and a
             // relaxed atomic store; a domain with no quota returns at once.
             if let Some(quota) = crate::quota::global_disk_quota() {
@@ -594,7 +633,206 @@ impl HttpCacheStorage for FileCache {
             namespace = namespace_str(namespace),
             "get cache from file"
         );
-        Ok(obj)
+        Ok(entry)
+    }
+
+    /// Reads the file at `path`: whole for a small object, as an open handle
+    /// for a large one.
+    async fn read_file_entry(
+        &self,
+        key: &str,
+        path: &Path,
+    ) -> Result<Option<CachedEntry>> {
+        let len = match fs::metadata(path).await {
+            Ok(metadata) => metadata.len(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            },
+            Err(e) => return Err(Error::Io { source: e }),
+        };
+        if len <= INLINE_MAX_BYTES as u64 {
+            return self.read_inline_entry(key, path, len).await;
+        }
+        self.open_stream_entry(key, path, len).await
+    }
+
+    /// Reads a small cache file whole: one allocation, no second syscall.
+    async fn read_inline_entry(
+        &self,
+        key: &str,
+        path: &Path,
+        len: u64,
+    ) -> Result<Option<CachedEntry>> {
+        // The read holds the whole object until it is parsed, and the guard
+        // releases that figure on every path out - including a corrupt file.
+        let _in_flight = InFlightGuard::new(Arc::clone(&self.gauges), len);
+        let buf = match fs::read(path).await {
+            Ok(buf) => buf,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            },
+            Err(e) => return Err(Error::Io { source: e }),
+        };
+        match CacheObject::try_from(Bytes::from(buf)) {
+            Ok(obj) => Ok(Some(CachedEntry {
+                meta: obj.meta,
+                payload: CachedPayload::Inline(obj.body),
+            })),
+            Err(e) => {
+                self.discard_corrupt(key, path, &e).await;
+                Ok(None)
+            },
+        }
+    }
+
+    /// Opens a large cache file and parses only its header and metadata.
+    ///
+    /// The body is left on disk: the returned handle is positioned at the
+    /// first body byte and the response reads it in
+    /// [`STREAM_CHUNK_BYTES`]-sized pieces, so serving a 200 MB object costs
+    /// one chunk of heap instead of 200 MB.
+    async fn open_stream_entry(
+        &self,
+        key: &str,
+        path: &Path,
+        file_len: u64,
+    ) -> Result<Option<CachedEntry>> {
+        let mut file = match fs::File::open(path).await {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            },
+            Err(e) => return Err(Error::Io { source: e }),
+        };
+        let mut header = [0u8; META_SIZE_LENGTH];
+        if let Err(e) = file.read_exact(&mut header).await {
+            // A file that cannot produce its header is torn, not an
+            // operational failure: treat it as a miss and drop it.
+            let error = Error::Invalid {
+                message: format!(
+                    "cache object is truncated, header read failed: {e}"
+                ),
+            };
+            self.discard_corrupt(key, path, &error).await;
+            return Ok(None);
+        }
+        let (meta0_size, meta1_size) = match parse_meta_sizes(&header) {
+            Ok(sizes) => sizes,
+            Err(e) => {
+                self.discard_corrupt(key, path, &e).await;
+                return Ok(None);
+            },
+        };
+        let meta_size = meta0_size.saturating_add(meta1_size);
+        let header_len = META_SIZE_LENGTH as u64;
+        let body_offset = header_len.saturating_add(meta_size as u64);
+        if body_offset > file_len {
+            let error = Error::Invalid {
+                message: format!(
+                    "cache object is truncated, meta claims {meta_size} bytes but only {} are present",
+                    file_len.saturating_sub(header_len)
+                ),
+            };
+            self.discard_corrupt(key, path, &error).await;
+            return Ok(None);
+        }
+        let mut meta = vec![0u8; meta_size];
+        if meta_size > 0
+            && let Err(e) = file.read_exact(&mut meta).await
+        {
+            let error = Error::Invalid {
+                message: format!(
+                    "cache object is truncated, metadata read failed: {e}"
+                ),
+            };
+            self.discard_corrupt(key, path, &error).await;
+            return Ok(None);
+        }
+        // Positioned at the first body byte: the reader can hand this handle
+        // straight to the chunk loop.
+        if let Err(e) = file.seek(SeekFrom::Start(body_offset)).await {
+            return Err(Error::Io { source: e });
+        }
+        let meta = Bytes::from(meta);
+        let meta1 = meta.slice(meta0_size..);
+        let meta0 = meta.slice(..meta0_size);
+        Ok(Some(CachedEntry {
+            meta: (meta0, meta1),
+            payload: CachedPayload::Stream {
+                file,
+                offset: body_offset,
+                len: file_len - body_offset,
+                in_flight: InFlightGuard::new(
+                    Arc::clone(&self.gauges),
+                    STREAM_CHUNK_BYTES as u64,
+                ),
+            },
+        }))
+    }
+
+    /// A truncated file (crash or full disk mid write) is a miss, not an
+    /// error: an error would surface as a 5xx on every hit of this key while
+    /// the file kept lying on disk. Remove it so the next request re-fetches
+    /// and rewrites it.
+    async fn discard_corrupt(&self, key: &str, path: &Path, error: &Error) {
+        warn!(
+            target: LOG_TARGET,
+            key,
+            error = %error,
+            "remove corrupt cache file"
+        );
+        let _ = self.remove_tracked(path).await;
+    }
+}
+
+/// Returns the elapsed time in seconds (as f64) since the given SystemTime
+#[cfg(feature = "tracing")]
+#[inline]
+fn elapsed_second(time: SystemTime) -> f64 {
+    time.elapsed().unwrap_or_default().as_millis() as f64 / 1000.0
+}
+
+#[async_trait]
+impl HttpCacheStorage for FileCache {
+    /// Retrieves a cache object by key and namespace.
+    ///
+    /// First checks the in-memory TinyUfo cache, then falls back to file system if not found.
+    /// Enforces a maximum concurrent reading limit.
+    ///
+    /// This is the "give me the bytes" contract: a body above
+    /// [`INLINE_MAX_BYTES`] is read back in full. [`Self::get_entry`] is the
+    /// entry point for the response path, which streams it instead.
+    ///
+    /// # Returns
+    /// * `Ok(Some(CacheObject))` - If cache entry is found and valid
+    /// * `Ok(None)` - If entry doesn't exist, is invalid, or concurrent
+    ///   reads are over quota (treated as a miss so the request falls back
+    ///   to origin instead of 5xx)
+    /// * `Err(Error::Io)` - On file system errors
+    async fn get(
+        &self,
+        key: &str,
+        namespace: &[u8],
+    ) -> Result<Option<CacheObject>> {
+        let Some(entry) = self.read_entry(key, namespace).await? else {
+            return Ok(None);
+        };
+        let CachedEntry { meta, payload } = entry;
+        // A streamed body is read back in full here: this call is the
+        // "give me the bytes" contract, used by the metadata update and the
+        // tests, and the read is charged to the in-flight gauge.
+        let body = payload.into_bytes(&self.gauges).await?;
+        Ok(Some(CacheObject { meta, body }))
+    }
+
+    /// The streaming-capable read: a body above `INLINE_MAX_BYTES` comes back
+    /// as an open file rather than a heap buffer.
+    async fn get_entry(
+        &self,
+        key: &str,
+        namespace: &[u8],
+    ) -> Result<Option<CachedEntry>> {
+        self.read_entry(key, namespace).await
     }
     /// Stores a cache object both in TinyUfo cache and on disk.
     ///
@@ -680,12 +918,9 @@ impl HttpCacheStorage for FileCache {
         #[cfg(feature = "tracing")]
         self.write_time.observe(elapsed_second(start));
         result.map_err(|e| Error::Io { source: e })?;
+        // Also republishes the backend's on-disk footprint: `current_size` is
+        // disk, and the module row now reports it as disk.
         self.track_written(old_len, new_len);
-        // Report the backend's held bytes to the module attribution tables.
-        pingwaf_profiler::set_memory(
-            pingwaf_profiler::Module::Cache,
-            self.current_size.load(Ordering::Relaxed),
-        );
         // Per-domain quota accounting. Eviction touches the disk, so it is
         // never done inline on the request path; the manager serialises one
         // pass per domain and a losing race is a no-op.
@@ -716,12 +951,13 @@ impl HttpCacheStorage for FileCache {
         key: &str,
         namespace: &[u8],
     ) -> Result<Option<CacheObject>> {
-        if let Some(c) = &self.cache {
+        if self.cache.is_some() {
             debug!(
                 target: LOG_TARGET,
                 key, namespace, "remove cache from tinyufo"
             );
-            c.remove(key);
+            // Releases the entry's index metadata from the gauge too.
+            self.remove_hot(key);
         }
         let file = self.get_file_path(key, namespace_str(namespace));
         // Already gone (e.g. external cleanup) is the same as a cache miss
@@ -845,11 +1081,10 @@ impl HttpCacheStorage for FileCache {
                     // also the hot layer's key - so the memory copy can be
                     // dropped too and a purged object cannot keep being
                     // served from tinyufo.
-                    if let Some(cache) = &self.cache
-                        && let Some(name) =
-                            file.path.file_name().and_then(|name| name.to_str())
+                    if let Some(name) =
+                        file.path.file_name().and_then(|name| name.to_str())
                     {
-                        cache.remove(name);
+                        self.remove_hot(name);
                     }
                     success += 1;
                 },
@@ -1314,5 +1549,222 @@ mod tests {
         let path = resolve_path("../pingap");
         assert_eq!(true, path.ends_with("/pingap"));
         assert_eq!(false, path.starts_with(".."));
+    }
+
+    /// A body under the inline threshold is handed back as bytes, and they are
+    /// the cached bytes.
+    #[tokio::test]
+    async fn small_objects_stay_inline() {
+        let dir = tempdir().unwrap();
+        // No `cache_max`: every read has to come from the file.
+        let cache = FileCache::new(dir.path().to_str().unwrap()).unwrap();
+        // Header (8) + meta (2) keep the file itself under the threshold.
+        let body = Bytes::from(vec![7u8; INLINE_MAX_BYTES - 64]);
+        let obj = CacheObject {
+            meta: (Bytes::from_static(b"k"), Bytes::from_static(b"v")),
+            body: body.clone(),
+        };
+        cache.put("small", b"", obj).await.unwrap();
+
+        let entry = cache.get_entry("small", b"").await.unwrap().unwrap();
+        assert_eq!(body.len(), entry.payload.len());
+        match entry.payload {
+            CachedPayload::Inline(got) => {
+                assert_eq!(body, got, "inline bytes are the cached bytes");
+            },
+            CachedPayload::Stream { len, .. } => {
+                panic!("a {len} byte body must stay inline")
+            },
+        }
+        // The byte-valued read agrees too, and neither read leaked a buffer.
+        assert_eq!(body, cache.get("small", b"").await.unwrap().unwrap().body);
+        assert_eq!(0, cache.gauges().in_flight_bytes());
+    }
+
+    /// A body over the inline threshold is not read into memory: the hit hands
+    /// back an open file positioned at the body, and its contents are exactly
+    /// the cached bytes.
+    #[tokio::test]
+    async fn large_objects_stream_without_buffering() {
+        let dir = tempdir().unwrap();
+        let cache = FileCache::new(dir.path().to_str().unwrap()).unwrap();
+        let body = Bytes::from(
+            (0..INLINE_MAX_BYTES * 2)
+                .map(|i| (i % 251) as u8)
+                .collect::<Vec<u8>>(),
+        );
+        let obj = CacheObject {
+            meta: (
+                Bytes::from_static(b"meta-key"),
+                Bytes::from_static(b"meta-value"),
+            ),
+            body: body.clone(),
+        };
+        cache.put("large", b"", obj).await.unwrap();
+
+        let entry = cache.get_entry("large", b"").await.unwrap().unwrap();
+        assert_eq!(body.len(), entry.payload.len());
+        // The whole point: an open stream costs a chunk, not the object.
+        let charged = cache.gauges().in_flight_bytes();
+        assert!(
+            charged >= STREAM_CHUNK_BYTES as u64,
+            "an open stream is charged for its chunk buffer, got {charged}"
+        );
+        assert!(
+            charged < body.len() as u64,
+            "an open stream must not be charged for the body: {charged} vs {}",
+            body.len()
+        );
+
+        let CachedPayload::Stream {
+            mut file,
+            offset,
+            len,
+            ..
+        } = entry.payload
+        else {
+            panic!("a {} byte body must stream", body.len());
+        };
+        assert_eq!(body.len() as u64, len);
+
+        // Read it the way the response path does, one chunk at a time.
+        let mut read = Vec::with_capacity(body.len());
+        let mut buf = vec![0u8; STREAM_CHUNK_BYTES];
+        let mut position = offset;
+        while (position - offset) < len {
+            let want = usize::try_from(
+                (len - (position - offset)).min(buf.len() as u64),
+            )
+            .expect("chunk size");
+            file.read_exact(&mut buf[..want]).await.unwrap();
+            read.extend_from_slice(&buf[..want]);
+            position += want as u64;
+        }
+        assert_eq!(
+            body.as_ref(),
+            read.as_slice(),
+            "the streamed bytes are the cached bytes"
+        );
+    }
+
+    /// The in-flight gauge is a RAII guard: every path out of a read — success,
+    /// miss and a corrupt file — has to leave it at zero.
+    #[tokio::test]
+    async fn in_flight_bytes_returns_to_zero() {
+        let dir = tempdir().unwrap();
+        let cache = FileCache::new(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(0, cache.gauges().in_flight_bytes());
+
+        // Success, inline.
+        let obj = CacheObject {
+            meta: (Bytes::from_static(b"k"), Bytes::from_static(b"v")),
+            body: Bytes::from(vec![1u8; 4096]),
+        };
+        cache.put("ok", b"", obj.clone()).await.unwrap();
+        assert_eq!(obj, cache.get("ok", b"").await.unwrap().unwrap());
+        assert_eq!(
+            0,
+            cache.gauges().in_flight_bytes(),
+            "an inline read releases its buffer"
+        );
+
+        // Success, streamed: charged while the handle is open, zero after.
+        let big = CacheObject {
+            meta: (Bytes::from_static(b"k"), Bytes::from_static(b"v")),
+            body: Bytes::from(vec![2u8; INLINE_MAX_BYTES + 1]),
+        };
+        cache.put("big", b"", big).await.unwrap();
+        let entry = cache.get_entry("big", b"").await.unwrap().unwrap();
+        assert!(cache.gauges().in_flight_bytes() >= STREAM_CHUNK_BYTES as u64);
+        drop(entry);
+        assert_eq!(
+            0,
+            cache.gauges().in_flight_bytes(),
+            "a dropped hit releases its chunk budget"
+        );
+
+        // Failure, inline: shorter than a header.
+        let tiny = cache.get_file_path("tiny", "");
+        std::fs::write(&tiny, b"abc").unwrap();
+        assert_eq!(true, cache.get_entry("tiny", b"").await.unwrap().is_none());
+        assert_eq!(0, cache.gauges().in_flight_bytes());
+        assert_eq!(false, tiny.exists(), "a torn file is removed");
+
+        // Failure, streamed: a header whose declared metadata outruns the file.
+        let torn = cache.get_file_path("torn", "");
+        let mut bytes = vec![0xffu8, 0xff, 0xff, 0xff, 0, 0, 0, 0];
+        bytes.resize(INLINE_MAX_BYTES + 1024, 0);
+        std::fs::write(&torn, &bytes).unwrap();
+        assert_eq!(true, cache.get_entry("torn", b"").await.unwrap().is_none());
+        assert_eq!(0, cache.gauges().in_flight_bytes());
+        assert_eq!(false, torn.exists(), "a torn file is removed");
+
+        // A plain miss charges nothing and releases nothing.
+        assert_eq!(
+            true,
+            cache.get_entry("absent", b"").await.unwrap().is_none()
+        );
+        assert_eq!(0, cache.gauges().in_flight_bytes());
+    }
+
+    /// The regression this closes: the backend published `current_size` — the
+    /// **disk** footprint — through `set_memory`, so the module table reported
+    /// "cache memory ≈ cache disk usage".
+    #[tokio::test]
+    async fn cache_memory_and_disk_are_reported_separately() {
+        let dir = tempdir().unwrap();
+        // No hot layer: nothing of this backend's is held in memory, and
+        // everything it stored is on disk.
+        let cache = FileCache::new(dir.path().to_str().unwrap()).unwrap();
+        let obj = CacheObject {
+            meta: (Bytes::from_static(b"k"), Bytes::from_static(b"v")),
+            body: Bytes::from(vec![9u8; 8192]),
+        };
+        cache.put("k", b"", obj.clone()).await.unwrap();
+
+        let file_len = std::fs::metadata(cache.get_file_path("k", ""))
+            .unwrap()
+            .len();
+        assert_eq!(
+            file_len,
+            cache.current_size.load(Ordering::Relaxed),
+            "the budget counter is the disk footprint"
+        );
+        assert_eq!(
+            file_len,
+            cache.gauges().disk_bytes(),
+            "the disk gauge carries the disk footprint"
+        );
+        assert_eq!(
+            0,
+            cache.gauges().index_bytes(),
+            "no hot layer means no index metadata"
+        );
+        assert_eq!(0, cache.gauges().in_flight_bytes());
+        assert_ne!(
+            cache.gauges().disk_bytes(),
+            cache.gauges().index_bytes() + cache.gauges().in_flight_bytes(),
+            "memory and disk are separate figures"
+        );
+
+        // And the disk figure reaches the module row the profile endpoint
+        // serialises, without being mixed into the memory column.
+        let snapshot = pingwaf_profiler::ProfileSnapshot::collect();
+        let row = snapshot
+            .modules
+            .iter()
+            .find(|row| row.module == "cache")
+            .expect("cache row");
+        assert!(
+            row.disk_bytes >= file_len,
+            "disk {} must cover this backend's {file_len} bytes",
+            row.disk_bytes
+        );
+        // The profile endpoint is a plain serialisation of this snapshot, so
+        // the disk figure has to be in the JSON next to the memory one.
+        let json = serde_json::to_value(row).expect("module row serialises");
+        assert!(json.get("disk_bytes").is_some(), "{json}");
+        assert!(json.get("disk_share").is_some(), "{json}");
+        assert!(json.get("mem_bytes").is_some(), "{json}");
     }
 }

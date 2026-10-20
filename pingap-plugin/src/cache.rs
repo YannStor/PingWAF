@@ -62,6 +62,33 @@ use crate::host_cache::{HostCacheSweep, touch};
 
 type Result<T> = std::result::Result<T, Error>;
 
+/// On-disk cache root used when a cache plugin config names no `directory`.
+///
+/// An explicit `directory` — a path, or `memory://…` — always wins, so every
+/// configuration that already names one is unaffected. Only a cache plugin
+/// with no `directory` key at all falls back here, instead of silently keeping
+/// the whole cache in the process heap (which is what an unset key used to
+/// mean, and what made a cache-heavy deployment look like a leak).
+///
+/// `/tmp` is the one path that exists and is writable in every deployment we
+/// support, container images included. **In a container `/tmp` is often a
+/// `tmpfs`, so these bytes are memory again — and they die with the
+/// container.** For a production cache mount a volume there (or point
+/// `directory` at one) so the cache is really on disk and survives a restart.
+pub const DEFAULT_CACHE_DIRECTORY: &str = "/tmp/pingwaf-cache";
+
+/// The cache directory a plugin config asks for.
+///
+/// Absent key: the default above. Explicit value: honoured as given, an empty
+/// string included — that still selects the in-memory backend, which is what
+/// every config written before this default existed expects.
+fn cache_directory(conf: &PluginConf) -> String {
+    match conf.get("directory") {
+        Some(value) => value.as_str().unwrap_or_default().to_string(),
+        None => DEFAULT_CACHE_DIRECTORY.to_string(),
+    }
+}
+
 // Singleton instances using OnceCell for thread-safe lazy initialization
 // Predictor: Determines if a response should be cached based on patterns/rules
 static PREDICTOR: OnceLock<Predictor<32>> = OnceLock::new();
@@ -509,7 +536,9 @@ impl TryFrom<&PluginConf> for Cache {
     /// - Compiles skip regex if provided
     fn try_from(value: &PluginConf) -> Result<Self> {
         let hash_value = get_hash_key(value);
-        let directory = get_str_conf(value, "directory");
+        // An unset `directory` gets the on-disk default instead of the memory
+        // backend; see `DEFAULT_CACHE_DIRECTORY`.
+        let directory = cache_directory(value);
 
         let cache = new_cache_backend(directory.as_str()).map_err(|e| {
             Error::Invalid {
@@ -1276,7 +1305,11 @@ purge_ip_list = ["127.0.0.1"]
     fn test_cache_params() {
         let params = Cache::try_from(
             &toml::from_str::<PluginConf>(
+                // The memory backend is opt-in: eviction only has a size to
+                // evict against there, while an unset `directory` is the file
+                // backend (which has no capacity to report).
                 r###"
+directory = "memory://"
 eviction = true
 headers = ["Accept-Encoding"]
 lock = "2s"
@@ -1323,6 +1356,60 @@ vary_headers = ["Accept-Encoding", " accept "]
         .unwrap()
         .to_string();
         assert_eq!(true, err.contains("lock_retries"), "{err}");
+    }
+
+    /// The `directory` key: absent means the on-disk default, and every
+    /// explicit value — including the empty string and `memory://` — is
+    /// honoured unchanged, so a config written before the default existed
+    /// keeps the backend it asked for.
+    #[test]
+    fn test_cache_directory_defaults_to_tmp() {
+        assert_eq!("/tmp/pingwaf-cache", DEFAULT_CACHE_DIRECTORY);
+
+        let resolved = |conf: &str| {
+            cache_directory(&toml::from_str::<PluginConf>(conf).unwrap())
+        };
+        // Absent: the default.
+        assert_eq!(DEFAULT_CACHE_DIRECTORY, resolved(""));
+        assert_eq!(DEFAULT_CACHE_DIRECTORY, resolved("lock = \"1s\""));
+        // Explicit values win, empty included (that is still the memory
+        // backend).
+        assert_eq!("", resolved(r#"directory = """#));
+        assert_eq!(
+            "memory://?max_size=10mb",
+            resolved(r#"directory = "memory://?max_size=10mb""#)
+        );
+        assert_eq!(
+            "/var/cache/pingap?levels=1:2",
+            resolved(r#"directory = "/var/cache/pingap?levels=1:2""#)
+        );
+
+        // And the built plugin carries it: the default lands on disk, an
+        // explicit directory is used as given.
+        let built = Cache::try_from(&toml::from_str::<PluginConf>("").unwrap())
+            .expect("cache with no directory");
+        assert_eq!(
+            Some(DEFAULT_CACHE_DIRECTORY.to_string()),
+            built.http_cache.directory
+        );
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_string_lossy().to_string();
+        let built = Cache::try_from(
+            &toml::from_str::<PluginConf>(&format!(r#"directory = "{path}""#))
+                .unwrap(),
+        )
+        .expect("cache with an explicit directory");
+        assert_eq!(Some(path), built.http_cache.directory);
+
+        let built = Cache::try_from(
+            &toml::from_str::<PluginConf>(r#"directory = """#).unwrap(),
+        )
+        .expect("cache with an empty directory");
+        assert_eq!(
+            None, built.http_cache.directory,
+            "still the memory backend"
+        );
     }
 
     /// Regression: only 1, 2 and 3 second locks used to be honoured, every
@@ -1410,10 +1497,13 @@ max_ttl = "1m"
 
     #[tokio::test]
     async fn test_purge_namespace_memory_backend_unsupported() {
-        // No directory -> memory backend, which cannot enumerate entries.
+        // `memory://` -> the memory backend, which cannot enumerate entries.
+        // (An absent `directory` used to mean this too; it is now the on-disk
+        // default, so the memory backend has to be asked for explicitly.)
         let cache = Cache::try_from(
             &toml::from_str::<PluginConf>(
                 r###"
+directory = "memory://"
 namespace = "purge-mem"
 purge_ip_list = ["127.0.0.1"]
 "###,
@@ -1544,6 +1634,7 @@ purge_ip_list = ["192.168.1.1"]
             observation_mode: false,
             proxy_trust: pingwaf_agent::cache::ProxyTrustConfig::default(),
             cache_settings: None,
+            response_replace: None,
         }
     }
 

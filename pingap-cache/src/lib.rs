@@ -233,7 +233,11 @@ pub fn new_cache_backend(directory: &str) -> Result<&'static HttpCache> {
     Ok(cache_ref)
 }
 
-pub use http_cache::{CacheObject, HttpCache, new_storage_clear_service};
+pub use http_cache::{
+    CacheGauges, CacheObject, CachedEntry, CachedPayload, HttpCache,
+    INLINE_MAX_BYTES, InFlightGuard, STREAM_CHUNK_BYTES,
+    new_storage_clear_service,
+};
 pub use quota::{
     DiskQuotaManager, DomainQuotaStatus, EvictionResult, PurgeResult,
     QuotaInfo, configured_quota_mb, forget_quota, global_disk_quota,

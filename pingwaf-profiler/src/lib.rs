@@ -16,6 +16,13 @@
 //!   their current byte count with [`set_memory`]/[`add_memory`]. Nothing
 //!   hooks the allocator, so this works with any allocator and on any
 //!   platform.
+//! * **Disk** is a separate gauge, not part of the memory figure: a module
+//!   that keeps data on disk publishes its footprint with
+//!   [`set_disk_bytes`]. The two are told apart on purpose — a cache that
+//!   holds gigabytes on disk and one that holds them in memory have the same
+//!   problem and completely different fixes, and reporting the on-disk byte
+//!   count as "memory" (what the cache backend used to do) makes the module
+//!   table say the process is using the filesystem's bytes.
 //!
 //! There is no sampling and no symbolisation: an accounting call is a few
 //! nanoseconds and works the same in a debug build on a laptop and a release
@@ -185,6 +192,11 @@ struct ModuleCounters {
     /// [`Instant`] measures time, not cycles.
     elapsed_ns: AtomicU64,
     mem_bytes: AtomicI64,
+    /// Bytes the module currently keeps **on disk**. A separate slot from
+    /// `mem_bytes`: the cache backend used to publish its on-disk usage into
+    /// the memory gauge, so the module table reported the filesystem's bytes
+    /// as resident memory.
+    disk_bytes: AtomicU64,
     calls: AtomicU64,
 }
 
@@ -206,6 +218,7 @@ impl ModuleCounters {
         Self {
             elapsed_ns: AtomicU64::new(0),
             mem_bytes: AtomicI64::new(0),
+            disk_bytes: AtomicU64::new(0),
             calls: AtomicU64::new(0),
         }
     }
@@ -268,6 +281,19 @@ pub fn add_memory(module: Module, delta: i64) {
     MODULES[module.index()]
         .mem_bytes
         .fetch_add(delta, Ordering::Relaxed);
+}
+
+/// Replaces the module's **on-disk** footprint (cache files, spill files).
+///
+/// Kept apart from [`set_memory`] on purpose: the cache backend's on-disk
+/// usage is what the filesystem holds, not what the process holds, and
+/// folding it into the memory gauge is what made the module table report
+/// "cache memory ≈ cache disk usage". A module with nothing on disk leaves
+/// this at zero.
+pub fn set_disk_bytes(module: Module, bytes: u64) {
+    MODULES[module.index()]
+        .disk_bytes
+        .store(bytes, Ordering::Relaxed);
 }
 
 /// Times the scope it lives in and attributes it to `module` on drop.
@@ -361,10 +387,16 @@ pub struct ModuleView {
     /// Share of the total attributed wall-clock time, 0.0–1.0. Same value as
     /// [`Self::cpu_share`].
     pub elapsed_share: f64,
-    /// Bytes the module currently reports as held.
+    /// Bytes the module currently reports as held **in memory**.
     pub mem_bytes: u64,
     /// Share of the total held bytes across modules, 0.0–1.0.
     pub mem_share: f64,
+    /// Bytes the module currently reports as held **on disk**. A module with
+    /// no on-disk footprint (proxy, waf, …) reports zero here.
+    pub disk_bytes: u64,
+    /// Share of the total on-disk bytes across modules, 0.0–1.0. Zero when
+    /// nothing reports disk usage.
+    pub disk_share: f64,
     /// Number of timed operations attributed to the module.
     pub calls: u64,
     /// Average microseconds per timed operation.
@@ -432,6 +464,7 @@ impl ProfileSnapshot {
         let mut modules = Vec::with_capacity(Module::ALL.len());
         let mut total_elapsed_ns = 0u64;
         let mut total_mem = 0u64;
+        let mut total_disk = 0u64;
         for module in Module::ALL {
             let counters = &MODULES[module.index()];
             let elapsed_ns = counters.elapsed_ns.load(Ordering::Relaxed);
@@ -439,6 +472,8 @@ impl ProfileSnapshot {
             let mem_bytes =
                 counters.mem_bytes.load(Ordering::Relaxed).max(0) as u64;
             total_mem = total_mem.saturating_add(mem_bytes);
+            let disk_bytes = counters.disk_bytes.load(Ordering::Relaxed);
+            total_disk = total_disk.saturating_add(disk_bytes);
             let calls = counters.calls.load(Ordering::Relaxed);
             let elapsed_ms = elapsed_ns as f64 / 1_000_000.0;
             modules.push(ModuleView {
@@ -449,6 +484,8 @@ impl ProfileSnapshot {
                 elapsed_share: 0.0,
                 mem_bytes,
                 mem_share: 0.0,
+                disk_bytes,
+                disk_share: 0.0,
                 calls,
                 avg_us: if calls == 0 {
                     0.0
@@ -469,6 +506,14 @@ impl ProfileSnapshot {
                 0.0
             } else {
                 row.mem_bytes as f64 / total_mem as f64
+            };
+            // Its own denominator: a module can own gigabytes on disk and
+            // nothing in memory, and the share must still read 1.0 there
+            // rather than "0 of the memory total".
+            row.disk_share = if total_disk == 0 {
+                0.0
+            } else {
+                row.disk_bytes as f64 / total_disk as f64
             };
         }
         let mut methods: Vec<MethodView> = Method::ALL
@@ -525,6 +570,7 @@ impl ProfileSnapshot {
         for counters in &MODULES {
             counters.elapsed_ns.store(0, Ordering::Relaxed);
             counters.mem_bytes.store(0, Ordering::Relaxed);
+            counters.disk_bytes.store(0, Ordering::Relaxed);
             counters.calls.store(0, Ordering::Relaxed);
         }
         for counters in &METHODS {
@@ -597,6 +643,69 @@ mod tests {
         assert_eq!(cache.mem_bytes, 2048);
         assert_eq!(waf.mem_bytes, 2048);
         assert!((cache.mem_share - 0.5).abs() < 1e-9);
+    }
+
+    /// The cache backend used to publish its **on-disk** byte count through
+    /// [`set_memory`], so the module table said "cache memory ≈ cache disk
+    /// usage". The two gauges must stay independent: setting one must not
+    /// move the other, each must have its own share denominator, and
+    /// `reset` must clear both.
+    #[test]
+    fn cache_memory_and_disk_are_reported_separately() {
+        let _guard = serial();
+        ProfileSnapshot::reset();
+        set_memory(Module::Cache, 1024);
+        set_disk_bytes(Module::Cache, 8 * 1024 * 1024);
+        let snapshot = ProfileSnapshot::collect();
+        let cache = snapshot
+            .modules
+            .iter()
+            .find(|row| row.module == "cache")
+            .expect("cache row");
+        assert_eq!(1024, cache.mem_bytes, "memory gauge is untouched");
+        assert_eq!(
+            8 * 1024 * 1024,
+            cache.disk_bytes,
+            "disk gauge is untouched"
+        );
+        assert_ne!(cache.mem_bytes, cache.disk_bytes);
+        // Each share uses its own total: the cache is all of the disk and
+        // all of the memory here, even though the two figures differ.
+        assert!((cache.mem_share - 1.0).abs() < 1e-9);
+        assert!((cache.disk_share - 1.0).abs() < 1e-9);
+
+        // A module with nothing on disk reports zero, not a share of someone
+        // else's footprint.
+        let proxy = snapshot
+            .modules
+            .iter()
+            .find(|row| row.module == "proxy")
+            .expect("proxy row");
+        assert_eq!(0, proxy.disk_bytes);
+        assert_eq!(0.0, proxy.disk_share);
+
+        // With several owners the disk share is split, while memory keeps its
+        // own denominator.
+        set_disk_bytes(Module::Db, 8 * 1024 * 1024);
+        let snapshot = ProfileSnapshot::collect();
+        let cache = snapshot
+            .modules
+            .iter()
+            .find(|row| row.module == "cache")
+            .expect("cache row");
+        assert!((cache.disk_share - 0.5).abs() < 1e-9);
+        assert!((cache.mem_share - 1.0).abs() < 1e-9);
+
+        // Nothing on disk anywhere: every share is zero, not a division by
+        // zero or a NaN in the JSON.
+        ProfileSnapshot::reset();
+        let snapshot = ProfileSnapshot::collect();
+        for row in &snapshot.modules {
+            assert_eq!(0, row.disk_bytes);
+            assert_eq!(0.0, row.disk_share);
+            assert_eq!(0, row.mem_bytes);
+            assert_eq!(0.0, row.mem_share);
+        }
     }
 
     /// A method row's slot, its snapshot name and its module must all line up
