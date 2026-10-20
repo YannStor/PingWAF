@@ -27,7 +27,7 @@ use regex::Regex;
 use regex::bytes::RegexBuilder;
 use std::borrow::Cow;
 use std::sync::LazyLock;
-use tracing::debug;
+use tracing::{debug, warn};
 
 const PLUGIN_ID: &str = "_sub_filter_";
 
@@ -138,6 +138,15 @@ const MAX_SUB_FILTER_BYTES: usize = 8 * 1024 * 1024;
 struct SubFilterReplacer {
     filters: Vec<SubFilterParams>,
     buffer: BytesMut,
+    /// Set once the body crosses [`MAX_SUB_FILTER_BYTES`] while streaming.
+    ///
+    /// [`SubFilter::handle_response`] can only read the cap off
+    /// `Content-Length`, and a chunked response does not carry one, so the
+    /// bound has to be enforced here as the chunks arrive. Once it trips the
+    /// replacer stops buffering and writes every remaining chunk through
+    /// unreplaced: the response is already in flight, so the only alternative
+    /// would be truncating it.
+    passthrough: bool,
 }
 
 impl ModifyResponseBody for SubFilterReplacer {
@@ -154,9 +163,31 @@ impl ModifyResponseBody for SubFilterReplacer {
         body: &mut Option<bytes::Bytes>,
         end_of_stream: bool,
     ) -> pingora::Result<()> {
+        // Over the cap already: this chunk (and every later one) is forwarded
+        // untouched. `body` is left exactly as the caller handed it over.
+        if self.passthrough {
+            return Ok(());
+        }
         if let Some(data) = body {
             self.buffer.extend(&data[..]);
             data.clear();
+        }
+        // A chunked response carries no `Content-Length`, so the header-side
+        // check cannot bound it and the buffer would grow with the body. Hand
+        // back what is already buffered and stop: dropping it would truncate
+        // the response, and keeping it would make the plugin itself the
+        // unbounded-memory lever the cap exists to prevent.
+        if self.buffer.len() > MAX_SUB_FILTER_BYTES {
+            let size = self.buffer.len();
+            warn!(
+                target: PLUGIN_ID,
+                size,
+                "response body exceeded the sub-filter cap while streaming; \
+                 passing the rest through unreplaced"
+            );
+            self.passthrough = true;
+            *body = Some(self.buffer.split().freeze());
+            return Ok(());
         }
         if !end_of_stream {
             return Ok(());
@@ -244,6 +275,10 @@ impl TryFrom<&PluginConf> for SubFilter {
             replacer: SubFilterReplacer {
                 filters,
                 buffer: BytesMut::new(),
+                // Each response gets a fresh clone of this replacer
+                // (`ctx.add_modify_body_handler(.., self.replacer.clone())`),
+                // so the passthrough latch never leaks across requests.
+                passthrough: false,
             },
             hash_value,
             status_codes,
@@ -375,82 +410,94 @@ mod tests {
         assert_eq!(params.flags, vec!['i', 'g']);
     }
 
+    /// Builds a replacer from one rule string.
+    fn new_replacer(rule: &str) -> SubFilterReplacer {
+        SubFilterReplacer {
+            filters: vec![parse_subs_filter(rule).expect("the rule parses")],
+            buffer: BytesMut::new(),
+            passthrough: false,
+        }
+    }
+
+    /// `handle` takes a `Session` only because the `ModifyResponseBody` trait
+    /// does; the replacer never reads it, so an empty mock connection is enough.
+    fn test_session() -> Session {
+        Session::new_h1(Box::new(tokio_test::io::Builder::new().build()))
+    }
+
+    /// The replacer emits only at end of stream: intermediate chunks are
+    /// buffered and the substituted body replaces the (now empty) chunk.
     #[test]
     fn test_sub_filter_replacer() {
-        // let replacer = SubFilterReplacer {
-        //     filters: vec![parse_subs_filter(
-        //         "subs_filter 'http://pingap.io' 'https://pingap.io/api' ig",
-        //     )
-        //     .unwrap()],
-        //     buffer: BytesMut::new(),
-        // };
-        // let data = b"http://pingap.io http://PinGap.io";
-        // let result = replacer.handle(Bytes::from_static(data)).unwrap();
-        // assert_eq!(
-        //     result,
-        //     Bytes::from_static(b"https://pingap.io/api https://pingap.io/api")
-        // );
+        let session = test_session();
 
-        // // case sensitive
-        // let replacer = SubFilterReplacer {
-        //     filters: vec![parse_subs_filter(
-        //         "subs_filter 'http://pingap.io' 'https://pingap.io/api' g",
-        //     )
-        //     .unwrap()],
-        // };
-        // let data = b"http://pingap.io http://PinGap.io";
-        // let result = replacer.handle(Bytes::from_static(data)).unwrap();
-        // assert_eq!(
-        //     result,
-        //     Bytes::from_static(b"https://pingap.io/api http://PinGap.io")
-        // );
+        // Literal, global.
+        let mut replacer = new_replacer("sub_filter 'Pingap' 'PingWAF' g");
+        let mut body = Some(Bytes::from_static(b"Pingap and Pingap"));
+        replacer.handle(&session, &mut body, false).unwrap();
+        assert_eq!(
+            body,
+            Some(Bytes::new()),
+            "chunks are buffered, not emitted"
+        );
+        replacer.handle(&session, &mut body, true).unwrap();
+        assert_eq!(body, Some(Bytes::from_static(b"PingWAF and PingWAF")));
 
-        // // case sensitive and not global
-        // let replacer = SubFilterReplacer {
-        //     filters: vec![parse_subs_filter(
-        //         "subs_filter 'http://pingap.io' 'https://pingap.io/api'",
-        //     )
-        //     .unwrap()],
-        // };
-        // let data = b"http://pingap.io http://PinGap.io http://pingap.io";
-        // let result = replacer.handle(Bytes::from_static(data)).unwrap();
-        // assert_eq!(
-        //     result,
-        //     Bytes::from_static(
-        //         b"https://pingap.io/api http://PinGap.io http://pingap.io"
-        //     )
-        // );
+        // Literal, first occurrence only.
+        let mut replacer = new_replacer("sub_filter 'Pingap' 'PingWAF'");
+        let mut body = Some(Bytes::from_static(b"Pingap and Pingap"));
+        replacer.handle(&session, &mut body, true).unwrap();
+        assert_eq!(body, Some(Bytes::from_static(b"PingWAF and Pingap")));
 
-        // // sub filter
-        // let replacer = SubFilterReplacer {
-        //     filters: vec![parse_subs_filter(
-        //         "sub_filter 'http://pingap.io' 'https://pingap.io/api'",
-        //     )
-        //     .unwrap()],
-        // };
-        // let data = b"http://pingap.io http://PinGap.io http://pingap.io";
-        // let result = replacer.handle(Bytes::from_static(data)).unwrap();
-        // assert_eq!(
-        //     result,
-        //     Bytes::from_static(
-        //         b"https://pingap.io/api http://PinGap.io http://pingap.io"
-        //     )
-        // );
+        // Regex, case-insensitive, global.
+        let mut replacer = new_replacer("subs_filter 'pingap' 'PingWAF' ig");
+        let mut body = Some(Bytes::from_static(b"Pingap pingap Pingap"));
+        replacer.handle(&session, &mut body, true).unwrap();
+        assert_eq!(body, Some(Bytes::from_static(b"PingWAF PingWAF PingWAF")));
+    }
 
-        // // sub filter global
-        // let replacer = SubFilterReplacer {
-        //     filters: vec![parse_subs_filter(
-        //         "sub_filter 'http://pingap.io' 'https://pingap.io/api' g",
-        //     )
-        //     .unwrap()],
-        // };
-        // let data = b"http://pingap.io http://PinGap.io http://pingap.io";
-        // let result = replacer.handle(Bytes::from_static(data)).unwrap();
-        // assert_eq!(
-        //     result,
-        //     Bytes::from_static(
-        //         b"https://pingap.io/api http://PinGap.io https://pingap.io/api"
-        //     )
-        // );
+    /// M4: a chunked response carries no `Content-Length`, so the header-side
+    /// check in `handle_response` never sees a size. The bound has to be
+    /// enforced while the chunks arrive: once the buffer crosses
+    /// `MAX_SUB_FILTER_BYTES` the already-buffered bytes are handed back and
+    /// every later chunk is forwarded untouched — the buffer never keeps
+    /// growing and no byte is dropped.
+    #[test]
+    fn test_replacer_passes_through_a_body_over_the_cap() {
+        let session = test_session();
+        let mut replacer = new_replacer("sub_filter 'Pingap' 'PingWAF' g");
+        let chunk = Bytes::from(vec![b'a'; 1024 * 1024]);
+
+        // Exactly the cap still buffers: the check is `>`, and one byte less
+        // must not silently disable the replacement.
+        for index in 0..8 {
+            let mut body = Some(chunk.clone());
+            replacer.handle(&session, &mut body, false).unwrap();
+            assert_eq!(body, Some(Bytes::new()), "chunk {index} is buffered");
+        }
+        assert!(!replacer.passthrough, "8 MiB is not over the cap");
+        assert_eq!(replacer.buffer.len(), MAX_SUB_FILTER_BYTES);
+
+        // The ninth megabyte crosses it: the buffered 9 MiB go out at once and
+        // the replacer switches to passthrough.
+        let mut body = Some(chunk.clone());
+        replacer.handle(&session, &mut body, false).unwrap();
+        assert!(replacer.passthrough, "the cap must trip while streaming");
+        assert!(replacer.buffer.is_empty(), "the buffer is handed back");
+        let forwarded = body.expect("the buffered bytes are written out");
+        assert_eq!(forwarded.len(), 9 * 1024 * 1024);
+
+        // Everything after that is forwarded byte-for-byte, end of stream
+        // included: no replacement is attempted any more.
+        let mut body = Some(Bytes::from_static(b"Pingap"));
+        replacer.handle(&session, &mut body, false).unwrap();
+        assert_eq!(body, Some(Bytes::from_static(b"Pingap")));
+        let mut body = Some(Bytes::from_static(b"Pingap"));
+        replacer.handle(&session, &mut body, true).unwrap();
+        assert_eq!(
+            body,
+            Some(Bytes::from_static(b"Pingap")),
+            "the tail is forwarded, never rewritten"
+        );
     }
 }

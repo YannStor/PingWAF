@@ -389,12 +389,20 @@ fn site_response_replace_plugin(
         );
     }
     // Same for the status filter: absent = all status codes.
+    //
+    // Sorted and deduplicated here as well as on the write path
+    // (`api::sites::normalise_response_replace`): a policy stored before that
+    // normalisation existed would otherwise render as `200,200,201` in the
+    // generated config, and the agent keys its plugin instances on a hash of
+    // this string, so the same policy would look like two different plugins.
     if !policy.status_codes.is_empty() {
+        let mut codes = policy.status_codes.clone();
+        codes.sort_unstable();
+        codes.dedup();
         conf.insert(
             "status_codes".to_string(),
             toml::Value::String(
-                policy
-                    .status_codes
+                codes
                     .iter()
                     .map(u32::to_string)
                     .collect::<Vec<_>>()

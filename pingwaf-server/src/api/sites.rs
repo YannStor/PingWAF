@@ -7,9 +7,11 @@ use axum::routing::{get, put};
 use axum::Json;
 use axum::Router;
 use chrono::{DateTime, Utc};
+use sea_orm::sea_query::{Expr, Func};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, EntityTrait,
-    PaginatorTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DbErr,
+    EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
+    TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -29,7 +31,7 @@ use crate::models::{
     acme_challenge, cache_rules, ip_groups, rate_limit_rules, route_match_type,
     rule, rule_groups, site, site_certificates, site_routes, site_ssl,
     site_status, site_upstream_pools, site_upstreams, tls_version,
-    trusted_header, ResponseReplaceConfig,
+    trusted_header, ResponseReplaceConfig, ResponseReplaceRule,
 };
 
 /// Longest accepted route `rewrite_path`, in **bytes**, mirroring
@@ -1348,7 +1350,8 @@ async fn create_upstream(
     // The same origin twice in one pool balances every request onto it twice
     // and doubles its health-check load; the same address in another pool is a
     // legitimate setup, so the check is scoped to this pool only.
-    let siblings = load_pool_addresses(&state, id, pool_id, None).await?;
+    let siblings =
+        load_address_collisions(&state, id, pool_id, &address, None).await?;
     ensure_address_available(&address, &siblings)?;
 
     let model = site_upstreams::ActiveModel {
@@ -1358,14 +1361,19 @@ async fn create_upstream(
         // The column is kept for the upcoming node-group feature; nothing
         // reads it today, so it mirrors the address instead of an input.
         name: Set(upstream_name_placeholder(&address)),
-        address: Set(address),
+        address: Set(address.clone()),
         weight: Set(payload.weight),
         tls: Set(payload.tls),
         health_status: Set("unknown".to_string()),
         created_at: Set(Utc::now()),
     }
     .insert(&state.db)
-    .await?;
+    .await
+    // The check above is a read-then-write, so two concurrent creates can both
+    // pass it; `idx_site_upstreams_pool_address` (migration 000062) rejects the
+    // loser. Reporting that as the same 400 keeps a race from looking like a
+    // server fault to the caller.
+    .map_err(|err| map_upstream_conflict(err, &address))?;
 
     tracing::info!(site_id = %id, upstream = %model.id, pool = %pool_id, "upstream added");
     touch_site(&state, id).await?;
@@ -1411,8 +1419,14 @@ async fn update_upstream(
     // address — which the console does on every unrelated edit — stays a no-op.
     let next_pool = payload.pool_id.unwrap_or(row.pool_id);
     if next_address != row.address || next_pool != row.pool_id {
-        let siblings =
-            load_pool_addresses(&state, id, next_pool, Some(target)).await?;
+        let siblings = load_address_collisions(
+            &state,
+            id,
+            next_pool,
+            &next_address,
+            Some(target),
+        )
+        .await?;
         ensure_address_available(&next_address, &siblings)?;
     }
 
@@ -1422,7 +1436,7 @@ async fn update_upstream(
         .as_deref()
         .is_some_and(|a| !a.trim().is_empty())
     {
-        active.address = Set(next_address);
+        active.address = Set(next_address.clone());
     }
     if let Some(weight) = payload.weight {
         active.weight = Set(weight);
@@ -1443,7 +1457,12 @@ async fn update_upstream(
         active.health_status = Set(health);
     }
 
-    let updated = active.update(&state.db).await?;
+    let updated = active
+        .update(&state.db)
+        .await
+        // Same backstop as create: a racing update that lands on an address a
+        // concurrent write already claimed is a 400, not a 500.
+        .map_err(|err| map_upstream_conflict(err, &next_address))?;
 
     tracing::info!(site_id = %id, upstream = %target, "upstream updated");
     touch_site(&state, id).await?;
@@ -2390,14 +2409,20 @@ const MAX_RESPONSE_REPLACE_RULES: usize = 20;
 /// The policy is compiled into the site's `sub_filter` plugin
 /// (`pingap-plugin/src/sub_filter.rs`), whose rule syntax is
 /// `sub_filter '<pattern>' '<replacement>' [flags]` parsed with
-/// `'([^']+)'`. Three consequences drive the checks below:
+/// `'([^']+)'`. Four consequences drive the checks below:
 ///
 /// * a single quote in either side ends the quoted literal early, so the rule
 ///   does not parse and the plugin fails to build;
 /// * the quoted groups require **at least one character**, so an empty
 ///   pattern or replacement is equally fatal;
 /// * a regex that does not compile (`is_regex`, and `path` which is always a
-///   regex) fails the same way.
+///   regex) fails the same way;
+/// * a rule is **one single line**, `sub_filter '<p>' '<r>' [flags]`, and the
+///   generated document carries it as one string — a line break, carriage
+///   return or tab has no representation there (the operands are delimited by
+///   `'` and separated by whitespace), and every TOML/HCL/KDL round trip the
+///   site's configuration goes through re-escapes it, so the rule that reaches
+///   the agent is no longer the rule the operator wrote.
 ///
 /// Any of those failures drops the entire generated configuration for the site,
 /// which is why they are rejected here rather than discovered by an agent.
@@ -2426,38 +2451,76 @@ fn validate_response_replace(
         )));
     }
     for (index, rule) in policy.rules.iter().enumerate() {
-        let number = index + 1;
-        if rule.pattern.is_empty()
-            || rule.pattern.len() > MAX_RESPONSE_REPLACE_PATTERN_LEN
-        {
+        validate_response_replace_rule(index + 1, rule)?;
+    }
+    Ok(())
+}
+
+/// Characters a rule operand cannot carry: they break the single-line form the
+/// data plane's rule syntax and the generated configuration both assume.
+const FORBIDDEN_RULE_CHARS: [char; 3] = ['\n', '\r', '\t'];
+
+/// Returns the first character of `value` that cannot appear in a rule operand.
+///
+/// `allow_backslash` exempts a `subs_filter` **pattern**, where a backslash is
+/// the regex escape itself (`\d`, `\.`); in a literal `sub_filter` pattern and
+/// in every replacement it is not a pattern-language construct, so it only
+/// imitates an escape sequence in a string that is never unescaped.
+fn forbidden_rule_char(value: &str, allow_backslash: bool) -> Option<char> {
+    value.chars().find(|c| {
+        FORBIDDEN_RULE_CHARS.contains(c) || (!allow_backslash && *c == '\\')
+    })
+}
+
+/// Validates one replacement rule: size, delimiters, characters, and — for a
+/// regex rule — that the pattern compiles.
+fn validate_response_replace_rule(
+    number: usize,
+    rule: &ResponseReplaceRule,
+) -> Result<(), ApiError> {
+    if rule.pattern.is_empty()
+        || rule.pattern.len() > MAX_RESPONSE_REPLACE_PATTERN_LEN
+    {
+        return Err(ApiError::BadRequest(format!(
+            "response_replace rule {number} pattern must be 1-\
+             {MAX_RESPONSE_REPLACE_PATTERN_LEN} bytes"
+        )));
+    }
+    if rule.replacement.is_empty()
+        || rule.replacement.len() > MAX_RESPONSE_REPLACE_REPLACEMENT_LEN
+    {
+        return Err(ApiError::BadRequest(format!(
+            "response_replace rule {number} replacement must be 1-\
+             {MAX_RESPONSE_REPLACE_REPLACEMENT_LEN} bytes"
+        )));
+    }
+    if rule.pattern.contains('\'') || rule.replacement.contains('\'') {
+        return Err(ApiError::BadRequest(format!(
+            "response_replace rule {number} must not contain a single \
+             quote; the data plane's rule syntax uses ' to delimit the \
+             pattern and the replacement"
+        )));
+    }
+    for (operand, value, allow_backslash) in [
+        ("pattern", rule.pattern.as_str(), rule.is_regex),
+        ("replacement", rule.replacement.as_str(), false),
+    ] {
+        if let Some(bad) = forbidden_rule_char(value, allow_backslash) {
             return Err(ApiError::BadRequest(format!(
-                "response_replace rule {number} pattern must be 1-\
-                 {MAX_RESPONSE_REPLACE_PATTERN_LEN} bytes"
+                "response_replace rule {number} {operand} must not contain \
+                 {bad:?}; a rule is one single-line `sub_filter '<pattern>' \
+                 '<replacement>' [flags]` entry, and only a regex pattern may \
+                 carry a backslash (its regex escape)"
             )));
         }
-        if rule.replacement.is_empty()
-            || rule.replacement.len() > MAX_RESPONSE_REPLACE_REPLACEMENT_LEN
-        {
-            return Err(ApiError::BadRequest(format!(
-                "response_replace rule {number} replacement must be 1-\
-                 {MAX_RESPONSE_REPLACE_REPLACEMENT_LEN} bytes"
-            )));
-        }
-        if rule.pattern.contains('\'') || rule.replacement.contains('\'') {
-            return Err(ApiError::BadRequest(format!(
-                "response_replace rule {number} must not contain a single \
-                 quote; the data plane's rule syntax uses ' to delimit the \
-                 pattern and the replacement"
-            )));
-        }
-        if rule.is_regex {
-            regex::Regex::new(&rule.pattern).map_err(|err| {
-                ApiError::BadRequest(format!(
-                    "response_replace rule {number} pattern is not a valid \
-                     regex: {err}"
-                ))
-            })?;
-        }
+    }
+    if rule.is_regex {
+        regex::Regex::new(&rule.pattern).map_err(|err| {
+            ApiError::BadRequest(format!(
+                "response_replace rule {number} pattern is not a valid \
+                 regex: {err}"
+            ))
+        })?;
     }
     Ok(())
 }
@@ -2467,16 +2530,28 @@ fn validate_response_replace(
 /// A console that deletes the last rule row sends `rules: []`; storing that as
 /// a policy would make the site read as configured while the data plane
 /// generates a plugin that can never fire, so it clears the column instead.
+///
+/// Validation comes **first**: the empty-rule shortcut used to return before
+/// `path` and `status_codes` were looked at, and the console sends `rules: []`
+/// on every save of a site whose policy it never touched — so a broken policy
+/// was re-accepted (and a duplicate status code re-stored) silently.
+///
+/// `status_codes` is sorted and deduplicated before the policy is returned: the
+/// data plane joins the codes into the plugin's `status_codes` string, where the
+/// same code twice is noise in the generated configuration and in the config
+/// diff an operator has to read.
 fn normalise_response_replace(
     policy: Option<ResponseReplaceConfig>,
 ) -> Result<Option<ResponseReplaceConfig>, ApiError> {
-    let Some(policy) = policy else {
+    let Some(mut policy) = policy else {
         return Ok(None);
     };
+    validate_response_replace(&policy)?;
     if policy.rules.is_empty() {
         return Ok(None);
     }
-    validate_response_replace(&policy)?;
+    policy.status_codes.sort_unstable();
+    policy.status_codes.dedup();
     Ok(Some(policy))
 }
 
@@ -2491,11 +2566,22 @@ fn normalise_response_replace(
 /// `siblings` is the caller's query result scoped to one pool and, on update,
 /// excluding the row being changed — which is what makes re-sending an
 /// unchanged address a no-op instead of a self-collision.
+///
+/// The comparison ignores ASCII case: a host name is not case-sensitive, so
+/// `HOST:port` and `host:port` are the same origin and used to slip past a
+/// plain `==`. Folding ASCII is exactly what the database does here — the
+/// unique index `idx_site_upstreams_pool_address` is built on `lower(address)`,
+/// and `normalize_origin_address` restricts the host to ASCII
+/// (`[A-Za-z0-9._:-]`), where `eq_ignore_ascii_case` and PostgreSQL's `lower()`
+/// agree.
 fn ensure_address_available(
     address: &str,
     siblings: &[String],
 ) -> Result<(), ApiError> {
-    if siblings.iter().any(|existing| existing == address) {
+    if siblings
+        .iter()
+        .any(|existing| existing.eq_ignore_ascii_case(address))
+    {
         return Err(ApiError::BadRequest(format!(
             "upstream {address} already exists in this pool"
         )));
@@ -2503,20 +2589,62 @@ fn ensure_address_available(
     Ok(())
 }
 
-/// Loads the origin addresses of one pool of one site.
+/// Recognises the unique-index rejection a racing write gets.
+///
+/// [`ensure_address_available`] is a read-then-write, so two concurrent
+/// requests can both see a free address and both write it. The decision belongs
+/// to `idx_site_upstreams_pool_address` (migration 000062), and its violation
+/// has to reach the caller as the same 400 a sequential duplicate produces.
+///
+/// `DbErr::RecordNotInserted` is matched too: it is the same "the write did not
+/// produce a row" outcome reported without a constraint name, which is what a
+/// driver that does not echo the PostgreSQL error text yields.
+fn is_upstream_conflict(err: &DbErr) -> bool {
+    if matches!(err, DbErr::RecordNotInserted) {
+        return true;
+    }
+    let message = err.to_string();
+    message.contains("idx_site_upstreams_pool_address")
+        || message.contains("duplicate key")
+}
+
+/// Maps a duplicate-origin rejection to a 400, passing anything else through.
+fn map_upstream_conflict(err: DbErr, address: &str) -> ApiError {
+    if is_upstream_conflict(&err) {
+        ApiError::BadRequest(format!(
+            "upstream {address} already exists in this pool"
+        ))
+    } else {
+        err.into()
+    }
+}
+
+/// Loads the origin addresses of one pool of one site that collide with
+/// `address`.
+///
+/// The predicate is `lower(address) = lower($1)` — the same expression
+/// `idx_site_upstreams_pool_address` is built on — so the pre-check and the
+/// constraint cannot disagree about what "the same origin" means, and on
+/// PostgreSQL the planner can ride that index instead of reading the pool's
+/// rows.
 ///
 /// `exclude` drops a single row from the result — the node an update is
 /// rewriting, so it cannot collide with itself. Only the addresses are read;
 /// the duplicate check needs nothing else from the row.
-async fn load_pool_addresses(
+async fn load_address_collisions(
     state: &AppState,
     site_id: Uuid,
     pool_id: Uuid,
+    address: &str,
     exclude: Option<Uuid>,
 ) -> Result<Vec<String>, ApiError> {
     let mut query = site_upstreams::Entity::find()
         .filter(site_upstreams::Column::SiteId.eq(site_id))
-        .filter(site_upstreams::Column::PoolId.eq(pool_id));
+        .filter(site_upstreams::Column::PoolId.eq(pool_id))
+        .filter(
+            Expr::expr(Func::lower(Expr::col(site_upstreams::Column::Address)))
+                .eq(Func::lower(Expr::val(address))),
+        );
     if let Some(exclude) = exclude {
         query = query.filter(site_upstreams::Column::Id.ne(exclude));
     }
@@ -3272,14 +3400,84 @@ mod tests {
         assert!(ensure_address_available("172.17.53.244:5000", &pool_b).is_ok());
 
         // An update that keeps the stored address excludes the row itself
-        // (`load_pool_addresses(.., Some(id))`), so the list it checks holds
-        // only the siblings and the request is a no-op, not a self-collision.
+        // (`load_address_collisions(.., Some(id))`), so the list it checks
+        // holds only the siblings and the request is a no-op, not a
+        // self-collision.
         let siblings_without_self = vec!["172.17.53.245:5000".to_string()];
         assert!(ensure_address_available(
             "172.17.53.244:5000",
             &siblings_without_self
         )
         .is_ok());
+    }
+
+    /// H1: a host name is not case-sensitive, so `HOST:port` and `host:port`
+    /// are the same origin — the plain `==` this check used to run let the
+    /// second form through, and the pool then balanced every request onto one
+    /// server twice. The database enforces the same rule through the
+    /// `lower(address)` unique index added by migration 000062.
+    #[test]
+    fn upstream_duplicate_check_ignores_ascii_case() {
+        let stored = vec!["Origin.Example.COM:8080".to_string()];
+        for candidate in [
+            "origin.example.com:8080",
+            "ORIGIN.EXAMPLE.COM:8080",
+            "Origin.Example.COM:8080",
+        ] {
+            let err = ensure_address_available(candidate, &stored).expect_err(
+                "a case-only difference must be the same origin, hence a 400",
+            );
+            assert_eq!(err.code(), "bad_request", "{candidate}");
+            assert!(
+                err.to_string().contains("already exists in this pool"),
+                "{err}"
+            );
+        }
+        // The port is not case-folded away: a different port is a different
+        // origin, and so is a different host.
+        assert!(ensure_address_available("origin.example.com:8081", &stored)
+            .is_ok());
+        assert!(
+            ensure_address_available("other.example.com:8080", &stored).is_ok()
+        );
+    }
+
+    /// H1: the pre-check is a read-then-write, so two concurrent requests can
+    /// both pass it; `idx_site_upstreams_pool_address` rejects the loser and
+    /// the caller must see the same 400 a sequential duplicate produces. The
+    /// race itself cannot be reproduced in a unit test — it depends on the
+    /// index — so this pins the error mapping it feeds.
+    #[test]
+    fn unique_index_violation_maps_to_bad_request() {
+        let index_violation = DbErr::Custom(
+            "error returned by database: duplicate key value violates unique \
+             constraint \"idx_site_upstreams_pool_address\""
+                .to_string(),
+        );
+        let bare_duplicate = DbErr::Custom(
+            "error returned by database: duplicate key value violates unique \
+             constraint"
+                .to_string(),
+        );
+        for err in [index_violation, bare_duplicate, DbErr::RecordNotInserted] {
+            match map_upstream_conflict(err, "api.example.com:8080") {
+                ApiError::BadRequest(message) => assert!(
+                    message.contains(
+                        "upstream api.example.com:8080 already exists in this pool"
+                    ),
+                    "{message}"
+                ),
+                other => panic!("expected BadRequest, got {other:?}"),
+            }
+        }
+        // Anything unrelated stays a server-side failure, not caller input.
+        assert!(!matches!(
+            map_upstream_conflict(
+                DbErr::Custom("connection reset".to_string()),
+                "api.example.com:8080"
+            ),
+            ApiError::BadRequest(_)
+        ));
     }
 
     fn replace_rule(
@@ -3450,6 +3648,55 @@ mod tests {
         );
     }
 
+    /// H2: a rule is emitted as one single-line
+    /// `sub_filter '<pattern>' '<replacement>' [flags]` entry inside the site's
+    /// generated configuration, so a line break, carriage return or tab in
+    /// either operand has no representation there and a backslash only imitates
+    /// an escape outside a regex pattern. All four are rejected at write time
+    /// because the failure would take the site's whole agent configuration down
+    /// with it.
+    #[test]
+    fn response_replace_rejects_multiline_operands_and_escapes() {
+        let check = |rule: ResponseReplaceRule| {
+            validate_response_replace(&ResponseReplaceConfig {
+                path: String::new(),
+                status_codes: Vec::new(),
+                rules: vec![rule],
+            })
+            .map_err(|err| (err.code(), err.to_string()))
+        };
+
+        for (operand, rule) in [
+            ("pattern", replace_rule("a\nb", "PingWAF", false)),
+            ("pattern", replace_rule("a\rb", "PingWAF", false)),
+            ("pattern", replace_rule("a\tb", "PingWAF", false)),
+            ("pattern", replace_rule("a\\b", "PingWAF", false)),
+            ("replacement", replace_rule("Google", "a\nb", false)),
+            ("replacement", replace_rule("Google", "a\rb", false)),
+            ("replacement", replace_rule("Google", "a\tb", false)),
+            ("replacement", replace_rule("Google", "a\\b", false)),
+            // A regex replacement has no escape language of its own either:
+            // `$1` is the capture reference, never `\1`.
+            ("replacement", replace_rule("Go+gle", "a\\b", true)),
+        ] {
+            let err = check(rule)
+                .expect_err("control characters and escapes must be rejected");
+            assert_eq!("bad_request", err.0, "{operand}");
+            assert!(
+                err.1.contains(operand) && err.1.contains("single-line"),
+                "the message must name the operand and the rule form: {}",
+                err.1
+            );
+        }
+
+        // A regex pattern keeps its backslash: `\d` / `\.` are the regex
+        // escapes, and refusing them would make `subs_filter` unusable.
+        assert_eq!(check(replace_rule(r"\d+\.\d+", "PingWAF", true)), Ok(()));
+        // A literal pattern and both sides of a plain rule are unaffected.
+        assert_eq!(check(replace_rule("Google", "PingWAF", false)), Ok(()));
+        assert_eq!(check(replace_rule("$1", "$2", false)), Ok(()));
+    }
+
     /// A policy with no rules is "replace nothing", which is what a console
     /// sends after deleting the last row: it clears the column instead of
     /// storing a policy the data plane would turn into a dead plugin.
@@ -3477,6 +3724,79 @@ mod tests {
             rules: vec![replace_rule("Google", "PingWAF", false)],
         }))
         .is_err());
+    }
+
+    /// M3: `rules: []` used to return before `path` / `status_codes` were
+    /// looked at, and the console sends exactly that on every save of a site
+    /// whose policy it never touched — so a broken policy was silently
+    /// re-accepted instead of rejected.
+    #[test]
+    fn response_replace_validates_before_the_empty_rules_shortcut() {
+        let broken_path =
+            normalise_response_replace(Some(ResponseReplaceConfig {
+                path: "^(/".to_string(),
+                status_codes: Vec::new(),
+                rules: Vec::new(),
+            }))
+            .expect_err("a broken path must be rejected even with no rules");
+        assert_eq!("bad_request", broken_path.code());
+        assert!(
+            broken_path
+                .to_string()
+                .contains("path is not a valid regex"),
+            "{broken_path}"
+        );
+
+        let bad_status =
+            normalise_response_replace(Some(ResponseReplaceConfig {
+                path: String::new(),
+                status_codes: vec![42],
+                rules: Vec::new(),
+            }))
+            .expect_err(
+                "an out-of-range status must be rejected with no rules",
+            );
+        assert_eq!("bad_request", bad_status.code());
+        assert!(
+            bad_status
+                .to_string()
+                .contains("must be between 100 and 599"),
+            "{bad_status}"
+        );
+
+        // A well-formed but empty policy still clears the column.
+        assert!(normalise_response_replace(Some(ResponseReplaceConfig {
+            path: "^/.*".to_string(),
+            status_codes: vec![200],
+            rules: Vec::new(),
+        }))
+        .unwrap()
+        .is_none());
+    }
+
+    /// L5: the data plane joins the codes into the plugin's `status_codes`
+    /// string, so the stored list is canonical — sorted, no repeats — and the
+    /// generated configuration does not carry `200,200,201,200`.
+    #[test]
+    fn response_replace_status_codes_are_sorted_and_deduped() {
+        let policy = normalise_response_replace(Some(ResponseReplaceConfig {
+            path: String::new(),
+            status_codes: vec![404, 200, 404, 201, 200],
+            rules: vec![replace_rule("Google", "PingWAF", false)],
+        }))
+        .unwrap()
+        .expect("a policy with rules is kept");
+        assert_eq!(policy.status_codes, vec![200, 201, 404]);
+        // The string the config builder joins matches the stored order.
+        assert_eq!(
+            policy
+                .status_codes
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            "200,201,404"
+        );
     }
 
     /// The site update keeps the same three-state contract as
