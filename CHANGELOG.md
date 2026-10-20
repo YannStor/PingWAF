@@ -8,6 +8,87 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+### Added
+
+- **Fleet node view: `GET /api/v1/system/nodes` (admin).** One request
+  answers how loaded the fleet is: `control` — the control-plane process's
+  own CPU (process/host/cores, from the same probe samples as
+  `/system/metrics`), RSS and RSS peak, and the profiler's `control`-module
+  request count and average wall-clock time — plus `agents[]`, one row per
+  registered agent ordered by name (`id`/`name`/`status`,
+  `cpu_percent`/`memory_bytes`/`connections`/`rps`/`sites`/`last_seen`).
+  Fields the control plane does not know yet are `null` rather than `0`.
+  Known limits, in the contract and the docs: `rps` has no retained data
+  source and is `null` for every node today; an agent's CPU comes from the
+  newest host probe sample (a ~5 s measurement) while the heartbeat's own
+  `cpu_usage_percent` is the average since boot; `agents.memory_bytes` is
+  the host's **total** memory before the first heartbeat and the **used**
+  memory afterwards (semantic drift, not yet fixed).
+- **Route `upstream_host`.** Route rules gained an optional Host override
+  for the origin: set it to a bare host name (≤ 253 bytes, no `://`, no
+  `/`, no whitespace or control characters; a port is accepted) and the
+  proxy sends it as the `Host` header to the upstream — required for
+  virtual-host origins such as a mirror route to `google.com`. Unset keeps
+  forwarding the client's `Host`; on update it is tri-state (absent keeps,
+  `null`/blank clears, a value replaces).
+- **Site `response_replace`.** Sites gained a response-body replacement
+  policy (JSONB): `{ path, status_codes[], rules[{pattern, replacement,
+  is_regex}] }` — up to 20 rules, pattern 1–512 bytes, replacement 1–2048
+  bytes, neither side may contain a single quote (the data plane's rule
+  syntax delimits them with `'`), regexes must compile, status codes
+  100–599; `rules: []` counts as "no policy". The policy becomes a per-site
+  `sub_filter` plugin instance in the generated agent configuration.
+  Known limitations: the plugin does not inspect `content-encoding`, so
+  `gzip`/`br` responses are not rewritten (patterns cannot match compressed
+  bytes and the body is re-chunked); responses larger than 8 MiB pass
+  through untouched.
+
+### Changed
+
+- **Cache attribution: memory and disk are separate figures.**
+  `GET /api/v1/system/profile` module rows gained `disk_bytes` /
+  `disk_share`; the cache module's `mem_bytes` now reports real memory —
+  the on-disk index plus `in_flight_bytes` (the read buffers of objects
+  being streamed out) — instead of the backend's disk footprint it
+  previously misreported as memory. Large cached objects (> 256 KiB) are
+  served by chunked streaming (64 KiB per chunk, pingora writes each chunk
+  downstream before reading the next) instead of being read whole into
+  memory; small objects stay inline, and `in_flight_bytes` is charged
+  while a read is open and released to zero by an RAII guard when it
+  finishes.
+- **Cache plugin default `directory` is now a file cache.** An unset
+  `directory` selects `/tmp/pingwaf-cache` (file-backed) instead of the
+  in-memory backend; an explicit `directory = ""` or `memory://…` still
+  selects memory, so pre-existing configs keep their semantics by
+  construction. Note for containers: `/tmp` is often a tmpfs mount, so the
+  default can still consume memory and vanish with the container —
+  production should mount a volume or point the key at a persistent path.
+- **Migration 59 / 60.** `site_routes.upstream_host TEXT NULL` and
+  `sites.response_replace JSONB NULL`; both default to `NULL`, nothing is
+  backfilled and existing behaviour is unchanged until the new fields are
+  set.
+
+### Fixed
+
+- **Duplicate origin in one pool is rejected with `400`.** Creating or
+  updating an upstream whose address already exists in the same pool now
+  fails (`"upstream <address> already exists in this pool"`) instead of
+  letting pingap keep two identical backends and balance every request
+  onto the same server twice. The same address in another pool remains
+  allowed, and re-sending an unchanged address on update excludes the row
+  itself, so it is a no-op rather than a self-collision.
+- **`GET /agents` gained `name` and `last_seen` aliases.** `name` mirrors
+  `hostname` and `last_seen` mirrors `last_heartbeat` — the names the
+  node view (`GET /system/nodes`) uses — while the original fields stay,
+  so existing callers keep working.
+- **The cache module's memory attribution no longer reports disk usage.**
+  The file backend published `current_size` — the **disk** footprint —
+  through the memory gauge, so a multi-GiB on-disk cache read as multi-GiB
+  RSS in the `cache` row. The disk figure moved to the new
+  `disk_bytes` / `disk_share` fields (see Changed above).
+
 ## [PingWAF 0.28.1] — 2026-10-20
 
 ### Fixed

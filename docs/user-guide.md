@@ -133,9 +133,20 @@ Routes dispatch requests to different pools by path; unmatched traffic goes to t
 | Path | Starts with `/` (e.g., `/api`), or a regular expression (e.g., `^/static/.*`) |
 | Priority weight | 1–60000; empty uses the auto weight (exact 1024 / prefix 512 / regex 256) |
 | Target pool | Pool that receives matching traffic |
+| Upstream host | Optional; overrides the `Host` header the origin sees for this route. Empty = forward the client's `Host` (historic behaviour) |
 | Enabled | Toggle a route without deleting it |
 
 A prefix route on `/` is rejected: it would conflict with the default-pool fallback.
+
+**Upstream host.** Fill this in when the route's pool fronts a virtual host
+that routes by `Host` — for example a mirror route to `google.com`: without
+an override the origin sees your site's domain and answers 404. The value
+must be a bare host name (at most 253 bytes, no scheme `://`, no path `/`,
+no whitespace or control characters; a port is accepted). Other rewrite
+knobs on the same route: **Strip path prefix** removes the matched prefix
+(`/api/users` → `/users`), **Rewrite path** replaces the whole forwarded
+path — see the [API docs](api.md#post-sitessite_idroutes) for exact
+semantics.
 
 ## WAF Configuration
 
@@ -380,6 +391,44 @@ Examples:
 - Strip `/api/v1` prefix: match `^/api/v1/(.*)` → replace `/$1`
 - Add security headers: `X-Frame-Options: DENY`
 - Remove `Server` header from responses
+
+### Response Body Replacement
+
+Beyond headers, a site can rewrite strings inside response bodies. Configure
+it on the site (via the dashboard's site settings or
+`PUT /api/v1/sites/{site_id}` with a `response_replace` object — see the
+[API docs](api.md#put-sitessite_id) for the full field list):
+
+```json
+{
+  "path": "^/status",
+  "status_codes": [200],
+  "rules": [
+    { "pattern": "Google", "replacement": "PingWAF", "is_regex": false }
+  ]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `path` | Regex the request path must match; empty = every path |
+| `status_codes` | Status codes to rewrite; empty = all. Each entry 100–599 |
+| `rules` | Up to 20 replacements, applied in order |
+| `rules[].pattern` | Text (1–512 bytes) matched literally, or as a regex when `is_regex` is set (regex must compile) |
+| `rules[].replacement` | Substitution text (1–2048 bytes); with `is_regex`, `$1` / `$name` refer to capture groups |
+| `rules[].is_regex` | Compile `pattern` as a regex instead of a literal |
+
+Two hard constraints, enforced with a `400` at save time: a rule's pattern
+or replacement may **not contain a single quote**, and neither side may be
+empty. Clearing the policy is done with `null` — or an empty `rules` list,
+which counts as "no policy".
+
+**Compressed responses are not rewritten.** The replacement runs on the raw
+response bytes and does not check `content-encoding`: for `gzip` / `br`
+responses the patterns do not match, so nothing is replaced (and the body is
+merely re-chunked). If the origin serves compressed bodies on paths you
+rewrite, disable that compression at the origin for those paths. Responses
+**larger than 8 MiB** are passed through untouched.
 
 ## Custom Error Pages
 

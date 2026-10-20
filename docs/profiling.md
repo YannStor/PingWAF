@@ -138,13 +138,13 @@ curl -k -H "Authorization: Bearer $TOKEN" \
   "total_cpu_ms": 48213.4,
   "total_elapsed_ms": 48213.4,
   "modules": [
-    { "module": "proxy",   "cpu_ms": 30102.1, "cpu_share": 0.62, "elapsed_ms": 30102.1, "elapsed_share": 0.62, "mem_bytes": 41943040, "mem_share": 0.55, "calls": 102341, "avg_us": 294.1 },
-    { "module": "waf",     "cpu_ms": 11101.2, "cpu_share": 0.23, "elapsed_ms": 11101.2, "elapsed_share": 0.23, "mem_bytes": 8388608,  "mem_share": 0.11, "calls": 98111,  "avg_us": 113.1 },
-    { "module": "cache",   "cpu_ms": 4000.8,  "cpu_share": 0.08, "elapsed_ms": 4000.8,  "elapsed_share": 0.08, "mem_bytes": 15728640, "mem_share": 0.21, "calls": 44120,  "avg_us": 90.7 },
-    { "module": "plugin",  "cpu_ms": 1500.1,  "cpu_share": 0.03, "elapsed_ms": 1500.1,  "elapsed_share": 0.03, "mem_bytes": 2097152,  "mem_share": 0.03, "calls": 30112,  "avg_us": 49.8 },
-    { "module": "db",      "cpu_ms": 1000.6,  "cpu_share": 0.02, "elapsed_ms": 1000.6,  "elapsed_share": 0.02, "mem_bytes": 1048576,  "mem_share": 0.01, "calls": 2140,   "avg_us": 467.6 },
-    { "module": "control", "cpu_ms": 400.2,   "cpu_share": 0.01, "elapsed_ms": 400.2,   "elapsed_share": 0.01, "mem_bytes": 524288,   "mem_share": 0.01, "calls": 980,    "avg_us": 408.4 },
-    { "module": "other",   "cpu_ms": 108.4,   "cpu_share": 0.00, "elapsed_ms": 108.4,   "elapsed_share": 0.00, "mem_bytes": 0,        "mem_share": 0.00, "calls": 210,    "avg_us": 516.2 }
+    { "module": "proxy",   "cpu_ms": 30102.1, "cpu_share": 0.62, "elapsed_ms": 30102.1, "elapsed_share": 0.62, "mem_bytes": 41943040, "mem_share": 0.55, "disk_bytes": 0,        "disk_share": 0.00, "calls": 102341, "avg_us": 294.1 },
+    { "module": "waf",     "cpu_ms": 11101.2, "cpu_share": 0.23, "elapsed_ms": 11101.2, "elapsed_share": 0.23, "mem_bytes": 8388608,  "mem_share": 0.11, "disk_bytes": 0,        "disk_share": 0.00, "calls": 98111,  "avg_us": 113.1 },
+    { "module": "cache",   "cpu_ms": 4000.8,  "cpu_share": 0.08, "elapsed_ms": 4000.8,  "elapsed_share": 0.08, "mem_bytes": 15728640, "mem_share": 0.21, "disk_bytes": 734003200, "disk_share": 1.00, "calls": 44120,  "avg_us": 90.7 },
+    { "module": "plugin",  "cpu_ms": 1500.1,  "cpu_share": 0.03, "elapsed_ms": 1500.1,  "elapsed_share": 0.03, "mem_bytes": 2097152,  "mem_share": 0.03, "disk_bytes": 0,        "disk_share": 0.00, "calls": 30112,  "avg_us": 49.8 },
+    { "module": "db",      "cpu_ms": 1000.6,  "cpu_share": 0.02, "elapsed_ms": 1000.6,  "elapsed_share": 0.02, "mem_bytes": 1048576,  "mem_share": 0.01, "disk_bytes": 0,        "disk_share": 0.00, "calls": 2140,   "avg_us": 467.6 },
+    { "module": "control", "cpu_ms": 400.2,   "cpu_share": 0.01, "elapsed_ms": 400.2,   "elapsed_share": 0.01, "mem_bytes": 524288,   "mem_share": 0.01, "disk_bytes": 0,        "disk_share": 0.00, "calls": 980,    "avg_us": 408.4 },
+    { "module": "other",   "cpu_ms": 108.4,   "cpu_share": 0.00, "elapsed_ms": 108.4,   "elapsed_share": 0.00, "mem_bytes": 0,        "mem_share": 0.00, "disk_bytes": 0,        "disk_share": 0.00, "calls": 210,    "avg_us": 516.2 }
   ],
   "methods": [
     { "method": "waf::handle_request",   "cpu_ms": 9200.4, "elapsed_ms": 9200.4, "calls": 98111, "avg_us": 93.8 },
@@ -207,8 +207,64 @@ curl -k -H "Authorization: Bearer $TOKEN" \
 - **Memory** — *reported*, not intercepted. Modules that own large structures
   (cache capacity, WAF body buffers, log batches) publish their current byte
   count; nothing hooks the allocator, so this works with any allocator and on
-  any platform. `mem_bytes` is "bytes currently held", not cumulative
-  allocation.
+  any platform. `mem_bytes` is "bytes currently held **in memory**", not
+  cumulative allocation.
+- **Disk** — *reported*, same mechanism, separate figure. `disk_bytes` is the
+  module's on-disk footprint and is published only by the cache module; every
+  other module reports `0`. See
+  [Memory vs. disk in the cache module](#memory-vs-disk-in-the-cache-module).
+
+### Memory vs. disk in the cache module
+
+The `cache` row is the only one that reports both figures, and the two must
+not be read as one number:
+
+- **`mem_bytes` — real memory**: the on-disk index structures **plus**
+  `in_flight_bytes`, the read buffers of objects currently being served out
+  of the cache. A cache that stores everything on disk should not make the
+  process look like it holds every cached byte in RAM.
+- **`disk_bytes` — disk footprint**: what the cache backend currently
+  occupies on its storage directory. Unbounded by the process's memory; the
+  quota (if configured) applies to this figure, not to `mem_bytes`.
+
+**Why the split exists.** Earlier releases published the backend's
+`current_size` — the **disk** footprint — through the memory gauge, so the
+`cache` module row reported disk usage as memory. A file-backed cache of a
+few GiB read as a few GiB of RSS and the module table misranked the memory
+hotspots. The fix moved the disk figure to its own gauge
+(`disk_bytes` / `disk_share`); `mem_bytes` now counts index + in-flight
+buffers only.
+
+**Streaming reads and `in_flight_bytes`.** Objects larger than the inline
+threshold (256 KiB) are never read fully into memory on a hit: the backend
+hands back an open file handle and the body is streamed to the client in
+64 KiB chunks (pingora writes each chunk downstream before the next is
+read). While the hit is being served, `in_flight_bytes` carries the chunk
+budget (plus inline objects being read); when the read finishes — success
+or error — an RAII guard releases it, so `in_flight_bytes` returns to zero
+and does not leak. Small objects stay inline (single buffer, same RAII
+release). A plain miss charges nothing.
+
+### Cache storage directory and its memory impression
+
+The cache plugin's `directory` configuration key decides whether the cache
+is file-backed or in-memory:
+
+- **Unset** now defaults to **`/tmp/pingwaf-cache`** (a file-backed cache).
+  Earlier releases defaulted to the in-memory backend, so an upgrade changes
+  behaviour for every config that never set the key: the cache's bytes move
+  from the process's memory (`mem_bytes` / RSS) to the storage directory,
+  where the `cache` module row reports them as `disk_bytes`.
+- **`directory = ""` or `memory://`** still selects the in-memory backend —
+  this is how every config written before the default existed keeps its
+  semantics.
+
+> **Containers: `/tmp` is often tmpfs.** Inside a container `/tmp` commonly
+> is a tmpfs mount — a file-backed cache under it then consumes **memory**
+> (it counts against the container's memory limit) and disappears with the
+> container. In production either mount a real volume at the cache directory
+> or point `directory` at a persistent path (e.g.
+> `directory = "/var/lib/pingwaf/cache"`).
 
 ### Response fields
 
@@ -220,7 +276,8 @@ curl -k -H "Authorization: Bearer $TOKEN" \
 | `modules[].module` | Module key |
 | `modules[].cpu_ms` / `elapsed_ms` | Cumulative **wall-clock** time attributed to the module (ms); the two fields always carry the same value |
 | `modules[].cpu_share` / `elapsed_share` | Share of the total attributed wall-clock time, 0.0–1.0 |
-| `modules[].mem_bytes` / `mem_share` | Bytes the module currently reports as held, and its share of the total |
+| `modules[].mem_bytes` / `mem_share` | Bytes the module currently reports as held in memory, and its share of the total |
+| `modules[].disk_bytes` / `disk_share` | Bytes the module currently occupies on disk, and its share of the total — reported only by the cache module (`0` elsewhere) |
 | `modules[].calls` / `avg_us` | Number of timed operations and average microseconds per operation |
 | `methods` | Method rows, hottest first, capped at 40 |
 | `methods[].method` | Call-site name (from the compile-time static enumeration) |

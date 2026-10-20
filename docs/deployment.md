@@ -669,6 +669,32 @@ route afterwards and enable **Strip path prefix** (`strip_prefix: true`, so
 `/api/users` is forwarded as `/users`) or set a fixed **Rewrite path**
 (`rewrite_path`), both of which were previously impossible.
 
+Migration 59 adds `site_routes.upstream_host` (`TEXT NULL`) and migration 60
+adds `sites.response_replace` (`JSONB NULL`). Both columns default to `NULL`
+and nothing backfills them, so after upgrading every route keeps forwarding
+the client's `Host` header and no site performs response-body replacement —
+behaviour is identical until you set the new fields (route
+[Upstream Host](#upstream-host-override) override; site
+[response replacement](user-guide.md#response-body-replacement)).
+
+**Cache storage default changed: unset `directory` is now a file cache.**
+Earlier releases made the cache plugin's `directory` key default to the
+in-memory backend. It now defaults to `/tmp/pingwaf-cache` — a file-backed
+cache. This affects every configuration that never set the key:
+
+- To keep the in-memory backend exactly as before, set the key explicitly:
+  `directory = ""` (or `directory = "memory://…"`).
+- If you accept the file cache, prefer a persistent path — inside a
+  container `/tmp` is usually a tmpfs mount, where the cache consumes
+  **memory** (it counts against the container's memory limit) and vanishes
+  with the container. Mount a volume at the cache directory or point
+  `directory` at a real path, e.g. `directory = "/var/lib/pingwaf/cache"`.
+- Whichever backend you run, the module attribution table now reports the
+  cache's disk footprint separately (`disk_bytes` on the `cache` row of
+  `GET /api/v1/system/profile`); memory attribution counts only the index
+  plus the read buffers of objects being streamed out — see
+  [Profiling](profiling.md#memory-vs-disk-in-the-cache-module).
+
 The System observation UI moved: the card on the settings page is gone, and
 the full view (overview, memory detail, module attribution, top methods)
 now lives on the dedicated `/system` page — admin-only, reachable from the

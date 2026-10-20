@@ -483,6 +483,44 @@ every origin pool under the site. It only applies to pools whose own
 `verify_cert` is `null` — see [origin pools](#post-sitessite_idupstream-pools) for the
 full precedence order.
 
+#### Response body replacement (`response_replace`)
+
+`response_replace` (JSON object or `null`) rewrites strings in response
+bodies served by the site. Omitting the key leaves the stored policy
+unchanged; `null` clears it; a policy with `rules: []` is treated as cleared
+too. The document:
+
+```json
+{
+  "path": "^/status",
+  "status_codes": [200],
+  "rules": [
+    { "pattern": "Google", "replacement": "PingWAF", "is_regex": false }
+  ]
+}
+```
+
+- `path` — regex the request path must match; empty applies to every path.
+- `status_codes` — status codes the replacement applies to; empty applies to
+  all. Each entry must be 100–599.
+- `rules` — applied in order, at most 20. `pattern` (1–512 bytes) is matched
+  literally unless `is_regex` is `true`, in which case it must compile as a
+  regex and `replacement` supports `$1` / `$name` capture references;
+  `replacement` is 1–2048 bytes. Neither side may contain a **single quote**
+  (the data plane's rule syntax delimits pattern and replacement with `'`),
+  and neither may be empty.
+
+Violations are rejected with `400` at write time — a rule the data plane
+cannot build would otherwise take down the whole agent configuration for the
+site. The policy becomes a per-site `sub_filter` plugin instance in the
+generated agent configuration.
+
+Known limitations: the replacement runs on the raw response bytes, so for
+**compressed** responses (`gzip` / `br`, where the plugin does not inspect
+`content-encoding`) the patterns do not match and the body is only re-chunked;
+responses **larger than 8 MiB** are passed through untouched.
+
+
 ### DELETE /sites/{site_id}
 
 Delete a site and all associated resources.
@@ -515,6 +553,15 @@ stripped (copy-pasting a URL is normal), a trailing `/` is ignored, and anything
 longer — a path, query or fragment — is rejected with `400` rather than silently
 dropped, because a dropped path also corrupts the SNI derived from the host. To
 speak TLS to the origin set `tls: true` or give the pool an `sni`.
+
+An address that already exists **in the same pool** is rejected with `400`
+(`"upstream <address> already exists in this pool"`): two identical nodes in
+one pool are never a load-balancing decision — every request would be
+balanced onto the same server twice and the duplicate only doubles the
+health-check load. The same address in *another* pool stays allowed (mirroring
+one origin into two pools is a legitimate setup). On update, the row being
+changed is excluded from the check, so re-sending an unchanged address is a
+no-op, not a self-collision.
 
 ### PUT /sites/{site_id}/upstreams/{upstream_id}
 
@@ -585,6 +632,7 @@ List path-based routes for a site, highest priority first. Each route:
   "ip_group_name": null,
   "strip_prefix": false,
   "rewrite_path": null,
+  "upstream_host": null,
   "created_at": "2024-01-01T00:00:00Z"
 }
 ```
@@ -604,7 +652,8 @@ Create a route.
   "pool_id": "uuid",
   "ip_group_id": "uuid",
   "strip_prefix": false,
-  "rewrite_path": null
+  "rewrite_path": null,
+  "upstream_host": null
 }
 ```
 
@@ -641,6 +690,26 @@ without the prefix, create a `prefix` route on `/api` with
 `strip_prefix: true` — `/api/users` reaches the origin as `/users`. To send
 everything under `/legacy` to a fixed upstream path instead, set
 `rewrite_path: "/v2"`.
+
+#### Upstream Host override (`upstream_host`)
+
+`upstream_host` (string or `null`) overrides the `Host` header the origin
+sees for requests the route matched. Unset (the default) forwards the
+client's `Host` unchanged — the behaviour every existing route relies on. It
+is required when the pool's origins are virtual hosts that route by
+`Host` (e.g. a mirror route to `google.com`): without it the origin sees
+your site's domain and answers 404.
+
+Validation — saving fails with `400` unless the value is a bare host name:
+
+- at most 253 bytes;
+- no scheme (`://`), no path (`/`), no whitespace, no control characters.
+  A port is accepted (`internal.example.com:8080`).
+
+On `PUT`, `upstream_host` follows the same tri-state pattern as
+`rewrite_path` — absent leaves the stored value, `null` or a blank string
+clears it, a value replaces it. The override applies only to the traffic the
+route matched; every other request keeps forwarding the client's `Host`.
 
 A route with an IP group only matches clients whose address is inside one of the
 group's CIDR ranges. Both conditions are ANDed, so the route above sends
@@ -1143,6 +1212,7 @@ List registered agents.
       "site_id": "uuid",
       "site_domain": "example.com",
       "hostname": "edge-01",
+      "name": "edge-01",
       "ip_address": "10.0.1.5",
       "version": "0.25.0",
       "os_info": "Linux 6.1.0",
@@ -1150,6 +1220,7 @@ List registered agents.
       "memory_bytes": 8589934592,
       "status": "online",
       "last_heartbeat": "2024-01-01T12:00:00Z",
+      "last_seen": "2024-01-01T12:00:00Z",
       "registered_at": "2024-01-01T00:00:00Z",
       "last_config_sync_at": "2024-01-01T11:58:00Z",
       "last_policy_sync_at": "2024-01-01T11:58:00Z",
@@ -1160,6 +1231,12 @@ List registered agents.
   "total": 1
 }
 ```
+
+`name` is an alias of `hostname` — the inventory stores one identity per
+node, and the node view (`GET /system/nodes`) names it `name`; carrying both
+keeps one shape for the console without breaking callers that read
+`hostname`. `last_seen` is likewise an alias of `last_heartbeat`
+(`null` = the agent has never heartbeated).
 
 ### POST /agents/enroll
 
@@ -3301,6 +3378,93 @@ endpoints — see [Profiling](profiling.md#what-changed-vs-pprof) for the
 migration table). Both endpoints require an admin token, work on every
 platform and in every build, and have no enable switch.
 
+### GET /system/nodes
+
+The fleet view in one request: the control-plane process's own counters plus
+one row per registered agent — what the dashboard's node table renders. It is
+the only endpoint that answers "how loaded is the fleet" in one call.
+
+**Response (200):**
+
+```json
+{
+  "control": {
+    "process_cpu_percent": 12.5,
+    "host_cpu_percent": 8.1,
+    "cores": 4,
+    "rss_bytes": 120258048,
+    "rss_peak_bytes": 154140467,
+    "requests": 980,
+    "avg_elapsed_ms": 0.4084
+  },
+  "agents": [
+    {
+      "id": "uuid",
+      "name": "edge-01",
+      "status": "online",
+      "cpu_percent": 23.4,
+      "memory_bytes": 1073741824,
+      "connections": 128,
+      "rps": null,
+      "sites": 1,
+      "last_seen": "2024-01-01T12:00:00Z"
+    }
+  ]
+}
+```
+
+(Values are illustrative.)
+
+**`control`** — the process serving the request:
+
+| Field | Meaning |
+|-------|---------|
+| `process_cpu_percent` | CPU used by this process, percent of one core (can exceed 100) |
+| `host_cpu_percent` | Machine-wide CPU usage, percent |
+| `cores` | Cores on the machine |
+| `rss_bytes` / `rss_peak_bytes` | Process RSS now / peak since start, bytes (`0` where the OS does not expose the peak) |
+| `requests` | Requests the profiler attributed to the `control` module (cumulative since start) |
+| `avg_elapsed_ms` | Mean wall-clock time per attributed control request, in milliseconds |
+
+The `control` CPU figures come from the same probe samples as
+`GET /system/metrics` (a ~5 s interval), **not** from the heartbeat counters
+an agent reports — those carry the average since boot instead, a different
+measure (see the caveat below).
+
+**`agents[]`** — one row per registered agent, ordered by `name` so the
+table does not reshuffle between polls:
+
+| Field | Meaning |
+|-------|---------|
+| `id` | Agent id |
+| `name` | Display name — the inventory keeps one identity per node, its `hostname` |
+| `status` | `online` / `offline` / `degraded`, as last reported |
+| `cpu_percent` | CPU load of the node, percent; `null` = no sample retained yet |
+| `memory_bytes` | Memory in use on the node, bytes; `null` = no sample retained yet |
+| `connections` | Connections currently handled by the edge process; `null` = never reported (e.g. metric shipping disabled) |
+| `rps` | Requests per second handled by the edge; **`null` for every node today** — the heartbeat carries the counter but the control plane retains no per-agent copy, so the field has no data source. It stays in the contract because it is the figure operators ask for first |
+| `sites` | Sites this agent serves: `1` for a bound agent; for a global (unbound) agent, every site of its API key's owner — the same visibility the config push uses |
+| `last_seen` | Last heartbeat, server time; `null` = never heard from |
+
+Fields the control plane does not know yet are `null` rather than `0`: a
+node that has never heartbeated reporting "0 %" would read as an idle node
+instead of an unknown one.
+
+Known caveats, unchanged behaviour the numbers must be read with:
+
+- The heartbeat's `cpu_usage_percent` is the **average since boot**; the
+  `cpu_percent` here comes from the agent's newest host probe sample (a ~5 s
+  interval measurement), so it can move sharply between polls.
+- `agents.memory_bytes` has a semantic drift: **before the agent's first
+  heartbeat** it carries the host's *total* memory (the registration
+  inventory value), afterwards the *used* memory from the probe samples.
+  This is not fixed yet — treat the first-poll value accordingly.
+
+```bash
+curl -k -H "Authorization: Bearer $TOKEN" \
+  "https://localhost:9080/api/v1/system/nodes"
+```
+
 ### GET /system/metrics
 
 Point-in-time snapshot of process/host CPU and memory. No sampling and no
@@ -3399,8 +3563,8 @@ snapshots and compare deltas for a live view.
   "total_cpu_ms": 48213.4,
   "total_elapsed_ms": 48213.4,
   "modules": [
-    { "module": "proxy",  "cpu_ms": 30102.1, "cpu_share": 0.62, "elapsed_ms": 30102.1, "elapsed_share": 0.62, "mem_bytes": 41943040, "mem_share": 0.55, "calls": 102341, "avg_us": 294.1 },
-    { "module": "waf",    "cpu_ms": 11101.2, "cpu_share": 0.23, "elapsed_ms": 11101.2, "elapsed_share": 0.23, "mem_bytes": 8388608,  "mem_share": 0.11, "calls": 98111,  "avg_us": 113.1 }
+    { "module": "proxy",  "cpu_ms": 30102.1, "cpu_share": 0.62, "elapsed_ms": 30102.1, "elapsed_share": 0.62, "mem_bytes": 41943040, "mem_share": 0.55, "disk_bytes": 0,       "disk_share": 0.00, "calls": 102341, "avg_us": 294.1 },
+    { "module": "waf",    "cpu_ms": 11101.2, "cpu_share": 0.23, "elapsed_ms": 11101.2, "elapsed_share": 0.23, "mem_bytes": 8388608,  "mem_share": 0.11, "disk_bytes": 0,       "disk_share": 0.00, "calls": 98111,  "avg_us": 113.1 }
   ],
   "methods": [
     { "method": "waf::handle_request",  "cpu_ms": 9200.4, "elapsed_ms": 9200.4, "calls": 98111, "avg_us": 93.8 },
@@ -3413,10 +3577,16 @@ snapshots and compare deltas for a live view.
   `plugin`, `db`, `control`, `other` (anything not yet instrumented).
   `cpu_share` / `elapsed_share` are the share of the total attributed
   wall-clock time (`total_cpu_ms` / `total_elapsed_ms`, always equal);
-  `mem_bytes` is bytes the module currently reports as held (reported, not
-  intercepted — no allocator hook), with `mem_share` its share of the total;
-  `calls` / `avg_us` are the timed operation count and average microseconds
-  per operation.
+  `mem_bytes` is bytes the module currently reports as **held in memory**
+  (reported, not intercepted — no allocator hook), with `mem_share` its share
+  of the total; `disk_bytes` / `disk_share` are the module's **on-disk**
+  footprint and its share — a separate figure reported only by the cache
+  module (every other module reports `0`), so a file-backed cache no longer
+  inflates the memory row. For the cache module `mem_bytes` is the on-disk
+  index plus the read buffers of objects being streamed out
+  (`in_flight_bytes`); see [Profiling](profiling.md#memory-vs-disk-in-the-cache-module)
+  for the exact accounting. `calls` / `avg_us` are the timed operation count
+  and average microseconds per operation.
 - `methods` — named call sites, hottest first, capped at 40 rows. Method
   names come from a compile-time static enumeration (the instrumented call
   sites: `proxy::request_filter`, `waf::handle_request`,

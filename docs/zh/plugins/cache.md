@@ -10,7 +10,7 @@ HTTP 响应缓存，后端可为内存 [TinyUFO](https://github.com/cloudflare/p
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `category` | string | — | 必须为 `cache`。 |
-| `directory` | string | 内存 | 空或 `memory://…` 选内存后端；其他值作为文件缓存目录。 |
+| `directory` | string | `/tmp/pingwaf-cache` | 未设置时为文件缓存（该默认路径；容器内 `/tmp` 常为 tmpfs，生产应指向持久路径）。显式设为空或 `memory://…` 选内存后端；其他值作为文件缓存目录。 |
 | `namespace` | string | — | 隔离条目；文件后端时成为子目录。 |
 | `headers` | string[] | — | 追加到缓存键的请求头（变体缓存）。 |
 | `vary_headers` | string[] | — | 源站 `Vary` 响应头的白名单：响应若列出了白名单之外的请求头则**整体不缓存**。不设则接受源站列出的全部。 |

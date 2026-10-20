@@ -116,13 +116,13 @@ curl -k -H "Authorization: Bearer $TOKEN" \
   "total_cpu_ms": 48213.4,
   "total_elapsed_ms": 48213.4,
   "modules": [
-    { "module": "proxy",   "cpu_ms": 30102.1, "cpu_share": 0.62, "elapsed_ms": 30102.1, "elapsed_share": 0.62, "mem_bytes": 41943040, "mem_share": 0.55, "calls": 102341, "avg_us": 294.1 },
-    { "module": "waf",     "cpu_ms": 11101.2, "cpu_share": 0.23, "elapsed_ms": 11101.2, "elapsed_share": 0.23, "mem_bytes": 8388608,  "mem_share": 0.11, "calls": 98111,  "avg_us": 113.1 },
-    { "module": "cache",   "cpu_ms": 4000.8,  "cpu_share": 0.08, "elapsed_ms": 4000.8,  "elapsed_share": 0.08, "mem_bytes": 15728640, "mem_share": 0.21, "calls": 44120,  "avg_us": 90.7 },
-    { "module": "plugin",  "cpu_ms": 1500.1,  "cpu_share": 0.03, "elapsed_ms": 1500.1,  "elapsed_share": 0.03, "mem_bytes": 2097152,  "mem_share": 0.03, "calls": 30112,  "avg_us": 49.8 },
-    { "module": "db",      "cpu_ms": 1000.6,  "cpu_share": 0.02, "elapsed_ms": 1000.6,  "elapsed_share": 0.02, "mem_bytes": 1048576,  "mem_share": 0.01, "calls": 2140,   "avg_us": 467.6 },
-    { "module": "control", "cpu_ms": 400.2,   "cpu_share": 0.01, "elapsed_ms": 400.2,   "elapsed_share": 0.01, "mem_bytes": 524288,   "mem_share": 0.01, "calls": 980,    "avg_us": 408.4 },
-    { "module": "other",   "cpu_ms": 108.4,   "cpu_share": 0.00, "elapsed_ms": 108.4,   "elapsed_share": 0.00, "mem_bytes": 0,        "mem_share": 0.00, "calls": 210,    "avg_us": 516.2 }
+    { "module": "proxy",   "cpu_ms": 30102.1, "cpu_share": 0.62, "elapsed_ms": 30102.1, "elapsed_share": 0.62, "mem_bytes": 41943040, "mem_share": 0.55, "disk_bytes": 0,        "disk_share": 0.00, "calls": 102341, "avg_us": 294.1 },
+    { "module": "waf",     "cpu_ms": 11101.2, "cpu_share": 0.23, "elapsed_ms": 11101.2, "elapsed_share": 0.23, "mem_bytes": 8388608,  "mem_share": 0.11, "disk_bytes": 0,        "disk_share": 0.00, "calls": 98111,  "avg_us": 113.1 },
+    { "module": "cache",   "cpu_ms": 4000.8,  "cpu_share": 0.08, "elapsed_ms": 4000.8,  "elapsed_share": 0.08, "mem_bytes": 15728640, "mem_share": 0.21, "disk_bytes": 734003200, "disk_share": 1.00, "calls": 44120,  "avg_us": 90.7 },
+    { "module": "plugin",  "cpu_ms": 1500.1,  "cpu_share": 0.03, "elapsed_ms": 1500.1,  "elapsed_share": 0.03, "mem_bytes": 2097152,  "mem_share": 0.03, "disk_bytes": 0,        "disk_share": 0.00, "calls": 30112,  "avg_us": 49.8 },
+    { "module": "db",      "cpu_ms": 1000.6,  "cpu_share": 0.02, "elapsed_ms": 1000.6,  "elapsed_share": 0.02, "mem_bytes": 1048576,  "mem_share": 0.01, "disk_bytes": 0,        "disk_share": 0.00, "calls": 2140,   "avg_us": 467.6 },
+    { "module": "control", "cpu_ms": 400.2,   "cpu_share": 0.01, "elapsed_ms": 400.2,   "elapsed_share": 0.01, "mem_bytes": 524288,   "mem_share": 0.01, "disk_bytes": 0,        "disk_share": 0.00, "calls": 980,    "avg_us": 408.4 },
+    { "module": "other",   "cpu_ms": 108.4,   "cpu_share": 0.00, "elapsed_ms": 108.4,   "elapsed_share": 0.00, "mem_bytes": 0,        "mem_share": 0.00, "disk_bytes": 0,        "disk_share": 0.00, "calls": 210,    "avg_us": 516.2 }
   ],
   "methods": [
     { "method": "waf::handle_request",   "cpu_ms": 9200.4, "elapsed_ms": 9200.4, "calls": 98111, "avg_us": 93.8 },
@@ -144,7 +144,28 @@ curl -k -H "Authorization: Bearer $TOKEN" \
 
 - **模块**——进程的功能域记录在定长的原子数组中。每个被插桩的作用域用一次 `fetch_add` 把耗时累加进所属模块；响应中始终出现 7 个模块：`proxy`、`waf`、`cache`、`plugin`、`db`、`control`、`other`（尚未插桩的部分）。
 - **方法**——具名调用点用 `timed_method` 计时。调用点集合是编译期静态枚举（见「[口径](#口径这些数字是什么不是什么)」），记账是每请求四次 relaxed 原子加（方法行两次、模块行两次）——无哈希查找、无分配。
-- **内存**——**上报**而非拦截。拥有大块结构的模块（缓存容量、WAF body 缓冲、日志批次）自行发布当前字节数；没有分配器钩子，因此适配任何分配器与任何平台。`mem_bytes` 是「当前持有的字节数」，不是累计分配量。
+- **内存**——**上报**而非拦截。拥有大块结构的模块（缓存容量、WAF body 缓冲、日志批次）自行发布当前字节数；没有分配器钩子，因此适配任何分配器与任何平台。`mem_bytes` 是「当前**在内存中**持有的字节数」，不是累计分配量。
+- **磁盘**——同一机制上报的**独立**指标。`disk_bytes` 是模块在磁盘上的占用，仅由 cache 模块发布，其余模块恒为 `0`。详见「[cache 模块的内存与磁盘口径](#cache-模块的内存与磁盘口径)」。
+
+### cache 模块的内存与磁盘口径
+
+`cache` 行是唯一同时上报两类数字的行，两者不可读作一个数：
+
+- **`mem_bytes`——真实内存**：磁盘上的索引结构**加上** `in_flight_bytes`（正在从缓存读出服务的对象的读缓冲）。磁盘缓存的体量不应让进程看起来像把每个缓存字节都装进了内存。
+- **`disk_bytes`——磁盘占用**：缓存后端当前在其存储目录中的占用。不受进程内存限制；配置的磁盘配额（如有）约束的是这一数字，而非 `mem_bytes`。
+
+**为什么要拆分。** 早先版本把后端的 `current_size`——**磁盘**占用——通过内存量表发布，于是 `cache` 模块行把磁盘用量当内存报。几 GiB 的文件缓存读起来就像几 GiB 的 RSS，模块表随之错排内存热点。修复将磁盘数字移到独立量表（`disk_bytes` / `disk_share`）；`mem_bytes` 现在只计索引 + 在读缓冲。
+
+**流式读取与 `in_flight_bytes`。** 超过内联阈值（256 KiB）的对象在命中时绝不整体读入内存：后端交回一个打开的文件句柄，响应体按 64 KiB 分块流式发给客户端（pingora 写出每一块后才读下一块）。命中被服务期间，`in_flight_bytes` 记入分块预算（以及正在读取的内联对象）；读取结束——无论成功还是出错——RAII 守卫即释放它，`in_flight_bytes` 归零、不泄漏。小对象保持内联（单缓冲，同样的 RAII 释放）。未命中不产生任何记账。
+
+### 缓存存储目录与其内存印象
+
+cache 插件的 `directory` 配置键决定缓存是文件后端还是内存后端：
+
+- **未设置**时现在的默认值是 **`/tmp/pingwaf-cache`**（文件后端）。更早版本的默认值是内存后端，因此升级会改变每个从未设置该键的配置的行为：缓存的字节从进程内存（`mem_bytes` / RSS）移到存储目录，`cache` 模块行以 `disk_bytes` 报告它们。
+- **`directory = ""` 或 `memory://`** 仍然选择内存后端——在此默认值出现之前写下的每份配置都由此保持原语义。
+
+> **容器内 `/tmp` 常为 tmpfs。** 容器内的 `/tmp` 通常是 tmpfs 挂载——指向它的文件缓存实际消耗的是**内存**（计入容器内存限额），且随容器一起消失。生产环境应在缓存目录挂载真实卷，或把 `directory` 指向持久路径（如 `directory = "/var/lib/pingwaf/cache"`）。
 
 ### 响应字段
 
@@ -156,7 +177,8 @@ curl -k -H "Authorization: Bearer $TOKEN" \
 | `modules[].module` | 模块键 |
 | `modules[].cpu_ms` / `elapsed_ms` | 归因到该模块的累计**墙钟**耗时（毫秒）；两字段取值恒等 |
 | `modules[].cpu_share` / `elapsed_share` | 占总归因墙钟时间的比例，0.0–1.0 |
-| `modules[].mem_bytes` / `mem_share` | 模块当前上报持有的字节数，及其占总量的比例 |
+| `modules[].mem_bytes` / `mem_share` | 模块当前上报**在内存中**持有的字节数，及其占总量的比例 |
+| `modules[].disk_bytes` / `disk_share` | 模块当前在磁盘上的占用字节数，及其占总量的比例——仅 cache 模块上报（其余为 `0`） |
 | `modules[].calls` / `avg_us` | 计时操作次数与平均每次微秒数 |
 | `methods` | 方法行，最热在前，最多 40 行 |
 | `methods[].method` | 调用点名称（来自编译期静态枚举） |
