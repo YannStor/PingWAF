@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{AddressFamily, Discovery, LOG_TARGET, STATIC_DISCOVERY};
+use super::{AddressFamily, Discovery, Error, LOG_TARGET, STATIC_DISCOVERY};
 use super::{Result, format_addrs};
 use http::Extensions;
 use pingora::lb::discovery;
@@ -35,15 +35,15 @@ pub fn is_static_discovery(value: &str) -> bool {
     matches!(value, "" | STATIC_DISCOVERY)
 }
 
-/// Applies [`AddressFamily::Auto`]'s IPv4 preference to a resolved static
-/// pool. `Auto` must accept both families at the filter stage - it cannot
-/// know there is an IPv4 address to prefer until the whole set is in - so
-/// the preference is applied here instead: a dual-stack pool keeps only its
+/// Applies [`AddressFamily::Auto`]'s IPv4 preference to a resolved
+/// backend pool. `Auto` must accept both families at the filter stage - it
+/// cannot know there is an IPv4 address to prefer until the whole set is in -
+/// so the preference is applied here instead: a dual-stack pool keeps only its
 /// A records, because an AAAA backend on a host without an IPv6 route can
 /// never pass a health check. A pool with no IPv4 address at all keeps its
 /// IPv6 backends so an IPv6-only origin stays reachable. Pure memory work:
-/// no additional DNS.
-fn static_pool_prefers_ipv4(
+/// no additional DNS. Shared by the static pool and the DNS discovery path.
+pub(crate) fn prefer_ipv4_when_auto(
     mut upstreams: BTreeSet<Backend>,
     family: AddressFamily,
 ) -> BTreeSet<Backend> {
@@ -124,8 +124,22 @@ pub fn new_static_discovery(discovery: &Discovery) -> Result<Backends> {
             ext: Extensions::new(),
         })
         .collect();
-    let upstreams =
-        static_pool_prefers_ipv4(upstreams, discovery.address_family);
+    let upstreams = prefer_ipv4_when_auto(upstreams, discovery.address_family);
+
+    // An address-family pin (or an unresolvable host) that filters every
+    // configured address out must fail loudly: a silent empty pool used to
+    // boot fine and then answer 503 for the rest of its life. The condition
+    // also covers `auto` on a host that only resolves one family, so a
+    // startup typo surfaces at reload time instead of on the first request.
+    if upstreams.is_empty() && !discovery.addr.is_empty() {
+        return Err(Error::Invalid {
+            message: format!(
+                "new_static_discovery: no address matches address_family={} for {}",
+                discovery.address_family.as_str(),
+                discovery.addr.join(",")
+            ),
+        });
+    }
 
     // Generate the log message from the final, deduplicated set of backends.
     let resolved_addrs: Vec<String> =
@@ -255,5 +269,47 @@ mod tests {
             .map(|backend| backend.addr.to_string())
             .collect();
         assert_eq!(vec!["127.0.0.1:8080".to_string()], addrs);
+    }
+
+    /// A pin to a family the configured addresses do not provide is a
+    /// configuration error, not an empty pool: `ipv4` against an IPv6-only
+    /// literal (and vice versa) used to boot an empty `Backends` and answer
+    /// 503 for the process' whole lifetime. `auto` accepts a single family.
+    #[tokio::test]
+    async fn pinned_family_with_no_matching_address_is_an_error() {
+        let err = new_static_discovery(&Discovery {
+            addr: vec!["[::1]:8080".to_string()],
+            address_family: AddressFamily::Ipv4,
+            ..Default::default()
+        })
+        .err()
+        .expect("ipv4 pin with an IPv6-only address must be rejected");
+        assert_eq!(
+            "new_static_discovery: no address matches address_family=ipv4 \
+             for [::1]:8080",
+            err.to_string()
+        );
+
+        let err = new_static_discovery(&Discovery {
+            addr: vec!["127.0.0.1:8080".to_string()],
+            address_family: AddressFamily::Ipv6,
+            ..Default::default()
+        })
+        .err()
+        .expect("ipv6 pin with an IPv4-only address must be rejected");
+        assert_eq!(
+            "new_static_discovery: no address matches address_family=ipv6 \
+             for 127.0.0.1:8080",
+            err.to_string()
+        );
+
+        // `auto` keeps single-family pools working in both directions.
+        for addr in ["[::1]:8080", "127.0.0.1:8080"] {
+            new_static_discovery(&Discovery {
+                addr: vec![addr.to_string()],
+                ..Default::default()
+            })
+            .expect("auto must accept a single-family pool");
+        }
     }
 }

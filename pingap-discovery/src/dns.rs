@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::AddressFamily;
+use super::common::prefer_ipv4_when_auto;
 use super::{Addr, Error, Result, format_addrs};
 use super::{DNS_DISCOVERY, Discovery, LOG_TARGET};
 use async_trait::async_trait;
@@ -69,7 +71,7 @@ struct Discovered {
 
 /// DNS service discovery implementation
 struct Dns {
-    ipv4_only: bool,
+    address_family: AddressFamily,
     hosts: Vec<Addr>,
     sender: Option<Arc<NotificationSender>>,
     name_server: Option<String>,
@@ -92,15 +94,19 @@ impl Dns {
     /// # Arguments
     /// * `addrs` - List of addresses to resolve
     /// * `tls` - Whether to use TLS
-    /// * `ipv4_only` - Whether to only use IPv4 addresses
+    /// * `address_family` - Which address family backends may use
     ///
     /// # Returns
     /// * `Result<Self>` - New DNS discovery instance
-    fn new(addrs: &[String], tls: bool, ipv4_only: bool) -> Result<Self> {
+    fn new(
+        addrs: &[String],
+        tls: bool,
+        address_family: AddressFamily,
+    ) -> Result<Self> {
         let hosts = format_addrs(addrs, tls)?;
         Ok(Self {
             hosts,
-            ipv4_only,
+            address_family,
             sender: None,
             name_server: None,
             domain: None,
@@ -224,10 +230,10 @@ impl Dns {
             );
         }
 
-        options.ip_strategy = if self.ipv4_only {
-            LookupIpStrategy::Ipv4Only
-        } else {
-            LookupIpStrategy::Ipv4AndIpv6
+        options.ip_strategy = match self.address_family {
+            AddressFamily::Ipv4 => LookupIpStrategy::Ipv4Only,
+            AddressFamily::Ipv6 => LookupIpStrategy::Ipv6Only,
+            AddressFamily::Auto => LookupIpStrategy::Ipv4AndIpv6,
         };
 
         Ok((config, options))
@@ -350,7 +356,7 @@ impl Dns {
             };
             for ip in lookup_ip
                 .iter()
-                .filter(|ip| !self.ipv4_only || ip.is_ipv4())
+                .filter(|ip| self.address_family.accepts(*ip))
             {
                 upstreams.insert(Backend {
                     addr: SocketAddr::Inet(StdSocketAddr::new(ip, *port)),
@@ -359,6 +365,10 @@ impl Dns {
                 });
             }
         }
+        // Same semantics as the static pool: under `Auto` a dual-stack
+        // answer keeps only its A records (an AAAA backend on a host without
+        // an IPv6 route can never be healthy); an IPv6-only answer is kept.
+        let upstreams = prefer_ipv4_when_auto(upstreams, self.address_family);
 
         let changed = {
             let mut cache = self.discovery_cache.lock().await;
@@ -486,7 +496,7 @@ impl ServiceDiscovery for Dns {
 /// * `Result<Backends>` - Configured service discovery backend
 pub fn new_dns_discover_backends(discovery: &Discovery) -> Result<Backends> {
     let mut dns =
-        Dns::new(&discovery.addr, discovery.tls, discovery.ipv4_only)?;
+        Dns::new(&discovery.addr, discovery.tls, discovery.address_family)?;
     if let Some(dns_server) = &discovery.dns_server {
         dns = dns.with_name_server(dns_server.clone());
     }
@@ -504,13 +514,89 @@ pub fn new_dns_discover_backends(discovery: &Discovery) -> Result<Backends> {
 #[cfg(test)]
 mod tests {
     use super::{Dns, is_dns_discovery, new_dns_discover_backends};
+    use crate::AddressFamily;
     use crate::Discovery;
+    use crate::common::prefer_ipv4_when_auto;
+    use http::Extensions;
+    use pingora::lb::Backend;
+    use pingora::protocols::l4::socket::SocketAddr;
     use pretty_assertions::assert_eq;
+    use std::collections::BTreeSet;
+    use std::net::SocketAddr as StdSocketAddr;
+
+    fn backend(addr: &str) -> Backend {
+        Backend {
+            addr: SocketAddr::Inet(addr.parse::<StdSocketAddr>().unwrap()),
+            weight: 1,
+            ext: Extensions::new(),
+        }
+    }
+
+    fn backends(addrs: &[&str]) -> BTreeSet<Backend> {
+        addrs.iter().map(|addr| backend(addr)).collect()
+    }
+
+    fn addr_strings(set: &BTreeSet<Backend>) -> Vec<String> {
+        set.iter().map(|b| b.addr.to_string()).collect()
+    }
+
+    /// The DNS path honours the three-valued family exactly like the static
+    /// pool: `Ipv6` drops A records, `Auto` on a dual-stack answer keeps
+    /// only the A records, and `Auto` on an IPv6-only answer keeps it.
+    #[test]
+    fn prefer_ipv4_when_auto_applies_the_family_contract() {
+        let dual = backends(&["127.0.0.1:8080", "[::1]:8080"]);
+
+        // A pinned family never applies the preference - pinned filtering
+        // already happened at the `accepts` stage, so this is identity.
+        let kept = prefer_ipv4_when_auto(dual.clone(), AddressFamily::Ipv6);
+        assert_eq!(
+            vec!["127.0.0.1:8080".to_string(), "[::1]:8080".to_string()],
+            addr_strings(&kept)
+        );
+        let kept = prefer_ipv4_when_auto(dual.clone(), AddressFamily::Ipv4);
+        assert_eq!(
+            vec!["127.0.0.1:8080".to_string(), "[::1]:8080".to_string()],
+            addr_strings(&kept)
+        );
+
+        let kept = prefer_ipv4_when_auto(dual.clone(), AddressFamily::Auto);
+        assert_eq!(vec!["127.0.0.1:8080".to_string()], addr_strings(&kept));
+
+        let only_v6 = backends(&["[::1]:8080"]);
+        let kept = prefer_ipv4_when_auto(only_v6, AddressFamily::Auto);
+        assert_eq!(vec!["[::1]:8080".to_string()], addr_strings(&kept));
+    }
+
+    /// The per-address filter in `run_discover` is the three-valued
+    /// `accepts`, not the legacy `!ipv4_only || is_ipv4`: `Ipv6` must drop
+    /// the A records, which the old expression kept.
+    #[test]
+    fn per_address_filter_honours_the_pinned_family() {
+        let resolved: Vec<std::net::IpAddr> = ["127.0.0.1", "2001:db8::10"]
+            .iter()
+            .map(|addr| addr.parse().unwrap())
+            .collect();
+
+        let kept: Vec<String> = resolved
+            .iter()
+            .filter(|ip| AddressFamily::Ipv6.accepts(**ip))
+            .map(|ip| ip.to_string())
+            .collect();
+        assert_eq!(vec!["2001:db8::10".to_string()], kept);
+
+        let kept: Vec<String> = resolved
+            .iter()
+            .filter(|ip| AddressFamily::Ipv4.accepts(**ip))
+            .map(|ip| ip.to_string())
+            .collect();
+        assert_eq!(vec!["127.0.0.1".to_string()], kept);
+    }
 
     #[tokio::test]
     async fn test_async_dns_discover() {
         assert_eq!(true, is_dns_discovery("dns"));
-        let dns = Dns::new(&["api".to_string()], true, true)
+        let dns = Dns::new(&["api".to_string()], true, AddressFamily::Ipv4)
             .unwrap()
             .with_name_server("8.8.8.8".to_string())
             .with_domain("github.com".to_string());
@@ -554,7 +640,7 @@ mod tests {
                 "api:443".to_string(),
             ],
             true,
-            true,
+            AddressFamily::Ipv4,
         )
         .unwrap()
         .with_name_server("8.8.8.8".to_string())

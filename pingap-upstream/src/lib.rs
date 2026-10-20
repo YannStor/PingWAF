@@ -112,4 +112,7 @@ pub trait UpstreamProvider: Send + Sync {
 pub use address_family::{AddressFamily, select_family};
 pub use backend_stats::{BackendStats, WindowStats};
 pub use hash_strategy::HashStrategy;
+pub use pingap_discovery::{
+    ADDRESS_FAMILY_AUTO, ADDRESS_FAMILY_IPV4, ADDRESS_FAMILY_IPV6,
+};
 pub use upstream::*;

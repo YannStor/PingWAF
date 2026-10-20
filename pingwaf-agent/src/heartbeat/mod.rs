@@ -27,6 +27,35 @@ static LAST_CPU: LazyLock<Mutex<Option<(u64, u64)>>> =
 static LAST_METRICS_CPU: LazyLock<Mutex<Option<(u64, u64)>>> =
     LazyLock::new(|| Mutex::new(None));
 
+/// The `(count, time)` pair a rate calculation differences against.
+#[derive(Debug)]
+struct RpsState {
+    count: u64,
+    time: Instant,
+}
+
+impl Default for RpsState {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            time: Instant::now(),
+        }
+    }
+}
+
+/// The heartbeat's RPS baseline: requests and timestamp of the previous
+/// `collect()`. Owned by the collector, on its own schedule. of the previous *ad-hoc* metrics sample.
+///
+/// This baseline is deliberately separate from the collector's heartbeat
+/// fields: a rate calculation consumes (overwrites) the baseline it is
+/// handed. The heartbeat and `MetricsCollector::metrics_snapshot()` fire on
+/// independent schedules, so sharing one baseline would let either caller
+/// steal the other's interval — a heartbeat right after an ad-hoc snapshot
+/// would difference over a near-zero window and report a meaningless spike.
+/// Two baselines keep both intervals intact.
+static LAST_RPS_SNAPSHOT: LazyLock<Mutex<RpsState>> =
+    LazyLock::new(|| Mutex::new(RpsState::default()));
+
 /// Collected system metrics for heartbeat reporting.
 #[derive(Debug, Clone)]
 pub struct SystemMetrics {
@@ -49,10 +78,9 @@ pub struct MetricsCollector {
     blocked_requests_total: AtomicU64,
     /// Current active connections (can go negative briefly during cleanup)
     active_connections: AtomicI64,
-    /// Timestamp of last RPS calculation
-    last_rps_time: std::sync::Mutex<Instant>,
-    /// Requests count at last RPS calculation
-    last_rps_count: AtomicU64,
+    /// The heartbeat's RPS baseline (see `LAST_RPS_SNAPSHOT` for why this
+    /// is not shared with the ad-hoc snapshot path).
+    rps_state: std::sync::Mutex<RpsState>,
     /// Last calculated RPS value
     cached_rps: AtomicU64,
 }
@@ -64,8 +92,7 @@ impl MetricsCollector {
             requests_total: AtomicU64::new(0),
             blocked_requests_total: AtomicU64::new(0),
             active_connections: AtomicI64::new(0),
-            last_rps_time: std::sync::Mutex::new(Instant::now()),
-            last_rps_count: AtomicU64::new(0),
+            rps_state: std::sync::Mutex::new(RpsState::default()),
             cached_rps: AtomicU64::new(0),
         }
     }
@@ -133,13 +160,20 @@ impl MetricsCollector {
 
     /// Collect a metrics snapshot for ad-hoc readers (`metrics_snapshot()`).
     ///
-    /// Differs from [`Self::collect`] only in the CPU baseline: it uses
-    /// `LAST_METRICS_CPU` instead of the heartbeat's `LAST_CPU`, because
-    /// `cpu_percent_since` consumes the baseline it differences against and
-    /// the two run on independent schedules. See `LAST_METRICS_CPU`'s doc
-    /// comment for why the baselines must not be shared.
+    /// Differs from [`Self::collect`] only in the baselines: it uses
+    /// `LAST_METRICS_CPU` and `LAST_RPS_SNAPSHOT` instead of the heartbeat's
+    /// `LAST_CPU` and `rps_state`, because those baselines are consumed by
+    /// the calculations that difference against them and the two run on
+    /// independent schedules. See `LAST_METRICS_CPU`'s and
+    /// `LAST_RPS_SNAPSHOT`'s doc comments for why the baselines must not be
+    /// shared.
     pub fn collect_snapshot(&self) -> SystemMetrics {
-        let rps = self.calculate_rps();
+        let rps = {
+            let mut state = LAST_RPS_SNAPSHOT
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            self.calculate_rps_with(&mut state)
+        };
         let (cpu_usage, memory_usage) =
             (read_cpu_percent_snapshot(), read_memory_usage());
         SystemMetrics {
@@ -152,25 +186,32 @@ impl MetricsCollector {
         }
     }
 
-    /// Calculate requests per second since last collection.
+    /// Calculate requests per second since last heartbeat collection.
     fn calculate_rps(&self) -> u64 {
+        let mut state =
+            self.rps_state.lock().unwrap_or_else(|err| err.into_inner());
+        self.calculate_rps_with(&mut state)
+    }
+
+    /// Differences the request counter against `state` and advances it.
+    /// Both the heartbeat (`rps_state`) and the ad-hoc snapshot
+    /// (`LAST_RPS_SNAPSHOT`) run this with their own baseline, so neither
+    /// steals the other's interval.
+    fn calculate_rps_with(&self, state: &mut RpsState) -> u64 {
         let current_count = self.requests_total.load(Ordering::Relaxed);
-        let previous_count =
-            self.last_rps_count.swap(current_count, Ordering::Relaxed);
+        let previous_count = state.count;
+        state.count = current_count;
 
-        if let Ok(mut last_time) = self.last_rps_time.lock() {
-            let now = Instant::now();
-            let elapsed = now.duration_since(*last_time).as_secs_f64();
-            *last_time = now;
+        let now = Instant::now();
+        let elapsed = now.duration_since(state.time).as_secs_f64();
+        state.time = now;
 
-            if elapsed > 0.0 {
-                let rps =
-                    ((current_count - previous_count) as f64 / elapsed) as u64;
-                self.cached_rps.store(rps, Ordering::Relaxed);
-                return rps;
-            }
+        if elapsed > 0.0 {
+            let rps = ((current_count.saturating_sub(previous_count)) as f64
+                / elapsed) as u64;
+            self.cached_rps.store(rps, Ordering::Relaxed);
+            return rps;
         }
-
         self.cached_rps.load(Ordering::Relaxed)
     }
 }
@@ -392,5 +433,36 @@ mod tests {
         assert_eq!(metrics.blocked_requests_total, 0);
         // CPU and memory may be 0 in test environments
         debug!("Collected metrics: {:?}", metrics);
+    }
+
+    /// An ad-hoc snapshot must not compress the heartbeat's RPS window: the
+    /// two paths difference against separate baselines, so a snapshot between
+    /// heartbeats leaves the heartbeat interval intact and both callers can
+    /// report the full request delta they observed.
+    #[test]
+    fn snapshot_rps_does_not_steal_the_heartbeat_window() {
+        let collector = MetricsCollector::new();
+
+        // Both baselines start empty; the first read of each is a 0 over a
+        // ~zero window and seeds its own baseline.
+        let _ = collector.collect();
+        let _ = collector.collect_snapshot();
+
+        // 10 requests reach the heartbeat only (its window is untouched by
+        // the snapshot in between).
+        for _ in 0..10 {
+            collector.record_request(false);
+        }
+        let heartbeat = collector.collect();
+        assert_eq!(10, heartbeat.requests_total);
+
+        let heartbeat_state = collector
+            .rps_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // The heartbeat's baseline holds the current total, not a total
+        // some snapshot already consumed.
+        assert_eq!(10, heartbeat_state.count);
+        assert!(heartbeat.requests_per_second > 0);
     }
 }
