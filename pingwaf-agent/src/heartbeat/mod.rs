@@ -14,6 +14,19 @@ use crate::probe;
 static LAST_CPU: LazyLock<Mutex<Option<(u64, u64)>>> =
     LazyLock::new(|| Mutex::new(None));
 
+/// CPU counters of the previous *ad-hoc* metrics sample, as `(busy, total)`
+/// jiffies.
+///
+/// This baseline is deliberately separate from [`LAST_CPU`]: `cpu_percent_since`
+/// consumes (overwrites) the baseline it is handed. The heartbeat and
+/// `MetricsCollector::metrics_snapshot()` fire on independent schedules, so
+/// sharing one baseline would let either caller steal the other's interval —
+/// a heartbeat right after a metrics snapshot would difference over a
+/// near-zero window and report a meaningless spike. Two baselines keep both
+/// intervals intact.
+static LAST_METRICS_CPU: LazyLock<Mutex<Option<(u64, u64)>>> =
+    LazyLock::new(|| Mutex::new(None));
+
 /// Collected system metrics for heartbeat reporting.
 #[derive(Debug, Clone)]
 pub struct SystemMetrics {
@@ -118,6 +131,27 @@ impl MetricsCollector {
         }
     }
 
+    /// Collect a metrics snapshot for ad-hoc readers (`metrics_snapshot()`).
+    ///
+    /// Differs from [`Self::collect`] only in the CPU baseline: it uses
+    /// `LAST_METRICS_CPU` instead of the heartbeat's `LAST_CPU`, because
+    /// `cpu_percent_since` consumes the baseline it differences against and
+    /// the two run on independent schedules. See `LAST_METRICS_CPU`'s doc
+    /// comment for why the baselines must not be shared.
+    pub fn collect_snapshot(&self) -> SystemMetrics {
+        let rps = self.calculate_rps();
+        let (cpu_usage, memory_usage) =
+            (read_cpu_percent_snapshot(), read_memory_usage());
+        SystemMetrics {
+            cpu_usage_percent: cpu_usage,
+            memory_usage_bytes: memory_usage,
+            active_connections: self.active_connections(),
+            requests_per_second: rps,
+            blocked_requests_total: self.blocked_requests_total(),
+            requests_total: self.requests_total(),
+        }
+    }
+
     /// Calculate requests per second since last collection.
     fn calculate_rps(&self) -> u64 {
         let current_count = self.requests_total.load(Ordering::Relaxed);
@@ -164,6 +198,16 @@ fn read_system_metrics() -> (f64, u64) {
 /// the platform reading is kept there so the field stays non-null.
 fn read_cpu_percent() -> f64 {
     let mut previous = LAST_CPU.lock().unwrap_or_else(|err| err.into_inner());
+    probe::cpu_percent_since(&mut previous).unwrap_or_else(platform_cpu_percent)
+}
+
+/// CPU usage for an ad-hoc read-only sample (see
+/// [`MetricsCollector::collect_snapshot`]), differenced against its own
+/// baseline so the heartbeat's [`LAST_CPU`] interval is untouched.
+fn read_cpu_percent_snapshot() -> f64 {
+    let mut previous = LAST_METRICS_CPU
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     probe::cpu_percent_since(&mut previous).unwrap_or_else(platform_cpu_percent)
 }
 

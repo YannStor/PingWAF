@@ -14,91 +14,25 @@
 
 //! Address-family selection for upstream nodes.
 //!
-//! A static upstream resolves a domain **once**, in `pingap-discovery`, and
-//! keeps every address the system resolver returns - both A and AAAA. On a
-//! host with no IPv6 route (the normal case for a container on an IPv4-only
-//! network) the AAAA entries become backends that can never pass a health
-//! check. When the resolver answers with AAAA only - a DNS64/NAT64 resolver,
-//! or a container whose `getaddrinfo` sees a configured IPv6 interface but
-//! has no route to use it - *every* backend is unreachable and the site
-//! answers `503 No available upstream`. `curl` reaches the same origin
-//! because of its happy-eyeballs fallback; pingora's upstream has no
-//! equivalent, so the choice has to be made before the backends are built.
+//! The [`AddressFamily`] type itself is owned by `pingap-discovery` — the
+//! filtering belongs where the addresses are resolved, not where the
+//! backends are built — and re-exported here so the rest of this crate and
+//! its dependents keep a single spelling.
 //!
+//! A static upstream resolves a domain **once**, in `pingap-discovery`, and
+//! the family filter is applied there (see its `new_static_discovery`).
+//! What remains in this module is what a **transparent** upstream needs:
 //! [`select_family`] narrows a resolved address set to one family, and
 //! [`resolve_preferred`] does the same on the request path behind a bounded
 //! cache so a transparent upstream does not pay a lookup per request.
+
+pub use pingap_discovery::AddressFamily;
 
 use dashmap::DashMap;
 use std::net::IpAddr;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tracing::debug;
-
-/// `address_family = "auto"`: prefer IPv4, fall back to IPv6.
-pub const ADDRESS_FAMILY_AUTO: &str = "auto";
-/// `address_family = "ipv4"`: A records only.
-pub const ADDRESS_FAMILY_IPV4: &str = "ipv4";
-/// `address_family = "ipv6"`: AAAA records only.
-pub const ADDRESS_FAMILY_IPV6: &str = "ipv6";
-
-/// The address family an upstream may connect over.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub enum AddressFamily {
-    /// Prefer IPv4; keep IPv6 only when the host has no A record at all.
-    #[default]
-    Auto,
-    /// A records only.
-    Ipv4,
-    /// AAAA records only.
-    Ipv6,
-}
-
-impl AddressFamily {
-    /// Parses the control plane's spelling. `None` for anything else, so the
-    /// caller keeps its own default instead of silently narrowing.
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            ADDRESS_FAMILY_AUTO => Some(Self::Auto),
-            ADDRESS_FAMILY_IPV4 => Some(Self::Ipv4),
-            ADDRESS_FAMILY_IPV6 => Some(Self::Ipv6),
-            _ => None,
-        }
-    }
-
-    /// The spelling [`Self::parse`] accepts.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Auto => ADDRESS_FAMILY_AUTO,
-            Self::Ipv4 => ADDRESS_FAMILY_IPV4,
-            Self::Ipv6 => ADDRESS_FAMILY_IPV6,
-        }
-    }
-
-    /// Maps the legacy `ipv4_only` switch: `true` pins IPv4, unset or `false`
-    /// is [`Self::Auto`] - never a wider family than the operator asked for.
-    /// There is no legacy spelling for IPv6-only.
-    #[must_use]
-    pub fn from_ipv4_only(ipv4_only: Option<bool>) -> Self {
-        if ipv4_only.unwrap_or_default() {
-            Self::Ipv4
-        } else {
-            Self::Auto
-        }
-    }
-
-    /// Whether an address of this family may be used.
-    #[must_use]
-    pub fn accepts(self, ip: IpAddr) -> bool {
-        match self {
-            Self::Auto => true,
-            Self::Ipv4 => ip.is_ipv4(),
-            Self::Ipv6 => ip.is_ipv6(),
-        }
-    }
-}
 
 /// Narrows a resolved address set to `family`, dropping duplicates and
 /// keeping the resolver's order.

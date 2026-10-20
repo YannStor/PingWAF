@@ -533,6 +533,7 @@ mod tests {
             addr: vec!["api".to_string()],
             tls: true,
             ipv4_only: true,
+            address_family: crate::AddressFamily::Ipv4,
             dns_server: Some("8.8.8.8".to_string()),
             dns_domain: Some("github.com".to_string()),
             dns_search: Some("local".to_string()),

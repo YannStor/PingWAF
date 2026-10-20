@@ -15,6 +15,7 @@
 use hickory_resolver::net::NetError;
 use pingap_core::NotificationSender;
 use snafu::Snafu;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 pub static LOG_TARGET: &str = "pingap::discovery";
@@ -138,11 +139,86 @@ pub const DOCKER_DISCOVERY: &str = "docker";
 pub const STATIC_DISCOVERY: &str = "static";
 pub const TRANSPARENT_DISCOVERY: &str = "transparent";
 
+/// `address_family = "auto"`: prefer IPv4, fall back to IPv6.
+pub const ADDRESS_FAMILY_AUTO: &str = "auto";
+/// `address_family = "ipv4"`: A records only.
+pub const ADDRESS_FAMILY_IPV4: &str = "ipv4";
+/// `address_family = "ipv6"`: AAAA records only.
+pub const ADDRESS_FAMILY_IPV6: &str = "ipv6";
+
+/// The address family an upstream may connect over.
+///
+/// This is the single source of truth; `pingap-upstream` re-exports it so
+/// both crates (and the config layer) spell the type the same way.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum AddressFamily {
+    /// Prefer IPv4; keep IPv6 only when the host has no A record at all.
+    #[default]
+    Auto,
+    /// A records only.
+    Ipv4,
+    /// AAAA records only.
+    Ipv6,
+}
+
+impl AddressFamily {
+    /// Parses the control plane's spelling. `None` for anything else, so the
+    /// caller keeps its own default instead of silently narrowing.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            ADDRESS_FAMILY_AUTO => Some(Self::Auto),
+            ADDRESS_FAMILY_IPV4 => Some(Self::Ipv4),
+            ADDRESS_FAMILY_IPV6 => Some(Self::Ipv6),
+            _ => None,
+        }
+    }
+
+    /// The spelling [`Self::parse`] accepts.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => ADDRESS_FAMILY_AUTO,
+            Self::Ipv4 => ADDRESS_FAMILY_IPV4,
+            Self::Ipv6 => ADDRESS_FAMILY_IPV6,
+        }
+    }
+
+    /// Maps the legacy `ipv4_only` switch: `true` pins IPv4, unset or `false`
+    /// is [`Self::Auto`] - never a wider family than the operator asked for.
+    /// There is no legacy spelling for IPv6-only.
+    #[must_use]
+    pub fn from_ipv4_only(ipv4_only: Option<bool>) -> Self {
+        if ipv4_only.unwrap_or_default() {
+            Self::Ipv4
+        } else {
+            Self::Auto
+        }
+    }
+
+    /// Whether an address of this family may be used. [`Self::Auto`]
+    /// accepts both families at the filter stage; the IPv4 preference is
+    /// applied by the static pool afterwards (it needs the whole resolved
+    /// set before it can decide).
+    #[must_use]
+    pub fn accepts(self, ip: IpAddr) -> bool {
+        match self {
+            Self::Auto => true,
+            Self::Ipv4 => ip.is_ipv4(),
+            Self::Ipv6 => ip.is_ipv6(),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Discovery {
     addr: Vec<String>,
     tls: bool,
+    /// Legacy `ipv4_only` switch, still consulted by the DNS and Docker
+    /// discovery paths; kept in sync with `address_family` by the builders.
     ipv4_only: bool,
+    /// Three-valued address family; the static pool filters on this.
+    address_family: AddressFamily,
     dns_server: Option<String>,
     dns_domain: Option<String>,
     dns_search: Option<String>,
@@ -155,6 +231,7 @@ impl Discovery {
             addr,
             tls: false,
             ipv4_only: false,
+            address_family: AddressFamily::default(),
             dns_server: None,
             dns_domain: None,
             dns_search: None,
@@ -172,8 +249,21 @@ impl Discovery {
         self.tls = tls;
         self
     }
+    /// Legacy spelling: `true` pins IPv4, `false` leaves [`AddressFamily::Auto`].
     pub fn with_ipv4_only(mut self, ipv4_only: bool) -> Self {
         self.ipv4_only = ipv4_only;
+        if ipv4_only {
+            self.address_family = AddressFamily::Ipv4;
+        }
+        self
+    }
+    /// The three-valued spelling. An explicit `Ipv4` also drives the legacy
+    /// `ipv4_only` switch so the DNS and Docker paths narrow the same way;
+    /// `Auto` and `Ipv6` leave it unset (`Ipv6` filtering is applied by the
+    /// static pool).
+    pub fn with_address_family(mut self, family: AddressFamily) -> Self {
+        self.address_family = family;
+        self.ipv4_only = family == AddressFamily::Ipv4;
         self
     }
     pub fn with_dns_server(mut self, dns_server: String) -> Self {

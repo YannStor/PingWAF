@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::Error;
-use crate::address_family::{AddressFamily, resolve_preferred, select_family};
+use crate::address_family::{AddressFamily, resolve_preferred};
 use crate::backend_circuit_state::{
     BackendCircuitStates, CircuitBreakerConfig,
 };
@@ -66,11 +66,11 @@ use rustls_pki_types::{CertificateDer, pem::PemObject};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -446,25 +446,13 @@ fn new_load_balancer(
         .unwrap_or_default();
 
     // Create backend servers using the configured addresses and discovery method.
-    // A static upstream is narrowed to one address family first: its addresses
-    // are resolved once, so a family the host cannot reach must not become a
-    // backend at all. DNS discovery keeps the configured names and applies
-    // `ipv4_only` on every refresh instead.
-    // The three-value spelling wins when the config carries one; `ipv4_only`
-    // stays as the fallback for hand-written configs. `ipv6` is now a real
-    // pin, not a silent `auto`.
-    let address_family = conf
-        .address_family
-        .as_deref()
-        .and_then(AddressFamily::parse)
-        .unwrap_or_else(|| AddressFamily::from_ipv4_only(conf.ipv4_only));
-    let addrs = if is_static_discovery(&discovery_category) {
-        narrow_static_addrs(&conf.addrs, address_family)
-    } else {
-        conf.addrs.clone()
-    };
-    let mut discovery = Discovery::new(addrs)
-        .with_ipv4_only(conf.ipv4_only.unwrap_or_default())
+    // The address family is resolved into a three-valued choice once (see
+    // [`effective_family`]) and handed to the discovery layer, which applies
+    // it where the addresses are actually resolved - so no blocking DNS on
+    // this hot-reload path, and transparent upstreams get the same family.
+    let address_family = effective_family(conf);
+    let mut discovery = Discovery::new(conf.addrs.clone())
+        .with_address_family(address_family)
         .with_tls(tls)
         .with_sender(sender.clone());
     if let Some(dns_server) = &conf.dns_server {
@@ -685,78 +673,19 @@ fn host_name(host: &str) -> &str {
     split_host_port(host, 0).0
 }
 
-/// Rewrites the domain entries of a static upstream to one address family.
+/// Resolves the configured address family into one three-valued choice.
 ///
-/// `pingap-discovery` resolves a static address once, when the upstream is
-/// built, and keeps **every** address the system resolver returns. On a host
-/// with no IPv6 route those AAAA entries become backends that can never pass
-/// a health check; when the resolver answers with AAAA only
-/// (a DNS64/NAT64 resolver, or a container that sees an IPv6 interface but
-/// has no route for it) every backend is unreachable and the site answers
-/// `503 No available upstream` - while `curl` reaches the same origin through
-/// its happy-eyeballs fallback. Narrowing the entry here means the
-/// unreachable family never becomes a backend at all.
-///
-/// An IP literal is passed through untouched (there is nothing to choose) and
-/// so is an entry the resolver cannot answer for: keeping the configured
-/// spelling lets the discovery layer report the same error it always did,
-/// instead of a pool that silently lost its only address.
-///
-/// DNS discovery is deliberately not narrowed this way - it re-resolves on
-/// every tick, so pinning its addresses at construction would freeze the pool.
-fn narrow_static_addrs(addrs: &[String], family: AddressFamily) -> Vec<String> {
-    addrs
-        .iter()
-        .flat_map(|entry| narrow_static_addr(entry, family))
-        .collect()
-}
-
-/// Narrows one `host:port [weight]` entry; see [`narrow_static_addrs`].
-fn narrow_static_addr(entry: &str, family: AddressFamily) -> Vec<String> {
-    let (addr, weight) = match entry.split_once(char::is_whitespace) {
-        Some((addr, weight)) => (addr.trim(), Some(weight.trim())),
-        None => (entry.trim(), None),
-    };
-    let (host, port) = split_host_port(addr, 0);
-    // `port == 0` means the entry is not a `host:port` pair at all, and an IP
-    // literal has no family to choose from: both go to the discovery layer
-    // exactly as configured.
-    if port == 0 || host.parse::<IpAddr>().is_ok() {
-        return vec![entry.to_string()];
-    }
-    let selected = match (host, port).to_socket_addrs() {
-        Ok(resolved) => select_family(resolved.map(|addr| addr.ip()), family),
-        Err(e) => {
-            warn!(
-                target: LOG_TARGET,
-                host,
-                port,
-                error = %e,
-                "narrow upstream address fail, keeping it as configured"
-            );
-            return vec![entry.to_string()];
-        },
-    };
-    if selected.is_empty() {
-        warn!(
-            target: LOG_TARGET,
-            host,
-            port,
-            family = family.as_str(),
-            "upstream host has no address of the requested family, keeping it as configured"
-        );
-        return vec![entry.to_string()];
-    }
-    selected
-        .into_iter()
-        .map(|ip| {
-            let socket = SocketAddr::new(ip, port);
-            match weight {
-                Some(weight) => format!("{socket} {weight}"),
-                None => socket.to_string(),
-            }
-        })
-        .collect()
+/// The three-value `address_family` spelling wins when the config carries
+/// one; the legacy `ipv4_only` switch stays as the fallback for hand-written
+/// configs (`ipv6` is a real pin, not a silent `auto`). Both the backends'
+/// discovery layer and a transparent upstream's request-path resolution go
+/// through this one function, so the two can never disagree about the
+/// family a given upstream may connect over.
+fn effective_family(conf: &UpstreamConf) -> AddressFamily {
+    conf.address_family
+        .as_deref()
+        .and_then(AddressFamily::parse)
+        .unwrap_or_else(|| AddressFamily::from_ipv4_only(conf.ipv4_only))
 }
 
 /// Resolves a `Host` value to a socket address. An IP literal is parsed; a
@@ -932,7 +861,7 @@ impl Upstream {
             tcp_recv_buf: conf.tcp_recv_buf.map(|item| item.as_u64() as usize),
             tcp_keepalive,
             tcp_fast_open: conf.tcp_fast_open,
-            address_family: AddressFamily::from_ipv4_only(conf.ipv4_only),
+            address_family: effective_family(conf),
             peer_tracer,
             tracer,
             processing: AtomicI32::new(0),
@@ -1485,9 +1414,8 @@ pub fn new_upstream_health_check_task(
 mod tests {
     use super::{
         AddressFamily, DEFAULT_LB_MAX_ITERATIONS, SelectionLb, Upstream,
-        UpstreamConf, UpstreamProvider, host_name, narrow_static_addr,
-        narrow_static_addrs, new_backends, new_load_balancer, resolve_host,
-        split_host_port,
+        UpstreamConf, UpstreamProvider, effective_family, host_name,
+        new_backends, new_load_balancer, resolve_host, split_host_port,
     };
     use crate::new_ahash_upstreams;
     use crate::upstream::{frequency_millis, milli_frequencies};
@@ -2036,74 +1964,23 @@ mod tests {
         );
     }
 
-    /// The static-discovery fix: a domain configured without a family is
-    /// narrowed before the backends are built, so an unreachable AAAA entry
-    /// never enters the pool. An IP literal and an unresolvable entry come
-    /// through untouched.
+    /// The three-value `address_family` spelling wins; the legacy
+    /// `ipv4_only` switch is only the fallback for configs without one.
     #[test]
-    fn test_narrow_static_addr() {
-        // IPv4 literal: untouched, whatever family is asked for.
-        for family in [
-            AddressFamily::Auto,
-            AddressFamily::Ipv4,
-            AddressFamily::Ipv6,
-        ] {
-            assert_eq!(
-                vec!["127.0.0.1:8080".to_string()],
-                narrow_static_addr("127.0.0.1:8080", family)
-            );
-        }
-        // IPv6 literal keeps its brackets.
-        assert_eq!(
-            vec!["[::1]:8080".to_string()],
-            narrow_static_addr("[::1]:8080", AddressFamily::Ipv6)
-        );
-        // A local name with an A record narrows to it and keeps its weight.
-        // The exact loopback address is left to the resolver, which varies
-        // between images; that it is IPv4 is the property under test.
-        let narrowed =
-            narrow_static_addr("localhost:8080 3", AddressFamily::Auto);
-        assert_eq!(1, narrowed.len(), "{narrowed:?}");
-        assert!(narrowed[0].ends_with(":8080 3"), "{narrowed:?}");
-        assert!(!narrowed[0].starts_with('['), "{narrowed:?}");
-        // An entry without a port is not a `host:port` pair: left alone so the
-        // discovery layer reports the same error it always did.
-        assert_eq!(
-            vec!["localhost".to_string()],
-            narrow_static_addr("localhost", AddressFamily::Auto)
-        );
-        // An unresolvable name is kept as configured, never dropped.
-        assert_eq!(
-            vec!["nonexistent.invalid:443".to_string()],
-            narrow_static_addr("nonexistent.invalid:443", AddressFamily::Auto)
-        );
-        // Pinning a family keeps the entry whatever the host answers: either
-        // that family's address, or - when the host has none - the configured
-        // spelling, because an empty result would silently empty the pool.
-        let pinned = narrow_static_addr("localhost:8080", AddressFamily::Ipv6);
-        assert_eq!(1, pinned.len(), "{pinned:?}");
-        assert!(
-            pinned[0] == "localhost:8080" || pinned[0].starts_with('['),
-            "{pinned:?}"
-        );
-    }
-
-    /// A whole static upstream is narrowed entry by entry, so one name in the
-    /// list cannot change what happens to the others.
-    #[test]
-    fn test_narrow_static_addrs_keeps_every_entry() {
-        let addrs = vec![
-            "127.0.0.1:8080".to_string(),
-            "localhost:8081".to_string(),
-            "nonexistent.invalid:443".to_string(),
-        ];
-        let narrowed = narrow_static_addrs(&addrs, AddressFamily::Auto);
-        assert_eq!(3, narrowed.len(), "{narrowed:?}");
-        assert_eq!("127.0.0.1:8080", narrowed[0]);
-        assert!(narrowed[1].ends_with(":8081"), "{narrowed:?}");
-        assert!(!narrowed[1].starts_with('['), "{narrowed:?}");
-        // Unresolvable entries survive as configured.
-        assert_eq!("nonexistent.invalid:443", narrowed[2]);
+    fn test_effective_family() {
+        let mut conf = UpstreamConf::default();
+        assert_eq!(AddressFamily::Auto, effective_family(&conf));
+        conf.ipv4_only = Some(true);
+        assert_eq!(AddressFamily::Ipv4, effective_family(&conf));
+        // An explicit spelling overrides the legacy switch - and never widens.
+        conf.address_family = Some("ipv6".to_string());
+        assert_eq!(AddressFamily::Ipv6, effective_family(&conf));
+        conf.ipv4_only = Some(false);
+        assert_eq!(AddressFamily::Ipv6, effective_family(&conf));
+        // An unknown spelling keeps the legacy fallback.
+        conf.address_family = Some("dual".to_string());
+        conf.ipv4_only = Some(true);
+        assert_eq!(AddressFamily::Ipv4, effective_family(&conf));
     }
 
     /// A transparent upstream resolves the request's host itself: an IP

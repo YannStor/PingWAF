@@ -1136,8 +1136,14 @@ impl ControlPlaneClient {
     }
 
     /// Get the current system metrics snapshot.
+    ///
+    /// This is a *read-only* sample on its own CPU baseline
+    /// (`collect_snapshot`), not a heartbeat collection: `collect()` would
+    /// consume the heartbeat's `LAST_CPU` baseline, and the two run on
+    /// independent schedules, so a snapshot firing just before a heartbeat
+    /// would leave it differencing over a near-zero interval.
     pub fn metrics_snapshot(&self) -> SystemMetrics {
-        self.metrics.collect()
+        self.metrics.collect_snapshot()
     }
 }
 
