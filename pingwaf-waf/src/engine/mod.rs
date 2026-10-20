@@ -95,6 +95,13 @@ pub struct WafEngineConfig {
     /// Monitor while the hit still feeds the total score). Empty = enforce
     /// everything.
     pub monitor_managed_rules: std::collections::HashSet<String>,
+    /// Built-in managed rules switched `off` by a site-level
+    /// `RuleOverride` (`enabled = false`; the control plane also emits one for
+    /// a built-in rule whose `mode` is `off`). Disabled rules are removed
+    /// before compilation: they are never evaluated, never scored and never
+    /// logged. `RuleOverride` cannot express `monitor` — that downgrade stays
+    /// on `monitor_managed_rules`. Empty = keep every managed rule.
+    pub disabled_managed_rules: std::collections::HashSet<String>,
     /// Custom rule ids downgraded to monitor-only: a hit feeds the anomaly
     /// score and the event log but the rule's own action never enforces.
     /// This carries the per-rule monitor switch from the control plane —
@@ -118,6 +125,7 @@ impl Default for WafEngineConfig {
             monitor_categories: CategorySet::EMPTY,
             monitor_stacks: StackSet::EMPTY,
             monitor_managed_rules: std::collections::HashSet::new(),
+            disabled_managed_rules: std::collections::HashSet::new(),
             monitor_custom_rules: std::collections::HashSet::new(),
         }
     }
@@ -321,6 +329,17 @@ impl WafEngine {
         let mut rules = Vec::with_capacity(config.rules.len() + 16);
         if config.enable_managed_rules {
             rules.extend(default_managed_rules(config.level));
+        }
+        // Site-level `RuleOverride` off: the rule is not compiled, not
+        // evaluated and never produces an event or score. Removal happens
+        // before any request ever sees the engine, so `rule_monitored` does
+        // not need an off branch. Custom rules cannot match the
+        // `PINGWAF-` guard and are left untouched.
+        if !config.disabled_managed_rules.is_empty() {
+            rules.retain(|r| {
+                !r.id.starts_with("PINGWAF-")
+                    || !config.disabled_managed_rules.contains(r.id.as_str())
+            });
         }
         rules.extend(config.rules.iter().cloned());
 
@@ -1503,6 +1522,61 @@ mod tests {
         assert_eq!(v.action, WafAction::Pass, "details: {}", v.details);
         assert_eq!(v.score, 0);
         assert!(v.matched_rules.is_empty());
+    }
+
+    #[test]
+    fn managed_rules_set_to_off_are_not_evaluated() {
+        let mut scanner = req("GET", "/", "");
+        scanner
+            .headers
+            .retain(|(k, _)| !k.eq_ignore_ascii_case("User-Agent"));
+        scanner
+            .headers
+            .push(("User-Agent".into(), "sqlmap/1.7".into()));
+        // Without the override the scanner UA blocks through PINGWAF-1010.
+        assert_eq!(engine().inspect(&scanner).action, WafAction::Block);
+
+        // With the off override the rule is gone entirely: no verdict, no
+        // event, no matched rule.
+        let cfg = WafEngineConfig {
+            disabled_managed_rules: ["PINGWAF-1010".to_string()]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let v = WafEngine::new(&cfg).inspect(&scanner);
+        assert_eq!(v.action, WafAction::Pass, "details: {}", v.details);
+        assert!(v.matched_rules.is_empty());
+        assert_eq!(v.breakdown.total, 0);
+
+        // Other managed rules keep enforcing on the same engine.
+        let r = req("GET", "/api/users", "id=1' OR 1=1 --");
+        let v = WafEngine::new(&cfg).inspect(&r);
+        assert_eq!(v.action, WafAction::Block);
+        assert!(!v.matched_rules.is_empty());
+    }
+
+    #[test]
+    fn managed_off_override_cannot_be_reintroduced_by_update_rules() {
+        let mut e = WafEngine::new(&WafEngineConfig {
+            disabled_managed_rules: ["PINGWAF-1010".to_string()]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        });
+        // A hot rule update must not resurrect the disabled managed rule:
+        // the drained managed set no longer contains it and user rules never
+        // carry a `PINGWAF-` id.
+        e.update_rules(Vec::new());
+        let mut scanner = req("GET", "/", "");
+        scanner
+            .headers
+            .retain(|(k, _)| !k.eq_ignore_ascii_case("User-Agent"));
+        scanner
+            .headers
+            .push(("User-Agent".into(), "sqlmap/1.7".into()));
+        let v = e.inspect(&scanner);
+        assert_eq!(v.action, WafAction::Pass, "details: {}", v.details);
     }
 
     #[test]

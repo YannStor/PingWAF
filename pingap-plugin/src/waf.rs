@@ -2169,6 +2169,14 @@ fn build_site_engine(cfg: &CacheWafConfig) -> WafEngine {
         monitor_managed_rules: parse_monitor_managed_rules(
             &cfg.monitor_managed_rules,
         ),
+        // `mode = off` / disabled built-in rules arrive as overrides: the
+        // engine drops them before compilation (no evaluation, no events).
+        disabled_managed_rules: cfg
+            .managed_overrides
+            .iter()
+            .filter(|o| !o.enabled && !o.rule_id.is_empty())
+            .map(|o| o.rule_id.clone())
+            .collect(),
         monitor_custom_rules,
         threshold: if cfg.anomaly_threshold > 0 {
             cfg.anomaly_threshold
@@ -2734,6 +2742,7 @@ impl TryFrom<&PluginConf> for WafPlugin {
             monitor_categories,
             monitor_stacks,
             monitor_managed_rules,
+            disabled_managed_rules: Default::default(),
             // Standalone mode has no custom rules to downgrade.
             monitor_custom_rules: Default::default(),
             threshold: anomaly_threshold,

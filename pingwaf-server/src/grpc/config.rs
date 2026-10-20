@@ -15,8 +15,8 @@ use pingwaf_proto::control_plane::{
     CacheTypeCategory, CacheTypePolicy, ChallengeConfig, CustomErrorPage,
     FailoverMode, GeoConfig, GlobalCacheSettings, HealthCheckConfig,
     IpAccessRule, RateLimitRule, RewriteOperation, RewriteRule, RouteConfig,
-    RuleBundle, Site, SiteCacheSettings, SiteConfig, SitePolicy, SslConfig,
-    UpstreamConfig, UpstreamPeer, WafConfig, WafRule,
+    RuleBundle, RuleOverride, Site, SiteCacheSettings, SiteConfig, SitePolicy,
+    SslConfig, UpstreamConfig, UpstreamPeer, WafConfig, WafRule,
 };
 use prost::Message;
 use prost_types::Timestamp;
@@ -831,7 +831,26 @@ fn waf_config_to_proto(
         ssrf_detection: has_tag("ssrf"),
         bot_detection: has_tag("bot"),
         custom_rules: rules.to_vec(),
-        managed_overrides: Vec::new(),
+        // Built-in managed rules travel as overrides, not `custom_rules`: the
+        // data plane always loads the managed set, so a built-in rule switched
+        // to `off` (or disabled) must be carried as an explicit override or it
+        // would keep being evaluated and logged on the agent. Only built-in
+        // ids (`PINGWAF-*`) land here; custom rules keep their `custom_rules`
+        // path and are filtered engine-side.
+        managed_overrides: rules
+            .iter()
+            .filter(|r| {
+                r.id.starts_with("PINGWAF-")
+                    && (!r.enabled || r.mode == WAF_MODE_OFF)
+            })
+            .map(|r| RuleOverride {
+                rule_id: r.id.clone(),
+                // `enabled = false` is the minimal "off" expression; the
+                // override carries no monitor downgrade (that stays on
+                // `monitor_managed_rules`).
+                ..Default::default()
+            })
+            .collect(),
         ml_enabled: false,
         ml_model_path: String::new(),
         ml_threshold: 0.0,
@@ -1502,6 +1521,68 @@ mod tests {
             proto.verified_bot_ranges,
             vec!["192.168.0.0/16".to_string()]
         );
+    }
+
+    #[test]
+    fn waf_config_emits_off_overrides_for_builtin_rules_only() {
+        let base = rule::Model {
+            id: Uuid::new_v4(),
+            group_id: None,
+            site_id: Uuid::nil(),
+            name: "r".into(),
+            description: None,
+            expression: "true".into(),
+            action: action::BLOCK.into(),
+            severity: 3,
+            tags: vec!["sqli".into()],
+            enabled: true,
+            mode: mode::MONITOR.into(),
+            priority: 0,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        // A built-in rule switched off emits a disable override, whether via
+        // `mode = off` or `enabled = false`.
+        let mut off_builtin = base.clone();
+        off_builtin.id = Uuid::nil();
+        off_builtin.name = "PINGWAF-1010".into();
+        let proto = rule_to_proto(&off_builtin);
+        let mut proto = proto;
+        proto.id = "PINGWAF-1010".into();
+        proto.mode = WAF_MODE_OFF;
+        let config = waf_config_to_proto(
+            &[proto.clone(), rule_to_proto(&base)],
+            &[],
+            None,
+        );
+        assert_eq!(config.managed_overrides.len(), 1);
+        assert_eq!(config.managed_overrides[0].rule_id, "PINGWAF-1010");
+        assert!(!config.managed_overrides[0].enabled);
+
+        let mut disabled_builtin = proto.clone();
+        disabled_builtin.mode = WAF_MODE_MONITOR;
+        disabled_builtin.enabled = false;
+        let config = waf_config_to_proto(&[disabled_builtin], &[], None);
+        assert_eq!(config.managed_overrides.len(), 1);
+        assert_eq!(config.managed_overrides[0].rule_id, "PINGWAF-1010");
+
+        // Enabled built-in rules produce no override.
+        let mut on_builtin = proto;
+        on_builtin.enabled = true;
+        on_builtin.mode = WAF_MODE_MONITOR;
+        let config = waf_config_to_proto(&[on_builtin], &[], None);
+        assert!(config.managed_overrides.is_empty());
+
+        // A disabled custom rule never produces an override — custom rules
+        // travel through `custom_rules` and are filtered engine-side.
+        let mut off_custom = base.clone();
+        off_custom.enabled = false;
+        off_custom.mode = mode::OFF.into();
+        let config =
+            waf_config_to_proto(&[rule_to_proto(&off_custom)], &[], None);
+        assert!(config.managed_overrides.is_empty());
+        assert_eq!(config.custom_rules.len(), 1);
     }
 
     #[test]

@@ -343,6 +343,7 @@ pub async fn refresh(
             monitor_categories: CategorySet::EMPTY,
             monitor_stacks: StackSet::EMPTY,
             monitor_managed_rules: std::collections::HashSet::new(),
+            disabled_managed_rules: std::collections::HashSet::new(),
             monitor_custom_rules: std::collections::HashSet::new(),
             threshold: 40,
             paranoia_level: 2,
