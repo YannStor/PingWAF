@@ -299,10 +299,10 @@ struct SiteContext {
     /// Site-level deep body inspection (advanced mode): inspect request
     /// bodies even when the plugin-level `inspect_body` switch is off.
     inspect_body: bool,
-    /// Seconds this site's withheld-body stage may run (1..=30, 0/unset
-    /// → 30). Snapshotted per site so concurrent requests on sites with
-    /// different settings never share a value (see
-    /// [`effective_body_stage_timeout`]).
+    /// Raw site-level `body_stage_timeout_secs`, only clamped to
+    /// 0..=30 — **not** resolved. `0` means the site did not set it; the
+    /// plugin's global conf value must stay the fallback at
+    /// withholding time (see [`effective_body_stage_timeout`]).
     body_stage_timeout_secs: u32,
     /// Sites behind a CDN/proxy: derive the client IP from a forwarded
     /// header instead of the TCP peer; IP rules, rate limits and logs all
@@ -351,10 +351,13 @@ impl SiteContext {
             inspect_body: waf_cfg
                 .filter(|cfg| cfg.enabled)
                 .is_some_and(|cfg| cfg.advanced_mode),
-            body_stage_timeout_secs: effective_body_stage_timeout(
-                waf_cfg.map(|cfg| cfg.body_stage_timeout_secs),
-                None,
-            ),
+            // Keep the raw wire value: a 0 here means "site unset", and
+            // rewriting it to the default would silently override the
+            // plugin's global conf at withholding time.
+            body_stage_timeout_secs: waf_cfg
+                .map(|cfg| cfg.body_stage_timeout_secs)
+                .unwrap_or(0)
+                .clamp(0, DEFERRED_BODY_MAX_STAGE_SECS as u32),
             proxy_trust: ProxyTrust::new(
                 site_rules.proxy_trust.enabled,
                 site_rules.proxy_trust.effective_header(),
@@ -1722,6 +1725,13 @@ const DEFERRED_BODY_MAX_STAGE_SECS: u64 = 30;
 /// Resolves the withheld-body stage deadline: the smaller of the
 /// configured timeout (mirroring the site's `downstream_read_timeout`)
 /// and the hard 30s ceiling; unset means 30s.
+///
+/// Relation to [`effective_body_stage_timeout`]: both resolve a withheld-
+/// body timeout under the same 30s ceiling, but they source different
+/// inputs — this one takes the site's downstream read timeout as a
+/// `Duration`, the other resolves site vs. global plugin conf in whole
+/// seconds. They are deliberately kept separate: merging them would need
+/// a shared mutable resolution site or a wider config-summarizing type.
 fn stage_deadline_timeout(configured: Option<Duration>) -> Duration {
     configured
         .unwrap_or(Duration::from_secs(DEFERRED_BODY_MAX_STAGE_SECS))
@@ -4550,13 +4560,15 @@ inspect_body = true"###,
         // shared state, so the requests never leak into each other.
         let mut cfg_a = cache_waf_config(false, Vec::new(), Vec::new());
         cfg_a.body_stage_timeout_secs = 5;
+        // Site B leaves it unset (0) — the site context must carry the
+        // raw 0 so the global conf stays reachable at withholding time.
         let mut cfg_b = cache_waf_config(false, Vec::new(), Vec::new());
-        cfg_b.body_stage_timeout_secs = 30;
+        cfg_b.body_stage_timeout_secs = 0;
 
         let site_a = SiteContext::build(&site_rules(Some(cfg_a)));
         let site_b = SiteContext::build(&site_rules(Some(cfg_b)));
         assert_eq!(5, site_a.body_stage_timeout_secs);
-        assert_eq!(30, site_b.body_stage_timeout_secs);
+        assert_eq!(0, site_b.body_stage_timeout_secs);
 
         // The deadline each site's staged body gets is derived from its
         // own context value; the global plugin conf does not override it.
@@ -4568,8 +4580,10 @@ inspect_body = true"###,
                 global
             ) as u64)
         );
+        // Site B is unset -> the global conf (10) applies, not the 30s
+        // default and not site A's value.
         assert_eq!(
-            Duration::from_secs(30),
+            Duration::from_secs(10),
             Duration::from_secs(effective_body_stage_timeout(
                 Some(site_b.body_stage_timeout_secs),
                 global
@@ -4578,13 +4592,30 @@ inspect_body = true"###,
     }
 
     #[test]
-    fn unset_site_timeout_falls_back_to_the_global_default() {
-        // No site config at all -> the site context carries the 30s
-        // default, which wins over the global conf.
-        let site = SiteContext::build(&site_rules(None));
+    fn explicit_site_timeout_wins_over_global() {
+        // A site that explicitly sets 30 keeps it even when the global
+        // conf asks for less.
+        let mut cfg = cache_waf_config(false, Vec::new(), Vec::new());
+        cfg.body_stage_timeout_secs = 30;
+        let site = SiteContext::build(&site_rules(Some(cfg)));
         assert_eq!(30, site.body_stage_timeout_secs);
         assert_eq!(
             30,
+            effective_body_stage_timeout(
+                Some(site.body_stage_timeout_secs),
+                Some(10)
+            )
+        );
+    }
+
+    #[test]
+    fn unset_site_timeout_falls_back_to_the_global_default() {
+        // No site config at all -> the site context carries the raw 0
+        // ("unset"), so the plugin's global conf value is used.
+        let site = SiteContext::build(&site_rules(None));
+        assert_eq!(0, site.body_stage_timeout_secs);
+        assert_eq!(
+            10,
             effective_body_stage_timeout(
                 Some(site.body_stage_timeout_secs),
                 Some(10)

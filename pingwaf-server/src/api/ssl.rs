@@ -66,11 +66,14 @@ pub struct CertificateResponse {
     pub has_certificate: bool,
     pub has_private_key: bool,
     /// Advisory only: certificate hostnames this site does not serve. Filled
-    /// in on the create/update responses, where a mismatched certificate is a
-    /// likely operator mistake — but never turned into a rejection, since
-    /// uploading the certificate before adding its hostname (or for another
-    /// site) is a legitimate workflow. Omitted from the read endpoints, which
-    /// have no single site to compare against.
+    /// in on every endpoint that returns a certificate — create/update, and
+    /// the list/show reads too, so the dashboard badge renders on a page
+    /// refresh rather than only right after a save (H3) — but never turned
+    /// into a rejection: uploading the certificate before adding its hostname
+    /// (or for another site) is a legitimate workflow.
+    ///
+    /// Empty (not null) when nothing is wrong; `None` only survives on a
+    /// response built from a model without a site lookup.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warnings: Option<Vec<String>>,
     pub created_at: DateTime<Utc>,
@@ -241,15 +244,36 @@ fn wildcard_covers(cert: &str, host: &str) -> bool {
     !label.is_empty() && !label.contains('.') && !label.contains('*')
 }
 
+/// Multi-label wildcard suffix check, mirroring the data-plane
+/// `lookup_with_wildcard` (pingwaf-agent cache): a site wildcard
+/// `*.example.com` covers any depth of subdomain (`a.example.com`,
+/// `a.b.example.com`) but not the parent `example.com` itself.
+fn site_wildcard_covers(site: &str, cert: &str) -> bool {
+    let Some(parent) = site.strip_prefix("*.") else {
+        return false;
+    };
+    // The wildcard never covers its own parent (`*.example.com` does not
+    // serve `example.com`), and only concrete hostnames match — not
+    // another wildcard.
+    let Some(head) =
+        cert.strip_suffix(parent).and_then(|h| h.strip_suffix('.'))
+    else {
+        return false;
+    };
+    !head.is_empty() && !head.contains('*')
+}
+
 /// Whether `served` (a hostname the site answers for) is covered by the
 /// certificate hostname `cert`. The two directions are not symmetric: a
-/// wildcard on the certificate side covers any single label under it, and a
-/// wildcard on the site side covers a concrete hostname the certificate
-/// names (the site serves `*.example.com`, so `api.example.com` is served).
+/// wildcard on the certificate side covers any single label under it
+/// (the TLS standard), while a wildcard on the site side uses multi-label
+/// suffix matching, mirroring the agent's data-plane rule lookup — the
+/// site serves `*.example.com`, so both `api.example.com` and
+/// `a.b.example.com` are served (`example.com` itself is not).
 fn cert_name_covers_site_name(cert: &str, served: &str) -> bool {
     cert == served
         || wildcard_covers(cert, served)
-        || wildcard_covers(served, cert)
+        || site_wildcard_covers(served, cert)
 }
 
 /// Certificate hostnames the site does not serve.
@@ -311,6 +335,75 @@ fn certificate_warnings(
         );
     }
     warnings
+        .iter()
+        .map(|domain| {
+            format!("certificate domain {domain} is not served by this site")
+        })
+        .collect()
+}
+
+/// The hostnames each site answers for, keyed by site id.
+///
+/// `(domain, alternate_domains)` is the whole of what
+/// [`certificate_warnings_for`] needs, so a list endpoint can fetch it once
+/// for the whole page instead of joining per row (H3 N+1). Sites that are
+/// gone from the table simply have no entry, which reads as "serves nothing".
+type SiteHostnames = HashMap<Uuid, (String, Vec<String>)>;
+
+/// Loads [`SiteHostnames`] for the given site ids in **one** query.
+///
+/// A database error degrades to an empty map (i.e. "no warnings") rather than
+/// propagating: these warnings are advisory, and failing a certificate listing
+/// because the advisory decoration could not be computed would be worse than
+/// showing the certificates without it.
+async fn site_hostname_index(
+    state: &AppState,
+    site_ids: impl IntoIterator<Item = Uuid>,
+) -> SiteHostnames {
+    let ids: Vec<Uuid> = {
+        let mut ids: Vec<Uuid> = site_ids.into_iter().collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    };
+    if ids.is_empty() {
+        return HashMap::new();
+    }
+    match site::Entity::find()
+        .filter(site::Column::Id.is_in(ids))
+        .all(&state.db)
+        .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|model| (model.id, (model.domain, model.alternate_domains)))
+            .collect(),
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not load site hostnames for certificate warnings"
+            );
+            HashMap::new()
+        },
+    }
+}
+
+/// Computes the advisory warnings for a certificate read back from the
+/// database, using hostnames already loaded by [`site_hostname_index`].
+///
+/// Same wording as [`certificate_warnings`] minus the per-row `tracing::warn!`:
+/// a *listing* of N already-saved certificates would otherwise log N WARN
+/// lines on every dashboard refresh, drowning the one line that mattered when
+/// the certificate was saved.
+fn certificate_warnings_for(
+    served: &SiteHostnames,
+    site_id: Uuid,
+    cert_domain: &str,
+) -> Vec<String> {
+    let Some((domain, alternate)) = served.get(&site_id) else {
+        return Vec::new();
+    };
+    uncovered_certificate_domains(cert_domain, domain, alternate)
         .iter()
         .map(|domain| {
             format!("certificate domain {domain} is not served by this site")
@@ -501,8 +594,24 @@ async fn list_certificates(
 
     let total = paginator.num_items().await?;
     let rows = paginator.fetch_page(pagination.index()).await?;
-    let items: Vec<CertificateResponse> =
-        rows.into_iter().map(Into::into).collect();
+    // H3: the advisory warnings are only useful where the dashboard reads
+    // certificates back, so the list fills them in too — one site lookup, then
+    // pure string comparisons per row. A failed lookup degrades to "no
+    // warnings" rather than failing the read: the list is a listing, and
+    // holding it hostage to an advisory field would be the wrong trade.
+    let served = site_hostname_index(&state, std::iter::once(id)).await;
+    let items: Vec<CertificateResponse> = rows
+        .into_iter()
+        .map(|row| {
+            let mut response = CertificateResponse::from(row);
+            response.warnings = Some(certificate_warnings_for(
+                &served,
+                response.site_id,
+                &response.domain,
+            ));
+            response
+        })
+        .collect();
     Ok(Json(Page::new(items, total, pagination)))
 }
 
@@ -670,7 +779,14 @@ async fn show_certificate(
     load_site_read(&state.db, id, &current).await?;
 
     let row = find_certificate(&state, id, target).await?;
-    Ok(Json(CertificateResponse::from(row)))
+    let served = site_hostname_index(&state, std::iter::once(id)).await;
+    let mut response = CertificateResponse::from(row);
+    response.warnings = Some(certificate_warnings_for(
+        &served,
+        response.site_id,
+        &response.domain,
+    ));
+    Ok(Json(response))
 }
 
 /// `PUT /api/v1/sites/{site_id}/certificates/{cert_id}`
@@ -1049,13 +1165,29 @@ async fn list_all_certificates(
 
     let total = paginator.num_items().await?;
     let rows = paginator.fetch_page(pagination.index()).await?;
+    // H3: one batch lookup for the hostnames of every site on this page (plus
+    // the site named in the query, if any), then pure string comparisons — no
+    // query per row. Sites outside the caller's visible set are skipped here;
+    // their certificates are already filtered out above.
+    let served = site_hostname_index(
+        &state,
+        rows.iter().map(|row| row.site_id).chain(requested),
+    )
+    .await;
     let items: Vec<CertificateWithSite> = rows
         .into_iter()
         .map(|row| {
             let (site_domain, site_name) =
                 sites.get(&row.site_id).cloned().unwrap_or_default();
+            let warnings = certificate_warnings_for(
+                &served,
+                row.site_id,
+                row.domain.as_str(),
+            );
+            let mut certificate = CertificateResponse::from(row);
+            certificate.warnings = Some(warnings);
             CertificateWithSite {
-                certificate: CertificateResponse::from(row),
+                certificate,
                 site_domain,
                 site_name,
             }
@@ -1119,7 +1251,15 @@ async fn show_global_certificate(
     let target = parse_uuid(&cert_id, "certificate id")?;
     let row = find_certificate_by_id(&state, target).await?;
     load_site_read(&state.db, row.site_id, &current).await?;
-    Ok(Json(CertificateResponse::from(row)))
+    let served =
+        site_hostname_index(&state, std::iter::once(row.site_id)).await;
+    let mut response = CertificateResponse::from(row);
+    response.warnings = Some(certificate_warnings_for(
+        &served,
+        response.site_id,
+        &response.domain,
+    ));
+    Ok(Json(response))
 }
 
 /// `PUT /api/v1/certificates/{cert_id}`
@@ -1670,14 +1810,14 @@ mod tests {
         );
     }
 
-    /// `*` covers exactly one label — a certificate wildcard over the site's
-    /// concrete hostname, and a site wildcard over a concrete certificate
-    /// hostname.
+    /// Certificate wildcards cover exactly one label (TLS standard);
+    /// site wildcards cover any number of labels, matching the agent's
+    /// data-plane rule lookup.
     #[test]
     fn a_wildcard_covers_exactly_one_label_in_both_directions() {
         // Certificate wildcard, concrete site hostname: covered.
         assert!(warnings_for("*.example.com", "a.example.com", &[]).is_empty());
-        // ... but not the parent itself, and not a deeper name.
+        // ... but not the parent itself, and not a deeper name (single label).
         assert_eq!(
             warnings_for("*.example.com", "example.com", &[]),
             vec!["*.example.com".to_string()]
@@ -1686,10 +1826,18 @@ mod tests {
             warnings_for("*.example.com", "a.b.example.com", &[]),
             vec!["*.example.com".to_string()]
         );
-        // Site wildcard, concrete certificate hostname: covered (the site
-        // serves every single-label host under its wildcard).
+        // Site wildcard, concrete certificate hostname: covered at any
+        // label depth, mirroring lookup_with_wildcard on the data plane.
         assert!(warnings_for("a.example.com", "*.example.com", &[]).is_empty());
+        assert!(
+            warnings_for("a.b.example.com", "*.example.com", &[]).is_empty()
+        );
         assert!(warnings_for("*.example.com", "*.example.com", &[]).is_empty());
+        // ... but the site wildcard does not serve its own parent.
+        assert_eq!(
+            warnings_for("example.com", "*.example.com", &[]),
+            vec!["example.com".to_string()]
+        );
         // A different parent is never covered.
         assert_eq!(
             warnings_for("*.example.com", "a.other.com", &[]),
@@ -1720,6 +1868,105 @@ mod tests {
             warnings_for("API.Other.COM", "api.example.com", &[]),
             vec!["api.other.com".to_string()]
         );
+    }
+
+    /* ── H3: warnings on the read path ─────────────────────────────── */
+
+    /// Builds the batch index the list endpoints pass in, without a database.
+    fn served_index(entries: &[(Uuid, &str, &[&str])]) -> SiteHostnames {
+        entries
+            .iter()
+            .map(|(id, domain, alternate)| {
+                (
+                    *id,
+                    (
+                        (*domain).to_string(),
+                        alternate.iter().map(|d| (*d).to_string()).collect(),
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    /// H3: the list/show read path used to leave `warnings` at `None`, so the
+    /// dashboard badge never rendered on a page load — only right after a save.
+    /// A superset certificate must now come back with the warning populated.
+    #[test]
+    fn read_path_warnings_are_populated_for_a_superset_certificate() {
+        let site_id = Uuid::new_v4();
+        let served = served_index(&[(site_id, "api.example.com", &[])]);
+        assert_eq!(
+            certificate_warnings_for(
+                &served,
+                site_id,
+                "api.example.com,api.other.com"
+            ),
+            vec![
+                "certificate domain api.other.com is not served by this site"
+                    .to_string()
+            ]
+        );
+    }
+
+    /// ... and stays empty (not null) for the common case, so a client can
+    /// tell "checked, nothing wrong" from "not checked".
+    #[test]
+    fn read_path_warnings_are_empty_for_a_subset_certificate() {
+        let site_id = Uuid::new_v4();
+        let served =
+            served_index(&[(site_id, "api.example.com", &["www.example.com"])]);
+        assert!(certificate_warnings_for(
+            &served,
+            site_id,
+            "api.example.com,www.example.com"
+        )
+        .is_empty());
+    }
+
+    /// A multi-site page is served by one index: every certificate is checked
+    /// against **its own** site's hostnames, never a neighbour's.
+    #[test]
+    fn read_path_warnings_use_the_certificate_own_site() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let served = served_index(&[
+            (a, "a.example.com", &[]),
+            (b, "b.example.com", &["alt.example.com"]),
+        ]);
+        // Correct on site A, wrong on site B — the same hostname flips.
+        assert!(
+            certificate_warnings_for(&served, a, "a.example.com").is_empty()
+        );
+        assert_eq!(
+            certificate_warnings_for(&served, b, "a.example.com"),
+            vec![
+                "certificate domain a.example.com is not served by this site"
+                    .to_string()
+            ]
+        );
+        assert!(
+            certificate_warnings_for(&served, b, "alt.example.com").is_empty()
+        );
+    }
+
+    /// A certificate whose site is missing from the index (deleted between the
+    /// paging query and the lookup) must not panic and must not invent a
+    /// warning out of an empty hostname set.
+    #[test]
+    fn read_path_warnings_do_not_panic_for_an_unknown_site() {
+        let site_id = Uuid::new_v4();
+        let served = served_index(&[]);
+        assert!(
+            certificate_warnings_for(&served, site_id, "api.example.com")
+                .is_empty()
+        );
+        // ... nor for a multi-site list where only some sites resolved.
+        let known = Uuid::new_v4();
+        let served = served_index(&[(known, "a.example.com", &[])]);
+        assert!(certificate_warnings_for(&served, known, "a.example.com")
+            .is_empty());
+        assert!(certificate_warnings_for(&served, site_id, "a.example.com")
+            .is_empty());
     }
 
     /// `split_domains` (not a single-hostname parse) feeds the comparison, so
