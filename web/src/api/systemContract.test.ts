@@ -1,10 +1,26 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
+// `@/api/debug` 的导入链会加载 client/authStore（node 环境），
+// 先垫一个最小 localStorage 存根再执行模块导入。
+vi.hoisted(() => {
+  const ls = globalThis.localStorage as unknown
+  if (typeof ls !== 'object' || ls === null || typeof (ls as { getItem?: unknown }).getItem !== 'function') {
+    ;(globalThis as Record<string, unknown>).localStorage = {
+      getItem: () => null,
+      setItem: () => undefined,
+      removeItem: () => undefined,
+    }
+  }
+})
+import { normaliseUsagePercent, type SystemMetrics } from '@/api/debug'
 import type {
-  SystemMetrics,
   SystemProfile,
   SystemProfileModule,
   SystemProfileMethod,
 } from '@/api/debug'
+import { routeRewriteFlags } from '@/pages/sites/basic/types'
 
 /**
  * 契约测试：`/api/v1/system/metrics` 与 `/api/v1/system/profile` 的响应结构。
@@ -42,7 +58,7 @@ const METRICS: SystemMetrics = {
     swap_total: '0 B',
     mem_available_bytes: 8589934592,
     mem_available: '8.0 GiB',
-    memory_used_percent: 0.5,
+    memory_used_percent: 56.3,
     page_faults_minor: 1234,
     page_faults_major: 5,
     cached_bytes: 0,
@@ -80,6 +96,48 @@ const PROFILE: SystemProfile = {
 const MODULE_NAMES = ['proxy', 'waf', 'cache', 'plugin', 'db', 'control', 'other']
 
 describe('system API contract', () => {
+  it('memory_used_percent is 0-100 and consumers must not rescale it', () => {
+    // 后端（pingwaf-system/src/memory.rs）按 0-100、1 位小数上报。
+    expect(METRICS.memory.memory_used_percent).toBe(56.3)
+    expect(METRICS.memory.memory_used_percent).toBeLessThanOrEqual(100)
+    // 量纲断言：消费端（MemoryDetail / MetricCards）只允许经
+    // normaliseUsagePercent 归一，禁止残留 `* 100` 或裸 `Math.min(1, …)` 钳制。
+    const consumers = [
+      'src/components/system/MemoryDetail.tsx',
+      'src/components/system/MetricCards.tsx',
+    ].map((p) => readFileSync(resolve(process.cwd(), p), 'utf8'))
+    for (const src of consumers) {
+      expect(src).not.toMatch(/memory_used_percent\s*\*\s*100/)
+      expect(src).not.toMatch(/Math\.min\(1,\s*[^)]*memory_used_percent/)
+    }
+  })
+
+  it('normaliseUsagePercent maps 0-100 to 0-1', () => {
+    expect(normaliseUsagePercent(56.3)).toBeCloseTo(0.563, 10)
+    expect(normaliseUsagePercent(100)).toBe(1)
+    expect(normaliseUsagePercent(0)).toBe(0)
+    // 越界钳制，不产生 >1 或 <0。
+    expect(normaliseUsagePercent(150)).toBe(1)
+    expect(normaliseUsagePercent(-5)).toBe(0)
+  })
+
+  it('non-prefix routes always submit strip_prefix: false', () => {
+    // 编辑场景：库里的 strip_prefix=true（Switch 已 disabled），改 match_type 后提交
+    // 必须强制 false，否则后端按旧值合并校验会恒 400。
+    for (const matchType of ['exact', 'regex']) {
+      expect(
+        routeRewriteFlags({ matchType, rewritePath: '', stripPrefix: true }),
+      ).toEqual({ strip_prefix: false, rewrite_path: null })
+    }
+    // prefix 下原语义保持：rewrite 优先，开关仅在无 rewrite 且开启时生效。
+    expect(
+      routeRewriteFlags({ matchType: 'prefix', rewritePath: '/v1', stripPrefix: true }),
+    ).toEqual({ strip_prefix: false, rewrite_path: '/v1' })
+    expect(
+      routeRewriteFlags({ matchType: 'prefix', rewritePath: '', stripPrefix: true }),
+    ).toEqual({ strip_prefix: true, rewrite_path: null })
+  })
+
   it('metrics snapshot exposes the fields SystemPage renders', () => {
     expect(METRICS.cpu.cores).toBeGreaterThan(0)
     expect(METRICS.memory.rss_peak).toBeTruthy()

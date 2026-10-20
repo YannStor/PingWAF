@@ -57,6 +57,14 @@ const crumbKeys: Record<string, string> = {
   assistant: 'pages.assistant.title',
   agents: 'pages.agents.title',
   lifecycle: 'pages.lifecycle.title',
+  // The four below are ≥8 characters, so without an entry here they fall
+  // through to the site-id branch in the breadcrumb builder and render as
+  // truncated ids ("ip-group", "blocked-", "config-v", "notifica"). They
+  // use the same labels as the sidebar.
+  'ip-groups': 'nav.ipGroups',
+  'blocked-ips': 'nav.blockedIps',
+  notifications: 'nav.notifications',
+  'config-versions': 'nav.configVersions',
 }
 
 // Sections that are pure path prefixes under a site (they redirect to their

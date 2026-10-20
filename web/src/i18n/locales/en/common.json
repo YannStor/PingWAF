@@ -11,6 +11,7 @@
     "overview": "Overview",
     "memoryDetail": "Memory detail",
     "modules": "Module attribution",
+    "module": "Module",
     "topMethods": "Top methods",
     "rss": "RSS",
     "rssPeak": "RSS peak",
@@ -1870,28 +1871,7 @@
       "passkeySwitchHint": "When off, the login form no longer offers passkeys and new passkeys cannot be bound. Existing credentials are kept and work again once re-enabled.",
       "passkeySwitchDescription": "Deployment-wide switch. Passkey binding and management live under \"Account settings\" in the top-right menu.",
       "passkeySwitchOn": "Passkey sign-in enabled.",
-      "passkeySwitchOff": "Passkey sign-in disabled.",
-      "systemObs": {
-        "title": "System observability",
-        "description": "Live process CPU, memory footprint and module-level attribution of the control plane.",
-        "processCpu": "Process CPU",
-        "hostCpu": "Host CPU",
-        "cores": "Cores",
-        "rss": "Process RSS",
-        "containerMemory": "Container memory ({{scope}})",
-        "modules": "Module attribution",
-        "module": "Module",
-        "cpuMs": "CPU (ms)",
-        "cpuShare": "CPU share",
-        "memBytes": "Memory",
-        "calls": "Calls",
-        "totalCpuMs": "Total {{value}} ms CPU",
-        "noData": "No attribution data yet.",
-        "topMethods": "Top methods",
-        "method": "Method",
-        "avgUs": "Avg (µs)",
-        "hint": "Metrics and profile are read-only observations; nothing is captured or downloaded."
-      }
+      "passkeySwitchOff": "Passkey sign-in disabled."
     },
     "geo": {
       "title": "Geo Restrictions",

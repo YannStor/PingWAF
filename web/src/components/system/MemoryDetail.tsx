@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
-import type { SystemMemoryMetrics } from '@/api/debug'
+import { normaliseUsagePercent, type SystemMemoryMetrics } from '@/api/debug'
 import { formatSize } from '@/lib/format'
 
 function Row({
@@ -28,7 +28,8 @@ export function MemoryDetail({ memory }: { memory: SystemMemoryMetrics | undefin
   const { t } = useTranslation()
   if (!memory) return null
   const mem = memory
-  const usagePercent = Math.min(1, Math.max(0, mem.memory_used_percent))
+  // 后端按 0-100（1 位小数）上报，这里换算为 0-1 供进度条/阈值使用。
+  const usagePercent = normaliseUsagePercent(mem.memory_used_percent)
   const tone =
     usagePercent > 0.9 ? 'bg-danger' : usagePercent > 0.75 ? 'bg-warning' : 'bg-brand'
 
@@ -60,7 +61,7 @@ export function MemoryDetail({ memory }: { memory: SystemMemoryMetrics | undefin
                   />
                 </div>
                 <span className="text-[13px] font-medium text-fg-strong tabular-nums">
-                  {(mem.memory_used_percent * 100).toFixed(1)}%
+                  {mem.memory_used_percent.toFixed(1)}%
                 </span>
               </div>
             </Row>

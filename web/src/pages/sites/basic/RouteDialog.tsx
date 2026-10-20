@@ -16,7 +16,7 @@ import type {
   UpdateRouteRequest,
   UpstreamPool,
 } from '@/api/types'
-import { emptyRouteForm, isValidRewritePath, type RouteFormState } from './types'
+import { emptyRouteForm, isValidRewritePath, routeRewriteFlags, type RouteFormState } from './types'
 
 export type RouteDialogRequest =
   | { mode: 'create'; poolId: string }
@@ -131,11 +131,7 @@ export function RouteDialog({
       setError(t('errors.validation'))
       return
     }
-    // The rewrite wins over stripping, and both only apply to prefix matches
-    // (the server rejects `strip_prefix` on other match types with a 400).
-    const rewritePath = form.matchType === 'prefix' && rewrite ? rewrite : null
-    const stripPrefix =
-      form.matchType === 'prefix' && !rewritePath && form.stripPrefix
+    const { strip_prefix: stripPrefix, rewrite_path: rewritePath } = routeRewriteFlags(form)
 
     if (editing) {
       save.mutate({

@@ -11,6 +11,7 @@
     "overview": "概要",
     "memoryDetail": "メモリ詳細",
     "modules": "モジュール別帰属",
+    "module": "モジュール",
     "topMethods": "上位メソッド",
     "rss": "RSS",
     "rssPeak": "RSS ピーク",
@@ -1870,28 +1871,7 @@
       "passkeySwitchHint": "オフにするとログイン画面にパスキーが表示されなくなり、新しいパスキーの登録もできません。既存の資格情報は保持され、再度有効化すると復帰します。",
       "passkeySwitchDescription": "デプロイ全体のスイッチ。パスキーの登録と管理は右上の「アカウント設定」で行います。",
       "passkeySwitchOn": "パスキーログインを有効にしました。",
-      "passkeySwitchOff": "パスキーログインを無効にしました。",
-      "systemObs": {
-        "title": "システム観測",
-        "description": "コントロールプレーンのプロセス CPU、メモリ使用量、モジュール別内訳のリアルタイム観測。",
-        "processCpu": "プロセス CPU",
-        "hostCpu": "ホスト CPU",
-        "cores": "コア数",
-        "rss": "プロセス RSS",
-        "containerMemory": "コンテナメモリ（{{scope}}）",
-        "modules": "モジュール別内訳",
-        "module": "モジュール",
-        "cpuMs": "CPU（ms）",
-        "cpuShare": "CPU 占有率",
-        "memBytes": "メモリ",
-        "calls": "呼び出し数",
-        "totalCpuMs": "累計 {{value}} ms CPU",
-        "noData": "内訳データはまだありません。",
-        "topMethods": "ホットメソッド Top 10",
-        "method": "メソッド",
-        "avgUs": "平均（µs）",
-        "hint": "metrics と profile は読み取り専用の観測データで、ファイルの収集やダウンロードは行いません。"
-      }
+      "passkeySwitchOff": "パスキーログインを無効にしました。"
     },
     "geo": {
       "title": "地域制限",

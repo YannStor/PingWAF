@@ -94,7 +94,7 @@ export function MetricPills({ metrics }: { metrics: SystemMetrics | undefined })
     { label: t('system.rss'), value: mem.rss },
     { label: t('system.rssPeak'), value: mem.rss_peak },
     { label: t('system.available'), value: mem.mem_available },
-    { label: t('system.usagePercent'), value: `${(mem.memory_used_percent * 100).toFixed(1)}%` },
+    { label: t('system.usagePercent'), value: `${mem.memory_used_percent.toFixed(1)}%` },
   ]
   return (
     <div className="flex flex-wrap gap-2">

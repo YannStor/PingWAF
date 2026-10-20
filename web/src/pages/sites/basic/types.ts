@@ -286,6 +286,25 @@ export function isValidRewritePath(raw: string): boolean {
   return new TextEncoder().encode(path).length <= 2048
 }
 
+/**
+ * Route 请求体的 `strip_prefix`/`rewrite_path` 组装规则。
+ *
+ * The rewrite wins over stripping, and both only apply to prefix matches
+ * (the server rejects `strip_prefix` on other match types with a 400).
+ * ⚠️ 非 prefix 时 `strip_prefix` 必须无条件为 false，与本地开关状态无关 —
+ * 否则用户把 prefix 路由改成 exact/regex 后无法保存（PUT 恒 400）。
+ */
+export function routeRewriteFlags(form: {
+  matchType: string
+  rewritePath: string
+  stripPrefix: boolean
+}): { strip_prefix: boolean; rewrite_path: string | null } {
+  const rewrite = form.rewritePath.trim()
+  const rewritePath = form.matchType === 'prefix' && rewrite ? rewrite : null
+  const stripPrefix = form.matchType === 'prefix' && !rewritePath && form.stripPrefix
+  return { strip_prefix: stripPrefix, rewrite_path: rewritePath }
+}
+
 /* ── Trusted proxy helpers ────────────────────────────────────────── */
 
 /** Select values for the trusted forwarded header dropdown. */

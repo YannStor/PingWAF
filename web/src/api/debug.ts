@@ -67,7 +67,7 @@ export interface SystemMemoryMetrics {
   mem_available_bytes: number
   /** `mem_available_bytes` 的人类可读形式。 */
   mem_available: string
-  /** 主机内存使用率（0.0-1.0）。 */
+  /** 主机内存使用率（0-100，1 位小数，如 `56.3`）。 */
   memory_used_percent: number
   /** 次要缺页次数（累计）。 */
   page_faults_minor: number
@@ -129,6 +129,15 @@ export function fetchSystemMetrics(): Promise<SystemMetrics> {
 /** `GET /api/v1/system/profile`（AdminUser）。 */
 export function fetchSystemProfile(): Promise<SystemProfile> {
   return apiClient.get<SystemProfile>('/system/profile')
+}
+
+/**
+ * `memory_used_percent` 量纲归一：后端按 0-100（1 位小数）上报，
+ * 这里换算为 0-1 供进度条/阈值使用。⚠️ 全仓只允许在消费端调用本函数
+ * 做一次除法，禁止再对原始值做 `* 100` 或 `Math.min(1, …)` 钳制。
+ */
+export function normaliseUsagePercent(v: number): number {
+  return Math.min(1, Math.max(0, v / 100))
 }
 
 export const debugKeys = {

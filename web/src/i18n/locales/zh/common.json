@@ -11,6 +11,7 @@
     "overview": "概览",
     "memoryDetail": "内存明细",
     "modules": "模块归因",
+    "module": "模块",
     "topMethods": "Top 方法",
     "rss": "RSS",
     "rssPeak": "RSS 峰值",
@@ -1870,28 +1871,7 @@
       "passkeySwitchHint": "关闭后登录页不再提供 Passkey 登录，也无法绑定新的 Passkey；已绑定的凭据会保留，重新开启后即可恢复使用。",
       "passkeySwitchDescription": "部署级总开关。Passkey 的绑定与管理在右上角\"账户设置\"中。",
       "passkeySwitchOn": "已启用 Passkey 登录。",
-      "passkeySwitchOff": "已禁用 Passkey 登录。",
-      "systemObs": {
-        "title": "System 观测",
-        "description": "控制面进程 CPU、内存占用与模块级归因的实时观测。",
-        "processCpu": "进程 CPU",
-        "hostCpu": "主机 CPU",
-        "cores": "核心数",
-        "rss": "进程 RSS",
-        "containerMemory": "容器内存（{{scope}} 口径）",
-        "modules": "模块归因",
-        "module": "模块",
-        "cpuMs": "CPU（ms）",
-        "cpuShare": "CPU 占比",
-        "memBytes": "内存",
-        "calls": "调用次数",
-        "totalCpuMs": "累计 {{value}} ms CPU",
-        "noData": "暂无归因数据。",
-        "topMethods": "热点方法 Top 10",
-        "method": "方法",
-        "avgUs": "平均耗时（µs）",
-        "hint": "metrics 与 profile 为只读观测数据，不会采集或下载任何文件。"
-      }
+      "passkeySwitchOff": "已禁用 Passkey 登录。"
     },
     "geo": {
       "title": "地域限制",
