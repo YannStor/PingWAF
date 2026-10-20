@@ -135,7 +135,7 @@ jobs:
 
       - name: Typos
         if: matrix.toolchain == 'stable' && always()
-        uses: crate-ci/typos@v1.50.3
+        uses: crate-ci/typos@v1.51.1
 
   # The alternative TLS backend gets the same clippy gate and the full test
   # suite, in its own job: `openssl` and `tls-rustls` are mutually exclusive
