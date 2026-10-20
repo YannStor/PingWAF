@@ -8,6 +8,34 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.28.2] — 2026-10-20
+
+### Fixed
+
+- **Node metrics query no longer sorts `agent_metrics` per poll.** The query
+  ordered `agent_id` ascending with `recorded_at` descending, which a single
+  b-tree cannot serve; migration 61 adds `(agent_id, name, recorded_at DESC)`
+  and the metric name is bound instead of interpolated. Site counts are
+  aggregated in SQL, and latest-sample queries break timestamp ties by `id`.
+- **Duplicate origin addresses are rejected case-insensitively.** Migration 62
+  adds a unique index on `(pool_id, lower(address))`; a concurrent insert or
+  update that slips past the pre-check now maps to `400` instead of a
+  database error. Existing duplicates abort the migration with the offending
+  pool and address instead of being deleted.
+- **`response_replace` operands reject control characters.** Newline, CR and
+  tab are refused in patterns and replacements (backslash too, except inside
+  a regex pattern where it is the regex escape): a rule is one single-line
+  `sub_filter` entry and a control character has no representation in it.
+  Validation runs before the empty-rules shortcut, and status codes are
+  sorted and de-duplicated.
+- **`sub_filter` caps buffered bytes, not `Content-Length`.** A chunked
+  response without that header could buffer without bound; above 8 MiB the
+  buffered body is handed back once, the response passes through and a
+  warning is logged.
+- **Console host validation matches the server** (C0/DEL/C1/U+2028/U+2029, byte
+  length), and the control-plane CPU bar uses host CPU so a >100% process
+  reading no longer renders a full bar.
+
 ## [Unreleased]
 
 ### Added
