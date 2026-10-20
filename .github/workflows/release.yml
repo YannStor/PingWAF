@@ -60,7 +60,7 @@ jobs:
       # The released binary embeds the dashboard, so build the real bundle
       # before cargo (rust-embed reads ../web/dist at compile time).
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
