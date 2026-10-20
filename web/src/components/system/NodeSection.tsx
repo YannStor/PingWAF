@@ -77,7 +77,10 @@ function Metric({
   )
 }
 
-/** CPU 百分比 → 0-1 供进度条；>1（多核超载）钳制显示。 */
+/**
+ * CPU 百分比 → 0-1 供进度条（仅用于 host_cpu_percent 的 0-100 语义）；
+ * >1 钳制显示。
+ */
 function cpuBar(percent: number | null): string | null {
   if (percent === null || !Number.isFinite(percent)) return null
   return `${Math.min(100, normaliseUsagePercent(percent) * 100)}%`
@@ -86,8 +89,10 @@ function cpuBar(percent: number | null): string | null {
 export function ControlNodeCard({ control }: { control: SystemControlNode }) {
   const { t } = useTranslation()
   const pct = (v: number) => `${(v * 100).toFixed(1)}%`
-  const processBar = cpuBar(control.process_cpu_percent)
   const hostBar = cpuBar(control.host_cpu_percent)
+  // 口径说明：进度条只用 host_cpu_percent（主机整体，天然 0-100）。
+  // process_cpu_percent 是单核口径可 >100（如 250%），套 0-100 归一会出现
+  // "条满格但文本 250.0%" 的矛盾，故文本照常显示，条不复用它。
   return (
     <div className="flex flex-col gap-2">
       <div className="grid grid-cols-1 gap-x-8 sm:grid-cols-2">
@@ -102,18 +107,11 @@ export function ControlNodeCard({ control }: { control: SystemControlNode }) {
           value={`${control.avg_elapsed_ms.toFixed(1)} ms`}
         />
       </div>
-      {(processBar || hostBar) && (
+      {hostBar && (
         <div className="flex flex-col gap-1.5 pt-1">
-          {processBar && (
-            <div className="h-1.5 overflow-hidden rounded-full bg-recessed" aria-hidden>
-              <div className="h-full rounded-full bg-brand" style={{ width: processBar }} />
-            </div>
-          )}
-          {hostBar && (
-            <div className="h-1.5 overflow-hidden rounded-full bg-recessed" aria-hidden>
-              <div className="h-full rounded-full bg-brand/60" style={{ width: hostBar }} />
-            </div>
-          )}
+          <div className="h-1.5 overflow-hidden rounded-full bg-recessed" aria-hidden>
+            <div className="h-full rounded-full bg-brand/60" style={{ width: hostBar }} />
+          </div>
         </div>
       )}
     </div>
@@ -201,7 +199,7 @@ function AgentTable({
         a.rps === null || !Number.isFinite(a.rps) ? (
           NULL_CELL
         ) : (
-          <span className="tabular-nums">{a.rps.toFixed(1)}</span>
+          <span className="tabular-nums">{a.rps.toFixed(0)}</span>
         ),
     },
     {

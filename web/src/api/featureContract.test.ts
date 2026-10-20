@@ -57,6 +57,14 @@ describe('GET /api/v1/system/nodes contract', () => {
     expect(src).toContain('—')
     expect(src).toContain('formatRelative(a.last_seen)')
   })
+
+  it('CPU bar uses host_cpu_percent only (process_cpu can exceed 100)', () => {
+    const src = read('src/components/system/NodeSection.tsx')
+    expect(src).not.toContain('processBar')
+    expect(src).toContain('cpuBar(control.host_cpu_percent)')
+    // rps 是整数，不做小数位
+    expect(src).toContain('a.rps.toFixed(0)')
+  })
 })
 
 /** 模块表磁盘列契约。 */
@@ -102,5 +110,13 @@ describe('upstream host validation', () => {
     expect(isValidUpstreamHost('a b')).toBe(false)
     expect(isValidUpstreamHost('x'.repeat(254))).toBe(false)
     expect(isValidUpstreamHost('x'.repeat(253))).toBe(true)
+  })
+
+  it('rejects C1 control chars and JS line separators like the server', () => {
+    expect(isValidUpstreamHost('a\u0080b')).toBe(false)
+    expect(isValidUpstreamHost('a\u009fb')).toBe(false)
+    expect(isValidUpstreamHost('a\u2028b')).toBe(false)
+    expect(isValidUpstreamHost('a\u2029b')).toBe(false)
+    expect(isValidUpstreamHost('example.com:8443')).toBe(true)
   })
 })
