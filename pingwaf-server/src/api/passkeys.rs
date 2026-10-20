@@ -298,6 +298,11 @@ async fn register_begin(
         .ok_or_else(|| {
             ApiError::Unauthorized("account no longer exists".to_string())
         })?;
+    // Registration is a credential-minting path too: an account disabled after
+    // its token was issued must not be able to enrol an authenticator that
+    // would outlive the disable. The extractor keeps accepting the token (it
+    // cannot see the row), so the check lives here.
+    ensure_account_active(&account)?;
     let display_name = account
         .name
         .as_deref()
@@ -334,6 +339,17 @@ async fn register_finish(
     ensure_passkey_enabled(&state).await?;
     let config = relying_party(&state, &headers)?;
     let cred_id = payload.id.clone();
+
+    // Depth in defence: `register/begin` already refused a disabled account,
+    // but a state issued just before the disable is still in the store, so the
+    // account is re-checked before the credential is persisted.
+    let account = user::Entity::find_by_id(current.id)
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| {
+            ApiError::Unauthorized("account no longer exists".to_string())
+        })?;
+    ensure_account_active(&account)?;
 
     let mut response = payload;
     response.name = Some(validate_name(
@@ -1200,6 +1216,23 @@ mod tests {
         assert!(ensure_account_active(&account(false, role::ADMIN)).is_ok());
         assert!(ensure_account_active(&account(false, role::VIEWER)).is_ok());
         assert!(ensure_account_active(&account(false, role::AUDITOR)).is_ok());
+    }
+
+    /// R-07: registration mints a credential, so it is gated by the same
+    /// account check as the login. The extractor cannot see the row, so a
+    /// token issued before the disable still arrives here.
+    #[test]
+    fn a_disabled_account_cannot_begin_or_finish_a_registration() {
+        let err =
+            ensure_account_active(&account(true, role::ADMIN)).unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+        assert!(err.to_string().contains("account is disabled"));
+        // The role guard applies to registration too.
+        let err =
+            ensure_account_active(&account(false, "superuser")).unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+        // ...and an ordinary active account is not caught by either arm.
+        assert!(ensure_account_active(&account(false, role::ADMIN)).is_ok());
     }
 
     #[test]

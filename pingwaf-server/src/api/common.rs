@@ -46,6 +46,12 @@ pub const DEFAULT_PAGE_SIZE: u64 = 50;
 /// Upper bound accepted from clients, to keep queries predictable.
 pub const MAX_PAGE_SIZE: u64 = 200;
 
+/// Cap on one cache-purge request, shared by the site endpoint
+/// (`POST /api/v1/sites/{site_id}/cache/purge`) and the agent command
+/// (`purge_cache`). Both fan the same list out to every edge serving the site,
+/// so a single ceiling keeps the two paths from drifting apart (D12).
+pub(crate) const MAX_PURGE_URLS: usize = 1000;
+
 /// `?page=&page_size=` query parameters.
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub struct Pagination {

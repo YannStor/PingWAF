@@ -158,15 +158,12 @@ async fn rollback_version(
 ) -> Result<Json<Value>, ApiError> {
     current.require_admin().map_err(ApiError::from)?;
 
+    // A missing snapshot surfaces through `From<DbErr>`, which answers a 404
+    // with the generic "not found" text: `RecordNotFound` carries the lookup
+    // string, and echoing it named the table to the caller.
     let outcome =
         config_history::rollback(&state.db, version_id, Some(&current.email))
-            .await
-            .map_err(|err| match err {
-                sea_orm::DbErr::RecordNotFound(message) => {
-                    ApiError::NotFound(message)
-                },
-                other => ApiError::from(other),
-            })?;
+            .await?;
 
     match outcome.scope {
         VersionScope::Site(site_id) => {
@@ -194,4 +191,35 @@ async fn rollback_version(
             VersionScope::Global => "global".to_string(),
         },
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::to_bytes;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use sea_orm::DbErr;
+
+    use super::*;
+
+    /// R-04: a rollback target that no longer exists reaches the caller as the
+    /// shared 404 envelope. `config_history::rollback` reports it as
+    /// `DbErr::RecordNotFound("site not found")`, whose text named the table,
+    /// so the handler must not build its own `ApiError::NotFound` around it.
+    #[tokio::test]
+    async fn a_missing_rollback_target_answers_the_generic_not_found() {
+        let err = ApiError::from(DbErr::RecordNotFound(
+            "sites: no row for id 7".to_string(),
+        ));
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(response.into_body(), 8192).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "error": { "code": "not_found", "message": "not found" }
+            })
+        );
+    }
 }

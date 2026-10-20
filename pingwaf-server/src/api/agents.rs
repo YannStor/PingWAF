@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::api::common::{
     load_site_read, non_empty, parse_optional_datetime, parse_uuid,
-    require_write, scope_site, Page, Pagination,
+    require_write, scope_site, Page, Pagination, MAX_PURGE_URLS,
 };
 use crate::api::error::ApiError;
 use crate::api::keys::mint_key;
@@ -50,13 +50,6 @@ pub mod command_type {
 /// clamped, so a client that meant "forever" has to spell it `0`.
 const MAX_BLOCK_DURATION_SECONDS: i64 = 86_400 * 365;
 
-/// Same ceiling `api::cache` applies to `POST /cache/purge` (D12).
-///
-/// Duplicated rather than imported: `cache::MAX_PURGE_URLS` is private to that
-/// module, and widening it to `pub(crate)` from here would couple the two
-/// modules in the wrong direction. Keep the two values equal — both endpoints
-/// fan the same list out to the same fleet.
-const MAX_PURGE_URLS: usize = 1000;
 /// Cap on tag selectors in one command; nothing populates tags yet, so any
 /// non-trivial list is a mistake.
 const MAX_PURGE_TAGS: usize = 100;

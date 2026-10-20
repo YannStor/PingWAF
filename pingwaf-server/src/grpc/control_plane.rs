@@ -53,6 +53,13 @@ type BoxedStream<T> =
 /// API key exists but is wrong, or does not exist at all.
 const INVALID_CREDENTIALS: &str = "invalid credentials";
 
+/// Fixed reply for a row the database reports as missing. The `DbErr` carries
+/// the lookup text, which can name the table, so it stays in the log (R-02).
+const NOT_FOUND_MESSAGE: &str = "not found";
+
+/// Fixed reply for every other storage failure (R-02).
+const INTERNAL_MESSAGE: &str = "internal error";
+
 /// Column widths from the migrations; longer values are truncated instead of
 /// failing the whole batch.
 const MAX_REQUEST_ID: usize = 36;
@@ -476,10 +483,9 @@ impl ControlPlaneTrait for ControlPlaneService {
                         dedup_key: Some(site_row.id.to_string()),
                     })
                     .await;
-                    bundles.push(Err(Status::internal(format!(
-                        "could not build the rule bundle for site {}: {err}",
-                        site_row.id
-                    ))));
+                    // The peer is told only that the bundle is unavailable;
+                    // the `DbErr` (table names, SQL) went to the log above.
+                    bundles.push(Err(db_status(err)));
                 },
             }
         }
@@ -2242,12 +2248,27 @@ fn positive_u32(value: u32) -> Option<u32> {
     }
 }
 
-/// Maps a SeaORM error onto `INTERNAL`, logging the detail server side.
+/// Maps a SeaORM error onto a `tonic::Status`, logging the detail server side.
+///
+/// The detail never reaches the peer: `DbErr::RecordNotFound` carries whatever
+/// text the lookup used (a generated `find_related` / `update` path puts the
+/// table name in it), and the other variants name tables, columns and
+/// connection strings just as readily. Both bodies are therefore fixed
+/// strings — the 404 says only that the row is gone, everything else answers
+/// `internal error` after the full error has been logged here.
+///
+/// `NotFound` is deliberately not logged at `error` level: a missing row is a
+/// routine race (an agent deleted between two statements), not an incident.
 fn db_status(err: sea_orm::DbErr) -> Status {
-    tracing::error!(error = %err, "database error in the gRPC control plane");
     match err {
-        sea_orm::DbErr::RecordNotFound(msg) => Status::not_found(msg),
-        other => Status::internal(other.to_string()),
+        sea_orm::DbErr::RecordNotFound(detail) => {
+            tracing::debug!(error = %detail, "grpc storage lookup found no row");
+            Status::not_found(NOT_FOUND_MESSAGE)
+        },
+        other => {
+            tracing::error!(error = %other, "grpc storage error");
+            Status::internal(INTERNAL_MESSAGE)
+        },
     }
 }
 
@@ -2611,5 +2632,35 @@ mod tests {
             row.country_code.clone().unwrap().unwrap().len(),
             MAX_COUNTRY
         );
+    }
+
+    /// R-02: a missing row answers a fixed 404. The `DbErr` text names the
+    /// table the generated lookup searched, so none of it may reach the peer.
+    #[test]
+    fn record_not_found_answers_a_generic_404() {
+        let status = db_status(sea_orm::DbErr::RecordNotFound(
+            "sites: no row for id 7".to_string(),
+        ));
+        assert_eq!(status.code(), tonic::Code::NotFound);
+        assert_eq!(status.message(), "not found");
+        for leak in ["sites", "SELECT", "relation", "id 7"] {
+            assert!(!status.message().contains(leak), "{leak}");
+        }
+    }
+
+    /// R-02: every other storage failure — a SQL error naming the table and
+    /// the connection, say — answers a bare `internal error`.
+    #[test]
+    fn other_storage_errors_answer_a_generic_internal_error() {
+        let err = sea_orm::DbErr::Query(sea_orm::RuntimeErr::Internal(
+            "SELECT * FROM \"site_certificates\": relation does not exist"
+                .to_string(),
+        ));
+        let status = db_status(err);
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert_eq!(status.message(), "internal error");
+        for leak in ["SELECT", "relation", "site_certificates", "\""] {
+            assert!(!status.message().contains(leak), "{leak}");
+        }
     }
 }

@@ -212,6 +212,67 @@ fn split_domains(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// Upper bound on a certificate domain, matching the `domain` column.
+const MAX_CERT_DOMAIN_LEN: usize = 255;
+
+/// Normalises and vets the `domain` a certificate row is stored under.
+///
+/// The value is not merely cosmetic: it names the hostnames the certificate is
+/// issued for (the ACME order is built from it) and it is what the control
+/// plane matches against a site's hostnames. A string carrying `/`, `:` or
+/// control characters used to be stored verbatim, so a caller could park a
+/// path, a port or a smuggled header inside a field the edge later parses as a
+/// hostname.
+///
+/// Returns the trimmed, lower-cased form; a single leading `*.` wildcard label
+/// is allowed, anything else about the name must look like DNS labels.
+pub(crate) fn validate_cert_domain(raw: &str) -> Result<String, ApiError> {
+    let domain = raw.trim().to_ascii_lowercase();
+    let invalid = |reason: &str| {
+        ApiError::BadRequest(format!("invalid domain: {reason}"))
+    };
+
+    if domain.is_empty() {
+        return Err(invalid("must be 1-255 characters"));
+    }
+    if domain.len() > MAX_CERT_DOMAIN_LEN {
+        return Err(invalid("must be 1-255 characters"));
+    }
+    // Control characters and the separators that would make the value
+    // ambiguous to whoever parses it as a host: `a/b` reads as a path and
+    // `a:443` as host plus port.
+    if domain.chars().any(|ch| {
+        ch.is_ascii_control()
+            || ch.is_whitespace()
+            || matches!(ch, '/' | ':' | '\\' | '@' | '?')
+    }) {
+        return Err(invalid("contains a forbidden character"));
+    }
+
+    // One wildcard label, and only as the leftmost label.
+    let rest = match domain.strip_prefix("*.") {
+        Some(rest) => rest,
+        None => domain.as_str(),
+    };
+    if rest.contains('*') {
+        return Err(invalid("wildcard is only allowed as a leading '*.'"));
+    }
+    if rest.is_empty() {
+        return Err(invalid("wildcard needs a parent domain"));
+    }
+    // Empty labels (`..`, a leading or trailing `.`) and over-long labels.
+    for label in rest.split('.') {
+        if label.is_empty() {
+            return Err(invalid("empty label"));
+        }
+        if label.len() > 63 {
+            return Err(invalid("label exceeds 63 characters"));
+        }
+    }
+
+    Ok(domain)
+}
+
 /// Routes contributed to `/api/v1`.
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -313,12 +374,7 @@ async fn insert_certificate<C: ConnectionTrait>(
     payload: CreateCertificateRequest,
 ) -> Result<site_certificates::Model, ApiError> {
     let site_id = site.id;
-    let domain = payload.domain.trim().to_lowercase();
-    if domain.is_empty() || domain.len() > 255 {
-        return Err(ApiError::BadRequest(
-            "domain must be 1-255 characters".to_string(),
-        ));
-    }
+    let domain = validate_cert_domain(&payload.domain)?;
     if !acme_challenge::is_valid(&payload.acme_challenge_type) {
         return Err(ApiError::BadRequest(format!(
             "invalid acme_challenge_type '{}'",
@@ -519,10 +575,17 @@ async fn update_certificate(
         ));
     }
 
+    // Vetted before the row is touched: a rejected domain must leave the
+    // stored certificate exactly as it was.
+    let next_domain = match non_empty(&payload.domain) {
+        Some(raw) => Some(validate_cert_domain(&raw)?),
+        None => None,
+    };
+
     let mut active: site_certificates::ActiveModel = row.into();
 
-    if let Some(domain) = non_empty(&payload.domain) {
-        active.domain = Set(domain.to_lowercase());
+    if let Some(domain) = next_domain {
+        active.domain = Set(domain);
     }
     if let Some(cert) = payload.cert_pem {
         active.cert_pem = Set(Some(cert));
@@ -1161,4 +1224,85 @@ async fn list_all_events(
         })
         .collect();
     Ok(Json(Page::new(items, total, pagination)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R-03: a domain longer than the column is refused before it reaches the
+    /// database (which would otherwise truncate or reject it).
+    #[test]
+    fn an_overlong_certificate_domain_is_a_bad_request() {
+        let long = format!("{}.example.com", "a".repeat(250));
+        assert!(long.len() > MAX_CERT_DOMAIN_LEN);
+        let err = validate_cert_domain(&long).unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// R-03: the empty string and a blank one are not a domain.
+    #[test]
+    fn a_blank_certificate_domain_is_a_bad_request() {
+        for raw in ["", "   ", "\t\n"] {
+            let err = validate_cert_domain(raw).unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{raw:?}");
+        }
+    }
+
+    /// R-03: `/` and `:` would let the value read as a path or a host:port to
+    /// whoever parses it downstream, so they are refused rather than stored.
+    #[test]
+    fn a_certificate_domain_with_a_separator_is_a_bad_request() {
+        for raw in [
+            "example.com/path",
+            "example.com:443",
+            "https://example.com",
+            "exa mple.com",
+            "example.com\u{0}",
+            "example.com\r\nX-Injected: 1",
+        ] {
+            let err = validate_cert_domain(raw).unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{raw:?}");
+        }
+    }
+
+    /// R-03: empty labels are refused; a leading `*.` is not one.
+    #[test]
+    fn empty_labels_are_refused_but_a_leading_wildcard_is_not() {
+        for raw in [
+            "..",
+            ".example.com",
+            "example.com.",
+            "a..b",
+            "*",
+            "*.",
+            "*.*.example.com",
+            "a.*.com",
+        ] {
+            let err = validate_cert_domain(raw).unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{raw:?}");
+        }
+        assert_eq!(
+            validate_cert_domain("*.example.com").unwrap(),
+            "*.example.com"
+        );
+    }
+
+    /// R-03: the stored form is trimmed and lower-cased, and a legitimate
+    /// hostname still passes untouched.
+    #[test]
+    fn a_valid_certificate_domain_is_normalised() {
+        assert_eq!(
+            validate_cert_domain("  Example.COM  ").unwrap(),
+            "example.com"
+        );
+        assert_eq!(
+            validate_cert_domain("*.Example.COM").unwrap(),
+            "*.example.com"
+        );
+        assert_eq!(
+            validate_cert_domain("a-b.c1.example.com").unwrap(),
+            "a-b.c1.example.com"
+        );
+    }
 }

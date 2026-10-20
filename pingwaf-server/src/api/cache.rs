@@ -22,6 +22,7 @@ use crate::api::agents::command_type;
 use crate::api::common::{
     agent_may_touch_site, load_site_read, load_site_write, non_empty,
     parse_uuid, purge_target_agents, scope_site, Page, Pagination,
+    MAX_PURGE_URLS,
 };
 use crate::api::error::ApiError;
 use crate::api::sites::touch_site;
@@ -35,9 +36,6 @@ use crate::models::{cache_rules, site};
 /// TTL bounds: agents refuse nonsensical values, so reject them at the source.
 const MAX_TTL_SECONDS: i32 = 30 * 86_400;
 const MAX_DISK_QUOTA_MB: i32 = 1_024 * 1024;
-/// Cap on one purge request: a huge list is almost always a mistake, and every
-/// URL is sent to every edge serving the site.
-const MAX_PURGE_URLS: usize = 1000;
 
 fn default_edge_ttl() -> i32 {
     3600
