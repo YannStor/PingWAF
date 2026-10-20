@@ -360,6 +360,19 @@ pub fn error_response_header(code: u16) -> ResponseHeader {
         .unwrap_or_else(|| error_resp::gen_error_response(code))
 }
 
+/// The client-safe value for the `X-Pingap-EType` header. Pingora's
+/// `ErrorType::Custom(s)` / `CustomCode(s, _)` return an arbitrary static
+/// string through `as_str()` — that can name internal plugins or
+/// implementation details, so only the built-in enum vocabulary is echoed
+/// verbatim and custom types collapse to `internal`.
+fn public_etype(etype: &pingora::ErrorType) -> &'static str {
+    use pingora::ErrorType;
+    match etype {
+        ErrorType::Custom(_) | ErrorType::CustomCode(..) => "internal",
+        _ => etype.as_str(),
+    }
+}
+
 /// A fixed, client-safe message for the error page, keyed by the pingora
 /// `ErrorType` string. The internal error chain (`e.to_string()`) can carry
 /// plugin names, upstream addresses and cause chains, so it is logged
@@ -2046,9 +2059,13 @@ impl ProxyHttp for Server {
                 "client gone, no response sent"
             );
         } else {
+            // The one ERROR line per failure (R-05): the full error chain and
+            // the request_id land together here, so the error-page render
+            // below does not log a second duplicate.
             error!(
                 target: LOG_TARGET,
                 error = %e,
+                request_id = ctx.state.request_id.as_deref().unwrap_or(""),
                 remote_addr = ctx.conn.remote_addr,
                 client_ip = ctx.conn.client_ip,
                 user_agent,
@@ -2074,15 +2091,9 @@ impl ProxyHttp for Server {
         let _ = resp.insert_header("server", "pingwaf");
         // Never echo the internal error chain (`e.to_string()`) to clients:
         // it can leak plugin names, upstream addresses, and cause chains.
-        // Log the full error server-side (with request_id) and render a
-        // fixed, error-type-specific message instead (R-05).
-        error!(
-            target: LOG_TARGET,
-            request_id = ctx.state.request_id.as_deref().unwrap_or(""),
-            error = %e,
-            error_type,
-            "proxy error"
-        );
+        // The full error (with request_id) is already logged once above in
+        // the single "fail to proxy" line (R-05); only the fixed,
+        // error-type-specific page renders here.
         let content = self.error_template.render(
             pingap_util::get_pkg_version(),
             public_error_message(error_type),
@@ -2096,7 +2107,10 @@ impl ProxyHttp for Server {
             "text/html; charset=utf-8"
         };
         let _ = resp.insert_header(http::header::CONTENT_TYPE, content_type);
-        let _ = resp.insert_header("X-Pingap-EType", error_type);
+        // Whitelisted type only: `ErrorType::Custom*` names are arbitrary
+        // static strings and may name internal plugin/implementation
+        // details, so they never reach the client header (R-07).
+        let _ = resp.insert_header("X-Pingap-EType", public_etype(e.etype()));
         let _ = resp
             .insert_header(http::header::CONTENT_LENGTH, buf.len().to_string());
 
@@ -3617,6 +3631,25 @@ value = 'proxy_set_headers = ["name:value"]'
             "{response}"
         );
         assert_eq!(false, response.contains("ReadError"), "{response}");
+    }
+
+    #[test]
+    fn public_etype_whitelists_builtin_and_collapses_custom() {
+        use pingora::ErrorType;
+        // Built-in types are echoed verbatim.
+        assert_eq!(public_etype(&ErrorType::ConnectError), "ConnectError");
+        assert_eq!(public_etype(&ErrorType::ReadTimedout), "ReadTimedout");
+        assert_eq!(public_etype(&ErrorType::HTTPStatus(502)), "HTTPStatus");
+        // Custom types return arbitrary strings through as_str() — they
+        // must not leak into the client-facing header.
+        assert_eq!(
+            public_etype(&ErrorType::new("InternalPluginName")),
+            "internal"
+        );
+        assert_eq!(
+            public_etype(&ErrorType::new_code("SecretUpstream", 599)),
+            "internal"
+        );
     }
 
     #[test]
