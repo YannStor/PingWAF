@@ -81,7 +81,16 @@ pub struct AgentResponse {
     pub version: Option<String>,
     pub os_info: Option<String>,
     pub cpu_cores: Option<i32>,
+    /// Legacy single figure, still emitted for callers that read it: the
+    /// capacity at registration, the usage from the first heartbeat on.
     pub memory_bytes: Option<i64>,
+    /// RAM the node has, in bytes, as reported at registration. `None` for a
+    /// row that has not re-registered since migration 000064 and had no probe
+    /// sample to backfill from.
+    pub total_memory_bytes: Option<i64>,
+    /// RAM in use on the node, in bytes, as reported by the last heartbeat.
+    /// `None` until the first heartbeat after migration 000064.
+    pub used_memory_bytes: Option<i64>,
     pub status: String,
     pub api_key_id: Option<Uuid>,
     pub config_hash: Option<String>,
@@ -536,6 +545,8 @@ async fn enrich(
             os_info: row.os_info,
             cpu_cores: row.cpu_cores,
             memory_bytes: row.memory_bytes,
+            total_memory_bytes: row.total_memory_bytes,
+            used_memory_bytes: row.used_memory_bytes,
             status: row.status,
             api_key_id: row.api_key_id,
             config_hash: row.config_hash,

@@ -1,5 +1,18 @@
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 use std::time::Instant;
+
+use crate::probe;
+
+/// Machine-wide CPU counters of the previous heartbeat, as `(busy, total)`
+/// jiffies.
+///
+/// The heartbeat reports the usage over the interval since the previous one —
+/// the same derivation the probe ships — instead of the average since boot,
+/// which is what operators used to see here. One baseline per agent process,
+/// like the collector itself.
+static LAST_CPU: LazyLock<Mutex<Option<(u64, u64)>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 /// Collected system metrics for heartbeat reporting.
 #[derive(Debug, Clone)]
@@ -134,57 +147,52 @@ impl Default for MetricsCollector {
     }
 }
 
-/// Read CPU and memory metrics from the system.
-///
-/// Platform-specific implementation:
-/// - Linux: reads /proc/stat and /proc/meminfo
-/// - macOS: uses sysctl via Command
-/// - Other: returns zeros
+/// CPU usage and memory in use, read for one heartbeat.
 fn read_system_metrics() -> (f64, u64) {
+    (read_cpu_percent(), read_memory_usage())
+}
+
+/// CPU usage over the interval since the previous heartbeat, in percent.
+///
+/// The counters and the arithmetic are the probe's
+/// ([`probe::cpu_percent_since`]), so both panels show the same measurement.
+/// The first heartbeat after start — and one after a reboot or a counter reset
+/// — has no baseline and reports the since-boot average; see that function for
+/// why a non-null first sample matters.
+///
+/// `None` from the probe means the platform exposes no `/proc/stat` counters:
+/// the platform reading is kept there so the field stays non-null.
+fn read_cpu_percent() -> f64 {
+    let mut previous = LAST_CPU.lock().unwrap_or_else(|err| err.into_inner());
+    probe::cpu_percent_since(&mut previous).unwrap_or_else(platform_cpu_percent)
+}
+
+/// Memory in use, in bytes.
+fn read_memory_usage() -> u64 {
     #[cfg(target_os = "linux")]
     {
-        read_linux_metrics()
+        read_linux_memory().unwrap_or(0)
     }
     #[cfg(target_os = "macos")]
     {
-        read_macos_metrics()
+        read_macos_memory().unwrap_or(0)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        (0.0, 0)
+        0
     }
 }
 
-#[cfg(target_os = "linux")]
-fn read_linux_metrics() -> (f64, u64) {
-    let cpu = read_linux_cpu().unwrap_or(0.0);
-    let mem = read_linux_memory().unwrap_or(0);
-    (cpu, mem)
+/// CPU reading on a platform whose counters the probe cannot difference.
+#[cfg(target_os = "macos")]
+fn platform_cpu_percent() -> f64 {
+    read_macos_cpu().unwrap_or(0.0)
 }
 
-#[cfg(target_os = "linux")]
-fn read_linux_cpu() -> Option<f64> {
-    // Read /proc/stat for CPU usage
-    let stat = std::fs::read_to_string("/proc/stat").ok()?;
-    let first_line = stat.lines().next()?;
-    let parts: Vec<&str> = first_line.split_whitespace().collect();
-    if parts.len() < 5 {
-        return None;
-    }
-
-    // user, nice, system, idle
-    let user: u64 = parts[1].parse().ok()?;
-    let nice: u64 = parts[2].parse().ok()?;
-    let system: u64 = parts[3].parse().ok()?;
-    let idle: u64 = parts[4].parse().ok()?;
-
-    let total = user + nice + system + idle;
-    if total == 0 {
-        return Some(0.0);
-    }
-
-    let busy = user + nice + system;
-    Some((busy as f64 / total as f64) * 100.0)
+/// CPU reading on a platform whose counters the probe cannot difference.
+#[cfg(not(target_os = "macos"))]
+fn platform_cpu_percent() -> f64 {
+    0.0
 }
 
 #[cfg(target_os = "linux")]
@@ -212,13 +220,6 @@ fn read_linux_memory() -> Option<u64> {
 #[cfg(target_os = "linux")]
 fn parse_meminfo_value(line: &str) -> Option<u64> {
     line.split_whitespace().nth(1)?.parse().ok()
-}
-
-#[cfg(target_os = "macos")]
-fn read_macos_metrics() -> (f64, u64) {
-    let cpu = read_macos_cpu().unwrap_or(0.0);
-    let mem = read_macos_memory().unwrap_or(0);
-    (cpu, mem)
 }
 
 #[cfg(target_os = "macos")]
@@ -320,6 +321,21 @@ mod tests {
 
         collector.record_connection(-1);
         assert_eq!(collector.active_connections(), 1);
+    }
+
+    /// The heartbeat reports the same bounded percentage the probe does, on
+    /// every read: the first one (no baseline) and the one that differences
+    /// against it.
+    #[test]
+    fn heartbeat_cpu_is_a_bounded_percentage() {
+        let (first, _) = read_system_metrics();
+        assert!(first.is_finite(), "cpu must be a real number, got {first}");
+        assert!((0.0..=100.0).contains(&first), "cpu out of range: {first}");
+        let (second, _) = read_system_metrics();
+        assert!(
+            (0.0..=100.0).contains(&second),
+            "cpu out of range: {second}"
+        );
     }
 
     #[test]

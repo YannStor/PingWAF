@@ -34,6 +34,7 @@ use crate::api::common::query_all;
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::auth::AdminUser;
+use crate::grpc::registry::{AgentRegistry, HeartbeatMetrics};
 use crate::models::{agent, api_key, site};
 
 /// `GET /api/v1/system/metrics` — process/host CPU and memory snapshots.
@@ -121,17 +122,24 @@ pub struct AgentNode {
     /// CPU load of the node, in percent. `None` = no sample retained.
     pub cpu_percent: Option<f64>,
     /// Memory in use on the node, in bytes. `None` = no sample retained.
+    ///
+    /// Kept under its original name for the console; it carries the same value
+    /// as `used_memory_bytes`.
     pub memory_bytes: Option<u64>,
+    /// Memory in use on the node, in bytes — the unambiguous name. `None` =
+    /// no sample retained.
+    pub used_memory_bytes: Option<u64>,
+    /// RAM the node has, in bytes. The probe's newest `MemTotal` when a sample
+    /// is retained, else the capacity recorded at registration. `None` = an
+    /// agent that has neither re-registered since migration 000064 nor shipped
+    /// a probe sample.
+    pub total_memory_bytes: Option<u64>,
     /// Connections currently handled by the edge process. `None` = never
     /// reported.
     pub connections: Option<u64>,
-    /// Requests per second handled by the edge. `None` = never reported.
-    ///
-    /// The heartbeat carries this counter, but the control plane retains no
-    /// per-agent copy of it, so the field is `null` for every node today. It
-    /// stays in the contract because it is the one figure an operator asks
-    /// for first; filling it needs the heartbeat counters to be kept (see
-    /// the note in [`HeartbeatMetrics`]).
+    /// Requests per second handled by the edge. `None` = the agent is not
+    /// connected, so nothing retained this counter: unlike CPU and memory it is
+    /// stored nowhere else.
     pub rps: Option<u64>,
     /// Sites this agent serves: `1` for a bound agent, and for a global
     /// (unbound) agent every site of its API key's owner — the same
@@ -141,18 +149,26 @@ pub struct AgentNode {
     pub last_seen: Option<DateTime<Utc>>,
 }
 
-/// Counter values the control plane retained from an agent's last heartbeat.
+/// Counter values the control plane has for one agent.
 ///
 /// This is the single place that decides how an observed value becomes an
 /// [`AgentNode`] field, so the mapping is testable without a database.
 ///
-/// The heartbeat itself is not kept: the control plane folds it into
-/// `host_samples` (CPU/memory) and `agent_metrics` (connection gauge) and
-/// discards the rest, which is why `rps` has no source and stays `None`.
+/// Two sources feed it, always in this order:
+///
+/// 1. the counters of the last heartbeat, retained in [`AgentRegistry`] while
+///    the stream is open — at most one heartbeat interval old, and the only
+///    source of `rps` (the heartbeat message itself is consumed and dropped);
+/// 2. the newest stored samples — `host_samples` for CPU/memory, the
+///    `pingwaf_active_connections` gauge in `agent_metrics` for the connection
+///    count — which is all an offline agent has.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct HeartbeatMetrics {
+pub struct NodeCounters {
     pub cpu_percent: Option<f64>,
-    pub memory_bytes: Option<u64>,
+    /// Memory in use on the node, in bytes.
+    pub used_memory_bytes: Option<u64>,
+    /// RAM the node has, in bytes, when the retained probe sample carries it.
+    pub total_memory_bytes: Option<u64>,
     pub connections: Option<u64>,
     pub rps: Option<u64>,
 }
@@ -174,7 +190,7 @@ async fn nodes(
     let profile = pingwaf_profiler::ProfileSnapshot::collect();
     Ok(Json(NodesView {
         control: control_node(&cpu, &memory, &profile),
-        agents: agent_nodes(&state.db).await?,
+        agents: agent_nodes(&state.db, &state.agents).await?,
     }))
 }
 
@@ -205,6 +221,7 @@ fn control_node(
 /// Loads the fleet and joins the retained heartbeat counters onto each row.
 async fn agent_nodes(
     db: &DatabaseConnection,
+    registry: &AgentRegistry,
 ) -> Result<Vec<AgentNode>, ApiError> {
     let rows = agent::Entity::find()
         .order_by_asc(agent::Column::Hostname)
@@ -222,25 +239,61 @@ async fn agent_nodes(
     for (id, connections) in latest_connections(db, &ids).await? {
         counters.entry(id).or_default().connections = Some(connections);
     }
+    // Live heartbeat counters: fresher than anything stored, and the only
+    // place RPS survives. Cloned once per poll — one flat entry per connected
+    // agent, not per stored sample.
+    let live = registry.metrics().await;
     let sites = agent_site_counts(db, &rows).await?;
 
-    let unknown = HeartbeatMetrics::default();
+    let unknown = NodeCounters::default();
     Ok(rows
         .iter()
         .map(|row| {
-            agent_node(
-                row,
-                counters.get(&row.id).unwrap_or(&unknown),
-                sites.get(&row.id).copied().unwrap_or(0),
-            )
+            let stored = counters.get(&row.id).unwrap_or(&unknown);
+            let merged = merge_counters(stored, live.get(&row.id).copied());
+            agent_node(row, &merged, sites.get(&row.id).copied().unwrap_or(0))
         })
         .collect())
+}
+
+/// Precedence between the two sources of [`NodeCounters`].
+///
+/// A live value wins field by field: it is at most one heartbeat old, where the
+/// stored sample can be a minute old (probe samples are persisted once a
+/// minute) or days old for an offline agent. The stored sample still answers
+/// for what a live report cannot express:
+///
+/// * CPU and memory are plain numbers on the wire, so `0` cannot be told apart
+///   from "the agent could not read it". A zero memory reading therefore falls
+///   back to the stored sample — showing `0` bytes would render as a node with
+///   no memory at all — while a zero connection/RPS count is kept, an idle edge
+///   being a real state.
+/// * `total_memory_bytes` only ever comes from a probe sample or the
+///   registration row, never from the heartbeat.
+fn merge_counters(
+    stored: &NodeCounters,
+    live: Option<HeartbeatMetrics>,
+) -> NodeCounters {
+    let Some(live) = live else {
+        return stored.clone();
+    };
+    NodeCounters {
+        cpu_percent: Some(live.cpu_percent)
+            .filter(|value| value.is_finite())
+            .or(stored.cpu_percent),
+        used_memory_bytes: (live.memory_bytes > 0)
+            .then_some(live.memory_bytes)
+            .or(stored.used_memory_bytes),
+        total_memory_bytes: stored.total_memory_bytes,
+        connections: Some(live.connections),
+        rps: Some(live.rps),
+    }
 }
 
 /// Maps one inventory row plus its retained counters onto the response.
 fn agent_node(
     row: &agent::Model,
-    counters: &HeartbeatMetrics,
+    counters: &NodeCounters,
     sites: u64,
 ) -> AgentNode {
     AgentNode {
@@ -250,7 +303,14 @@ fn agent_node(
         // A NaN would serialise as `null` anyway; dropping it here keeps the
         // struct free of a value nothing can compare.
         cpu_percent: counters.cpu_percent.filter(|value| value.is_finite()),
-        memory_bytes: counters.memory_bytes,
+        memory_bytes: counters.used_memory_bytes,
+        used_memory_bytes: counters.used_memory_bytes,
+        // The probe's newest reading is the same `MemTotal` registration
+        // reports, and it is fresher; the row column covers an agent that has
+        // re-registered but has not been sampled yet.
+        total_memory_bytes: counters.total_memory_bytes.or(row
+            .total_memory_bytes
+            .and_then(|bytes| u64::try_from(bytes).ok())),
         connections: counters.connections,
         rps: counters.rps,
         sites,
@@ -274,33 +334,40 @@ fn agent_node(
 /// still supplies `(agent_id, sampled_at DESC)`, and the extra key is resolved
 /// by an incremental sort inside each group — never over the table.
 const LATEST_SAMPLES_SQL: &str = "SELECT DISTINCT ON (agent_id) agent_id, \
-     cpu_usage_percent, memory_used_bytes \
+     cpu_usage_percent, memory_used_bytes, memory_total_bytes \
      FROM host_samples \
      WHERE agent_id = ANY($1) \
      ORDER BY agent_id, sampled_at DESC, id DESC";
 
 /// The probe is what the edge samples for `cpu_usage_percent` and
-/// `memory_usage_bytes`: the heartbeat's own copies of those two are not
-/// persisted, but the raw samples are, so the newest one is the same
+/// `memory_usage_bytes`: the heartbeat's own copies of those two are only kept
+/// per stream, but the raw samples are persisted, so the newest one is the same
 /// measurement at most one heartbeat interval older. A node that has not been
 /// sampled yet stays `None`.
+///
+/// The same row carries the node's `MemTotal`, which is the capacity the node
+/// view reports — the inventory column only exists since migration 000064, and
+/// the sample is fresher than it in any case.
 async fn latest_samples(
     db: &DatabaseConnection,
     ids: &[Uuid],
-) -> Result<HashMap<Uuid, HeartbeatMetrics>, ApiError> {
+) -> Result<HashMap<Uuid, NodeCounters>, ApiError> {
     let mut out = HashMap::with_capacity(ids.len());
     for row in latest_rows(db, LATEST_SAMPLES_SQL, ids, Vec::new()).await? {
         let agent_id = required::<Uuid>(&row, "agent_id")?;
         let cpu_percent = optional::<f64>(&row, "cpu_usage_percent")?;
-        // The column is a signed bigint; a negative count is a corrupt
+        // The columns are signed bigints; a negative count is a corrupt
         // sample, not a byte total, so it reads as unknown.
-        let memory_bytes = optional::<i64>(&row, "memory_used_bytes")?
+        let used_memory_bytes = optional::<i64>(&row, "memory_used_bytes")?
+            .and_then(|bytes| u64::try_from(bytes).ok());
+        let total_memory_bytes = optional::<i64>(&row, "memory_total_bytes")?
             .and_then(|bytes| u64::try_from(bytes).ok());
         out.insert(
             agent_id,
-            HeartbeatMetrics {
+            NodeCounters {
                 cpu_percent,
-                memory_bytes,
+                used_memory_bytes,
+                total_memory_bytes,
                 ..Default::default()
             },
         );
@@ -557,7 +624,11 @@ mod tests {
             version: Some("0.28.1".to_string()),
             os_info: Some("linux x86_64".to_string()),
             cpu_cores: Some(4),
+            // A row from before migration 000064: the single legacy figure,
+            // no split columns.
             memory_bytes: Some(8 << 30),
+            total_memory_bytes: None,
+            used_memory_bytes: None,
             status: status.to_string(),
             api_key_id: None,
             config_hash: None,
@@ -613,10 +684,11 @@ mod tests {
     #[test]
     fn agent_node_maps_the_last_heartbeat_counters() {
         let seen = Utc::now();
-        let row = inventory_row("edge-1", "online", Some(seen));
-        let counters = HeartbeatMetrics {
+        let mut row = inventory_row("edge-1", "online", Some(seen));
+        let counters = NodeCounters {
             cpu_percent: Some(12.5),
-            memory_bytes: Some(3 << 30),
+            used_memory_bytes: Some(3 << 30),
+            total_memory_bytes: Some(8 << 30),
             connections: Some(17),
             rps: Some(42),
         };
@@ -627,14 +699,19 @@ mod tests {
         assert_eq!(node.status, "online");
         assert_eq!(node.cpu_percent, Some(12.5));
         assert_eq!(node.memory_bytes, Some(3 << 30));
+        assert_eq!(node.used_memory_bytes, Some(3 << 30));
+        assert_eq!(node.total_memory_bytes, Some(8 << 30));
         assert_eq!(node.connections, Some(17));
         assert_eq!(node.rps, Some(42));
+
         assert_eq!(node.sites, 3);
         assert_eq!(node.last_seen, Some(seen));
 
         let json = serde_json::to_value(&node).expect("serialises");
         assert_eq!(json["cpu_percent"], serde_json::json!(12.5));
         assert_eq!(json["memory_bytes"], serde_json::json!(3u64 << 30));
+        assert_eq!(json["used_memory_bytes"], serde_json::json!(3u64 << 30));
+        assert_eq!(json["total_memory_bytes"], serde_json::json!(8u64 << 30));
         assert_eq!(json["sites"], serde_json::json!(3));
         assert_eq!(
             json["last_seen"],
@@ -643,6 +720,14 @@ mod tests {
             ),
             "timestamps use RFC 3339 in UTC, the same encoding /agents emits"
         );
+
+        // Without a retained probe sample the capacity comes from the row, and
+        // the usage stays unknown rather than borrowing the legacy figure.
+        row.total_memory_bytes = Some(16 << 30);
+        let node = agent_node(&row, &NodeCounters::default(), 0);
+        assert_eq!(node.total_memory_bytes, Some(16 << 30));
+        assert_eq!(node.used_memory_bytes, None);
+        assert_eq!(node.memory_bytes, None);
     }
 
     /// Unknown counters are `null`, never `0`: a node that has never
@@ -650,12 +735,14 @@ mod tests {
     #[test]
     fn agent_node_reports_unknown_counters_as_null() {
         let row = inventory_row("edge-2", "offline", None);
-        let node = agent_node(&row, &HeartbeatMetrics::default(), 0);
+        let node = agent_node(&row, &NodeCounters::default(), 0);
         let json = serde_json::to_value(&node).expect("serialises");
 
         for field in [
             "cpu_percent",
             "memory_bytes",
+            "used_memory_bytes",
+            "total_memory_bytes",
             "connections",
             "rps",
             "last_seen",
@@ -670,11 +757,73 @@ mod tests {
     #[test]
     fn non_finite_cpu_is_reported_as_unknown() {
         let row = inventory_row("edge-3", "online", None);
-        let counters = HeartbeatMetrics {
+        let counters = NodeCounters {
             cpu_percent: Some(f64::NAN),
             ..Default::default()
         };
         assert_eq!(agent_node(&row, &counters, 0).cpu_percent, None);
+    }
+
+    /// The live heartbeat is the fresher source and wins field by field; the
+    /// stored sample still answers for what the heartbeat cannot say.
+    #[test]
+    fn live_heartbeat_counters_win_over_the_stored_sample() {
+        let stored = NodeCounters {
+            cpu_percent: Some(3.0),
+            used_memory_bytes: Some(2 << 30),
+            total_memory_bytes: Some(8 << 30),
+            connections: Some(1),
+            rps: None,
+        };
+        let live = HeartbeatMetrics {
+            cpu_percent: 42.5,
+            memory_bytes: 3 << 30,
+            connections: 17,
+            rps: 130,
+        };
+
+        let merged = merge_counters(&stored, Some(live));
+        assert_eq!(merged.cpu_percent, Some(42.5));
+        assert_eq!(merged.used_memory_bytes, Some(3 << 30));
+        assert_eq!(
+            merged.total_memory_bytes,
+            Some(8 << 30),
+            "the heartbeat never reports capacity"
+        );
+        assert_eq!(merged.connections, Some(17));
+        assert_eq!(merged.rps, Some(130), "RPS exists only in the live report");
+
+        // A zero memory reading means "could not read it", not "a node with no
+        // memory": the stored sample answers instead. An idle edge reporting
+        // zero connections or RPS is a real value and is kept.
+        let unreadable = HeartbeatMetrics {
+            memory_bytes: 0,
+            connections: 0,
+            rps: 0,
+            ..live
+        };
+        let merged = merge_counters(&stored, Some(unreadable));
+        assert_eq!(merged.used_memory_bytes, Some(2 << 30));
+        assert_eq!(merged.connections, Some(0));
+        assert_eq!(merged.rps, Some(0));
+    }
+
+    /// An agent with no live stream keeps exactly the stored sample: the
+    /// registry is a `None` for every offline node, not a zeroed entry.
+    #[test]
+    fn stored_sample_is_used_without_a_live_heartbeat() {
+        let stored = NodeCounters {
+            cpu_percent: Some(3.0),
+            used_memory_bytes: Some(2 << 30),
+            total_memory_bytes: Some(8 << 30),
+            connections: Some(1),
+            rps: None,
+        };
+        assert_eq!(merge_counters(&stored, None), stored);
+        assert_eq!(
+            merge_counters(&NodeCounters::default(), None),
+            NodeCounters::default()
+        );
     }
 
     /// The console reads these keys by name, so the JSON shape is a
@@ -703,18 +852,17 @@ mod tests {
         }
 
         let row = inventory_row("edge-1", "online", Some(Utc::now()));
-        let agent = serde_json::to_value(agent_node(
-            &row,
-            &HeartbeatMetrics::default(),
-            1,
-        ))
-        .expect("serialises");
+        let agent =
+            serde_json::to_value(agent_node(&row, &NodeCounters::default(), 1))
+                .expect("serialises");
         let agent_fields = [
             "id",
             "name",
             "status",
             "cpu_percent",
             "memory_bytes",
+            "used_memory_bytes",
+            "total_memory_bytes",
             "connections",
             "rps",
             "sites",

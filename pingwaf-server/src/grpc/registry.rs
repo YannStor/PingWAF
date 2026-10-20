@@ -9,6 +9,11 @@
 //! Agents that are not connected get their commands queued (bounded) and
 //! drained on the next heartbeat, so a rule change issued from the dashboard is
 //! never silently lost as long as the agent reconnects.
+//!
+//! The registry also holds the counters of each connected agent's last
+//! heartbeat ([`HeartbeatMetrics`]). The heartbeat is otherwise consumed and
+//! dropped, and `requests_per_second` in particular is stored nowhere else, so
+//! this is the only source of a live RPS figure for `/api/v1/system/nodes`.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -37,6 +42,8 @@ struct Connection {
 struct Inner {
     connected: HashMap<Uuid, Connection>,
     pending: HashMap<Uuid, VecDeque<ServerCommand>>,
+    /// Counters of the last heartbeat on the live stream, one entry per agent.
+    metrics: HashMap<Uuid, HeartbeatMetrics>,
     next_generation: u64,
 }
 
@@ -44,6 +51,30 @@ struct Inner {
 #[derive(Clone, Default)]
 pub struct AgentRegistry {
     inner: Arc<RwLock<Inner>>,
+}
+
+/// Counters the agent reported in its most recent heartbeat.
+///
+/// The heartbeat itself is kept nowhere: the control plane folds CPU and memory
+/// into `host_samples`, the connection gauge into `agent_metrics`, and drops the
+/// rest — which is why the node view could not answer RPS at all and had to
+/// reconstruct the other figures from stored samples. Retaining the last report
+/// of each connected agent gives `/api/v1/system/nodes` fresh values (at most
+/// one heartbeat interval old) and the one figure nothing else carries.
+///
+/// A zero is what the agent reported, not "unknown": the wire fields are plain
+/// integers, so the two cannot be told apart here. A node with no entry has not
+/// heartbeated since it connected and is reported as unknown by the API.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HeartbeatMetrics {
+    /// CPU usage over the agent's last heartbeat interval, in percent.
+    pub cpu_percent: f64,
+    /// Memory in use on the node, in bytes.
+    pub memory_bytes: u64,
+    /// Connections the edge is handling.
+    pub connections: u64,
+    /// Requests per second the edge served over the last interval.
+    pub rps: u64,
 }
 
 /// Snapshot of one live connection, used by the `/api/v1/agents` endpoints.
@@ -77,6 +108,10 @@ impl AgentRegistry {
                 generation,
             },
         );
+        // Counters belong to the stream that reported them: a reconnect starts
+        // empty and is filled by the opening heartbeat, which already carries
+        // them.
+        inner.metrics.remove(&agent_id);
         let drained = inner.pending.remove(&agent_id).unwrap_or_default();
         if !drained.is_empty() {
             tracing::info!(
@@ -99,6 +134,7 @@ impl AgentRegistry {
         match current {
             Some(current) if current == generation => {
                 inner.connected.remove(agent_id);
+                inner.metrics.remove(agent_id);
                 tracing::debug!(%agent_id, "agent heartbeat stream closed");
             },
             Some(_) => {
@@ -119,6 +155,10 @@ impl AgentRegistry {
         if inner.connected.remove(agent_id).is_some() {
             tracing::debug!(%agent_id, "agent connection closed by request");
         }
+        // The counters are as stale as the connection they came from: a node
+        // the operator just disconnected must not keep reporting its last
+        // heartbeat.
+        inner.metrics.remove(agent_id);
     }
 
     /// Forgets queued commands for agents that no longer exist. Called by
@@ -134,6 +174,7 @@ impl AgentRegistry {
             if inner.pending.remove(agent_id).is_some() {
                 dropped += 1;
             }
+            inner.metrics.remove(agent_id);
         }
         if dropped > 0 {
             tracing::info!(
@@ -141,6 +182,24 @@ impl AgentRegistry {
                 "dropped queued commands for pruned agents"
             );
         }
+    }
+
+    /// Retains the counters of one heartbeat. Called for every message on the
+    /// stream, including the opening one, so a reconnecting agent is current
+    /// before its second heartbeat.
+    pub async fn record_heartbeat(
+        &self,
+        agent_id: Uuid,
+        metrics: HeartbeatMetrics,
+    ) {
+        self.inner.write().await.metrics.insert(agent_id, metrics);
+    }
+
+    /// Last reported counters, one entry per agent that heartbeated on its
+    /// current stream. A clone per poll of `/api/v1/system/nodes`: the fleet is
+    /// small and the map is flat.
+    pub async fn metrics(&self) -> HashMap<Uuid, HeartbeatMetrics> {
+        self.inner.read().await.metrics.clone()
     }
 
     /// True when the agent currently holds an open stream.
@@ -312,5 +371,99 @@ mod tests {
                 .await;
         }
         assert_eq!(registry.pending_count(&agent).await, PENDING_COMMAND_LIMIT);
+    }
+
+    fn counters(cpu_percent: f64, rps: u64) -> HeartbeatMetrics {
+        HeartbeatMetrics {
+            cpu_percent,
+            memory_bytes: 3 << 30,
+            connections: 17,
+            rps,
+        }
+    }
+
+    /// The counters live and die with the stream that reported them: recorded
+    /// while it is open, untouched by a stale stream closing, dropped when the
+    /// owning stream ends.
+    #[tokio::test]
+    async fn heartbeat_metrics_follow_the_stream_lifecycle() {
+        let registry = AgentRegistry::new();
+        let agent = Uuid::new_v4();
+        assert!(
+            !registry.metrics().await.contains_key(&agent),
+            "a node that never heartbeated has no entry, not a zeroed one"
+        );
+
+        let (tx, _rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+        let (generation, _) = registry.connect(agent, tx).await;
+        registry.record_heartbeat(agent, counters(12.5, 42)).await;
+
+        let metrics = registry.metrics().await;
+        let entry = metrics.get(&agent).expect("counters of the live stream");
+        assert!((entry.cpu_percent - 12.5).abs() < f64::EPSILON);
+        assert_eq!(entry.memory_bytes, 3 << 30);
+        assert_eq!(entry.connections, 17);
+        assert_eq!(entry.rps, 42);
+
+        // A superseded stream finishing must not erase the live counters.
+        registry.disconnect(&agent, generation + 1).await;
+        assert!(registry.metrics().await.contains_key(&agent));
+
+        registry.disconnect(&agent, generation).await;
+        assert!(!registry.metrics().await.contains_key(&agent));
+    }
+
+    /// A reconnect starts with no counters (the opening heartbeat refills
+    /// them), and both cleanup paths — a pruned row and a REST disconnect —
+    /// take the last report with them.
+    #[tokio::test]
+    async fn reconnect_and_cleanup_drop_stale_metrics() {
+        let registry = AgentRegistry::new();
+        let agent = Uuid::new_v4();
+
+        let (tx, _rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+        registry.connect(agent, tx).await;
+        registry.record_heartbeat(agent, counters(1.0, 1)).await;
+        let (tx, _rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+        registry.connect(agent, tx).await;
+        assert!(!registry.metrics().await.contains_key(&agent));
+
+        registry.record_heartbeat(agent, counters(2.0, 2)).await;
+        registry.forget(&[agent]).await;
+        assert!(!registry.metrics().await.contains_key(&agent));
+
+        registry.record_heartbeat(agent, counters(3.0, 3)).await;
+        registry.force_disconnect(&agent).await;
+        assert!(!registry.metrics().await.contains_key(&agent));
+    }
+
+    /// Every writer goes through the same lock: concurrent heartbeats all land,
+    /// each with its own values.
+    #[tokio::test]
+    async fn concurrent_heartbeats_keep_every_agent() {
+        let registry = AgentRegistry::new();
+        let agents: Vec<Uuid> = (0..32).map(|_| Uuid::new_v4()).collect();
+        let mut tasks = Vec::with_capacity(agents.len());
+        for (index, agent) in agents.iter().copied().enumerate() {
+            let registry = registry.clone();
+            tasks.push(tokio::spawn(async move {
+                registry
+                    .record_heartbeat(
+                        agent,
+                        counters(index as f64, index as u64),
+                    )
+                    .await;
+            }));
+        }
+        for task in tasks {
+            task.await.expect("record task");
+        }
+
+        let metrics = registry.metrics().await;
+        assert_eq!(metrics.len(), agents.len());
+        for (index, agent) in agents.iter().enumerate() {
+            let entry = metrics.get(agent).expect("every agent is present");
+            assert_eq!(entry.rps, index as u64);
+        }
     }
 }

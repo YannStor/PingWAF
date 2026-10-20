@@ -325,13 +325,112 @@ fn now_millis() -> i64 {
 
 /// CPU usage between two counter snapshots, in percent.
 fn cpu_percent(previous: &Counters, current: &Counters) -> Option<f64> {
-    let total = current.cpu_total.checked_sub(previous.cpu_total)?;
+    cpu_percent_between(jiffies(previous), jiffies(current))
+}
+
+/// `(busy, total)` of one sampler snapshot.
+fn jiffies(counters: &Counters) -> (u64, u64) {
+    (
+        counters.cpu_total.saturating_sub(counters.cpu_idle),
+        counters.cpu_total,
+    )
+}
+
+/// CPU usage between two `(busy, total)` jiffy snapshots, in percent.
+///
+/// `None` when the interval holds no time or the counters moved backwards
+/// (a reboot between the samples, a wrapped counter): the difference is then
+/// meaningless, and a caller that holds a baseline re-establishes it instead
+/// of subtracting into a wrapped `u64`. Busy above total — a torn read of
+/// `/proc/stat` — clamps to 100 % rather than reporting a percentage nothing
+/// can plot.
+pub(crate) fn cpu_percent_between(
+    previous: (u64, u64),
+    current: (u64, u64),
+) -> Option<f64> {
+    let total = current.1.checked_sub(previous.1)?;
     if total == 0 {
         return None;
     }
-    let idle = current.cpu_idle.saturating_sub(previous.cpu_idle);
-    let busy = total.saturating_sub(idle);
-    Some((busy as f64 / total as f64 * 100.0).clamp(0.0, 100.0))
+    let busy = current.0.checked_sub(previous.0)?;
+    Some((busy.min(total) as f64 / total as f64 * 100.0).clamp(0.0, 100.0))
+}
+
+/// Busy share since boot, in percent: the only CPU figure available before
+/// this process has taken two samples.
+pub(crate) fn cpu_percent_since_boot((busy, total): (u64, u64)) -> Option<f64> {
+    (total > 0).then(|| busy.min(total) as f64 / total as f64 * 100.0)
+}
+
+/// CPU usage since the previous call, in percent, with the baseline kept in
+/// `previous` (`(busy, total)` jiffies from `/proc/stat`).
+///
+/// The heartbeat uses this so its figure is the average over the heartbeat
+/// interval, the same measurement the probe ships, instead of the average since
+/// boot (which is diluted by everything the machine did before the agent
+/// started).
+///
+/// The first call has no baseline and reports the since-boot average: the
+/// heartbeat has no "unknown" CPU, and a non-null first sample is what keeps
+/// the field honest until the second heartbeat. A counter that moved backwards
+/// (reboot, wrap, a reset `/proc`) re-baselines the same way instead of
+/// producing a wrapped percentage.
+///
+/// `None` only when the platform exposes no machine-wide counters at all
+/// (anything without `/proc/stat`); the caller falls back to its own platform
+/// reading.
+pub(crate) fn cpu_percent_since(
+    previous: &mut Option<(u64, u64)>,
+) -> Option<f64> {
+    let current = cpu_counters()?;
+    let percent = previous
+        .and_then(|prev| cpu_percent_between(prev, current))
+        .or_else(|| cpu_percent_since_boot(current));
+    *previous = Some(current);
+    percent
+}
+
+/// Machine-wide CPU jiffies from `/proc/stat`, as `(total, idle)`.
+///
+/// One parser for both readers: the probe's own sampler and the heartbeat's
+/// interval figure ([`cpu_counters`]) must never disagree about what "busy"
+/// means.
+#[cfg(target_os = "linux")]
+fn read_cpu_jiffies() -> Option<(u64, u64)> {
+    let stat = std::fs::read_to_string("/proc/stat").ok()?;
+    // user nice system idle iowait irq softirq steal ...
+    let fields: Vec<u64> = stat
+        .lines()
+        .next()?
+        .split_whitespace()
+        .skip(1)
+        .filter_map(|field| field.parse().ok())
+        .collect();
+    if fields.len() < 4 {
+        return None;
+    }
+    let total = fields.iter().sum();
+    // iowait counts as idle: the CPU was not doing work.
+    let idle = fields[3] + fields.get(4).copied().unwrap_or(0);
+    Some((total, idle))
+}
+
+/// Machine-wide CPU counters as `(busy, total)` jiffies.
+///
+/// The heartbeat diffs this against its previous reading, so its
+/// `cpu_usage_percent` covers the heartbeat interval rather than the time since
+/// boot.
+#[cfg(target_os = "linux")]
+pub(crate) fn cpu_counters() -> Option<(u64, u64)> {
+    let (total, idle) = read_cpu_jiffies()?;
+    Some((total.saturating_sub(idle), total))
+}
+
+/// Platforms without `/proc/stat` expose no machine-wide counters here; the
+/// heartbeat keeps its own platform reading.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn cpu_counters() -> Option<(u64, u64)> {
+    None
 }
 
 /// Physical block devices: everything the kernel exports as a whole disk, so
@@ -351,21 +450,9 @@ fn whole_disks() -> Vec<String> {
 fn read_counters() -> Counters {
     let mut counters = Counters::default();
 
-    if let Ok(stat) = std::fs::read_to_string("/proc/stat") {
-        if let Some(line) = stat.lines().next() {
-            // user nice system idle iowait irq softirq steal ...
-            let fields: Vec<u64> = line
-                .split_whitespace()
-                .skip(1)
-                .filter_map(|field| field.parse().ok())
-                .collect();
-            if fields.len() >= 4 {
-                counters.cpu_total = fields.iter().sum();
-                // iowait counts as idle: the CPU was not doing work.
-                counters.cpu_idle =
-                    fields[3] + fields.get(4).copied().unwrap_or(0);
-            }
-        }
+    if let Some((total, idle)) = read_cpu_jiffies() {
+        counters.cpu_total = total;
+        counters.cpu_idle = idle;
     }
 
     if let Ok(dev) = std::fs::read_to_string("/proc/net/dev") {
@@ -725,6 +812,60 @@ mod tests {
         assert!((percent - 50.0).abs() < 0.001, "got {percent}");
 
         assert_eq!(cpu_percent(&previous, &previous), None);
+    }
+
+    /// The first heartbeat after start has no baseline: it reports the
+    /// since-boot average, never a missing value.
+    #[test]
+    fn first_cpu_sample_falls_back_to_the_since_boot_average() {
+        assert_eq!(cpu_percent_since_boot((400, 1_000)), Some(40.0));
+        // A machine that exposes no jiffies has no percentage to report.
+        assert_eq!(cpu_percent_since_boot((0, 0)), None);
+    }
+
+    /// Two samples: the delta over the interval, not the since-boot average.
+    #[test]
+    fn consecutive_cpu_samples_are_the_interval_delta() {
+        // 200 jiffies elapsed, 100 of them busy => 50 %, where the since-boot
+        // average of the second reading would be 25 %.
+        let percent = cpu_percent_between((200, 1_000), (300, 1_200)).unwrap();
+        assert!((percent - 50.0).abs() < 0.001, "got {percent}");
+        // An interval with no busy time is 0 %, not a missing value.
+        assert_eq!(cpu_percent_between((200, 1_000), (200, 1_200)), Some(0.0));
+        // A stalled counter (the same reading twice) has no interval at all.
+        assert_eq!(cpu_percent_between((200, 1_000), (200, 1_000)), None);
+    }
+
+    /// A reboot, a wrap or a reset `/proc` moves the counters backwards: no
+    /// subtraction may panic or wrap, and the fallback still answers.
+    #[test]
+    fn cpu_counters_that_restart_do_not_panic() {
+        assert_eq!(cpu_percent_between((5_000, 6_000), (10, 20)), None);
+        assert_eq!(cpu_percent_since_boot((10, 20)), Some(50.0));
+        // A torn read (busy above total) clamps instead of reporting >100 %.
+        assert_eq!(cpu_percent_between((0, 100), (200, 200)), Some(100.0));
+    }
+
+    /// The stateful wrapper the heartbeat uses: a value on the first call and a
+    /// baseline kept for the next one. On a platform without `/proc/stat` it
+    /// reports `None` — the heartbeat then keeps its own platform reading — and
+    /// must not leave a bogus baseline behind.
+    #[test]
+    fn heartbeat_cpu_sampling_keeps_its_baseline() {
+        let mut previous = None;
+        match cpu_percent_since(&mut previous) {
+            Some(first) => {
+                assert!((0.0..=100.0).contains(&first), "got {first}");
+                assert!(previous.is_some(), "the baseline is kept");
+                let second =
+                    cpu_percent_since(&mut previous).expect("interval delta");
+                assert!((0.0..=100.0).contains(&second), "got {second}");
+            },
+            None => assert!(
+                previous.is_none(),
+                "no counters read means no baseline to keep"
+            ),
+        }
     }
 
     #[test]

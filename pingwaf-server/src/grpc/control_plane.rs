@@ -38,7 +38,9 @@ use crate::grpc::cache_status::CacheStatusRegistry;
 use crate::grpc::config::{
     build_rule_bundle, build_site_config, from_timestamp,
 };
-use crate::grpc::registry::{AgentRegistry, COMMAND_CHANNEL_CAPACITY};
+use crate::grpc::registry::{
+    AgentRegistry, HeartbeatMetrics, COMMAND_CHANNEL_CAPACITY,
+};
 use crate::models::{
     access_log, action, agent, agent_blocked_ip, agent_metric, agent_status,
     api_key, certificate_events, host_sample, security_event, site,
@@ -268,8 +270,13 @@ impl ControlPlaneTrait for ControlPlaneService {
                 active.version = Set(optional(&payload.version));
                 active.os_info = Set(optional(&payload.os_info));
                 active.cpu_cores = Set(positive_i32(payload.cpu_cores as i64));
-                active.memory_bytes =
-                    Set(positive_i64(payload.memory_bytes as i64));
+                // Registration reports the RAM the node has, never the usage:
+                // `memory_bytes` keeps receiving it (unchanged behaviour) and
+                // `total_memory_bytes` is the unambiguous copy the API reads.
+                // The heartbeat owns `used_memory_bytes` from here on.
+                let total_memory = positive_i64(payload.memory_bytes as i64);
+                active.memory_bytes = Set(total_memory);
+                active.total_memory_bytes = Set(total_memory);
                 active.status = Set(status);
                 active.api_key_id = Set(Some(key.id));
                 active.ip_address = Set(payload.ip_address.clone());
@@ -283,6 +290,7 @@ impl ControlPlaneTrait for ControlPlaneService {
             },
             None => {
                 let agent_id = Uuid::new_v4();
+                let total_memory = positive_i64(payload.memory_bytes as i64);
                 let created = agent::ActiveModel {
                     id: Set(agent_id),
                     site_id: Set(site_id),
@@ -291,9 +299,10 @@ impl ControlPlaneTrait for ControlPlaneService {
                     version: Set(optional(&payload.version)),
                     os_info: Set(optional(&payload.os_info)),
                     cpu_cores: Set(positive_i32(payload.cpu_cores as i64)),
-                    memory_bytes: Set(positive_i64(
-                        payload.memory_bytes as i64,
-                    )),
+                    memory_bytes: Set(total_memory),
+                    total_memory_bytes: Set(total_memory),
+                    // Usage starts unknown: the first heartbeat fills it.
+                    used_memory_bytes: Set(None),
                     status: Set(status),
                     api_key_id: Set(Some(key.id)),
                     config_hash: Set(None),
@@ -382,6 +391,9 @@ impl ControlPlaneTrait for ControlPlaneService {
         cache_status
             .record_heartbeat(agent_id, &first.site_statuses)
             .await;
+        registry
+            .record_heartbeat(agent_id, heartbeat_metrics(&first))
+            .await;
         tokio::spawn(async move {
             persist_heartbeat(&db, agent_id, &first, &registry).await;
             persist_host_samples(&db, agent_id, &first.host_samples).await;
@@ -397,6 +409,12 @@ impl ControlPlaneTrait for ControlPlaneService {
             } {
                 cache_status
                     .record_heartbeat(agent_id, &message.site_statuses)
+                    .await;
+                // Retained before the (awaited, database-bound) persist so the
+                // node view reflects this heartbeat even if the row update is
+                // slow or fails.
+                registry
+                    .record_heartbeat(agent_id, heartbeat_metrics(&message))
                     .await;
                 persist_heartbeat(&db, agent_id, &message, &registry).await;
                 persist_host_samples(&db, agent_id, &message.host_samples)
@@ -931,6 +949,18 @@ async fn record_upstream_health(
         .await;
 }
 
+/// Counters of one heartbeat in the shape [`crate::grpc::registry`] retains for
+/// the node view. The memory figure is the usage the agent reported; the total
+/// is a registration value (`agents.total_memory_bytes`).
+fn heartbeat_metrics(message: &AgentHeartbeat) -> HeartbeatMetrics {
+    HeartbeatMetrics {
+        cpu_percent: message.cpu_usage_percent,
+        memory_bytes: message.memory_usage_bytes,
+        connections: message.active_connections,
+        rps: message.requests_per_second,
+    }
+}
+
 /// Persists the runtime counters of one heartbeat.
 async fn persist_heartbeat(
     db: &DatabaseConnection,
@@ -979,7 +1009,12 @@ async fn persist_heartbeat(
         active.config_hash = Set(Some(message.config_hash.clone()));
     }
     if message.memory_usage_bytes > 0 {
-        active.memory_bytes = Set(Some(message.memory_usage_bytes as i64));
+        let used = message.memory_usage_bytes as i64;
+        // The heartbeat reports memory *in use*. `memory_bytes` keeps getting
+        // that figure (unchanged behaviour for old readers); the split column
+        // is the unambiguous copy (migration 000064).
+        active.memory_bytes = Set(Some(used));
+        active.used_memory_bytes = Set(Some(used));
     }
     // Sync timestamps come from the agent's own clock, but they only feed
     // the dashboard's "last synced" display, so a skewed clock cannot make
