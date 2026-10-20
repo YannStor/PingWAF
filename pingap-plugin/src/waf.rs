@@ -2105,20 +2105,26 @@ fn build_site_engine(cfg: &CacheWafConfig) -> WafEngine {
         CacheWafMode::Monitor => WafMode::Monitor,
         CacheWafMode::Block => WafMode::Block,
     };
-    // Per-rule monitor downgrade: a custom rule whose mode is monitor (or
-    // off, which is treated the same — detected and logged, never enforced)
-    // feeds the score and the event log but never carries its action. The
-    // site-level engine mode stays the master switch on top of this.
+    // Per-rule modes:
+    // - `off`: the rule is fully disabled — it is NOT compiled, evaluated,
+    //   scored, or logged at all.
+    // - `monitor`: the rule is evaluated and feeds the score/event log, but
+    //   never carries its action (downgraded, no enforcement).
+    // - `block`: the rule is evaluated and enforced.
+    // The site-level engine mode stays the master switch on top of this.
     let monitor_custom_rules: std::collections::HashSet<String> = cfg
         .custom_rules
         .iter()
-        .filter(|r| r.enabled && r.mode != CacheWafMode::Block)
+        // Only `monitor` rules participate in the event/score stream.
+        .filter(|r| r.enabled && r.mode == CacheWafMode::Monitor)
         .map(|r| r.id.clone())
         .collect();
+    // Active rules: enabled and not off. Off rules must not be compiled or
+    // evaluated (R-01); `enabled = false` rules are likewise skipped.
     let rules: Vec<CompiledRule> = cfg
         .custom_rules
         .iter()
-        .filter(|r| r.enabled)
+        .filter(|r| r.enabled && r.mode != CacheWafMode::Off)
         .filter_map(|r| {
             let action = match r.action {
                 CacheWafAction::Block => RuleAction::Block,
@@ -3775,6 +3781,7 @@ pub(crate) mod tests {
     use pingap_util::base64_encode;
     use pingora::proxy::Session;
     use pingwaf_agent::cache::RuleCache;
+    use pingwaf_agent::cache::WafRule;
     use pingwaf_agent::client::ControlPlaneClient;
     use pingwaf_agent::config::AgentConfig;
     use pingwaf_agent::heartbeat::MetricsCollector;
@@ -3966,6 +3973,54 @@ ml_threshold = 0.75
         let v = downgraded.inspect(&r);
         assert_eq!(v.action, WafAction::Monitor, "details: {}", v.details);
         assert!(v.matched_rules.contains(&"PINGWAF-1010".to_string()));
+    }
+
+    fn custom_rule(id: &str, mode: CacheWafMode, needle: &str) -> WafRule {
+        WafRule {
+            id: id.into(),
+            name: id.into(),
+            description: String::new(),
+            expression: format!(
+                r#"http.request.uri.query contains "{needle}""#
+            ),
+            action: CacheWafAction::Block,
+            severity: 3,
+            tags: Vec::new(),
+            enabled: true,
+            mode,
+            priority: 0,
+        }
+    }
+
+    #[test]
+    fn off_rules_are_not_compiled_or_evaluated() {
+        let mut cfg = cache_waf_config(false, Vec::new(), Vec::new());
+        cfg.custom_rules = vec![
+            custom_rule("rule-off", CacheWafMode::Off, "offmark"),
+            custom_rule("rule-monitor", CacheWafMode::Monitor, "monmark"),
+            custom_rule("rule-block", CacheWafMode::Block, "blkmark"),
+        ];
+        let engine = build_site_engine(&cfg);
+
+        // Off rule: its payload must not match — no rule id in the verdict
+        // and no enforcement outcome.
+        let v = engine.inspect(&probe("?q=offmark"));
+        assert!(
+            !v.matched_rules.iter().any(|id| id == "rule-off"),
+            "off rule was evaluated: {}",
+            v.details
+        );
+        assert_ne!(v.action, WafAction::Block, "details: {}", v.details);
+
+        // Monitor rule: still detected (feeds score/events) but downgraded
+        // — the hit never enforces the rule's own Block action.
+        let v = engine.inspect(&probe("?q=monmark"));
+        assert!(v.matched_rules.contains(&"rule-monitor".to_string()));
+        assert_eq!(v.action, WafAction::Monitor, "details: {}", v.details);
+
+        // Block rule: fully enforced.
+        let v = engine.inspect(&probe("?q=blkmark"));
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
     }
 
     #[test]

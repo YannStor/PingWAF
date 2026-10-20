@@ -360,6 +360,28 @@ pub fn error_response_header(code: u16) -> ResponseHeader {
         .unwrap_or_else(|| error_resp::gen_error_response(code))
 }
 
+/// A fixed, client-safe message for the error page, keyed by the pingora
+/// `ErrorType` string. The internal error chain (`e.to_string()`) can carry
+/// plugin names, upstream addresses and cause chains, so it is logged
+/// server-side and never rendered to clients (R-05). Unknown types fall back
+/// to a generic message.
+fn public_error_message(error_type: &str) -> &'static str {
+    let t = error_type.to_ascii_lowercase();
+    match t.as_str() {
+        // Upstream read/write/connect timeouts (checked before the generic
+        // connect arm, since e.g. "ConnectTimedout" contains "connect").
+        t if t.contains("timed") || t.contains("timeout") => "Upstream Timeout",
+        // Upstream connection failures (includes refused / unreachable /
+        // TLS handshake problems).
+        t if t.contains("connect") => "Upstream Unavailable",
+        "readerror" | "writeerror" => "Upstream Connection Error",
+        "h2error" | "h2connectionerror" | "h2streamerror" => {
+            "Upstream Protocol Error"
+        },
+        _ => "Internal Server Error",
+    }
+}
+
 /// The status to answer a proxy failure with, and whether the client is
 /// gone, so that nothing can be sent to it.
 ///
@@ -2050,9 +2072,20 @@ impl ProxyHttp for Server {
         // The edge generated this error itself (upstream unreachable, …) —
         // stamp it like every other edge response.
         let _ = resp.insert_header("server", "pingwaf");
+        // Never echo the internal error chain (`e.to_string()`) to clients:
+        // it can leak plugin names, upstream addresses, and cause chains.
+        // Log the full error server-side (with request_id) and render a
+        // fixed, error-type-specific message instead (R-05).
+        error!(
+            target: LOG_TARGET,
+            request_id = ctx.state.request_id.as_deref().unwrap_or(""),
+            error = %e,
+            error_type,
+            "proxy error"
+        );
         let content = self.error_template.render(
             pingap_util::get_pkg_version(),
-            &e.to_string(),
+            public_error_message(error_type),
             error_type,
             ctx.state.request_id.as_deref().unwrap_or(""),
         );
@@ -3584,5 +3617,34 @@ value = 'proxy_set_headers = ["name:value"]'
             "{response}"
         );
         assert_eq!(false, response.contains("ReadError"), "{response}");
+    }
+
+    #[test]
+    fn public_error_message_never_echoes_internal_chain() {
+        // The internal error chain can carry upstream addresses and cause
+        // details; the public message must be a fixed, safe string.
+        let sensitive = "upstream 10.0.0.7:8080 connect refused (cause: dns)";
+        // Simulate what the render path sees: the mapping output derived
+        // from the error type — never the error chain itself.
+        let msg = public_error_message("ConnectError");
+        assert!(!msg.contains("10.0.0.7"), "{msg}");
+        assert!(!msg.contains(sensitive), "{msg}");
+        assert_eq!(msg, "Upstream Unavailable");
+
+        // Mapping coverage.
+        assert_eq!(public_error_message("ConnectTimedout"), "Upstream Timeout");
+        assert_eq!(
+            public_error_message("ReadError"),
+            "Upstream Connection Error"
+        );
+        assert_eq!(
+            public_error_message("H2StreamError"),
+            "Upstream Protocol Error"
+        );
+        // Unknown types fall back to the generic message.
+        assert_eq!(
+            public_error_message("SomethingNew"),
+            "Internal Server Error"
+        );
     }
 }
