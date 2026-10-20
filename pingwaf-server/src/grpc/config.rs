@@ -14,9 +14,10 @@ use pingwaf_proto::control_plane::{
     BasicAuthConfig, BasicAuthCredential, BotProtectionConfig, CacheRule,
     CacheTypeCategory, CacheTypePolicy, ChallengeConfig, CustomErrorPage,
     FailoverMode, GeoConfig, GlobalCacheSettings, HealthCheckConfig,
-    IpAccessRule, RateLimitRule, RewriteOperation, RewriteRule, RouteConfig,
-    RuleBundle, RuleOverride, Site, SiteCacheSettings, SiteConfig, SitePolicy,
-    SslConfig, UpstreamConfig, UpstreamPeer, WafConfig, WafRule,
+    IpAccessRule, RateLimitRule, ResponseReplaceConfig, ResponseReplaceRule,
+    RewriteOperation, RewriteRule, RouteConfig, RuleBundle, RuleOverride, Site,
+    SiteCacheSettings, SiteConfig, SitePolicy, SslConfig, UpstreamConfig,
+    UpstreamPeer, WafConfig, WafRule,
 };
 use prost::Message;
 use prost_types::Timestamp;
@@ -748,6 +749,7 @@ fn routes_to_proto(
                 ip_ranges,
                 strip_prefix: route.strip_prefix,
                 rewrite_path: route.rewrite_path.clone().unwrap_or_default(),
+                upstream_host: route.upstream_host.clone().unwrap_or_default(),
             })
         })
         .collect()
@@ -1270,10 +1272,48 @@ pub async fn build_rule_bundle(
         global_cache,
         cache_settings: site_cache_settings,
         origin_verify_cert,
+        response_replace: response_replace_to_proto(site_row),
     };
 
     bundle.config_hash = fingerprint(&bundle);
     Ok(bundle)
+}
+
+/// Reads the site's response replacement policy into its protocol shape.
+///
+/// A row whose document does not parse contributes nothing: one malformed
+/// policy must not cost the site every other rule in its bundle. The write path
+/// validates the shape, so this only fires for hand-edited data.
+fn response_replace_to_proto(
+    site_row: &site::Model,
+) -> Option<ResponseReplaceConfig> {
+    let stored = site_row.response_replace.as_ref()?;
+    // `ResponseReplaceConfig` is both the stored model and the protocol
+    // message, so the model side is named explicitly here.
+    let Some(parsed) = crate::models::ResponseReplaceConfig::from_json(stored)
+    else {
+        tracing::warn!(
+            site = %site_row.domain,
+            "response_replace is not a valid policy document; ignoring it"
+        );
+        return None;
+    };
+    if parsed.rules.is_empty() {
+        return None;
+    }
+    Some(ResponseReplaceConfig {
+        path: parsed.path,
+        status_codes: parsed.status_codes.into_iter().map(u32::from).collect(),
+        rules: parsed
+            .rules
+            .into_iter()
+            .map(|rule| ResponseReplaceRule {
+                pattern: rule.pattern,
+                replacement: rule.replacement,
+                is_regex: rule.is_regex,
+            })
+            .collect(),
+    })
 }
 
 /// Maps a `sites.failover_policy` string onto the proto enum; unknown values
@@ -2162,6 +2202,7 @@ mod tests {
             ip_group_id: None,
             strip_prefix: false,
             rewrite_path: None,
+            upstream_host: None,
             created_at: Utc::now(),
         }
     }

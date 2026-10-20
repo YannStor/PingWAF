@@ -133,6 +133,45 @@ pub struct SiteRules {
     /// CDN / reverse proxy in front of it.
     #[serde(default)]
     pub proxy_trust: ProxyTrustConfig,
+    /// Response body replacement policy, compiled into the site's
+    /// `sub_filter` plugin. `None` when the site replaces nothing — and for
+    /// every snapshot written before the policy existed.
+    #[serde(default)]
+    pub response_replace: Option<ResponseReplaceConfig>,
+}
+
+/// One literal or regex replacement of a [`ResponseReplaceConfig`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResponseReplaceRule {
+    /// Text (or regex when `is_regex`) the response body is searched for.
+    pub pattern: String,
+    /// Text substituted for every match.
+    pub replacement: String,
+    /// Compile `pattern` as a regular expression.
+    #[serde(default)]
+    pub is_regex: bool,
+}
+
+/// A site's response body replacement policy: what the data plane turns into
+/// a `sub_filter` plugin instance for that site.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResponseReplaceConfig {
+    /// Regex the request path must match; empty applies to every path.
+    #[serde(default)]
+    pub path: String,
+    /// Status codes the replacement applies to; empty applies to all.
+    #[serde(default)]
+    pub status_codes: Vec<u32>,
+    /// Replacements applied in order; empty is a no-op policy.
+    #[serde(default)]
+    pub rules: Vec<ResponseReplaceRule>,
+}
+
+impl ResponseReplaceConfig {
+    /// Whether the policy would generate a plugin that can never fire.
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
 }
 
 /// Site-level forwarded-header trust: which header carries the real client
@@ -898,6 +937,10 @@ pub struct RouteConfig {
     /// defaulted so an old `sites.json` keeps loading.
     #[serde(default)]
     pub rewrite_path: String,
+    /// `Host` header sent to the origin; empty keeps the client's Host. Again
+    /// defaulted so a snapshot written before the field existed still loads.
+    #[serde(default)]
+    pub upstream_host: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2364,6 +2407,10 @@ impl RuleCache {
                 .cache_settings
                 .as_ref()
                 .map(Self::convert_site_cache_settings),
+            response_replace: bundle
+                .response_replace
+                .as_ref()
+                .map(Self::convert_response_replace),
         }
     }
 
@@ -2695,6 +2742,25 @@ impl RuleCache {
             ip_ranges: r.ip_ranges.clone(),
             strip_prefix: r.strip_prefix,
             rewrite_path: r.rewrite_path.clone(),
+            upstream_host: r.upstream_host.clone(),
+        }
+    }
+
+    fn convert_response_replace(
+        r: &proto::ResponseReplaceConfig,
+    ) -> ResponseReplaceConfig {
+        ResponseReplaceConfig {
+            path: r.path.clone(),
+            status_codes: r.status_codes.clone(),
+            rules: r
+                .rules
+                .iter()
+                .map(|rule| ResponseReplaceRule {
+                    pattern: rule.pattern.clone(),
+                    replacement: rule.replacement.clone(),
+                    is_regex: rule.is_regex,
+                })
+                .collect(),
         }
     }
 }
@@ -2745,6 +2811,9 @@ mod tests {
         // they existed: an empty registry and an unsynced global default.
         assert!(cached.failover_registry.is_empty());
         assert_eq!(cached.global_fail_open, None);
+        // Same for the response replacement policy: a snapshot written
+        // before it existed must load as "replace nothing", not fail.
+        assert!(site.response_replace.is_none());
     }
 
     /// Copy-on-write snapshot economics: cloning a `CachedRules` — what
@@ -3282,8 +3351,18 @@ mod tests {
                         ip_ranges: vec!["10.0.0.0/8".to_string()],
                         strip_prefix: true,
                         rewrite_path: "/v2".to_string(),
+                        upstream_host: "origin.example.com".to_string(),
                     }],
                     bot_protection: None,
+                    response_replace: Some(ResponseReplaceConfig {
+                        path: "^/api/.*".to_string(),
+                        status_codes: vec![200],
+                        rules: vec![ResponseReplaceRule {
+                            pattern: "Google".to_string(),
+                            replacement: "PingWAF".to_string(),
+                            is_regex: false,
+                        }],
+                    }),
                 }),
             )]
             .into_iter()
@@ -3424,6 +3503,7 @@ mod tests {
                 observation_mode: false,
                 proxy_trust: ProxyTrustConfig::default(),
                 cache_settings: None,
+                response_replace: None,
             })
         };
         let store = |global_space_mb: Option<u32>, quota_mb: u32| {

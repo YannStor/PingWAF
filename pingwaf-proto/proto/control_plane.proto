@@ -317,6 +317,37 @@ message RuleBundle {
   // falling through to strict validation would 502 every HTTPS origin with
   // a self-signed certificate. See `BasicConf::origin_verify_cert`.
   optional bool origin_verify_cert = 28;
+
+  // Site-level response body replacement, compiled into a per-site
+  // `sub_filter` plugin instance. Absent = the site replaces nothing and no
+  // plugin is generated for it (old servers never send it).
+  optional ResponseReplaceConfig response_replace = 29;
+}
+
+// One literal or regex replacement inside a ResponseReplaceConfig. The pair
+// becomes `sub_filter '<pattern>' '<replacement>' g` (literal) or
+// `subs_filter '...' '...' g` (regex) in pingap's sub_filter plugin.
+message ResponseReplaceRule {
+  // Text (or regex when `is_regex`) searched for in the response body;
+  // non-empty, at most 512 bytes, no single quote (`'` delimits the plugin's
+  // rule syntax).
+  string pattern = 1;
+  // Substituted for every match; non-empty, at most 2048 bytes, no single
+  // quote. With `is_regex` the data plane runs it through the regex crate's
+  // replacement expansion, so `$1` / `$name` are capture references.
+  string replacement = 2;
+  // Compile `pattern` as a regular expression instead of a literal.
+  bool is_regex = 3;
+}
+
+// A site's response body replacement policy (`sites.response_replace`).
+message ResponseReplaceConfig {
+  // Regex the request path must match; empty applies to every path.
+  string path = 1;
+  // Status codes the replacement applies to (100-599); empty applies to all.
+  repeated uint32 status_codes = 2;
+  // Replacements applied in order; empty is a no-op policy.
+  repeated ResponseReplaceRule rules = 3;
 }
 
 // Deployment-wide cache limits, mirrored from the `cache_settings` table.
@@ -717,6 +748,10 @@ message RouteConfig {
   // Fixed path replacing the whole request path before proxying; wins over
   // `strip_prefix`. Empty disables it. The query string is preserved.
   string rewrite_path = 11;
+  // `Host` header sent to the origin for this route. Empty keeps the client's
+  // Host (the historic behaviour); a bare host name pins the virtual host the
+  // origin answers for. Mirrors `LocationConf.upstream_host`.
+  string upstream_host = 12;
 }
 
 enum LoadBalanceAlgorithm {

@@ -29,7 +29,7 @@ use crate::models::{
     acme_challenge, cache_rules, ip_groups, rate_limit_rules, route_match_type,
     rule, rule_groups, site, site_certificates, site_routes, site_ssl,
     site_status, site_upstream_pools, site_upstreams, tls_version,
-    trusted_header,
+    trusted_header, ResponseReplaceConfig,
 };
 
 /// Longest accepted route `rewrite_path`, in **bytes**, mirroring
@@ -78,6 +78,9 @@ pub struct SiteResponse {
     /// `None` means every pool without its own pin follows the
     /// deployment-wide `origin_settings.verify_cert`.
     pub origin_verify_cert: Option<bool>,
+    /// Response body replacement policy; `None` when the site replaces
+    /// nothing and no `sub_filter` plugin is generated for it.
+    pub response_replace: Option<ResponseReplaceConfig>,
     pub user_id: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -103,6 +106,10 @@ impl From<site::Model> for SiteResponse {
             trusted_proxy_ranges: model.trusted_proxy_ranges,
             trusted_proxy_group_ids: model.trusted_proxy_group_ids,
             origin_verify_cert: model.origin_verify_cert,
+            response_replace: model
+                .response_replace
+                .as_ref()
+                .and_then(ResponseReplaceConfig::from_json),
             user_id: model.user_id,
             created_at: model.created_at,
             updated_at: model.updated_at,
@@ -261,6 +268,12 @@ pub struct UpdateSiteRequest {
     /// alone.
     #[serde(default, deserialize_with = "deserialize_present_nullable")]
     pub origin_verify_cert: Option<Option<bool>>,
+    /// Response body replacement policy. Absent leaves the stored policy
+    /// alone, an explicit `null` removes it, an object replaces it wholesale.
+    /// A policy with an empty `rules` list also removes it: that is what a
+    /// console sends after deleting the last rule row.
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    pub response_replace: Option<Option<ResponseReplaceConfig>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -484,6 +497,11 @@ pub struct CreateRouteRequest {
     /// The query string is preserved.
     #[serde(default)]
     pub rewrite_path: Option<String>,
+    /// `Host` header the origin receives for this route — the knob a
+    /// reverse-proxy route needs when the origin serves virtual hosts.
+    /// `None` forwards the client's Host.
+    #[serde(default)]
+    pub upstream_host: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -511,6 +529,10 @@ pub struct UpdateRouteRequest {
     /// alone, `null` (or a blank string) clears it, a value sets it.
     #[serde(default, deserialize_with = "deserialize_present_nullable")]
     pub rewrite_path: Option<Option<String>>,
+    /// Same tri-state: absent keeps the stored `Host` override, `null` (or a
+    /// blank string) goes back to forwarding the client's Host.
+    #[serde(default, deserialize_with = "deserialize_present_nullable")]
+    pub upstream_host: Option<Option<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -983,6 +1005,8 @@ async fn create(
         trusted_proxy_group_ids: Set(Vec::new()),
         // New sites start with no opinion: pools follow the global default.
         origin_verify_cert: Set(None),
+        // Nothing is replaced until the operator configures a policy.
+        response_replace: Set(None),
         created_at: Set(timestamp),
         updated_at: Set(timestamp),
     }
@@ -1247,6 +1271,17 @@ async fn update(
     if let Some(verify_cert) = payload.origin_verify_cert {
         active.origin_verify_cert = Set(verify_cert);
     }
+    // Same tri-state: absent leaves the stored policy alone, `null` removes
+    // it. The policy is validated before it is stored because the data plane
+    // compiles it into the site's `sub_filter` plugin — a pattern that does not
+    // parse costs the site its whole agent configuration, not just the
+    // replacement.
+    if let Some(policy) = payload.response_replace {
+        active.response_replace =
+            Set(normalise_response_replace(policy)?.map(|policy| {
+                serde_json::to_value(policy).unwrap_or(serde_json::Value::Null)
+            }));
+    }
     active.updated_at = Set(Utc::now());
 
     let updated = active
@@ -1310,6 +1345,12 @@ async fn create_upstream(
     validate_upstream(&address, payload.weight)?;
     let pool_id = resolve_pool(&state, id, payload.pool_id.as_ref()).await?;
 
+    // The same origin twice in one pool balances every request onto it twice
+    // and doubles its health-check load; the same address in another pool is a
+    // legitimate setup, so the check is scoped to this pool only.
+    let siblings = load_pool_addresses(&state, id, pool_id, None).await?;
+    ensure_address_available(&address, &siblings)?;
+
     let model = site_upstreams::ActiveModel {
         id: Set(Uuid::new_v4()),
         site_id: Set(id),
@@ -1364,6 +1405,16 @@ async fn update_upstream(
     };
     let next_weight = payload.weight.unwrap_or(row.weight);
     validate_upstream(&next_address, next_weight)?;
+
+    // A changed address (or a move to another pool) must not collide with a
+    // sibling there. The row itself is excluded, so re-sending the stored
+    // address — which the console does on every unrelated edit — stays a no-op.
+    let next_pool = payload.pool_id.unwrap_or(row.pool_id);
+    if next_address != row.address || next_pool != row.pool_id {
+        let siblings =
+            load_pool_addresses(&state, id, next_pool, Some(target)).await?;
+        ensure_address_available(&next_address, &siblings)?;
+    }
 
     let mut active: site_upstreams::ActiveModel = row.into();
     if payload
@@ -1668,6 +1719,7 @@ async fn create_route(
     let match_type = payload.match_type.trim().to_string();
     let path = payload.path.trim().to_string();
     let rewrite_path = non_empty(&payload.rewrite_path);
+    let upstream_host = non_empty(&payload.upstream_host);
     validate_route(
         &name,
         &match_type,
@@ -1675,6 +1727,7 @@ async fn create_route(
         payload.priority,
         payload.strip_prefix,
         rewrite_path.as_deref(),
+        upstream_host.as_deref(),
     )?;
     ensure_pool_can_serve(&state, id, payload.pool_id).await?;
     if let Some(group_id) = payload.ip_group_id {
@@ -1693,6 +1746,7 @@ async fn create_route(
         ip_group_id: Set(payload.ip_group_id),
         strip_prefix: Set(payload.strip_prefix),
         rewrite_path: Set(rewrite_path),
+        upstream_host: Set(upstream_host),
         created_at: Set(Utc::now()),
     }
     .insert(&state.db)
@@ -1750,6 +1804,12 @@ async fn update_route(
         Some(value) => non_empty(value),
         None => row.rewrite_path.clone(),
     };
+    // Same tri-state as `rewrite_path`: absent keeps the stored value, `null`
+    // (or a blank string) clears it, a value replaces it.
+    let upstream_host = match payload.upstream_host.as_ref() {
+        Some(value) => non_empty(value),
+        None => row.upstream_host.clone(),
+    };
     validate_route(
         &name,
         &match_type,
@@ -1757,6 +1817,7 @@ async fn update_route(
         priority,
         strip_prefix,
         rewrite_path.as_deref(),
+        upstream_host.as_deref(),
     )?;
 
     let mut active: site_routes::ActiveModel = row.into();
@@ -1786,6 +1847,9 @@ async fn update_route(
     }
     if payload.rewrite_path.is_some() {
         active.rewrite_path = Set(rewrite_path);
+    }
+    if payload.upstream_host.is_some() {
+        active.upstream_host = Set(upstream_host);
     }
 
     let updated = active.update(&state.db).await?;
@@ -2168,6 +2232,7 @@ fn validate_route(
     priority: Option<i32>,
     strip_prefix: bool,
     rewrite_path: Option<&str>,
+    upstream_host: Option<&str>,
 ) -> Result<(), ApiError> {
     if name.is_empty() || name.len() > 100 {
         return Err(ApiError::BadRequest(
@@ -2277,7 +2342,190 @@ fn validate_route(
              to strip"
         )));
     }
+    validate_upstream_host(upstream_host)?;
     Ok(())
+}
+
+/// Validates a route's `upstream_host`: the bare host name written into the
+/// origin request's `Host` header.
+///
+/// Mirrors `pingap_config::LocationConf::validate_with_upstream` — no scheme,
+/// no path, no whitespace, at most 253 bytes — because that is the predicate
+/// the data plane applies when it builds the location, and
+/// `pingap-location` additionally runs the value through `HeaderValue::from_str`
+/// (which refuses control characters). A value accepted here but rejected
+/// there takes the site's whole agent configuration down with it, so the
+/// stricter of the two rules is enforced at write time.
+fn validate_upstream_host(host: Option<&str>) -> Result<(), ApiError> {
+    let Some(host) = host else {
+        return Ok(());
+    };
+    let host = host.trim();
+    if host.is_empty()
+        || host.len() > 253
+        || host.contains('/')
+        || host.contains("://")
+        || host.chars().any(char::is_whitespace)
+        || host.chars().any(char::is_control)
+    {
+        return Err(ApiError::BadRequest(format!(
+            "upstream_host '{host}' must be a bare host name (no scheme, path \
+             or whitespace, at most 253 bytes)"
+        )));
+    }
+    Ok(())
+}
+
+/// Largest accepted replacement pattern, in bytes.
+const MAX_RESPONSE_REPLACE_PATTERN_LEN: usize = 512;
+
+/// Largest accepted replacement text, in bytes.
+const MAX_RESPONSE_REPLACE_REPLACEMENT_LEN: usize = 2048;
+
+/// Largest number of rules one policy may carry.
+const MAX_RESPONSE_REPLACE_RULES: usize = 20;
+
+/// Validates and canonicalises a response replacement policy.
+///
+/// The policy is compiled into the site's `sub_filter` plugin
+/// (`pingap-plugin/src/sub_filter.rs`), whose rule syntax is
+/// `sub_filter '<pattern>' '<replacement>' [flags]` parsed with
+/// `'([^']+)'`. Three consequences drive the checks below:
+///
+/// * a single quote in either side ends the quoted literal early, so the rule
+///   does not parse and the plugin fails to build;
+/// * the quoted groups require **at least one character**, so an empty
+///   pattern or replacement is equally fatal;
+/// * a regex that does not compile (`is_regex`, and `path` which is always a
+///   regex) fails the same way.
+///
+/// Any of those failures drops the entire generated configuration for the site,
+/// which is why they are rejected here rather than discovered by an agent.
+fn validate_response_replace(
+    policy: &ResponseReplaceConfig,
+) -> Result<(), ApiError> {
+    if !policy.path.trim().is_empty() {
+        regex::Regex::new(&policy.path).map_err(|err| {
+            ApiError::BadRequest(format!(
+                "response_replace path is not a valid regex: {err}"
+            ))
+        })?;
+    }
+    for code in &policy.status_codes {
+        if !(100..=599).contains(code) {
+            return Err(ApiError::BadRequest(format!(
+                "response_replace status code {code} must be between 100 and \
+                 599"
+            )));
+        }
+    }
+    if policy.rules.len() > MAX_RESPONSE_REPLACE_RULES {
+        return Err(ApiError::BadRequest(format!(
+            "response_replace accepts at most {MAX_RESPONSE_REPLACE_RULES} \
+             rules"
+        )));
+    }
+    for (index, rule) in policy.rules.iter().enumerate() {
+        let number = index + 1;
+        if rule.pattern.is_empty()
+            || rule.pattern.len() > MAX_RESPONSE_REPLACE_PATTERN_LEN
+        {
+            return Err(ApiError::BadRequest(format!(
+                "response_replace rule {number} pattern must be 1-\
+                 {MAX_RESPONSE_REPLACE_PATTERN_LEN} bytes"
+            )));
+        }
+        if rule.replacement.is_empty()
+            || rule.replacement.len() > MAX_RESPONSE_REPLACE_REPLACEMENT_LEN
+        {
+            return Err(ApiError::BadRequest(format!(
+                "response_replace rule {number} replacement must be 1-\
+                 {MAX_RESPONSE_REPLACE_REPLACEMENT_LEN} bytes"
+            )));
+        }
+        if rule.pattern.contains('\'') || rule.replacement.contains('\'') {
+            return Err(ApiError::BadRequest(format!(
+                "response_replace rule {number} must not contain a single \
+                 quote; the data plane's rule syntax uses ' to delimit the \
+                 pattern and the replacement"
+            )));
+        }
+        if rule.is_regex {
+            regex::Regex::new(&rule.pattern).map_err(|err| {
+                ApiError::BadRequest(format!(
+                    "response_replace rule {number} pattern is not a valid \
+                     regex: {err}"
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Validates a payload policy and normalises "no rules" to "no policy".
+///
+/// A console that deletes the last rule row sends `rules: []`; storing that as
+/// a policy would make the site read as configured while the data plane
+/// generates a plugin that can never fire, so it clears the column instead.
+fn normalise_response_replace(
+    policy: Option<ResponseReplaceConfig>,
+) -> Result<Option<ResponseReplaceConfig>, ApiError> {
+    let Some(policy) = policy else {
+        return Ok(None);
+    };
+    if policy.rules.is_empty() {
+        return Ok(None);
+    }
+    validate_response_replace(&policy)?;
+    Ok(Some(policy))
+}
+
+/// Rejects an origin address that already exists in the same pool.
+///
+/// Two identical nodes in one pool are never a load-balancing decision: pingap
+/// keeps both as separate backends, so every request is balanced onto the same
+/// server twice over and the duplicate only doubles the health-check load.
+/// The same address in *another* pool stays allowed — pools are independent
+/// upstreams, and mirroring one origin into two pools is a legitimate setup.
+///
+/// `siblings` is the caller's query result scoped to one pool and, on update,
+/// excluding the row being changed — which is what makes re-sending an
+/// unchanged address a no-op instead of a self-collision.
+fn ensure_address_available(
+    address: &str,
+    siblings: &[String],
+) -> Result<(), ApiError> {
+    if siblings.iter().any(|existing| existing == address) {
+        return Err(ApiError::BadRequest(format!(
+            "upstream {address} already exists in this pool"
+        )));
+    }
+    Ok(())
+}
+
+/// Loads the origin addresses of one pool of one site.
+///
+/// `exclude` drops a single row from the result — the node an update is
+/// rewriting, so it cannot collide with itself. Only the addresses are read;
+/// the duplicate check needs nothing else from the row.
+async fn load_pool_addresses(
+    state: &AppState,
+    site_id: Uuid,
+    pool_id: Uuid,
+    exclude: Option<Uuid>,
+) -> Result<Vec<String>, ApiError> {
+    let mut query = site_upstreams::Entity::find()
+        .filter(site_upstreams::Column::SiteId.eq(site_id))
+        .filter(site_upstreams::Column::PoolId.eq(pool_id));
+    if let Some(exclude) = exclude {
+        query = query.filter(site_upstreams::Column::Id.ne(exclude));
+    }
+    Ok(query
+        .all(&state.db)
+        .await?
+        .into_iter()
+        .map(|row| row.address)
+        .collect())
 }
 
 /// Resolves the pool a new origin node belongs to: the given pool when
@@ -2804,7 +3052,7 @@ mod tests {
                          match_type: &str,
                          strip: bool,
                          rewrite: Option<&str>| {
-            validate_route("api", match_type, path, None, strip, rewrite)
+            validate_route("api", match_type, path, None, strip, rewrite, None)
                 .map_err(|err| (err.code(), err.to_string()))
         };
         let check = |match_type: &str, strip: bool, rewrite: Option<&str>| {
@@ -2873,7 +3121,7 @@ mod tests {
     #[test]
     fn strip_prefix_on_the_root_path_is_rejected() {
         let check = |path: &str, match_type: &str, strip: bool| {
-            validate_route("api", match_type, path, None, strip, None)
+            validate_route("api", match_type, path, None, strip, None, None)
                 .map_err(|err| (err.code(), err.to_string()))
         };
 
@@ -2943,5 +3191,328 @@ mod tests {
         .expect("create payload without the new fields");
         assert!(!create.strip_prefix);
         assert_eq!(create.rewrite_path, None);
+        assert_eq!(create.upstream_host, None);
+    }
+
+    /// D-5: the route's `Host` override is validated with the data plane's
+    /// rule. A value accepted here but rejected by `pingap-location` would
+    /// drop the site's whole generated configuration, so the stricter rule is
+    /// the one enforced at write time.
+    #[test]
+    fn route_upstream_host_matches_the_data_plane_rule() {
+        let check = |host: Option<&str>| {
+            validate_route(
+                "mirror", "prefix", "/google", None, false, None, host,
+            )
+            .map_err(|err| (err.code(), err.to_string()))
+        };
+
+        // Absent keeps the client's Host: the historic behaviour, and what a
+        // route that proxies a site's own origin wants.
+        assert_eq!(check(None), Ok(()));
+        // A bare host name, with or without an explicit port: the data plane
+        // builds a HeaderValue out of either.
+        assert_eq!(check(Some("www.google.com")), Ok(()));
+        assert_eq!(check(Some("www.google.com:8443")), Ok(()));
+
+        // The 253-byte ceiling is the one the config file enforces.
+        let at_limit = "a".repeat(253);
+        assert_eq!(check(Some(&at_limit)), Ok(()));
+        let too_long = "a".repeat(254);
+        assert!(check(Some(&too_long))
+            .expect_err("254 bytes is over the ceiling")
+            .1
+            .contains("at most 253 bytes"));
+
+        // Shapes an origin cannot use as a virtual host name. Interior
+        // whitespace and control characters are in the list because
+        // `HeaderValue::from_str` would refuse them when the location is
+        // built.
+        for bad in [
+            "https://www.google.com",
+            "www.google.com/",
+            "/google",
+            "www google.com",
+            "www.goo\tdle.com",
+        ] {
+            let err = check(Some(bad)).expect_err("must be rejected");
+            assert_eq!("bad_request", err.0, "{bad:?} must be a 400");
+        }
+        // Surrounding whitespace is trimmed, not rejected: the config-file
+        // path trims too, and the handlers already map a blank payload to
+        // "unset". A blank reaching this function directly is still refused
+        // rather than written as an empty Host header.
+        assert_eq!(check(Some("  www.google.com  ")), Ok(()));
+        assert!(check(Some("   ")).is_err());
+    }
+
+    /// D-1: an identical origin already in the same pool is refused with a 400
+    /// naming the address; the same address in *another* pool stays allowed,
+    /// because the check is scoped to one pool's node list.
+    #[test]
+    fn duplicate_upstream_in_one_pool_is_rejected() {
+        let pool_a = vec!["172.17.53.244:5000".to_string()];
+
+        let err = ensure_address_available("172.17.53.244:5000", &pool_a)
+            .expect_err("the same address twice in one pool must be a 400");
+        assert_eq!(err.code(), "bad_request");
+        assert!(
+            err.to_string().contains(
+                "upstream 172.17.53.244:5000 already exists in this pool"
+            ),
+            "the message must name the address and the pool: {err}"
+        );
+
+        // A second, distinct origin in the same pool is what a pool is for.
+        assert!(ensure_address_available("172.17.53.245:5000", &pool_a).is_ok());
+
+        // Another pool has its own node list — the handlers query per pool,
+        // never per site — so the same address is free to appear again.
+        let pool_b: Vec<String> = Vec::new();
+        assert!(ensure_address_available("172.17.53.244:5000", &pool_b).is_ok());
+
+        // An update that keeps the stored address excludes the row itself
+        // (`load_pool_addresses(.., Some(id))`), so the list it checks holds
+        // only the siblings and the request is a no-op, not a self-collision.
+        let siblings_without_self = vec!["172.17.53.245:5000".to_string()];
+        assert!(ensure_address_available(
+            "172.17.53.244:5000",
+            &siblings_without_self
+        )
+        .is_ok());
+    }
+
+    fn replace_rule(
+        pattern: &str,
+        replacement: &str,
+        is_regex: bool,
+    ) -> crate::models::ResponseReplaceRule {
+        crate::models::ResponseReplaceRule {
+            pattern: pattern.to_string(),
+            replacement: replacement.to_string(),
+            is_regex,
+        }
+    }
+
+    /// D-6: the policy is compiled into the site's `sub_filter` plugin, whose
+    /// rule parser (`'([^']+)'`) cannot express an empty side or a quote, and
+    /// whose regex compiles at plugin build time. Every one of those failures
+    /// would take down the site's whole agent configuration, so all of them are
+    /// rejected here.
+    #[test]
+    fn response_replace_policy_is_validated() {
+        let policy =
+            |path: &str,
+             status_codes: Vec<u16>,
+             rules: Vec<crate::models::ResponseReplaceRule>| {
+                ResponseReplaceConfig {
+                    path: path.to_string(),
+                    status_codes,
+                    rules,
+                }
+            };
+        let check = |policy: &ResponseReplaceConfig| {
+            validate_response_replace(policy)
+                .map_err(|err| (err.code(), err.to_string()))
+        };
+
+        // The documented shape, plus the "all paths / all statuses" form.
+        assert_eq!(
+            check(&policy(
+                "^/.*",
+                vec![200],
+                vec![replace_rule("Google", "PingWAF", false)]
+            )),
+            Ok(())
+        );
+        assert_eq!(
+            check(&policy(
+                "",
+                Vec::new(),
+                vec![replace_rule("Google", "PingWAF", false)]
+            )),
+            Ok(())
+        );
+
+        // `path` is always a regex.
+        let err = check(&policy(
+            "^(/",
+            Vec::new(),
+            vec![replace_rule("Google", "PingWAF", false)],
+        ))
+        .expect_err("a broken path regex must be rejected");
+        assert_eq!("bad_request", err.0);
+        assert!(err.1.contains("path is not a valid regex"), "{}", err.1);
+
+        // Status codes stay inside the HTTP range.
+        for bad in [99u16, 600] {
+            let err = check(&policy(
+                "",
+                vec![bad],
+                vec![replace_rule("Google", "PingWAF", false)],
+            ))
+            .expect_err("an out-of-range status must be rejected");
+            assert!(err.1.contains("must be between 100 and 599"), "{}", err.1);
+        }
+
+        // At most 20 rules.
+        let many = vec![replace_rule("Google", "PingWAF", false); 21];
+        let err = check(&policy("", Vec::new(), many))
+            .expect_err("21 rules is over the cap");
+        assert!(err.1.contains("at most 20 rules"), "{}", err.1);
+        assert_eq!(
+            check(&policy(
+                "",
+                Vec::new(),
+                vec![replace_rule("Google", "PingWAF", false); 20]
+            )),
+            Ok(())
+        );
+
+        // The plugin's quoted groups need at least one character on both
+        // sides, and its size ceilings mirror the task's contract.
+        let err = check(&policy(
+            "",
+            Vec::new(),
+            vec![replace_rule("", "PingWAF", false)],
+        ))
+        .expect_err("an empty pattern cannot be parsed by the plugin");
+        assert!(err.1.contains("pattern must be 1-512 bytes"), "{}", err.1);
+
+        let long_pattern = "a".repeat(513);
+        let err = check(&policy(
+            "",
+            Vec::new(),
+            vec![replace_rule(&long_pattern, "PingWAF", false)],
+        ))
+        .expect_err("a 513-byte pattern is over the cap");
+        assert!(err.1.contains("pattern must be 1-512 bytes"), "{}", err.1);
+        assert_eq!(
+            check(&policy(
+                "",
+                Vec::new(),
+                vec![replace_rule(&"a".repeat(512), "PingWAF", false)]
+            )),
+            Ok(())
+        );
+
+        let err = check(&policy(
+            "",
+            Vec::new(),
+            vec![replace_rule("Google", "", false)],
+        ))
+        .expect_err("an empty replacement cannot be parsed by the plugin");
+        assert!(
+            err.1.contains("replacement must be 1-2048 bytes"),
+            "{}",
+            err.1
+        );
+
+        let long_replacement = "b".repeat(2049);
+        let err = check(&policy(
+            "",
+            Vec::new(),
+            vec![replace_rule("Google", &long_replacement, false)],
+        ))
+        .expect_err("a 2049-byte replacement is over the cap");
+        assert!(
+            err.1.contains("replacement must be 1-2048 bytes"),
+            "{}",
+            err.1
+        );
+
+        // A single quote ends the plugin's quoted literal early, so the rule
+        // would not parse at all.
+        for rule in [
+            replace_rule("Goo'gle", "PingWAF", false),
+            replace_rule("Google", "Ping'WAF", false),
+        ] {
+            let err = check(&policy("", Vec::new(), vec![rule]))
+                .expect_err("a quote must be rejected");
+            assert!(err.1.contains("single quote"), "{}", err.1);
+        }
+
+        // `is_regex` patterns compile at plugin build time.
+        let err = check(&policy(
+            "",
+            Vec::new(),
+            vec![replace_rule("Goo(gle", "PingWAF", true)],
+        ))
+        .expect_err("a broken rule regex must be rejected");
+        assert!(err.1.contains("pattern is not a valid regex"), "{}", err.1);
+        assert_eq!(
+            check(&policy(
+                "",
+                Vec::new(),
+                vec![replace_rule("Go+gle", "PingWAF", true)]
+            )),
+            Ok(())
+        );
+    }
+
+    /// A policy with no rules is "replace nothing", which is what a console
+    /// sends after deleting the last row: it clears the column instead of
+    /// storing a policy the data plane would turn into a dead plugin.
+    #[test]
+    fn response_replace_without_rules_clears_the_policy() {
+        assert!(normalise_response_replace(None).unwrap().is_none());
+        assert!(normalise_response_replace(Some(ResponseReplaceConfig {
+            path: "^/.*".to_string(),
+            status_codes: vec![200],
+            rules: Vec::new(),
+        }))
+        .unwrap()
+        .is_none());
+        let kept = normalise_response_replace(Some(ResponseReplaceConfig {
+            path: "^/.*".to_string(),
+            status_codes: vec![200],
+            rules: vec![replace_rule("Google", "PingWAF", false)],
+        }))
+        .unwrap();
+        assert_eq!(kept.map(|policy| policy.rules.len()), Some(1));
+        // An invalid policy is still rejected, not silently dropped.
+        assert!(normalise_response_replace(Some(ResponseReplaceConfig {
+            path: "^(/".to_string(),
+            status_codes: Vec::new(),
+            rules: vec![replace_rule("Google", "PingWAF", false)],
+        }))
+        .is_err());
+    }
+
+    /// The site update keeps the same three-state contract as
+    /// `origin_verify_cert`: absent = unchanged, `null` = cleared, an object =
+    /// replaced.
+    #[test]
+    fn response_replace_request_is_three_state() {
+        let absent: UpdateSiteRequest =
+            serde_json::from_str(r#"{}"#).expect("absent key");
+        assert_eq!(absent.response_replace, None, "missing key = no change");
+
+        let cleared: UpdateSiteRequest =
+            serde_json::from_str(r#"{"response_replace": null}"#)
+                .expect("present null");
+        assert_eq!(
+            cleared.response_replace,
+            Some(None),
+            "explicit null removes the policy"
+        );
+
+        let set: UpdateSiteRequest = serde_json::from_str(
+            r#"{"response_replace":{"path":"^/.*","status_codes":[200],
+                "rules":[{"pattern":"Google","replacement":"PingWAF",
+                          "is_regex":false}]}}"#,
+        )
+        .expect("present object");
+        let policy = set.response_replace.flatten().expect("policy parsed");
+        assert_eq!(policy.path, "^/.*");
+        assert_eq!(policy.status_codes, vec![200]);
+        assert_eq!(policy.rules.len(), 1);
+        assert!(!policy.rules[0].is_regex);
+
+        // Wrong types are rejected, not coerced.
+        assert!(serde_json::from_str::<UpdateSiteRequest>(
+            r#"{"response_replace":{"rules":[{"pattern":1}]}}"#
+        )
+        .is_err());
     }
 }

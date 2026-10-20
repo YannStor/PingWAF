@@ -94,6 +94,11 @@ pub mod sites {
         /// `verify_cert`; `None` means the site has no opinion and each pool
         /// follows the deployment-wide `origin_settings.verify_cert`.
         pub origin_verify_cert: Option<bool>,
+        /// Response body replacement policy, compiled into the site's
+        /// `sub_filter` plugin instance in the agent configuration. `None`
+        /// leaves every response untouched.
+        #[sea_orm(column_type = "JsonBinary")]
+        pub response_replace: Option<Json>,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
     }
@@ -219,6 +224,11 @@ pub mod site_routes {
         /// Fixed path replacing the whole upstream path; wins over
         /// `strip_prefix`. `None` forwards the (possibly stripped) path.
         pub rewrite_path: Option<String>,
+        /// `Host` header sent to the origin for this route. `None` keeps the
+        /// client's Host (the historic behaviour); a value pins the virtual
+        /// host the origin answers for, mirroring
+        /// `pingap_config::LocationConf::upstream_host`.
+        pub upstream_host: Option<String>,
         pub created_at: DateTimeUtc,
     }
 
@@ -323,5 +333,66 @@ pub mod tls_version {
             .or_else(|| lower.strip_prefix("tls"))
             .unwrap_or(&lower);
         is_valid(stripped).then(|| stripped.to_string())
+    }
+}
+
+/// One literal or regex replacement of a site's [`ResponseReplaceConfig`].
+///
+/// The pair maps onto one entry of pingap's `sub_filter` plugin
+/// (`pingap-plugin/src/sub_filter.rs`): `sub_filter '<pattern>'
+/// '<replacement>' g` for a literal rule, `subs_filter '...' '...' g` when
+/// [`Self::is_regex`] is set.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResponseReplaceRule {
+    /// Text (or regex, when `is_regex`) the response body is searched for.
+    pub pattern: String,
+    /// Text substituted for every match. Must not be empty: the data plane's
+    /// rule parser only matches a quoted, non-empty replacement, so an empty
+    /// one would make the whole plugin fail to build.
+    ///
+    /// With `is_regex` the data plane hands this to `regex`'s `replace_all`,
+    /// which runs it through `Captures::expand` — `$1` / `$name` are capture
+    /// references, not literal dollars. A literal replacement (the default)
+    /// is never expanded.
+    pub replacement: String,
+    /// Compile `pattern` as a regular expression instead of a literal.
+    #[serde(default)]
+    pub is_regex: bool,
+}
+
+/// A site's response body replacement policy: the JSONB document stored in
+/// `sites.response_replace`, and the source of the site's `sub_filter` plugin
+/// instance in the generated agent configuration.
+///
+/// ```json
+/// {
+///   "path": "^/.*",
+///   "status_codes": [200],
+///   "rules": [
+///     { "pattern": "Google", "replacement": "PingWAF", "is_regex": false }
+///   ]
+/// }
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResponseReplaceConfig {
+    /// Regex the request path must match; empty applies to every path.
+    #[serde(default)]
+    pub path: String,
+    /// Status codes the replacement applies to; empty applies to all of them.
+    #[serde(default)]
+    pub status_codes: Vec<u16>,
+    /// Replacements applied in order; empty is a no-op policy.
+    #[serde(default)]
+    pub rules: Vec<ResponseReplaceRule>,
+}
+
+impl ResponseReplaceConfig {
+    /// Reads a stored `sites.response_replace` document.
+    ///
+    /// `None` when the column is empty or the document does not match this
+    /// shape: the data plane then leaves responses untouched instead of
+    /// failing to build its whole configuration over one bad row.
+    pub fn from_json(value: &Json) -> Option<Self> {
+        serde_json::from_value(value.clone()).ok()
     }
 }

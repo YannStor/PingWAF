@@ -50,7 +50,7 @@ use pingora::server;
 use pingora::server::configuration::Opt;
 use pingora::services::background::background_service;
 use pingwaf_agent::cache::{
-    CachedRules, HealthCheckConfig, RuleCache, SslConfig,
+    CachedRules, HealthCheckConfig, ResponseReplaceConfig, RuleCache, SslConfig,
 };
 use pingwaf_agent::config::AgentConfig;
 use pingwaf_server::ServerConfig;
@@ -326,6 +326,89 @@ fn site_posture_plugins(
     }
 
     names
+}
+
+/// Builds the site's `sub_filter` plugin — the data-plane half of the control
+/// plane's `sites.response_replace` policy — and returns its name.
+///
+/// Deliberately not folded into [`site_posture_plugins`]: that function returns
+/// early for a site without TLS, which would silently drop the replacement for
+/// every plain-HTTP site.
+///
+/// The config keys are the ones `pingap-plugin/src/sub_filter.rs` reads:
+/// `path` (regex the request path must match), `status_codes` (a
+/// comma-separated list) and `filters` (rule strings, each
+/// `sub_filter '<pattern>' '<replacement>' [flags]`). The `g` flag is always
+/// stated so a body replacement applies to every occurrence — without it the
+/// plugin replaces only the first one.
+///
+/// Known limitation: the plugin buffers and rewrites the body bytes without
+/// decompressing them, so a response the origin sent with
+/// `content-encoding: gzip` (or br/zstd) is inspected in its compressed form —
+/// the pattern does not match, nothing is replaced, and the body is still
+/// re-sent chunked because the plugin already dropped `Content-Length`. The
+/// control plane cannot compensate for that from here.
+fn site_response_replace_plugin(
+    site_id: &str,
+    policy: Option<&ResponseReplaceConfig>,
+    plugins: &mut HashMap<String, PluginConf>,
+) -> Vec<String> {
+    let Some(policy) = policy.filter(|policy| !policy.rules.is_empty()) else {
+        return Vec::new();
+    };
+
+    let filters: Vec<toml::Value> = policy
+        .rules
+        .iter()
+        .map(|rule| {
+            // `subs_filter` compiles the pattern as a regex, `sub_filter`
+            // matches it literally — the two directives the plugin knows.
+            let directive = if rule.is_regex {
+                "subs_filter"
+            } else {
+                "sub_filter"
+            };
+            toml::Value::String(format!(
+                "{directive} '{}' '{}' g",
+                rule.pattern, rule.replacement
+            ))
+        })
+        .collect();
+
+    let mut conf = PluginConf::new();
+    conf.insert(
+        "category".to_string(),
+        toml::Value::String("sub_filter".to_string()),
+    );
+    // An empty `path` in the plugin means "every path"; stating it anyway would
+    // be misleading in the generated config, so it is left out.
+    if !policy.path.trim().is_empty() {
+        conf.insert(
+            "path".to_string(),
+            toml::Value::String(policy.path.trim().to_string()),
+        );
+    }
+    // Same for the status filter: absent = all status codes.
+    if !policy.status_codes.is_empty() {
+        conf.insert(
+            "status_codes".to_string(),
+            toml::Value::String(
+                policy
+                    .status_codes
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+        );
+    }
+    conf.insert("filters".to_string(), toml::Value::Array(filters));
+
+    // One instance per site: the rules are the site's, so a shared instance
+    // would apply one site's text to another's responses.
+    let name = format!("{site_id}_sub_filter");
+    plugins.insert(name.clone(), conf);
+    vec![name]
 }
 
 /// Synthesizes the data-plane health check URL from the control plane's
@@ -632,6 +715,13 @@ fn cached_rules_to_pingap_config(
             site.ssl_config.as_ref(),
             &mut plugins,
         ));
+        // Response body replacement: a separate instance per site, registered
+        // only when the site actually configures a policy.
+        site_plugins.extend(site_response_replace_plugin(
+            site_id,
+            site.response_replace.as_ref(),
+            &mut plugins,
+        ));
 
         if let Some(key) = fallback_key {
             let loc_name = format!("{site_id}_loc");
@@ -708,6 +798,13 @@ fn cached_rules_to_pingap_config(
                     strip_prefix: route.strip_prefix.then_some(true),
                     rewrite_path: (!route.rewrite_path.trim().is_empty())
                         .then(|| route.rewrite_path.trim().to_string()),
+                    // The `Host` the origin receives. An empty value on the
+                    // wire means "unset" — keep the client's Host, which is
+                    // what a route proxying the site's own origin wants. A
+                    // mirror route points this at the mirrored site's name so
+                    // its virtual host answers instead of 404ing.
+                    upstream_host: (!route.upstream_host.trim().is_empty())
+                        .then(|| route.upstream_host.trim().to_string()),
                     plugins: Some(site_plugins.clone()),
                     ..Default::default()
                 },
@@ -1698,7 +1795,8 @@ mod tests {
     use super::*;
     use pingwaf_agent::cache::{
         CacheRule as AgentCacheRule, CachedRules, GlobalCacheSettings,
-        ProxyTrustConfig, RouteConfig, SiteRules, UpstreamConfig, UpstreamPeer,
+        ProxyTrustConfig, ResponseReplaceRule, RouteConfig, SiteRules,
+        UpstreamConfig, UpstreamPeer,
     };
 
     #[test]
@@ -1741,6 +1839,7 @@ mod tests {
             observation_mode: false,
             proxy_trust: ProxyTrustConfig::default(),
             cache_settings: None,
+            response_replace: None,
         }
     }
 
@@ -1786,6 +1885,7 @@ mod tests {
             ip_ranges: vec![],
             strip_prefix: false,
             rewrite_path: String::new(),
+            upstream_host: String::new(),
         }
     }
 
@@ -2221,6 +2321,142 @@ mod tests {
             assert_eq!(loc.strip_prefix, None, "{name} must not strip");
             assert_eq!(loc.rewrite_path, None, "{name} must not replace");
         }
+    }
+
+    /// D-5: the route's `Host` override reaches the generated location as
+    /// `upstream_host`. An unset value stays `None`, i.e. the client's Host is
+    /// forwarded — the behaviour every existing route relies on.
+    #[test]
+    fn route_upstream_host_reaches_the_location_config() {
+        let mut site = site_rules("site1", "mirror.example.com");
+        site.upstreams = vec![pool("pool-a", vec![peer("172.17.53.244:5000")])];
+
+        let mut mirror = route("r1", "prefix", "/google", "pool-a");
+        mirror.upstream_host = "  www.google.com  ".to_string();
+        let plain = route("r2", "prefix", "/api", "pool-a");
+        site.routes = vec![mirror, plain];
+
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+
+        let loc = config
+            .locations
+            .get("site1_route_r1")
+            .expect("mirror route location");
+        // Trimmed, so a padded value still builds a valid HeaderValue.
+        assert_eq!(loc.upstream_host.as_deref(), Some("www.google.com"));
+
+        let loc = config
+            .locations
+            .get("site1_route_r2")
+            .expect("plain route location");
+        assert_eq!(loc.upstream_host, None, "unset keeps the client's Host");
+    }
+
+    /// D-6: a site's response replacement policy becomes a `sub_filter` plugin
+    /// instance wired into that site's locations, using the key names
+    /// `pingap-plugin/src/sub_filter.rs` actually reads.
+    #[test]
+    fn site_response_replace_generates_a_sub_filter_plugin() {
+        let mut site = site_rules("site1", "mirror.example.com");
+        let mut default_pool = pool("pool-a", vec![peer("172.17.53.244:5000")]);
+        default_pool.is_default = true;
+        site.upstreams = vec![default_pool];
+        // Deliberately no `ssl_config`: the plugin must appear for a
+        // plain-HTTP site too, which is why it is not built inside
+        // `site_posture_plugins` (that one returns early without TLS).
+        assert!(site.ssl_config.is_none());
+        site.response_replace = Some(ResponseReplaceConfig {
+            path: "  ^/google/.*  ".to_string(),
+            status_codes: vec![200, 404],
+            rules: vec![
+                ResponseReplaceRule {
+                    pattern: "Google".to_string(),
+                    replacement: "PingWAF".to_string(),
+                    is_regex: false,
+                },
+                ResponseReplaceRule {
+                    pattern: "Go+gle".to_string(),
+                    replacement: "PingWAF".to_string(),
+                    is_regex: true,
+                },
+            ],
+        });
+
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site.clone()),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+
+        let conf = config
+            .plugins
+            .get("site1_sub_filter")
+            .expect("per-site sub_filter plugin");
+        let value = |key: &str| {
+            conf.get(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert_eq!(value("category"), "sub_filter");
+        assert_eq!(value("path"), "^/google/.*");
+        assert_eq!(value("status_codes"), "200,404");
+        let filters: Vec<&str> = conf
+            .get("filters")
+            .and_then(|v| v.as_array())
+            .expect("filters array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        // `g` is always stated: without it the plugin replaces only the first
+        // occurrence. `sub_filter` matches literally, `subs_filter` is the
+        // regex directive.
+        assert_eq!(
+            filters,
+            vec![
+                "sub_filter 'Google' 'PingWAF' g",
+                "subs_filter 'Go+gle' 'PingWAF' g",
+            ]
+        );
+
+        let fallback = config
+            .locations
+            .get("site1_loc")
+            .expect("fallback location");
+        assert!(
+            fallback
+                .plugins
+                .as_ref()
+                .expect("plugins")
+                .iter()
+                .any(|name| name == "site1_sub_filter"),
+            "the site's locations must reference the plugin"
+        );
+
+        // Without a policy nothing is generated: no dead plugin instance.
+        let mut bare = site;
+        bare.response_replace = None;
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(bare),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+        assert!(!config.plugins.contains_key("site1_sub_filter"));
+        assert!(
+            config
+                .locations
+                .get("site1_loc")
+                .expect("fallback location")
+                .plugins
+                .as_ref()
+                .expect("plugins")
+                .iter()
+                .all(|name| name != "site1_sub_filter")
+        );
     }
 
     #[test]
