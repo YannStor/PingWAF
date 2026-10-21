@@ -75,24 +75,57 @@ export function MethodTable({
         accessor: (m) => m.mem_bytes,
         align: 'right',
         sortable: true,
-        cell: (m) => (
-          <div
-            className="flex items-center justify-end gap-2"
-            title={m.mem_bytes === 0 ? t('system.notReported') : undefined}
-          >
-            <div className="h-1.5 w-16 overflow-hidden rounded-full bg-recessed">
-              <div
-                className="h-full rounded-full bg-success"
-                style={{ width: `${Math.min(100, m.mem_share * 100)}%` }}
-              />
+        cell: (m) => {
+          const peak = (m as { mem_peak_bytes?: number }).mem_peak_bytes ?? 0
+          const peakShare = (m as { mem_peak_share?: number }).mem_peak_share ?? 0
+          if (m.mem_bytes === 0) {
+            if (peak <= 0) {
+              return (
+                <span
+                  className="flex justify-end tabular-nums text-fg-subtle"
+                  title={t('system.notReported', 'Not reported')}
+                >
+                  —
+                </span>
+              )
+            }
+            return (
+              <div className="flex items-center justify-end gap-2">
+                <div className="h-1.5 w-16 overflow-hidden rounded-full bg-recessed">
+                  <div
+                    className="h-full rounded-full bg-warning"
+                    style={{ width: `${Math.min(100, peakShare * 100)}%` }}
+                  />
+                </div>
+                <span className="w-20 text-right tabular-nums">
+                  {formatSize(peak)}
+                  <span className="ml-1 rounded bg-recessed px-1 text-[10px] font-medium text-fg-subtle">
+                    {t('system.peak', 'peak')}
+                  </span>
+                </span>
+              </div>
+            )
+          }
+          return (
+            <div className="flex items-center justify-end gap-2">
+              <div className="h-1.5 w-16 overflow-hidden rounded-full bg-recessed">
+                <div
+                  className="h-full rounded-full bg-success"
+                  style={{ width: `${Math.min(100, m.mem_share * 100)}%` }}
+                />
+              </div>
+              <span className="w-20 text-right tabular-nums">{formatSize(m.mem_bytes)}</span>
             </div>
-            <span className="w-20 text-right tabular-nums">{formatSize(m.mem_bytes)}</span>
-          </div>
-        ),
+          )
+        },
       },
       {
         key: 'mem_share',
-        header: t('system.memShare'),
+        header: (
+          <span title={t('system.memShareHint', '该方法内存占所属模块内存的比例，各方法份额之和 ≤ 1')}>
+            {t('system.memShare')}
+          </span>
+        ),
         accessor: (m) => m.mem_share,
         align: 'right',
         sortable: true,
@@ -133,6 +166,7 @@ export function MethodTable({
           <button
             key={value}
             type="button"
+            aria-pressed={sortBy === value}
             className={
               sortBy === value
                 ? 'rounded-full bg-brand/10 px-2.5 py-1 font-medium text-brand'

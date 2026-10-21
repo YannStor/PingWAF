@@ -20,7 +20,7 @@ AI 爬虫控制回答站点面对的两个问题：哪些 AI 爬虫家族在抓�
 | `GET /api/v1/sites/{site_id}/ai-crawl` | 站点的 AI 爬虫设置与按家族覆盖项列表 |
 | `PUT /api/v1/sites/{site_id}/ai-crawl` | 更新设置和/或整体替换覆盖项集合 |
 | `GET /api/v1/sites/{site_id}/ai-crawl/preview?file=robots\|llms` | 渲染生成文件正文而不保存（返回 `mode`、`content_type`、`body`） |
-| `GET /api/v1/ai-crawl/catalog` | PingWAF 认识的爬虫家族（18 个） |
+| `GET /api/v1/ai-crawl/catalog` | PingWAF 认识的爬虫家族（19 个） |
 | `GET /api/v1/analytics/ai-crawlers` | 基于 `access_logs` 按家族聚合的 AI 爬虫流量 |
 
 ### `GET /api/v1/sites/{site_id}/ai-crawl`
@@ -67,7 +67,7 @@ AI 爬虫控制回答站点面对的两个问题：哪些 AI 爬虫家族在抓�
 
 ### 家族目录（`GET /api/v1/ai-crawl/catalog`）
 
-18 个家族，每个包含 `id`、`operator`、`name`、`category`（`training` / `search` / `agent` / `other`）与识别用的小写 `ua_substrings`。目录是控制面常量——新增爬虫是代码变更，不是迁移。覆盖（除其他外）：GPTBot、OAI-SearchBot、ChatGPT-User（OpenAI）；ClaudeBot、Claude-User、anthropic-ai（Anthropic）；PerplexityBot；Google-Extended；Applebot-Extended；CCBot（Common Crawl）；Bytespider（字节跳动）；Amazonbot；Meta-ExternalAgent；cohere-ai；YouBot；Diffbot；ImagesiftBot；Timpibot。
+19 个家族，每个包含 `id`、`operator`、`name`、`category`（`training` / `search` / `agent` / `other`）与识别用的小写 `ua_substrings`。目录是控制面常量——新增爬虫是代码变更，不是迁移。最新加入的是 `facebookexternalhit`（Meta，category `other`）：链接预览抓取器独立成族，以便与 Meta-ExternalAgent 训练爬虫分开观察或放行。覆盖（除其他外）：GPTBot、OAI-SearchBot、ChatGPT-User（OpenAI）；ClaudeBot、Claude-User、anthropic-ai（Anthropic）；PerplexityBot；Google-Extended；Applebot-Extended；CCBot（Common Crawl）；Bytespider（字节跳动）；Amazonbot；Meta-ExternalAgent；facebookexternalhit；cohere-ai；YouBot；Diffbot；ImagesiftBot；Timpibot。
 
 ## 动作与执行
 
@@ -84,6 +84,8 @@ AI 爬虫控制回答站点面对的两个问题：哪些 AI 爬虫家族在抓�
 ## 生成的 robots.txt / llms.txt
 
 两个文件各有一个模式：`off`（源站的同名文件——如有——原样透传）或 `generate`（由 PingWAF 提供自己的文件）。
+
+**`off`（或整个功能未启用）意味着「由源站决定」。** 数据面不会为 `/robots.txt` 或 `/llms.txt` 注册任何 `mock` 插件，这些路径的请求直接转发源站、完全由源站应答：源站返回什么——正常文件、重定向，甚至 `403`——客户端就看到什么。这样的 `403` 来自源站而非 WAF：不会产生 `security_events` 记录，也没有 WAF 拦截标记，排查应面向源站而非规则集。
 
 **文件从哪来。** 正文由控制面在**配置构建期**渲染——不是按请求——并随规则包推送到数据面。数据面用精确路径的 `mock` 插件实例服务它（`/robots.txt` 与 `/llms.txt`，状态 `200`，`Content-Type: text/plain; charset=utf-8`，`Cache-Control: public, max-age=<cache_max_age>`），且注册在 WAF 之前，因此 `robots.txt` 请求在任何检测之前就被应答。空正文不会注册任何东西——源站文件照常透传。
 
@@ -103,7 +105,7 @@ AI 爬虫控制回答站点面对的两个问题：哪些 AI 爬虫家族在抓�
 
 ## 分析（`GET /api/v1/analytics/ai-crawlers`）
 
-按目录中的模式匹配 `access_logs` 记录的原始 user agent 进行聚合，因此流量面板能按家族给出请求计数——即使数据早于功能启用的时间。它是只读报表；执行在数据面完成。
+按目录中的模式匹配 `access_logs` 记录的原始 user agent 进行聚合，因此流量面板能按家族给出请求计数——即使数据早于功能启用的时间。**时间窗内有匹配流量的家族才会出现行**——目录认识但窗口内没有请求的家族不会出现，而不是计为零。窗口以显式 `from`/`to`（ISO 8601）或简写 `range=24h|7d|30d` 给出（等价换算；两者同时给出时显式 `from`/`to` 优先；非法值返回 `400 invalid_range`）。它是只读报表；执行在数据面完成。
 
 ## 相关
 

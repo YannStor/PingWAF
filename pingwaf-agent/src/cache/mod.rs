@@ -1765,6 +1765,16 @@ impl RuleCache {
         self.blocked_lookup(site_id, ip, |entry| entry.reason.clone())
     }
 
+    /// The expiry of the dynamic block covering `ip` for a site. The outer
+    /// `None` means not blocked; the inner `None` means permanent.
+    pub fn blocked_expires_at(
+        &self,
+        site_id: &str,
+        ip: &str,
+    ) -> Option<Option<DateTime<Utc>>> {
+        self.blocked_lookup(site_id, ip, |entry| entry.expires_at)
+    }
+
     /// Resolve the dynamic block covering `ip` for a site.
     ///
     /// A block entry is either a single address (legacy and still the common

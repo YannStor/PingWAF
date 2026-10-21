@@ -8,6 +8,93 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.29.1] — 2026-10-21
+
+### Added
+
+- **`PINGWAF-1070`: PHP `session.upload_progress` probe rule
+  (CVE-2026-109618/109619, "php2shell").** New Strict-only managed rule that
+  blocks multipart requests carrying the upload-progress field together with a
+  well-formed session id (`PHPSESSID` in the cookie, in the body, or in the
+  query; `Content-Type` matched case-insensitively), or the session-file-write
+  shape (a NUL byte within 32 bytes of the part headers). This is a
+  compensating control, not a fix — the flaw is a use-after-free in PHP's own
+  multipart parser, so the rule only matches the request shape the feature
+  requires. Sites with `advanced_mode` (deep inspection) receive it on upgrade
+  and will answer `403`; an application that genuinely drives PHP's
+  upload-progress feature looks identical and must be exempted per site with
+  `monitor_managed_rules = ["PINGWAF-1070"]`. Body inspection is prefix-only
+  (`max_body_size`, 64 KiB by default) and releases a withheld body
+  un-inspected once `body_stage_timeout` expires, so a padded or slow-drip
+  upload can still slip past it.
+- **Unified API error envelope.** Every `/api/v1` `4xx`/`5xx` response —
+  including axum's framework-level rejections and unknown routes — is now
+  `{"error":{"code","message"}}` with the status code unchanged. New codes:
+  `invalid_query`, `invalid_body`, `method_not_allowed`, `unknown_file`
+  (AI-crawl preview `file` is not `robots`/`llms`), `invalid_range`
+  (analytics `range` is not `24h`/`7d`/`30d`); `404 not_found` messages
+  echo the full path including the `/api/v1` prefix.
+- **Data-plane request boundaries.** The edge now refuses malformed request
+  heads before routing: HTTP/1.1+ without a `Host` header answers `400`
+  (`/healthz`, `/ready`, `/metrics` exempt; HTTP/1.0/0.9 still allowed and
+  routed to the explicit default site), a single header field over 8 KiB
+  answers `431`, and methods outside the standard set (plus `PURGE`)
+  answer `405` instead of being proxied verbatim.
+- **Memory peak attribution in `/api/v1/system/profile`.** `modules[]` and
+  `methods[]` gained `mem_peak_bytes` / `mem_peak_share` — a high-water
+  mark kept since process start or the last reset, surviving a drop of the
+  current gauge to zero (`mem_bytes` / `mem_share` keep their
+  current-value semantics; a momentary `0` may just mean the buffer was
+  released between reports, so hunt memory hogs via the peak fields).
+- **IP-ban rejects are security events.** A request refused because its
+  client IP is currently banned writes a `security_events` row
+  (`event_type = "defense"`, `rule_id = "ip_ban"`, `action = "block"`,
+  details with reason and unblock time), on top of the access-log row.
+- **`facebookexternalhit` crawler family.** The AI-crawl catalogue grew
+  from 18 to 19 families: Meta's link-preview fetcher is its own
+  category-`other` family so it can be observed or allowed independently
+  of the Meta-ExternalAgent training crawler.
+- **`GET /analytics/ai-crawlers` accepts `range=24h|7d|30d`**, converted to
+  a `from`/`to` window identical to the explicit pair (explicit `from`/`to`
+  wins); an unknown value answers `400 invalid_range` instead of silently
+  reporting 24 hours.
+
+### Changed
+
+- **AI-crawl `off` mode is documented as "the origin decides".** When the
+  feature is disabled or a file mode is `off`, the data plane registers no
+  `mock` plugin for `/robots.txt` / `/llms.txt`; those paths are answered
+  entirely by the origin (a demo origin's `403` is origin behaviour, not a
+  WAF block, and produces no security event).
+- **`/analytics/ai-crawlers` rows.** The endpoint reports one row per
+  family **with matching traffic inside the window**, not one row per
+  catalogue family — families without requests are absent, not zero.
+
+### Fixed
+
+- **Site cloning copies WAF custom rules.** `POST /sites/{id}/clone` now
+  replicates the `rule` table and the `rule_groups` references inside the
+  clone transaction (previously the clone silently had zero custom rules);
+  group ids are remapped to the clone's own group rows.
+- **SSL read/write symmetry.** `GET /sites/{id}/ssl` now returns
+  `http1_enabled` / `http2_enabled`, matching `ssl-settings`, so a switch
+  sent via `PUT /ssl` reads back from the same resource.
+- **`security_events.rule_id` records the enforcing rule.** When the rule
+  that executed a block/challenge differs from the detection signature,
+  the enforcer is stored in `rule_id`; the detection signature stays on
+  the wire (`waf_rule_id`) and the enforcer travels in the new
+  `waf_enforced_rule_id` protobuf field (field 57). A log-only rule no
+  longer appears as the blocker in analytics and alerts.
+- **CC-challenge responses are visible again.** The `503` challenge pages
+  (and challenge-policy `403` blocks) are written to `access_logs`, so
+  `/analytics/status-codes` counts match what clients actually received.
+- **SSRF-006 no longer misfires on UA version strings.** Pure IP-literal
+  needles are boundary-anchored, so `Chrome/120.0.0.0` in a User-Agent does
+  not match; `http://0.0.0.0/`, `http://127.0.0.1/` and
+  `http://169.254.169.254/` are still detected.
+- **AI-crawl preview rejects unknown `file` values** with
+  `400 unknown_file` instead of silently falling back to `robots`.
+
 ## [PingWAF 0.29.0] — 2026-10-21
 
 ### Added

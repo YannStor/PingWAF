@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 
 use axum::extract::{Query, State};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Json;
 use axum::Router;
@@ -57,11 +58,27 @@ pub struct RangeQuery {
     pub site_id: Option<String>,
     pub from: Option<String>,
     pub to: Option<String>,
+    /// Named window (`24h` | `7d` | `30d`), equivalent to an explicit
+    /// from/to pair (C5/L4-001). Explicit `from`/`to` win when both are sent;
+    /// only `/analytics/ai-crawlers` consumes it today.
+    #[serde(default)]
+    pub range: Option<String>,
     /// `minute`, `hour` (default), `day` or `week`.
     #[serde(default = "default_interval")]
     pub interval: String,
     #[serde(default = "default_limit")]
     pub limit: i64,
+}
+
+/// Maps a named `range` value onto its window length in hours
+/// (`24h` → 24, `7d` → 168, `30d` → 720); `None` for anything else.
+fn range_window_hours(raw: &str) -> Option<i64> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "24h" => Some(24),
+        "7d" => Some(7 * 24),
+        "30d" => Some(30 * 24),
+        _ => None,
+    }
 }
 
 fn default_interval() -> String {
@@ -279,11 +296,40 @@ pub struct AiCrawlerOverview {
 /// raw user agent recorded in `access_logs`. The predicates are constants
 /// from the catalogue (never user input), and the site+time index still
 /// bounds the scan.
+///
+/// Accepts the named `range` in addition to explicit `from`/`to` (C5): the
+/// named window is converted to the same from/to pair an explicit call would
+/// send, so `?range=7d` and an equivalent `from`/`to` return identical
+/// numbers. Explicit `from`/`to` win when both are given; an unknown range is
+/// a 400 `invalid_range`, not a silent fallback to the default window (the
+/// silent-ignore bug was L2-003/L4-001).
 async fn ai_crawlers(
     State(state): State<AppState>,
     current: AuthUser,
     Query(query): Query<RangeQuery>,
-) -> Result<Json<AiCrawlerOverview>, ApiError> {
+) -> Result<Response, ApiError> {
+    let query = match non_empty(&query.range) {
+        None => query,
+        Some(raw) => match range_window_hours(&raw) {
+            Some(hours) if query.from.is_none() && query.to.is_none() => {
+                let to = Utc::now();
+                RangeQuery {
+                    from: Some((to - Duration::hours(hours)).to_rfc3339()),
+                    to: Some(to.to_rfc3339()),
+                    range: None,
+                    ..query
+                }
+            },
+            Some(_) => query,
+            None => {
+                return Ok(crate::api::contract_error(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "invalid_range",
+                    "range must be one of 24h, 7d, 30d",
+                ));
+            },
+        },
+    };
     let resolved = resolve(&state, &current, &query).await?;
 
     let (case_sql, filter_sql) = ai_crawler_predicates();
@@ -371,7 +417,8 @@ async fn ai_crawlers(
         },
         families: by_family.len() as i64,
         rows: by_family,
-    }))
+    })
+    .into_response())
 }
 
 /// Builds the `CASE` that names a family and the `WHERE` that restricts the
@@ -655,6 +702,7 @@ async fn traffic(
         site_id: query.site_id,
         from: query.from,
         to: query.to,
+        range: None,
         interval: default_interval(),
         limit: default_limit(),
     };
@@ -1111,6 +1159,25 @@ mod tests {
         assert!(sql.ends_with("AND site_id = $3"));
         assert_eq!(values.len(), 3);
         assert_eq!(scoped.next_placeholder(), 4);
+    }
+
+    /// C5/L4-001: the named windows map onto the exact hour counts an
+    /// explicit from/to pair would produce, and anything else is rejected so
+    /// the handler can answer 400 `invalid_range` instead of silently
+    /// falling back to the default 24h window (the L2-003 bug).
+    #[test]
+    fn named_ranges_map_to_their_window_lengths() {
+        assert_eq!(Some(24), range_window_hours("24h"));
+        assert_eq!(Some(7 * 24), range_window_hours("7d"));
+        assert_eq!(Some(30 * 24), range_window_hours("30d"));
+        // Case and padding are tolerated; wrong values are not.
+        assert_eq!(Some(24), range_window_hours(" 24H "));
+        for invalid in ["", "1h", "7w", "30", "yesterday", "24d; drop table"] {
+            assert!(
+                range_window_hours(invalid).is_none(),
+                "{invalid:?} must not be accepted"
+            );
+        }
     }
 
     /// D19: the `LIMIT` never appears as a literal in the SQL text — it is

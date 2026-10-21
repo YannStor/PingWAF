@@ -68,7 +68,11 @@ export function ModuleTable({
       },
       {
         key: 'elapsed_share',
-        header: t('system.share'),
+        header: (
+          <span title={t('system.shareHint', '模块耗时占全部归因时间的比例，非 CPU 占比')}>
+            {t('system.share')}
+          </span>
+        ),
         accessor: (m) => m.elapsed_share,
         sortable: true,
         cell: (m) => (
@@ -91,25 +95,56 @@ export function ModuleTable({
         accessor: (m) => m.mem_bytes,
         align: 'right',
         sortable: true,
-        cell: (m) => (
-          <div
-            className="flex items-center justify-end gap-2"
-            title={m.mem_bytes === 0 ? t('system.notReported') : undefined}
-          >
-            <div className="h-1.5 w-16 overflow-hidden rounded-full bg-recessed">
-              <div
-                className="h-full rounded-full bg-success"
-                style={{ width: `${Math.min(100, m.mem_share * 100)}%` }}
-              />
+        cell: (m) => {
+          const peak = (m as { mem_peak_bytes?: number }).mem_peak_bytes ?? 0
+          const peakShare = (m as { mem_peak_share?: number }).mem_peak_share ?? 0
+          if (m.mem_bytes === 0) {
+            // 未上报（C3）：当前值与峰值都缺省时不渲染 0 宽度进度条
+            if (peak <= 0) {
+              return (
+                <span
+                  className="flex justify-end tabular-nums text-fg-subtle"
+                  title={t('system.notReported', 'Not reported')}
+                >
+                  —
+                </span>
+              )
+            }
+            // 当前值为 0 但存在峰值保持：显示峰值并标注 peak
+            return (
+              <div className="flex items-center justify-end gap-2">
+                <div className="h-1.5 w-16 overflow-hidden rounded-full bg-recessed">
+                  <div
+                    className="h-full rounded-full bg-warning"
+                    style={{ width: `${Math.min(100, peakShare * 100)}%` }}
+                  />
+                </div>
+                <span className="w-20 text-right tabular-nums">
+                  {formatSize(peak)}
+                  <span className="ml-1 rounded bg-recessed px-1 text-[10px] font-medium text-fg-subtle">
+                    {t('system.peak', 'peak')}
+                  </span>
+                </span>
+              </div>
+            )
+          }
+          return (
+            <div className="flex items-center justify-end gap-2">
+              <div className="h-1.5 w-16 overflow-hidden rounded-full bg-recessed">
+                <div
+                  className="h-full rounded-full bg-success"
+                  style={{ width: `${Math.min(100, m.mem_share * 100)}%` }}
+                />
+              </div>
+              <span className="w-20 text-right tabular-nums">
+                {formatSize(m.mem_bytes)}
+                {m.mem_share > 0 ? (
+                  <span className="ml-1 text-fg-subtle">{`${(m.mem_share * 100).toFixed(0)}%`}</span>
+                ) : null}
+              </span>
             </div>
-            <span className="w-20 text-right tabular-nums">
-              {formatSize(m.mem_bytes)}
-              {m.mem_share > 0 ? (
-                <span className="ml-1 text-fg-subtle">{`${(m.mem_share * 100).toFixed(0)}%`}</span>
-              ) : null}
-            </span>
-          </div>
-        ),
+          )
+        },
       },
       {
         key: 'calls',

@@ -69,7 +69,7 @@ pub fn validate_body_stage_timeout_secs(raw: i32) -> Result<i32, ApiError> {
 /// Built-in managed rules a site can downgrade to monitor-only, by id.
 /// Mirrors `pingwaf_waf::MANAGED_RULE_IDS` (whitelisted through the crate so
 /// a new managed rule cannot be configured before the engine knows it).
-pub const MANAGED_RULES: [&str; 14] = pingwaf_waf::MANAGED_RULE_IDS;
+pub const MANAGED_RULES: [&str; 15] = pingwaf_waf::MANAGED_RULE_IDS;
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateWafSettingsRequest {
@@ -164,9 +164,9 @@ pub fn routes() -> Router<AppState> {
 
 /// `GET /api/v1/managed-rules` — catalogue of the built-in managed rules.
 ///
-/// Listed at the Strict level so the strict-only gate (PINGWAF-1061) shows
-/// too; a site running the Normal level simply never matches it, and the
-/// `strict_only` flag tells the dashboard.
+/// Listed at the Strict level so the strict-only rules (PINGWAF-1061 and
+/// PINGWAF-1070) show too; a site running the Normal level simply never
+/// matches them, and the `strict_only` flag tells the dashboard.
 async fn list_managed_rules() -> Json<Vec<ManagedRuleEntry>> {
     Json(
         pingwaf_waf::managed_rule_catalogue(pingwaf_waf::WafLevel::Strict)

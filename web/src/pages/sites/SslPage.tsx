@@ -731,6 +731,7 @@ export function SslPage() {
                   variant="primary"
                   size="sm"
                   loading={savingScope === 'tls'}
+                  disabled={!drafts.tls.http1_enabled && !drafts.tls.http2_enabled}
                   onClick={saveTls}
                 >
                   {t('common.save')}
@@ -850,6 +851,13 @@ export function SslPage() {
               </p>
             )}
             {protocolsError && <CardError message={protocolsError} />}
+            {/* Both switches off is not a savable state — say so inline, next
+                to the controls, instead of only greying the Save button. */}
+            {!drafts.tls.http1_enabled && !drafts.tls.http2_enabled && (
+              <CardError
+                message={t('pages.ssl.protocols.atLeastOne', t('pages.ssl.protocolsRequired'))}
+              />
+            )}
           </CardBody>
         </Card>
       )}

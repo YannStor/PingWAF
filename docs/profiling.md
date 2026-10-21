@@ -138,7 +138,7 @@ curl -k -H "Authorization: Bearer $TOKEN" \
   "total_cpu_ms": 48213.4,
   "total_elapsed_ms": 48213.4,
   "modules": [
-    { "module": "proxy",           "cpu_ms": 30102.1, "cpu_share": 0.62, "elapsed_ms": 30102.1, "elapsed_share": 0.62, "mem_bytes": 41943040, "mem_share": 0.55, "calls": 102341, "avg_us": 294.1 },
+    { "module": "proxy",           "cpu_ms": 30102.1, "cpu_share": 0.62, "elapsed_ms": 30102.1, "elapsed_share": 0.62, "mem_bytes": 41943040, "mem_share": 0.55, "mem_peak_bytes": 41943040, "mem_peak_share": 0.55, "calls": 102341, "avg_us": 294.1 },
     { "module": "waf",             "cpu_ms": 11101.2, "cpu_share": 0.23, "elapsed_ms": 11101.2, "elapsed_share": 0.23, "mem_bytes": 8388608,  "mem_share": 0.11, "calls": 98111,  "avg_us": 113.1 },
     { "module": "cache",           "cpu_ms": 4000.8,  "cpu_share": 0.08, "elapsed_ms": 4000.8,  "elapsed_share": 0.08, "mem_bytes": 15728640, "mem_share": 0.21, "calls": 44120,  "avg_us": 90.7 },
     { "module": "plugin",          "cpu_ms": 1500.1,  "cpu_share": 0.03, "elapsed_ms": 1500.1,  "elapsed_share": 0.03, "mem_bytes": 2097152,  "mem_share": 0.03, "calls": 30112,  "avg_us": 49.8 },
@@ -156,7 +156,7 @@ curl -k -H "Authorization: Bearer $TOKEN" \
   "methods": [
     { "method": "waf::handle_request",   "cpu_ms": 9200.4, "cpu_share": 0.19, "elapsed_ms": 9200.4, "elapsed_share": 0.19, "mem_bytes": 0,       "mem_share": 0.00, "calls": 98111, "avg_us": 93.8 },
     { "method": "proxy::request_filter", "cpu_ms": 7100.9, "cpu_share": 0.15, "elapsed_ms": 7100.9, "elapsed_share": 0.15, "mem_bytes": 0,       "mem_share": 0.00, "calls": 88430, "avg_us": 80.3 },
-    { "method": "waf::body_read",        "cpu_ms": 700.9,  "cpu_share": 0.01, "elapsed_ms": 700.9,  "elapsed_share": 0.01, "mem_bytes": 2097152, "mem_share": 1.00, "calls": 12000, "avg_us": 58.4 }
+    { "method": "waf::body_read",        "cpu_ms": 700.9,  "cpu_share": 0.01, "elapsed_ms": 700.9,  "elapsed_share": 0.01, "mem_bytes": 2097152, "mem_share": 1.00, "mem_peak_bytes": 2097152, "mem_peak_share": 1.00, "calls": 12000, "avg_us": 58.4 }
   ]
 }
 ```
@@ -241,7 +241,14 @@ curl -k -H "Authorization: Bearer $TOKEN" \
   and the access-log body prefix buffered for the log entry (`log`).
   Nothing hooks the allocator, so this works with any allocator and on
   any platform. `mem_bytes` is "bytes currently held **in memory**", not
-  cumulative allocation.
+  cumulative allocation. Beside the current value the snapshot keeps a
+  **high-water mark**: `mem_peak_bytes` / `mem_peak_share` (updated with a
+  relaxed `fetch_max` on the same hot path — no lock, no allocation) hold
+  the largest value the gauge ever reached since process start or the last
+  reset, and survive a drop back to zero. A released buffer can leave
+  `mem_bytes` at `0` between reports, so a momentary `0` does not mean
+  "no memory" — when hunting the memory-heavy modules or call sites, read
+  the peak fields, not the instantaneous ones.
 - **Disk** — the on-disk gauge is still collected internally by the cache
   backend (quota accounting uses it), but it is **no longer part of the
   snapshot**: module and method rows report memory only. The earlier
@@ -317,11 +324,13 @@ is file-backed or in-memory:
 | `modules[].cpu_ms` / `elapsed_ms` | Cumulative **wall-clock** time attributed to the module (ms); the two fields always carry the same value |
 | `modules[].cpu_share` / `elapsed_share` | Share of the total attributed wall-clock time, 0.0–1.0 |
 | `modules[].mem_bytes` / `mem_share` | Bytes the module currently reports as held in memory, and its share of the total |
+| `modules[].mem_peak_bytes` / `mem_peak_share` | High-water mark of that gauge since process start (or the last reset) — kept even after the current value drops — and its share of the sum of all modules' peaks (`0.0` when no module has reported anything). Prefer the peak when locating memory-heavy modules: a momentary `mem_bytes` of `0` may just mean the buffer was released between reports |
 | `modules[].calls` / `avg_us` | Number of timed operations and average microseconds per operation |
 | `methods` | Method rows, hottest first, capped at 40 |
 | `methods[].method` | Call-site name (from the compile-time static enumeration) |
 | `methods[].cpu_ms` / `elapsed_ms` / `calls` / `avg_us` | Same semantics as the module rows |
 | `methods[].mem_bytes` / `mem_share` | Bytes the call site currently reports as held, and its share of **its module's** memory (not of the process total; `0.0` when the module reports nothing) |
+| `methods[].mem_peak_bytes` / `mem_peak_share` | High-water mark of the call site's gauge (same keep-forever policy as the module peak) and its share of the sum of all modules' peaks |
 
 Counters are **cumulative since process start** (they reset only when the
 process restarts), so read them as "where has the time gone since boot",

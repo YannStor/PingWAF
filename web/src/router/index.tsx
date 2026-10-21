@@ -1,11 +1,9 @@
 import {
   createBrowserRouter,
-  Link,
   Navigate,
   useLocation,
 } from 'react-router-dom'
 import type { ReactElement } from 'react'
-import { useTranslation } from 'react-i18next'
 import { AppLayout } from '@/layouts/AppLayout'
 import { useAuthStore } from '@/stores/authStore'
 
@@ -22,6 +20,7 @@ import { NotificationsPage } from '@/pages/NotificationsPage'
 import { AccountPage } from '@/pages/AccountPage'
 import { ProfilePage } from '@/pages/ProfilePage'
 import { SystemPage } from '@/pages/SystemPage'
+import { NotFoundPage } from '@/pages/NotFoundPage'
 import { BotPage as BotProtectionPage } from '@/pages/sites/BotPage'
 import {
   ProtectionPage,
@@ -43,8 +42,7 @@ import { RewritePage } from '@/pages/sites/RewritePage'
 import { BasicPage } from '@/pages/sites/basic/BasicPage'
 import { LifecyclePage } from '@/pages/LifecyclePage'
 import { SiteSettingsPage } from '@/pages/placeholders'
-import { EmptyState } from '@/components/ui/EmptyState'
-import { Button } from '@/components/ui/Button'
+
 
 /** Redirects unauthenticated users to the login page. */
 function RequireAuth({ children }: { children: ReactElement }) {
@@ -63,21 +61,6 @@ function RequireAdmin({ children }: { children: ReactElement }) {
     return <Navigate to="/dashboard" replace />
   }
   return children
-}
-
-function NotFoundPage() {
-  const { t } = useTranslation()
-  return (
-    <EmptyState
-      title={t('pages.notFound.title')}
-      description={t('pages.notFound.description')}
-      action={
-        <Link to="/dashboard">
-          <Button variant="primary">{t('pages.notFound.backToDashboard')}</Button>
-        </Link>
-      }
-    />
-  )
 }
 
 export const router = createBrowserRouter([

@@ -326,6 +326,14 @@ impl Default for WafEngine {
     }
 }
 
+/// The rules behind one verdict: every recorded hit, plus the id of the rule
+/// that actually forced a block or challenge when that differs from the
+/// detection signature (L3-006).
+struct RuleHits {
+    matched: Vec<String>,
+    enforced: Option<String>,
+}
+
 impl WafEngine {
     pub fn new(config: &WafEngineConfig) -> Self {
         let mut rules = Vec::with_capacity(config.rules.len() + 16);
@@ -1186,6 +1194,7 @@ impl WafEngine {
                 action: WafAction::Pass,
                 score: breakdown.total_u8(),
                 matched_rules: matched,
+                enforced_rule_id: None,
                 details: format!(
                     "allow-rule matched: {} [{}]{}",
                     rule.id,
@@ -1208,7 +1217,10 @@ impl WafEngine {
         if self.fast_path_block_on_critical && critical_hit {
             return self.finalize_verdict(
                 &mut breakdown,
-                self.matched_from(&recs, &[]),
+                RuleHits {
+                    matched: self.matched_from(&recs, &[]),
+                    enforced: None,
+                },
                 self.details_from(&recs, &[]),
                 Some(WafAction::Block),
                 "stage1-critical",
@@ -1220,6 +1232,12 @@ impl WafEngine {
         let stage2_started = Instant::now();
         let mut rule_recs: Vec<RuleRec> = Vec::new();
         let mut forced_action: Option<WafAction> = None;
+        // The rule that actually forces the verdict (L3-006): the first
+        // enforcing (non-monitored) Block/Challenge rule that matched. Kept
+        // apart from `matched_rules`, which is detection-ordered and often
+        // starts with a detection signature.
+        let mut enforced_block: Option<String> = None;
+        let mut enforced_challenge: Option<String> = None;
         for rule in &self.rules {
             if !rule.enabled || rule.action == RuleAction::Allow {
                 continue;
@@ -1267,6 +1285,9 @@ impl WafEngine {
                     );
                     if !rule_monitored {
                         forced_action = Some(WafAction::Block);
+                        if enforced_block.is_none() {
+                            enforced_block = Some(rule.id.clone());
+                        }
                     }
                 },
                 RuleAction::Challenge | RuleAction::JsChallenge => {
@@ -1279,6 +1300,9 @@ impl WafEngine {
                         && forced_action != Some(WafAction::Block)
                     {
                         forced_action = Some(WafAction::Challenge);
+                        if enforced_challenge.is_none() {
+                            enforced_challenge = Some(rule.id.clone());
+                        }
                     }
                 },
             }
@@ -1319,9 +1343,17 @@ impl WafEngine {
             ScoreClass::LikelyAttack => "likely-attack",
             ScoreClass::Attack => "attack",
         };
+        let enforced = match forced_action {
+            Some(WafAction::Block) => enforced_block,
+            Some(WafAction::Challenge) => enforced_challenge,
+            _ => None,
+        };
         self.finalize_verdict(
             &mut breakdown,
-            self.matched_from(&recs, &rule_recs),
+            RuleHits {
+                matched: self.matched_from(&recs, &rule_recs),
+                enforced,
+            },
             self.details_from(&recs, &rule_recs),
             Some(action),
             reason,
@@ -1434,7 +1466,7 @@ impl WafEngine {
     fn finalize_verdict(
         &self,
         breakdown: &mut ScoreBreakdown,
-        matched: Vec<String>,
+        rules: RuleHits,
         details: Vec<String>,
         action: Option<WafAction>,
         reason: &str,
@@ -1459,8 +1491,8 @@ impl WafEngine {
             None
         };
         // De-dup matched ids while preserving first-seen order.
-        let mut seen: Vec<String> = Vec::with_capacity(matched.len());
-        for id in matched {
+        let mut seen: Vec<String> = Vec::with_capacity(rules.matched.len());
+        for id in rules.matched {
             if !seen.contains(&id) {
                 seen.push(id);
             }
@@ -1495,6 +1527,12 @@ impl WafEngine {
             action,
             score: breakdown.total_u8(),
             matched_rules: seen,
+            enforced_rule_id: if matches!(action, WafAction::Monitor) {
+                // Nothing was enforced.
+                None
+            } else {
+                rules.enforced
+            },
             details: detail_str,
             breakdown: *breakdown,
         }
@@ -1582,6 +1620,71 @@ mod tests {
         let v = WafEngine::new(&cfg).inspect(&r);
         assert_eq!(v.action, WafAction::Block);
         assert!(!v.matched_rules.is_empty());
+    }
+
+    #[test]
+    fn php_upload_progress_managed_rule_blocks_at_strict_only() {
+        let body = concat!(
+            "------B\r\n",
+            "Content-Disposition: form-data; name=\"PHP_SESSION_UPLOAD_PROGRESS\"",
+            "\r\n\r\nx\r\n------B\r\n",
+            "Content-Disposition: form-data; name=\"f\"; filename=\"a.txt\"",
+            "\r\n\r\nAAAA\r\n------B--\r\n",
+        );
+        let mut r = req("POST", "/index.php", "");
+        // Wire header names reach the engine already lower-cased (the http
+        // layer normalises them) and the expression looks them up verbatim.
+        r.headers = vec![
+            (
+                "content-type".into(),
+                "multipart/form-data; boundary=----B".into(),
+            ),
+            (
+                "cookie".into(),
+                "PHPSESSID=abcdefghijklmnopqrstuvwxyz".into(),
+            ),
+            // Kept so PINGWAF-1011 (empty UA) does not add a Challenge to the
+            // monitored verdict under test.
+            ("user-agent".into(), "Mozilla/5.0".into()),
+        ];
+        r.body = Some(body.as_bytes().to_vec());
+
+        // Advanced-mode sites run Strict: the only level that ships the rule,
+        // and the only one where `http.request.body` is ever populated.
+        let strict = WafEngine::new(&WafEngineConfig {
+            level: WafLevel::Strict,
+            ..Default::default()
+        });
+        let v = strict.inspect(&r);
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+        assert!(v.matched_rules.iter().any(|id| id == "PINGWAF-1070"));
+
+        // A mixed-case media type is legal on the wire (RFC 2045) and must
+        // still block.
+        let mut upper = r.clone();
+        upper.headers[0].1 = "MULTIPART/FORM-DATA; boundary=----B".to_string();
+        let v = strict.inspect(&upper);
+        assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+
+        // Normal level does not ship it at all.
+        let normal = WafEngine::new(&WafEngineConfig {
+            level: WafLevel::Normal,
+            ..Default::default()
+        });
+        let v = normal.inspect(&r);
+        assert!(!v.matched_rules.iter().any(|id| id == "PINGWAF-1070"));
+
+        // The per-rule monitor switch keeps detection but drops enforcement.
+        let monitored = WafEngine::new(&WafEngineConfig {
+            level: WafLevel::Strict,
+            monitor_managed_rules: ["PINGWAF-1070".to_string()]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        });
+        let v = monitored.inspect(&r);
+        assert_eq!(v.action, WafAction::Monitor, "details: {}", v.details);
+        assert!(v.matched_rules.iter().any(|id| id == "PINGWAF-1070"));
     }
 
     #[test]
@@ -1936,6 +2039,45 @@ mod tests {
         let v = e.inspect(&req("GET", "/secret/data", ""));
         assert!(matches!(v.action, WafAction::Block | WafAction::Monitor));
         assert!(v.matched_rules.contains(&"BLOCK-SECRET".to_string()));
+    }
+
+    /// L3-006: when a custom rule enforces the block, `enforced_rule_id`
+    /// names that rule even though `matched_rules` leads with detection
+    /// signatures; a monitor downgrade clears it.
+    #[test]
+    fn enforced_rule_id_names_the_enforcing_rule() {
+        let detector = CompiledRule::compile(
+            "PINGWAF-1051",
+            "long uri",
+            r#"http.request.uri.path starts_with "/long""#,
+            RuleAction::Log,
+            3,
+            vec!["managed".into()],
+        )
+        .unwrap();
+        let blocker = CompiledRule::compile(
+            "59cee22a-enforce",
+            "block long uri",
+            r#"http.request.uri.path starts_with "/long""#,
+            RuleAction::Block,
+            3,
+            vec!["custom".into()],
+        )
+        .unwrap();
+        let cfg = WafEngineConfig {
+            rules: vec![detector, blocker],
+            ..Default::default()
+        };
+        let e = WafEngine::new(&cfg);
+        let v = e.inspect(&req("GET", "/long/uri", ""));
+        assert_eq!(v.action, WafAction::Block);
+        assert!(v.matched_rules.contains(&"PINGWAF-1051".to_string()));
+        assert_eq!(
+            v.enforced_rule_id.as_deref(),
+            Some("59cee22a-enforce"),
+            "details: {}",
+            v.details
+        );
     }
 
     #[test]

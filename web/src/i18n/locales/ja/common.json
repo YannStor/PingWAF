@@ -59,7 +59,11 @@
     "memShare": "モジュール内占有率",
     "sortBy": "並び替え",
     "sortByElapsed": "経過時間",
-    "sortByMem": "メモリ"
+    "sortByMem": "メモリ",
+    "peak": "ピーク",
+    "memShareHint": "このメソッドが所属モジュールのメモリに占める割合（合計は 1 以下）。",
+    "shareHint": "帰属時間全体に占める割合（CPU 使用率ではありません）。",
+    "samplingHint": "メモリ列は現在の保持値（0 は未報告、—/peak はピーク値）。比率は所属モジュールまたは帰属時間全体に対する割合で、子ステージの比率は合算できません。"
   },
   "app": {
     "name": "PingWAF",
@@ -468,7 +472,10 @@
         "removeRule": "ルールを削除",
         "gzipHint": "圧縮レスポンス（gzip/br）では置換が適用されません。",
         "empty": "置換ルールがありません。追加してレスポンス本文の置換を開始できます。"
-      }
+      },
+      "cloneDomainConflict": "このドメインは既に別のサイトで使用されています。",
+      "cloneNameSuffix": "コピー",
+      "cloneFrom": "クローン元：{{domain}}"
     },
     "siteDetail": {
       "title": "サイト",
@@ -737,14 +744,16 @@
         "includeRoutes": "ルートを含める",
         "includeRoutesHint": "サイトのルートパスを生成される llms.txt に追記します。",
         "preview": "プレビュー",
-        "previewTitle": "{file} プレビュー",
+        "previewTitle": "{{file}} プレビュー",
         "previewLoading": "プレビューを読み込み中…",
         "previewEmpty": "（本文なし）",
         "cacheMaxAge": "キャッシュ max-age（秒）",
         "cacheMaxAgeHint": "生成ファイルの Cache-Control max-age（0〜86400）。",
         "cacheMaxAgeInvalid": "0〜86400 秒の間で指定してください。",
         "bodyTooLong": "カスタム本文が 64 KiB の上限を超えています。保存前に短くしてください。",
-        "saved": "AI クロール設定を保存しました"
+        "saved": "AI クロール設定を保存しました",
+        "upstreamHint": "AI クローラー制御が無効な場合、robots.txt / llms.txt へのリクエストはオリジンへ転送され、オリジンが応答を決定します。",
+        "previewFailed": "プレビューの読み込みに失敗しました"
       }
     },
     "cc": {
@@ -1204,7 +1213,10 @@
       "copied": "クリップボードにコピーしました",
       "copyFailed": "クリップボードにコピーできませんでした。バンドルをダウンロードしてください。",
       "issueElsewhereHint": "証明書の発行・アップロード・更新はグローバル SSL/TLS ページで行えます。",
-      "openGlobalSsl": "SSL/TLS を開く"
+      "openGlobalSsl": "SSL/TLS を開く",
+      "protocols": {
+        "atLeastOne": "少なくとも1つのプロトコルを有効のままにしてください。"
+      }
     },
     "traffic": {
       "aiBots": {
@@ -2530,7 +2542,14 @@
       "verifyCertDisabledHint": "「HTTPS オリジン」をオンにすると証明書検証を設定できます（HTTP オリジンには TLS ハンドシェイクがなく、検証対象がありません）。",
       "certFollowGlobal": "証明書検証：デプロイ既定に従う",
       "originTlsSummary": "オリジン証明書検証（サイト既定）：",
-      "originTlsSettingsLink": "SSL ページで設定 →"
+      "originTlsSettingsLink": "SSL ページで設定 →",
+      "addressFamily": "アドレスファミリー",
+      "addressFamilyHint": "auto は IPv4 を優先します。単一スタックのオリジンは ipv4/ipv6 を固定できます（IP リテラルは無視されます）。",
+      "addressFamilyOptions": {
+        "auto": "自動（IPv4 優先）",
+        "ipv4": "IPv4 のみ",
+        "ipv6": "IPv6 のみ"
+      }
     },
     "profile": {
       "title": "アカウント設定",
@@ -2597,5 +2616,8 @@
       "challengeConfirmDescription": "このサイトに JS チャレンジの IP ルールを作成します。訪問者はまずチャレンジを通過する必要があります。",
       "challengeRuleName": "JS チャレンジ {{ip}}"
     }
+  },
+  "notFound": {
+    "title": "ページが見つかりません"
   }
 }

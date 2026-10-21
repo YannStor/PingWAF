@@ -73,6 +73,21 @@ use tower_http::trace::TraceLayer;
 pub use error::{error_response, ApiError};
 pub use state::AppState;
 
+/// Builds a contract-envelope error response with an endpoint-specific code
+/// (C1) for the cases [`ApiError`]'s fixed code set cannot express — e.g.
+/// `invalid_range` (analytics) or `unknown_file` (AI crawl preview).
+pub(crate) fn contract_error(
+    status: StatusCode,
+    code: &'static str,
+    message: impl Into<String>,
+) -> Response {
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message.into() } })),
+    )
+        .into_response()
+}
+
 /// Prefix every REST route lives under.
 pub const API_PREFIX: &str = "/api/v1";
 
@@ -146,6 +161,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/version", get(version))
         .fallback(api_not_found)
+        .method_not_allowed_fallback(api_method_not_allowed)
         // An account still holding the shipped initial password may only use
         // the endpoints that let it finish the forced change (D20). Applied to
         // the whole `/api/v1` group, so a route added later is covered by
@@ -163,6 +179,7 @@ pub fn build_router(state: AppState) -> Router {
         // `control` row. Outermost here, so it also covers the two
         // middlewares above (both cheap) but not CORS/compression/security
         // headers, which wrap the root router.
+        .layer(middleware::from_fn(unified_error_envelope))
         .layer(middleware::from_fn(record_control_module));
 
     let mut root = Router::new()
@@ -473,17 +490,131 @@ async fn version(State(state): State<AppState>) -> Json<serde_json::Value> {
 
 /// JSON 404 for unmatched API routes, so the frontend never has to
 /// parse an HTML error page for API calls.
+///
+/// This fallback is mounted on the router nested under [`API_PREFIX`], and
+/// axum strips that prefix before matching — so the path the client sent has
+/// to be re-prepended here: the message must echo the full path (C1/L4-005),
+/// not the remainder after `/api/v1`.
 async fn api_not_found(uri: axum::http::Uri) -> Response {
     (
         StatusCode::NOT_FOUND,
         Json(json!({
             "error": {
                 "code": "not_found",
-                "message": format!("no route matches {}", uri.path()),
+                "message": format!(
+                    "no route matches {API_PREFIX}{}",
+                    uri.path()
+                ),
             }
         })),
     )
         .into_response()
+}
+
+/// JSON 405 for a path that exists but not with this method.
+async fn api_method_not_allowed() -> Response {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        Json(json!({
+            "error": {
+                "code": "method_not_allowed",
+                "message": "the method is not allowed for this route",
+            }
+        })),
+    )
+        .into_response()
+}
+
+/// The `code` for a status code the envelope middleware rewrites, refining
+/// 400/422 by the rejection text axum produced (C1). axum's `Query`/`Json`
+/// rejections are text/plain with stable message prefixes, which is what lets
+/// a middleware — rather than a rewrite of every handler — tell a bad query
+/// string from a bad body.
+fn error_code_for(status: StatusCode, message: &str) -> &'static str {
+    match status.as_u16() {
+        400 | 422
+            if message.starts_with("Failed to deserialize query string") =>
+        {
+            "invalid_query"
+        },
+        400 | 422
+            if message.starts_with("Failed to deserialize the JSON")
+                || message.starts_with("Failed to parse the request body") =>
+        {
+            "invalid_body"
+        },
+        400 => "bad_request",
+        401 => "unauthorized",
+        403 => "forbidden",
+        404 => "not_found",
+        405 => "method_not_allowed",
+        409 => "conflict",
+        429 => "rate_limited",
+        500..=599 => "internal_error",
+        _ => "request_failed",
+    }
+}
+
+/// A canonical message for a status when the original body carried none.
+fn error_message_for(status: StatusCode) -> &'static str {
+    status.canonical_reason().unwrap_or("request failed")
+}
+
+/// Rewrites every 4xx/5xx response leaving the API into the unified
+/// `{"error":{"code","message"}}` envelope (C1/L4-005), keeping the status
+/// code. Responses that are already JSON are left untouched — the handlers'
+/// `ApiError` already speaks the envelope — so this only catches axum's
+/// extractor rejections (text/plain) and the empty 405 fallback body.
+async fn unified_error_envelope(request: Request, next: Next) -> Response {
+    let response = next.run(request).await;
+    if !(response.status().is_client_error()
+        || response.status().is_server_error())
+    {
+        return response;
+    }
+    let is_json = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(';')
+                .any(|part| part.trim() == "application/json")
+        });
+    if is_json {
+        return response;
+    }
+
+    let status = response.status();
+    // Preserve the original headers (Retry-After, WWW-Authenticate, CORS, …):
+    // rebuilding the response from a JSON tuple would silently drop them, and
+    // an auth challenge without its `WWW-Authenticate` is a different response.
+    let headers = response.headers().clone();
+    let body = axum::body::to_bytes(response.into_body(), 8 * 1024)
+        .await
+        .unwrap_or_default();
+    let raw = String::from_utf8_lossy(&body);
+    let message = raw.trim();
+    let code = error_code_for(status, message);
+    let message = if message.is_empty() {
+        error_message_for(status).to_string()
+    } else {
+        message.to_string()
+    };
+    let mut rebuilt = (
+        status,
+        Json(json!({ "error": { "code": code, "message": message } })),
+    )
+        .into_response();
+    for (name, value) in headers.iter() {
+        if name == axum::http::header::CONTENT_TYPE
+            || name == axum::http::header::CONTENT_LENGTH
+        {
+            continue;
+        }
+        rebuilt.headers_mut().insert(name.clone(), value.clone());
+    }
+    rebuilt
 }
 
 #[cfg(test)]
@@ -635,6 +766,154 @@ mod tests {
         assert!(is_health_probe("/api/v1/health"));
         assert!(!is_health_probe("/api/v1/sites"));
         assert!(!is_health_probe("/healthz/extra"));
+    }
+
+    /// C1/L4-005: axum's rejection texts map onto the contract's codes.
+    #[test]
+    fn rejection_texts_map_to_contract_codes() {
+        assert_eq!(
+            "invalid_query",
+            error_code_for(
+                StatusCode::BAD_REQUEST,
+                "Failed to deserialize query string: invalid digit"
+            )
+        );
+        assert_eq!(
+            "invalid_body",
+            error_code_for(
+                StatusCode::BAD_REQUEST,
+                "Failed to deserialize the JSON body into the target type"
+            )
+        );
+        assert_eq!(
+            "invalid_body",
+            error_code_for(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Failed to parse the request body as JSON: trailing comma"
+            )
+        );
+        assert_eq!(
+            "method_not_allowed",
+            error_code_for(StatusCode::METHOD_NOT_ALLOWED, "")
+        );
+        assert_eq!("not_found", error_code_for(StatusCode::NOT_FOUND, ""));
+        // An unrecognised 400 stays a 400 with a generic code, not 500.
+        assert_eq!(
+            "bad_request",
+            error_code_for(StatusCode::BAD_REQUEST, "anything")
+        );
+    }
+
+    async fn body_of(response: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body reads");
+        serde_json::from_slice(&bytes).expect("envelope body is json")
+    }
+
+    /// `api_not_found` runs on the router nested under `/api/v1`, whose
+    /// fallback only sees the path *after* the prefix — the message must
+    /// still echo the full path (C1).
+    #[tokio::test]
+    async fn not_found_message_carries_the_api_prefix() {
+        let uri: axum::http::Uri = "/ghosts".parse().expect("uri");
+        let response = api_not_found(uri).await;
+        assert_eq!(StatusCode::NOT_FOUND, response.status());
+        let body = body_of(response).await;
+        assert_eq!("not_found", body["error"]["code"]);
+        assert_eq!("no route matches /api/v1/ghosts", body["error"]["message"]);
+    }
+
+    #[tokio::test]
+    async fn the_envelope_rewrites_non_json_client_errors_in_place() {
+        use tower::ServiceExt;
+
+        // Fields exist only to make the extractors fail on bad input.
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct PageQuery {
+            page: u32,
+        }
+
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct CreateBody {
+            name: String,
+        }
+
+        let app: Router = Router::new()
+            .route(
+                "/things",
+                get(|_query: axum::extract::Query<PageQuery>| async { "ok" })
+                    .post(|_body: Json<CreateBody>| async { "ok" }),
+            )
+            .layer(middleware::from_fn(unified_error_envelope));
+
+        // A bad query string is rejected text/plain by axum; the envelope
+        // keeps the 400 and labels it invalid_query, as JSON.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/things?page=abc")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(StatusCode::BAD_REQUEST, response.status());
+        assert!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("application/json")),
+            "the rejection must leave as application/json"
+        );
+        let body = body_of(response).await;
+        assert_eq!("invalid_query", body["error"]["code"]);
+
+        // An invalid JSON body becomes invalid_body, status preserved.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/things")
+                    .header(
+                        axum::http::header::CONTENT_TYPE,
+                        "application/json",
+                    )
+                    .body(axum::body::Body::from("{not json"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(StatusCode::BAD_REQUEST, response.status());
+        let body = body_of(response).await;
+        assert_eq!("invalid_body", body["error"]["code"]);
+    }
+
+    #[tokio::test]
+    async fn the_method_not_allowed_fallback_speaks_the_envelope() {
+        use tower::ServiceExt;
+
+        let app: Router = Router::new()
+            .route("/x", get(|| async { "ok" }))
+            .method_not_allowed_fallback(api_method_not_allowed)
+            .layer(middleware::from_fn(unified_error_envelope));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/x")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(StatusCode::METHOD_NOT_ALLOWED, response.status());
+        let body = body_of(response).await;
+        assert_eq!("method_not_allowed", body["error"]["code"]);
     }
 
     /// Drives the middleware over real sockets, with the same listener wiring

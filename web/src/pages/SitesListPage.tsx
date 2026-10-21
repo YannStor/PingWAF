@@ -115,6 +115,8 @@ export function SitesListPage() {
   const [cloneSource, setCloneSource] = useState<Site | null>(null)
   const [cloneForm, setCloneForm] = useState<SiteFormState>(emptyForm)
   const [cloneErrors, setCloneErrors] = useState<SiteFormErrors>({})
+  /** Backend message for a domain conflict, shown as detail under the field. */
+  const [cloneConflictDetail, setCloneConflictDetail] = useState<string | null>(null)
 
   const sitesQuery = useQuery({
     queryKey: siteKeys.list({ search: debouncedQuery || undefined }),
@@ -282,10 +284,12 @@ export function SitesListPage() {
     setCloneForm({
       ...emptyForm,
       // The clone reuses everything but the primary domain, which must be new.
-      name: site.name ? `${site.name} copy` : `${site.domain} copy`,
+      // The suffix is localized ("copy"/"副本"/"コピー").
+      name: site.name ? `${site.name} ${t('pages.sites.cloneNameSuffix', 'copy')}` : `${site.domain} ${t('pages.sites.cloneNameSuffix', 'copy')}`,
       alternateDomains: site.alternate_domains ?? [],
     })
     setCloneErrors({})
+    setCloneConflictDetail(null)
     setCloneOpen(true)
   }
 
@@ -294,6 +298,7 @@ export function SitesListPage() {
     setCloneSource(null)
     setCloneForm(emptyForm)
     setCloneErrors({})
+    setCloneConflictDetail(null)
   }
 
   const cloneSite = useMutation({
@@ -311,7 +316,13 @@ export function SitesListPage() {
         err instanceof ApiError &&
         (err.code === 'domain_conflict' || /already in use|conflict/i.test(err.message || ''))
       if (isDomainConflict) {
-        setCloneErrors((e) => ({ ...e, domain: t('pages.sites.domainConflict') }))
+        // Localized message under the Domain field; the backend's raw message
+        // (English) is kept as a collapsed detail line, not as the alert.
+        setCloneConflictDetail(err instanceof ApiError ? err.message || null : null)
+        setCloneErrors((e) => ({
+          ...e,
+          domain: t('pages.sites.cloneDomainConflict', t('pages.sites.domainConflict')),
+        }))
       } else {
         setCloneErrors((e) => ({
           ...e,
@@ -393,6 +404,13 @@ export function SitesListPage() {
       ...e,
       domain: DOMAIN_PATTERN.test(domain) ? undefined : t('pages.sites.domainInvalid'),
     }))
+  }
+
+  /** Same blur-level format check, but for the clone dialog's fields. */
+  const validateCloneDomainField = () => {
+    const domain = normaliseDomainInput(cloneForm.domain)
+    if (DOMAIN_PATTERN.test(domain)) return
+    setCloneErrors((e) => ({ ...e, domain: t('pages.sites.domainInvalid') }))
   }
 
   const validateAlternateDomain = (index: number) => {
@@ -880,6 +898,14 @@ export function SitesListPage() {
         }
       >
         <div className="flex flex-col gap-4">
+          {cloneSource && (
+            <p className="flex items-center gap-1.5 text-[13px] text-fg-subtle">
+              <Globe weight="duotone" className="h-3.5 w-3.5 shrink-0" />
+              <span>
+                {t('pages.sites.cloneFrom', { domain: cloneSource.domain })}
+              </span>
+            </p>
+          )}
           {cloneErrors.top && (
             <p
               role="alert"
@@ -905,8 +931,15 @@ export function SitesListPage() {
             onChange={(e) =>
               setCloneForm((f) => ({ ...f, domain: e.target.value }))
             }
+            onBlur={validateCloneDomainField}
             required
           />
+          {cloneErrors.domain && cloneConflictDetail && (
+            <details className="-mt-2 text-xs text-fg-subtle">
+              <summary className="cursor-pointer select-none">{t('common.details')}</summary>
+              <span title={cloneConflictDetail}>{cloneConflictDetail}</span>
+            </details>
+          )}
 
           <div className="flex flex-col gap-2">
             <div className="flex items-center justify-between">

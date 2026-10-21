@@ -33,7 +33,7 @@ authentication as the rest of the API); writes require the `write` role.
 | `GET /api/v1/sites/{site_id}/ai-crawl` | The site's AI crawl settings plus the per-family override list |
 | `PUT /api/v1/sites/{site_id}/ai-crawl` | Update settings and/or replace the override set |
 | `GET /api/v1/sites/{site_id}/ai-crawl/preview?file=robots\|llms` | Render the generated file body without saving (`mode`, `content_type`, `body`) |
-| `GET /api/v1/ai-crawl/catalog` | The crawler families PingWAF recognises (18) |
+| `GET /api/v1/ai-crawl/catalog` | The crawler families PingWAF recognises (19) |
 | `GET /api/v1/analytics/ai-crawlers` | Aggregated AI crawler traffic per family from `access_logs` |
 
 ### `GET /api/v1/sites/{site_id}/ai-crawl`
@@ -89,15 +89,18 @@ data plane with the next rule bundle.
 
 ### The catalogue (`GET /api/v1/ai-crawl/catalog`)
 
-18 families, each with `id`, `operator`, `name`, `category`
+19 families, each with `id`, `operator`, `name`, `category`
 (`training` / `search` / `agent` / `other`) and the lowercase
 `ua_substrings` that identify it. The catalogue is a control-plane
 constant — adding a new crawler is a code change, not a migration.
-The list covers, among others: GPTBot, OAI-SearchBot, ChatGPT-User
-(OpenAI); ClaudeBot, Claude-User, anthropic-ai (Anthropic);
+The most recent addition is `facebookexternalhit` (Meta, category
+`other`): the link-preview fetcher is its own family so it can be
+observed or allowed independently of the Meta-ExternalAgent training
+crawler. The list covers, among others: GPTBot, OAI-SearchBot,
+ChatGPT-User (OpenAI); ClaudeBot, Claude-User, anthropic-ai (Anthropic);
 PerplexityBot; Google-Extended; Applebot-Extended; CCBot (Common Crawl);
-Bytespider (ByteDance); Amazonbot; Meta-ExternalAgent; cohere-ai; YouBot;
-Diffbot; ImagesiftBot; Timpibot.
+Bytespider (ByteDance); Amazonbot; Meta-ExternalAgent; facebookexternalhit;
+cohere-ai; YouBot; Diffbot; ImagesiftBot; Timpibot.
 
 ## Actions and enforcement
 
@@ -120,6 +123,14 @@ protection).
 
 Both files have a mode: `off` (the origin's own file, if any, passes
 through untouched) or `generate` (PingWAF serves its own file).
+
+**`off` (or the whole feature disabled) means "the origin decides".** No
+`mock` plugin is registered for `/robots.txt` or `/llms.txt`, so requests
+to those paths are forwarded to the origin and answered entirely by it:
+whatever the origin returns — a normal file, a redirect, or even a `403`
+— is what the client sees. Such a `403` comes from the origin, not from
+the WAF: it produces no `security_events` row and no WAF mitigation
+header, so it should be triaged on the origin, not in the rule set.
 
 **Where the file comes from.** The control plane renders the body at
 configuration-build time — not per request — and pushes it to the data
@@ -165,7 +176,13 @@ route paths.
 Aggregates AI crawler families over `access_logs` by matching the recorded
 raw user agent against the catalogue's patterns, so the traffic panel shows
 per-family request counts even for periods before the feature was enabled.
-It is read-only reporting; enforcement lives in the data plane.
+**Rows only exist for families with matching traffic inside the window** —
+a family the catalogue knows but that sent no requests is absent, not
+reported as zero. The window is given as explicit `from`/`to` (ISO 8601) or
+as the shorthand `range=24h|7d|30d` (equivalent window; explicit
+`from`/`to` wins when both are present; an unknown value answers
+`400 invalid_range`). It is read-only reporting; enforcement lives in the
+data plane.
 
 ## Related
 

@@ -44,6 +44,9 @@ pub struct SecurityEvent {
     pub path: String,
     pub query_string: String,
     pub rule_id: String,
+    /// Identifier of the rule that actually enforced the action (L3-006);
+    /// empty when the verdict came from the score gate, not a specific rule.
+    pub enforced_rule_id: String,
     pub rule_name: String,
     /// Which protection produced the event: `managed` / `waf` / `ip_geo` /
     /// `bot` / `rate_limit` / `challenge`. Drives dashboard deep links.
@@ -217,6 +220,19 @@ impl PingWafAgent {
         self.rule_cache.blocked_reason(site_id, ip)
     }
 
+    /// When a dynamic block expires, wrapped in `Option` twice: the outer
+    /// `None` means the IP is not blocked; the inner `None` means a
+    /// permanent block. Used by the edge so refusal events can carry the
+    /// unblocking time (L3-002).
+    #[inline]
+    pub fn blocked_expires_at(
+        &self,
+        site_id: &str,
+        ip: &str,
+    ) -> Option<Option<chrono::DateTime<chrono::Utc>>> {
+        self.rule_cache.blocked_expires_at(site_id, ip)
+    }
+
     /// Dynamically block an IP for a site. Called by the WAF plugin when a
     /// block verdict fires so the edge keeps refusing the client before the
     /// engine even runs; the block is reported to the control plane on the
@@ -258,6 +274,7 @@ impl PingWafAgent {
             waf_score: event.score,
             waf_action: event.action,
             waf_rule_id: event.rule_id,
+            waf_enforced_rule_id: event.enforced_rule_id,
             waf_rule_name: event.rule_name,
             waf_event_type: event.event_type,
             waf_details: event.details,
@@ -303,6 +320,7 @@ impl PingWafAgent {
             waf_score: 0,
             waf_action: String::new(),
             waf_rule_id: String::new(),
+            waf_enforced_rule_id: String::new(),
             waf_rule_name: String::new(),
             waf_event_type: String::new(),
             waf_details: String::new(),

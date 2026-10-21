@@ -815,8 +815,24 @@ impl Server {
         ctx: &mut Ctx,
     ) -> pingora::Result<()> {
         let header = session.req_header();
+        // L3-009: an HTTP/1.1+ request without any Host must be refused per
+        // RFC 9112 §3.2 instead of silently falling to a default location
+        // with no site context. HTTP/1.0 and internal paths stay allowed.
+        if pingap_core::get_host(header).is_none() && !host_is_optional(header)
+        {
+            return Err(new_internal_error(
+                400,
+                "missing required Host header",
+            ));
+        }
         let host = pingap_core::get_host(header).unwrap_or_default();
         let path = header.uri.path();
+
+        // L3-007/L3-008: refuse unknown methods and oversized single header
+        // fields before any location matching or plugin work.
+        if let Err((status, message)) = validate_request_head(header) {
+            return Err(new_internal_error(status, message));
+        }
 
         // locations not found
         let Some(route) = self.server_locations_provider.get(&self.name) else {
@@ -1033,6 +1049,68 @@ impl Server {
 }
 
 const MODULE_GRPC_WEB: &str = "grpc-web";
+
+/// Largest single request-header field (name + value bytes) accepted from a
+/// downstream client (L3-007). Mirrors nginx's default
+/// `large_client_header_buffers` line size; an oversized field is answered
+/// with `431 Request Header Fields Too Large` before any upstream work.
+pub const MAX_SINGLE_REQUEST_HEADER_BYTES: usize = 8 * 1024;
+
+/// Request methods forwarded to an upstream (L3-008). Anything else is
+/// refused at the edge with `405 Method Not Allowed` instead of being
+/// proxied verbatim. `PURGE` is a pingap cache-invalidation extension and
+/// stays allowed; `CONNECT`/`TRACE` follow nginx's default of forwarding
+/// the standard set.
+const ALLOWED_REQUEST_METHODS: &[&str] = &[
+    "GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "TRACE",
+    "CONNECT", "PURGE",
+];
+
+/// Paths served by the deployment itself (health checks, metrics) that stay
+/// reachable without a `Host` header.
+const HOST_OPTIONAL_PATH_PREFIXES: &[&str] =
+    &["/healthz", "/ready", "/metrics"];
+
+/// Validates the request head before routing (L3-007/L3-008/L3-009):
+/// unknown methods → `405`, a single header field over
+/// [`MAX_SINGLE_REQUEST_HEADER_BYTES`] → `431`. Returns the status and the
+/// message for the caller to raise as a pingora error.
+pub(crate) fn validate_request_head(
+    header: &RequestHeader,
+) -> Result<(), (u16, String)> {
+    let method = header.method.as_str();
+    if !ALLOWED_REQUEST_METHODS.contains(&method) {
+        return Err((405, format!("method not allowed: {method}")));
+    }
+    for (name, value) in header.headers.iter() {
+        let Ok(value) = value.to_str() else {
+            continue;
+        };
+        if name.as_str().len() + value.len() > MAX_SINGLE_REQUEST_HEADER_BYTES {
+            return Err((
+                431,
+                format!("request header field too large: {}", name.as_str()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `true` when the request may proceed without a `Host` header: HTTP/1.0
+/// (RFC 9112 §3.2 makes Host optional there) or an internal path the
+/// deployment serves itself.
+fn host_is_optional(header: &RequestHeader) -> bool {
+    host_is_optional_parts(header.version, header.uri.path())
+}
+
+fn host_is_optional_parts(version: http::Version, path: &str) -> bool {
+    if matches!(version, http::Version::HTTP_09 | http::Version::HTTP_10) {
+        return true;
+    }
+    HOST_OPTIONAL_PATH_PREFIXES
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+}
 
 impl Server {
     /// Executes request plugins in the configured chain
@@ -2300,6 +2378,53 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_test::io::Builder;
 
+    fn req_header_for(method: &str, path: &str) -> RequestHeader {
+        RequestHeader::build(method.as_bytes(), path.as_bytes(), None).unwrap()
+    }
+
+    /// L3-007/L3-008: unknown methods are refused with 405 and a single
+    /// header field over 8 KiB with 431; the standard set (including
+    /// OPTIONS/HEAD/PURGE) passes untouched.
+    #[test]
+    fn test_validate_request_head_method_and_header_size() {
+        for method in ["GET", "HEAD", "POST", "OPTIONS", "PURGE", "PATCH"] {
+            assert!(
+                validate_request_head(&req_header_for(method, "/")).is_ok(),
+                "{method} must stay allowed"
+            );
+        }
+        assert_eq!(
+            validate_request_head(&req_header_for("FOO", "/"))
+                .unwrap_err()
+                .0,
+            405
+        );
+
+        let mut big = req_header_for("GET", "/");
+        big.insert_header("X-Big", "x".repeat(8192).as_str())
+            .unwrap();
+        assert_eq!(validate_request_head(&big).unwrap_err().0, 431);
+
+        let mut ok = req_header_for("GET", "/");
+        ok.insert_header("X-Ok", "x".repeat(8000).as_str()).unwrap();
+        assert!(validate_request_head(&ok).is_ok());
+    }
+
+    /// L3-009: Host is mandatory on HTTP/1.1+ outside the internal paths,
+    /// and optional on HTTP/1.0/0.9 and those paths.
+    #[test]
+    fn test_host_is_optional_boundaries() {
+        assert!(host_is_optional(&req_header_for("GET", "/healthz")));
+        assert!(host_is_optional(&req_header_for("GET", "/ready/x")));
+        assert!(host_is_optional(&req_header_for("GET", "/metrics")));
+        assert!(!host_is_optional(&req_header_for("GET", "/")));
+
+        assert!(host_is_optional_parts(http::Version::HTTP_10, "/"));
+        assert!(host_is_optional_parts(http::Version::HTTP_09, "/"));
+        assert!(!host_is_optional_parts(http::Version::HTTP_11, "/"));
+        assert!(!host_is_optional_parts(http::Version::HTTP_2, "/"));
+    }
+
     #[test]
     fn test_get_digest_detail() {
         let digest = Digest {
@@ -2682,7 +2807,7 @@ value = 'proxy_set_headers = ["name:value"]'
     async fn test_early_request_filter() {
         let server = new_server();
 
-        let headers = [""].join("\r\n");
+        let headers = ["Host: github.com"].join("\r\n");
         let input_header =
             format!("GET /vicanso/pingap?size=1 HTTP/1.1\r\n{headers}\r\n\r\n");
         let mock_io = Builder::new().read(input_header.as_bytes()).build();
@@ -2772,8 +2897,9 @@ value = 'proxy_set_headers = ["name:value"]'
         ] {
             let (server, request_calls, _) = new_server_counting();
 
-            let input_header =
-                format!("GET /vicanso/pingap HTTP/1.1\r\n{headers}\r\n");
+            let input_header = format!(
+                "GET /vicanso/pingap HTTP/1.1\r\nHost: github.com\r\n{headers}\r\n"
+            );
             let mock_io = Builder::new().read(input_header.as_bytes()).build();
             let mut session = Session::new_h1(Box::new(mock_io));
             session.read_request().await.unwrap();
@@ -3476,7 +3602,7 @@ value = 'proxy_set_headers = ["name:value"]'
         // there is nothing for `logging` to undo.
         let (mut session, mut ctx, result) = run(
             &server,
-            "POST /vicanso/pingap HTTP/1.1\r\nContent-Length: 2048\r\n\r\n",
+            "POST /vicanso/pingap HTTP/1.1\r\nHost: github.com\r\nContent-Length: 2048\r\n\r\n",
         )
         .await;
         let err = result.unwrap_err();
@@ -3492,12 +3618,18 @@ value = 'proxy_set_headers = ["name:value"]'
         assert_eq!(0, location.stats().processing);
 
         // Over `max_processing`: counted, rejected, undone once logged.
-        let (mut first_session, mut first_ctx, result) =
-            run(&server, "GET /vicanso/pingap HTTP/1.1\r\n\r\n").await;
+        let (mut first_session, mut first_ctx, result) = run(
+            &server,
+            "GET /vicanso/pingap HTTP/1.1\r\nHost: github.com\r\n\r\n",
+        )
+        .await;
         result.unwrap();
         assert_eq!(1, location.stats().processing);
-        let (mut session, mut ctx, result) =
-            run(&server, "GET /vicanso/pingap HTTP/1.1\r\n\r\n").await;
+        let (mut session, mut ctx, result) = run(
+            &server,
+            "GET /vicanso/pingap HTTP/1.1\r\nHost: github.com\r\n\r\n",
+        )
+        .await;
         let err = result.unwrap_err();
         assert_eq!(
             true,
@@ -3550,8 +3682,10 @@ value = 'proxy_set_headers = ["name:value"]'
                 calls: calls.clone(),
             }),
         })));
-        let (mut session, client) =
-            new_duplex_session("GET /vicanso/pingap HTTP/1.1\r\n\r\n").await;
+        let (mut session, client) = new_duplex_session(
+            "GET /vicanso/pingap HTTP/1.1\r\nHost: github.com\r\n\r\n",
+        )
+        .await;
         let mut ctx = Ctx::default();
         server
             .early_request_filter(&mut session, &mut ctx)

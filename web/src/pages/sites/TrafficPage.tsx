@@ -48,6 +48,7 @@ import { cn } from '@/lib/utils'
 import {
   formatBitrate,
   formatBucket,
+  formatDateTime,
   formatCompactNumber,
   formatLatency,
   formatNumber,
@@ -273,6 +274,7 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
               key={r}
               type="button"
               onClick={() => setRange(r)}
+              aria-pressed={range === r}
               className={cn(
                 'rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
                 range === r
@@ -664,7 +666,7 @@ export function AiBotsPanel({
   siteId?: string
   range?: TrafficRange
 }) {
-  const { t, i18n } = useTranslation()
+  const { t } = useTranslation()
   const overviewQuery = useQuery({
     queryKey: aiCrawlKeys.aiBots(siteId, range),
     queryFn: () => aiCrawlApi.aiCrawlerOverview(siteId, range),
@@ -738,7 +740,7 @@ export function AiBotsPanel({
       cell: (r) =>
         r.last_seen ? (
           <span className="tabular-nums text-[13px] text-fg-subtle">
-            {new Date(r.last_seen).toLocaleString(i18n.language)}
+            {formatDateTime(r.last_seen)}
           </span>
         ) : (
           <span className="text-[13px] text-fg-subtle">—</span>
@@ -787,7 +789,7 @@ export function AiBotsPanel({
                 value={formatNumber(overview?.families ?? 0)}
               />
             </div>
-            <CardBody className="p-0">
+            <div>
               <Table
                 columns={columns}
                 data={rows}
@@ -801,7 +803,7 @@ export function AiBotsPanel({
                   />
                 }
               />
-            </CardBody>
+            </div>
           </>
         )}
       </CardBody>

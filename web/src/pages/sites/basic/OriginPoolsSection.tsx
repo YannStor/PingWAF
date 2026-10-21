@@ -270,6 +270,10 @@ export function OriginPoolsSection({
                         <Globe weight="duotone" className="h-3.5 w-3.5" />
                         {nodes.length} {t('pages.origin.poolNodes')}
                       </span>
+                      <span className="flex items-center gap-1">
+                        <Network weight="duotone" className="h-3.5 w-3.5" />
+                        {t(`pages.basic.addressFamilyOptions.${pool.address_family ?? 'auto'}`, pool.address_family ?? 'auto')}
+                      </span>
                       {pool.sni ? (
                         <span className="flex items-center gap-1">
                           <Lock weight="duotone" className="h-3.5 w-3.5" />

@@ -1063,7 +1063,7 @@ impl Plugin for ChallengePlugin {
         let challenge_request = ChallengeRequest {
             path,
             method,
-            client_ip,
+            client_ip: client_ip.clone(),
             user_agent,
             cookies: Vec::new(),
             has_js_support: None,
@@ -1072,7 +1072,7 @@ impl Plugin for ChallengePlugin {
             // the checking side alike: the challenge page is built with it
             // (see `build_challenge_response` below) and the cookie it issues
             // is bound to it.
-            site_id: host,
+            site_id: host.clone(),
         };
 
         let decision = engine.should_challenge(&challenge_request);
@@ -1086,10 +1086,16 @@ impl Plugin for ChallengePlugin {
                 .request_id
                 .clone()
                 .unwrap_or_else(generate_request_id);
-            return Ok(RequestPluginResult::Respond(block_page(
-                &request_id,
-                "blocked by challenge policy",
-            )));
+            ctx.state.request_id = Some(request_id.clone());
+            let response =
+                block_page(&request_id, "blocked by challenge policy");
+            // L3-005: plugin-generated responses never reach the access-log
+            // response phase; emit the entry here so the refusal stays
+            // visible in analytics.
+            super::waf::emit_challenge_access(
+                session, ctx, &host, &client_ip, &response,
+            );
+            return Ok(RequestPluginResult::Respond(response));
         }
 
         // Any challenge flavour needs the original URL and a request id.
@@ -1106,6 +1112,7 @@ impl Plugin for ChallengePlugin {
             .request_id
             .clone()
             .unwrap_or_else(generate_request_id);
+        ctx.state.request_id = Some(request_id.clone());
 
         let kind = match decision {
             ChallengeDecision::ManagedChallenge => ChallengeKind::Managed,
@@ -1115,13 +1122,20 @@ impl Plugin for ChallengePlugin {
             _ => ChallengeKind::Js,
         };
 
-        Ok(RequestPluginResult::Respond(build_challenge_response(
+        let response = build_challenge_response(
             &request_id,
             &original_url,
             &site_id,
             self.pow_difficulty,
             kind,
-        )))
+        );
+        // L3-005: the challenge 503 never reached the access-log response
+        // phase, so analytics showed none of the challenged traffic. Emit
+        // the entry here, keyed by the host the challenge was issued for.
+        super::waf::emit_challenge_access(
+            session, ctx, &site_id, &client_ip, &response,
+        );
+        Ok(RequestPluginResult::Respond(response))
     }
 }
 

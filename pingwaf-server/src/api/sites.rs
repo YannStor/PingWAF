@@ -160,6 +160,11 @@ pub struct SslResponse {
     pub hsts_enabled: bool,
     pub hsts_max_age: i32,
     pub always_use_https: bool,
+    /// Downstream protocol switches, same names and semantics as
+    /// `SslSettingsResponse` (C2/L4-003): `PUT /sites/{id}/ssl` writes them,
+    /// `GET` reads them back.
+    pub http1_enabled: bool,
+    pub http2_enabled: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -199,6 +204,8 @@ impl From<site_ssl::Model> for SslResponse {
             hsts_enabled: model.hsts_enabled,
             hsts_max_age: model.hsts_max_age,
             always_use_https: model.always_use_https,
+            http1_enabled: model.http1_enabled,
+            http2_enabled: model.http2_enabled,
             created_at: model.created_at,
         }
     }
@@ -1232,6 +1239,91 @@ macro_rules! clone_site_rows {
     }};
 }
 
+/// Copies the source site's WAF rule groups and custom rules onto the clone
+/// inside the caller's transaction (C4/L2-001). Groups are inserted first so
+/// each rule's `group_id` can be remapped to the clone's own group rows,
+/// keeping the same grouping semantics. Returns (groups, rules) copied.
+async fn clone_site_rules<C>(
+    txn: &C,
+    source_id: Uuid,
+    new_id: Uuid,
+    timestamp: DateTime<Utc>,
+) -> Result<(usize, usize), DbErr>
+where
+    C: ConnectionTrait,
+{
+    let mut group_ids: HashMap<Uuid, Uuid> = HashMap::new();
+    let groups = rule_groups::Entity::find()
+        .filter(rule_groups::Column::SiteId.eq(source_id))
+        .all(txn)
+        .await?;
+    for row in groups {
+        let old_id = row.id;
+        let node = clone_rule_group_row(row, new_id, timestamp);
+        let inserted = node.insert(txn).await?;
+        group_ids.insert(old_id, inserted.id);
+    }
+    let source_rules = rule::Entity::find()
+        .filter(rule::Column::SiteId.eq(source_id))
+        .all(txn)
+        .await?;
+    let rule_count = source_rules.len();
+    for row in source_rules {
+        clone_rule_row(row, new_id, &group_ids, timestamp)
+            .insert(txn)
+            .await?;
+    }
+    Ok((group_ids.len(), rule_count))
+}
+
+/// Builds the clone's `rule_groups` row from the source row: new id, new site,
+/// fresh timestamps, everything else identical.
+fn clone_rule_group_row(
+    row: rule_groups::Model,
+    new_id: Uuid,
+    timestamp: DateTime<Utc>,
+) -> rule_groups::ActiveModel {
+    let mut node: rule_groups::ActiveModel = row.into();
+    node.id = Set(Uuid::new_v4());
+    node.site_id = Set(new_id);
+    node.created_at = Set(timestamp);
+    node.updated_at = Set(timestamp);
+    node
+}
+
+/// Builds the clone's `rules` row from the source row. `group_ids` maps the
+/// source site's group ids to the clone's; a group the map does not know is
+/// carried over as-is, never dropped to `None` (losing the group would change
+/// the rule's evaluation semantics silently).
+fn clone_rule_row(
+    row: rule::Model,
+    new_id: Uuid,
+    group_ids: &HashMap<Uuid, Uuid>,
+    timestamp: DateTime<Utc>,
+) -> rule::ActiveModel {
+    let old_group = row.group_id;
+    let mut node: rule::ActiveModel = row.into();
+    node.id = Set(Uuid::new_v4());
+    node.site_id = Set(new_id);
+    // A group the map does not know belongs to another site (or was deleted
+    // between the two reads). Carrying its id over would attach the clone's
+    // rule to a foreign group, and deleting that group would then cascade into
+    // the clone — so the reference is dropped and logged instead.
+    node.group_id = Set(old_group.and_then(|g| match group_ids.get(&g) {
+        Some(new) => Some(*new),
+        None => {
+            tracing::warn!(
+                group_id = %g,
+                "clone: rule references a group outside the source site; dropping the reference"
+            );
+            None
+        },
+    }));
+    node.created_at = Set(timestamp);
+    node.updated_at = Set(timestamp);
+    node
+}
+
 async fn clone_site(
     State(state): State<AppState>,
     current: AuthUser,
@@ -1366,6 +1458,13 @@ async fn clone_site(
     clone_site_rows!(&txn, rate_limit_rules, source_id, new_id);
     clone_site_rows!(&txn, site_ai_crawl_settings, source_id, new_id);
     clone_site_rows!(&txn, site_ai_bot_policies, source_id, new_id);
+
+    // WAF custom rules travel with the clone (C4/L2-001): without them the
+    // clone runs with a weaker policy than the source and nothing in the API
+    // surfaces the difference. Groups are copied first so each rule's
+    // `group_id` can be remapped to the clone's own group rows, keeping the
+    // same grouping semantics.
+    clone_site_rules(&txn, source_id, new_id, timestamp).await?;
 
     txn.commit().await?;
 
@@ -3118,6 +3217,8 @@ pub async fn touch_site(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Tests convert `ActiveModel`s back into `Model`s to assert field parity.
+    use sea_orm::TryIntoModel;
 
     /// The three accepted families, their normalization, and a rejection for
     /// anything else - including the empty string, which must not silently
@@ -3461,6 +3562,168 @@ mod tests {
             healthy_threshold: 10,
         };
         hc.validate().expect("upper bounds must validate");
+    }
+
+    /// C2/L4-003: the TLS protocol switches a `PUT /ssl` writes onto the
+    /// `site_ssl` row must come back out of `SslResponse` under the same
+    /// names — read/write symmetry, not a write-only field pair.
+    #[test]
+    fn ssl_response_reads_back_protocol_switches() {
+        let model = site_ssl::Model {
+            id: Uuid::new_v4(),
+            site_id: Uuid::new_v4(),
+            cert_pem: None,
+            key_pem: None,
+            issuer: None,
+            domain: "example.com".to_string(),
+            expires_at: None,
+            auto_renew: false,
+            acme_email: None,
+            acme_challenge_type: None,
+            acme_dns_provider: None,
+            acme_dns_config: None,
+            https_enabled: true,
+            min_tls_version: tls_version::TLS_12.to_string(),
+            max_tls_version: None,
+            self_signed: false,
+            certificate_id: None,
+            mtls_enabled: false,
+            mtls_client_ca: None,
+            mtls_organization: None,
+            mtls_require_client_cert: false,
+            hsts_enabled: false,
+            hsts_max_age: 0,
+            always_use_https: false,
+            http1_enabled: true,
+            http2_enabled: false,
+            created_at: Utc::now(),
+        };
+        let response = SslResponse::from(model);
+        assert!(response.http1_enabled);
+        assert!(!response.http2_enabled);
+    }
+
+    /// C4/L2-001: cloning must copy every WAF rule, one for one (N 条 → N
+    /// 条), carrying over the expression/action/mode/grouping and only
+    /// replacing identity, site and timestamps — a rule left behind would run
+    /// the clone with a weaker policy than the source.
+    #[test]
+    fn cloning_rules_copies_every_rule_one_for_one() {
+        let now = Utc::now();
+        let source_site = Uuid::new_v4();
+        let new_site = Uuid::new_v4();
+        let source_group = Uuid::new_v4();
+        let new_group = Uuid::new_v4();
+        let group_ids = HashMap::from([(source_group, new_group)]);
+
+        let make_rule = |name: &str, group: Option<Uuid>| rule::Model {
+            id: Uuid::new_v4(),
+            group_id: group,
+            site_id: source_site,
+            name: name.to_string(),
+            description: Some("custom".to_string()),
+            expression: "http.request.uri.path contains \"/admin\"".to_string(),
+            action: "block".to_string(),
+            severity: 3,
+            tags: vec!["custom".to_string()],
+            enabled: true,
+            mode: "block".to_string(),
+            priority: 10,
+            created_at: now,
+            updated_at: now,
+        };
+        let source_rules = [
+            make_rule("grouped", Some(source_group)),
+            make_rule("ungrouped", None),
+            make_rule("another", Some(source_group)),
+        ];
+        assert_eq!(3, source_rules.len(), "source has N rules");
+
+        let clones: Vec<rule::ActiveModel> = source_rules
+            .iter()
+            .cloned()
+            .map(|row| clone_rule_row(row, new_site, &group_ids, now))
+            .collect();
+        assert_eq!(
+            source_rules.len(),
+            clones.len(),
+            "N source rules must produce N clone rows"
+        );
+
+        let clones: Vec<rule::Model> = clones
+            .into_iter()
+            .map(|row| row.try_into_model().expect("all fields are set"))
+            .collect();
+
+        for (source, clone) in source_rules.iter().zip(&clones) {
+            assert_ne!(
+                source.id, clone.id,
+                "the clone row gets its own identity"
+            );
+            assert_eq!(clone.site_id, new_site);
+            // Content (except id / site_id / timestamps) matches the source.
+            assert_eq!(source.name, clone.name);
+            assert_eq!(source.description, clone.description);
+            assert_eq!(source.expression, clone.expression);
+            assert_eq!(source.action, clone.action);
+            assert_eq!(source.severity, clone.severity);
+            assert_eq!(source.tags, clone.tags);
+            assert_eq!(source.enabled, clone.enabled);
+            assert_eq!(source.mode, clone.mode);
+            assert_eq!(source.priority, clone.priority);
+            // Group ids remap onto the clone's own group rows.
+            let expected_group = source
+                .group_id
+                .map(|g| group_ids.get(&g).copied().unwrap_or(g));
+            assert_eq!(expected_group, clone.group_id);
+        }
+
+        // Group semantics: a source group maps to the clone's own group row,
+        // never to the source's id and never to None.
+        let grouped = clones
+            .iter()
+            .find(|row| row.name == "grouped")
+            .expect("grouped rule");
+        assert_eq!(Some(new_group), grouped.group_id);
+        let ungrouped = clones
+            .iter()
+            .find(|row| row.name == "ungrouped")
+            .expect("ungrouped rule");
+        assert_eq!(None, ungrouped.group_id);
+
+        // Group rows are copied the same way: same name/phase/priority,
+        // new identity and site.
+        let group_row = clone_rule_group_row(
+            rule_groups::Model {
+                id: source_group,
+                site_id: source_site,
+                name: "admin".to_string(),
+                phase: "request".to_string(),
+                priority: 1,
+                enabled: true,
+                created_at: now,
+                updated_at: now,
+            },
+            new_site,
+            now,
+        );
+        let group_row = group_row.try_into_model().expect("all fields are set");
+        assert_ne!(source_group, group_row.id, "new identity");
+        assert_eq!(new_site, group_row.site_id);
+        assert_eq!("admin", group_row.name);
+
+        // A group id the map does not know belongs to another site: the
+        // reference is dropped, never carried over. Keeping it would attach
+        // the clone's rule to a foreign group, and deleting that group would
+        // cascade into the clone.
+        let orphan = clone_rule_row(
+            make_rule("orphan", Some(Uuid::new_v4())),
+            new_site,
+            &HashMap::new(),
+            now,
+        );
+        let orphan = orphan.try_into_model().expect("all fields are set");
+        assert!(orphan.group_id.is_none());
     }
 
     #[test]

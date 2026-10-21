@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type ReactNode } from 'react'
+import { useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -391,7 +391,11 @@ function AiCrawlCard({ siteId, canWrite }: { siteId: string; canWrite: boolean }
   const [preview, setPreview] = useState<{
     file: 'robots' | 'llms'
     data: AiCrawlPreview | null
+    error: Error | null
   } | null>(null)
+  // Request sequence guard: only the latest preview click may update state,
+  // so rapid robots/llms alternation can't leave a stale response on screen.
+  const previewSeq = useRef(0)
 
   // Long-lived static data: the family catalog rarely changes.
   const catalogQuery = useQuery({
@@ -498,11 +502,17 @@ function AiCrawlCard({ siteId, canWrite }: { siteId: string; canWrite: boolean }
   })
 
   const openPreview = (file: 'robots' | 'llms') => {
-    setPreview({ file, data: null })
+    const seq = ++previewSeq.current
+    setPreview({ file, data: null, error: null })
     aiCrawlApi
       .preview(siteId, file)
-      .then((data) => setPreview({ file, data }))
-      .catch(() => setPreview(null))
+      .then((data) => {
+        if (previewSeq.current === seq) setPreview({ file, data, error: null })
+      })
+      .catch((err: unknown) => {
+        if (previewSeq.current === seq)
+          setPreview({ file, data: null, error: err instanceof Error ? err : new Error(String(err)) })
+      })
   }
 
   const actionOptions = AI_CRAWL_POLICY_ACTIONS.map((a) => ({
@@ -539,6 +549,12 @@ function AiCrawlCard({ siteId, canWrite }: { siteId: string; canWrite: boolean }
               label={t('pages.bots.aiCrawl.enable')}
               description={t('pages.bots.aiCrawl.enableHint')}
             />
+            <p className="-mt-3 text-xs text-fg-subtle">
+              {t(
+                'pages.bots.aiCrawl.upstreamHint',
+                'When the AI crawler is disabled, robots.txt / llms.txt requests pass through to your origin, which decides the response.',
+              )}
+            </p>
             <Select
               label={t('pages.bots.aiCrawl.defaultAction')}
               value={draft.default_action}
@@ -591,6 +607,13 @@ function AiCrawlCard({ siteId, canWrite }: { siteId: string; canWrite: boolean }
               <p className="mb-2 text-sm font-medium text-fg-strong">
                 {t('pages.bots.aiCrawl.families')}
               </p>
+              {catalogQuery.isError ? (
+                <ErrorState
+                  error={catalogQuery.error}
+                  onRetry={() => catalogQuery.refetch()}
+                  retrying={catalogQuery.isFetching}
+                />
+              ) : (
               <div className="overflow-x-auto rounded-lg border border-line">
                 <table className="w-full text-left text-[13px]">
                   <thead className="bg-recessed/60 text-xs uppercase tracking-wide text-fg-subtle">
@@ -644,6 +667,7 @@ function AiCrawlCard({ siteId, canWrite }: { siteId: string; canWrite: boolean }
                   </tbody>
                 </table>
               </div>
+              )}
             </div>
 
             {/* robots.txt / llms.txt */}
@@ -658,6 +682,7 @@ function AiCrawlCard({ siteId, canWrite }: { siteId: string; canWrite: boolean }
                 }
                 onMode={(robots_mode) => patch({ robots_mode })}
                 onBody={(robots_body) => patch({ robots_body })}
+                ariaDescribedBy={bodyTooLong ? 'ai-crawl-body-too-long' : undefined}
                 onPreview={() => openPreview('robots')}
               />
               <FileConfig
@@ -670,6 +695,7 @@ function AiCrawlCard({ siteId, canWrite }: { siteId: string; canWrite: boolean }
                 }
                 onMode={(llms_mode) => patch({ llms_mode })}
                 onBody={(llms_body) => patch({ llms_body })}
+                ariaDescribedBy={bodyTooLong ? 'ai-crawl-body-too-long' : undefined}
                 onPreview={() => openPreview('llms')}
                 extra={
                   <Switch
@@ -698,7 +724,9 @@ function AiCrawlCard({ siteId, canWrite }: { siteId: string; canWrite: boolean }
               onChange={(e) => patch({ cache_max_age: Number(e.target.value) })}
             />
             {bodyTooLong && (
-              <p className="text-sm text-fg-danger">{t('pages.bots.aiCrawl.bodyTooLong')}</p>
+              <p id="ai-crawl-body-too-long" className="text-sm text-fg-danger">
+                {t('pages.bots.aiCrawl.bodyTooLong')}
+              </p>
             )}
 
             {canWrite && (
@@ -724,9 +752,11 @@ function AiCrawlCard({ siteId, canWrite }: { siteId: string; canWrite: boolean }
         open={preview !== null}
         onClose={() => setPreview(null)}
         size="lg"
-        title={t('pages.bots.aiCrawl.previewTitle', {
-          file: preview?.file === 'llms' ? 'llms.txt' : 'robots.txt',
-        })}
+        title={t(
+          'pages.bots.aiCrawl.previewTitle',
+          preview?.file === 'llms' ? 'llms.txt preview' : 'robots.txt preview',
+          { file: preview?.file === 'llms' ? 'llms.txt' : 'robots.txt' },
+        )}
         description={preview?.data?.content_type}
         footer={
           <Button variant="secondary" onClick={() => setPreview(null)}>
@@ -734,7 +764,23 @@ function AiCrawlCard({ siteId, canWrite }: { siteId: string; canWrite: boolean }
           </Button>
         }
       >
-        {preview?.data ? (
+        {preview?.error ? (
+          <div className="flex flex-col items-center gap-3 py-8">
+            <span className="text-sm text-fg-danger">
+              {t('pages.bots.aiCrawl.previewFailed', 'Failed to load preview')}
+            </span>
+            {preview.error.message && (
+              <span className="pw-mono text-xs text-fg-subtle">{preview.error.message}</span>
+            )}
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => openPreview(preview.file)}
+            >
+              {t('common.retry', 'Retry')}
+            </Button>
+          </div>
+        ) : preview?.data ? (
           <pre className="pw-mono max-h-[60vh] overflow-auto whitespace-pre-wrap rounded-lg bg-recessed p-3 text-xs text-fg">
             {preview.data.body || t('pages.bots.aiCrawl.previewEmpty')}
           </pre>
@@ -761,6 +807,7 @@ function FileConfig({
   onMode,
   onBody,
   onPreview,
+  ariaDescribedBy,
   extra,
 }: {
   title: string
@@ -771,6 +818,7 @@ function FileConfig({
   onMode: (mode: string) => void
   onBody: (body: string) => void
   onPreview: () => void
+  ariaDescribedBy?: string
   extra?: ReactNode
 }) {
   const { t } = useTranslation()
@@ -805,6 +853,7 @@ function FileConfig({
             placeholder={t('pages.bots.aiCrawl.bodyPlaceholder')}
             value={body}
             disabled={disabled}
+            aria-describedby={ariaDescribedBy}
             onChange={(e) => onBody(e.target.value)}
           />
           <p className="text-xs text-fg-subtle">{t('pages.bots.aiCrawl.bodyHint')}</p>

@@ -898,6 +898,11 @@ message LogEntry {
   // Which protection produced the event: "managed"|"waf"|"ip_geo"|"bot"|
   // "rate_limit"|"challenge". Drives dashboard deep links; empty on old data.
   string waf_event_type = 56;
+  // Identifier of the rule that actually enforced the block/challenge
+  // (L3-006), distinct from `waf_rule_id` which keeps recording the
+  // detection signature for compatibility. Empty when no single rule
+  // enforced the verdict (anomaly-score gate, stage-1 critical fast path).
+  string waf_enforced_rule_id = 57;
 
   // Performance
   uint64 total_latency_ms = 60;

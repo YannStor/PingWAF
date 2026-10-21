@@ -97,6 +97,10 @@ export interface SystemProfileModule {
   mem_bytes: number
   /** 占总内存的比例（0.0-1.0）。 */
   mem_share: number
+  /** 峰值持有字节（自启动或上次 reset 起）。旧后端不返回。 */
+  mem_peak_bytes?: number
+  /** 占全部模块峰值之和的比例（0.0-1.0）。 */
+  mem_peak_share?: number
   /** 墙钟耗时（毫秒）。⚠️ 口径为墙钟，非 CPU。 */
   elapsed_ms: number
   /** 墙钟耗时占比（0.0-1.0）。⚠️ 口径为墙钟，非 CPU。 */
@@ -120,6 +124,10 @@ export interface SystemProfileMethod {
   mem_bytes: number
   /** 占所属模块内存的比例（0.0-1.0）。 */
   mem_share: number
+  /** 峰值持有字节（自启动或上次 reset 起）。旧后端不返回。 */
+  mem_peak_bytes?: number
+  /** 占全部模块峰值之和的比例（0.0-1.0）。 */
+  mem_peak_share?: number
   calls: number
   /** 平均单次调用耗时（微秒）。 */
   avg_us: number

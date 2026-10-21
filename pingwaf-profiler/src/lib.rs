@@ -297,6 +297,10 @@ struct ModuleCounters {
     /// [`Instant`] measures time, not cycles.
     elapsed_ns: AtomicU64,
     mem_bytes: AtomicI64,
+    /// High-water mark of `mem_bytes` since process start (or the last
+    /// [`ProfileSnapshot::reset`]). `fetch_max`, relaxed — same cost class
+    /// as the current-value update, no allocation, no lock.
+    mem_peak_bytes: AtomicI64,
     /// Bytes the module currently keeps **on disk**. A separate slot from
     /// `mem_bytes`: the cache backend used to publish its on-disk usage into
     /// the memory gauge, so the module table reported the filesystem's bytes
@@ -323,6 +327,7 @@ impl ModuleCounters {
         Self {
             elapsed_ns: AtomicU64::new(0),
             mem_bytes: AtomicI64::new(0),
+            mem_peak_bytes: AtomicI64::new(0),
             disk_bytes: AtomicU64::new(0),
             calls: AtomicU64::new(0),
         }
@@ -335,6 +340,8 @@ struct MethodCounters {
     /// report here; a method whose work allocates and drops within the call
     /// stays at zero.
     mem_bytes: AtomicI64,
+    /// High-water mark of `mem_bytes`, same policy as the module slot.
+    mem_peak_bytes: AtomicI64,
     calls: AtomicU64,
 }
 
@@ -343,6 +350,7 @@ impl MethodCounters {
         Self {
             elapsed_ns: AtomicU64::new(0),
             mem_bytes: AtomicI64::new(0),
+            mem_peak_bytes: AtomicI64::new(0),
             calls: AtomicU64::new(0),
         }
     }
@@ -377,9 +385,10 @@ pub fn record_cpu(module: Module, ns: u64) {
 /// buffers, log batches). Saturates at zero so a racing subtraction cannot
 /// wrap into an absurd number.
 pub fn set_memory(module: Module, bytes: u64) {
-    MODULES[module.index()]
-        .mem_bytes
-        .store(bytes.min(i64::MAX as u64) as i64, Ordering::Relaxed);
+    let counters = &MODULES[module.index()];
+    let value = bytes.min(i64::MAX as u64) as i64;
+    counters.mem_bytes.store(value, Ordering::Relaxed);
+    counters.mem_peak_bytes.fetch_max(value, Ordering::Relaxed);
 }
 
 /// Adds `delta` bytes (negative for release) to the module's held-bytes
@@ -388,9 +397,13 @@ pub fn add_memory(module: Module, delta: i64) {
     if delta == 0 {
         return;
     }
-    MODULES[module.index()]
-        .mem_bytes
-        .fetch_add(delta, Ordering::Relaxed);
+    let counters = &MODULES[module.index()];
+    let current = counters.mem_bytes.fetch_add(delta, Ordering::Relaxed);
+    // Track the high-water mark of the value *after* the add; a transient
+    // negative cannot lower the peak (`fetch_max` keeps the running max).
+    counters
+        .mem_peak_bytes
+        .fetch_max(current.saturating_add(delta), Ordering::Relaxed);
 }
 
 /// Replaces the module's **on-disk** footprint (cache files, spill files).
@@ -431,9 +444,11 @@ pub fn add_method_memory(method: Method, delta: i64) {
     if delta == 0 {
         return;
     }
-    METHODS[method.index()]
-        .mem_bytes
-        .fetch_add(delta, Ordering::Relaxed);
+    let counters = &METHODS[method.index()];
+    let current = counters.mem_bytes.fetch_add(delta, Ordering::Relaxed);
+    counters
+        .mem_peak_bytes
+        .fetch_max(current.saturating_add(delta), Ordering::Relaxed);
 }
 
 /// Releases the bytes it was created with on drop, from both the method row
@@ -577,6 +592,13 @@ pub struct ModuleView {
     pub mem_bytes: u64,
     /// Share of the total held bytes across modules, 0.0–1.0.
     pub mem_share: f64,
+    /// High-water mark of [`Self::mem_bytes`] since process start (or the
+    /// last reset). Stays above zero after the current value drops, so a
+    /// gauge sampled between reports still shows what the module held.
+    pub mem_peak_bytes: u64,
+    /// Share of the sum of all modules' [`Self::mem_peak_bytes`], 0.0–1.0.
+    /// 0.0 when the total peak is 0.
+    pub mem_peak_share: f64,
     /// Number of timed operations attributed to the module.
     pub calls: u64,
     /// Average microseconds per timed operation.
@@ -607,6 +629,12 @@ pub struct MethodView {
     /// Share of the method's module memory, 0.0–1.0. Zero when the module
     /// reports nothing, so a method's share never divides by zero.
     pub mem_share: f64,
+    /// High-water mark of [`Self::mem_bytes`] since process start (or the
+    /// last reset).
+    pub mem_peak_bytes: u64,
+    /// Share of the sum of all modules' peak bytes, 0.0–1.0. 0.0 when the
+    /// total peak is 0.
+    pub mem_peak_share: f64,
     /// Number of timed calls.
     pub calls: u64,
     /// Average microseconds per call.
@@ -649,6 +677,7 @@ impl ProfileSnapshot {
         let mut modules = Vec::with_capacity(Module::ALL.len());
         let mut total_elapsed_ns = 0u64;
         let mut total_mem = 0u64;
+        let mut total_mem_peak = 0u64;
         // Per-module memory, so a method row can express its share of the
         // module it rolls up into.
         let mut module_mem = [0u64; Module::ALL.len()];
@@ -658,7 +687,14 @@ impl ProfileSnapshot {
             total_elapsed_ns = total_elapsed_ns.saturating_add(elapsed_ns);
             let mem_bytes =
                 counters.mem_bytes.load(Ordering::Relaxed).max(0) as u64;
+            // Guard against a `store` interleaving between the two loads: the
+            // peak is a high-water mark, so it can never sit below the value
+            // currently held.
+            let mem_peak_bytes =
+                (counters.mem_peak_bytes.load(Ordering::Relaxed).max(0) as u64)
+                    .max(mem_bytes);
             total_mem = total_mem.saturating_add(mem_bytes);
+            total_mem_peak = total_mem_peak.saturating_add(mem_peak_bytes);
             module_mem[module.index()] = mem_bytes;
             let calls = counters.calls.load(Ordering::Relaxed);
             let elapsed_ms = elapsed_ns as f64 / 1_000_000.0;
@@ -670,6 +706,8 @@ impl ProfileSnapshot {
                 elapsed_share: 0.0,
                 mem_bytes,
                 mem_share: 0.0,
+                mem_peak_bytes,
+                mem_peak_share: 0.0,
                 calls,
                 avg_us: if calls == 0 {
                     0.0
@@ -690,6 +728,11 @@ impl ProfileSnapshot {
                 0.0
             } else {
                 row.mem_bytes as f64 / total_mem as f64
+            };
+            row.mem_peak_share = if total_mem_peak == 0 {
+                0.0
+            } else {
+                row.mem_peak_bytes as f64 / total_mem_peak as f64
             };
         }
         let mut methods: Vec<MethodView> = Method::ALL
@@ -712,6 +755,10 @@ impl ProfileSnapshot {
                 };
                 let mem_bytes =
                     counters.mem_bytes.load(Ordering::Relaxed).max(0) as u64;
+                let mem_peak_bytes =
+                    (counters.mem_peak_bytes.load(Ordering::Relaxed).max(0)
+                        as u64)
+                        .max(mem_bytes);
                 let module_total = module_mem[method.module().index()];
                 Some(MethodView {
                     method: method.as_str(),
@@ -724,6 +771,12 @@ impl ProfileSnapshot {
                         0.0
                     } else {
                         mem_bytes as f64 / module_total as f64
+                    },
+                    mem_peak_bytes,
+                    mem_peak_share: if total_mem_peak == 0 {
+                        0.0
+                    } else {
+                        mem_peak_bytes as f64 / total_mem_peak as f64
                     },
                     calls,
                     avg_us: elapsed_ns as f64 / calls as f64 / 1_000.0,
@@ -755,12 +808,14 @@ impl ProfileSnapshot {
         for counters in &MODULES {
             counters.elapsed_ns.store(0, Ordering::Relaxed);
             counters.mem_bytes.store(0, Ordering::Relaxed);
+            counters.mem_peak_bytes.store(0, Ordering::Relaxed);
             counters.disk_bytes.store(0, Ordering::Relaxed);
             counters.calls.store(0, Ordering::Relaxed);
         }
         for counters in &METHODS {
             counters.elapsed_ns.store(0, Ordering::Relaxed);
             counters.mem_bytes.store(0, Ordering::Relaxed);
+            counters.mem_peak_bytes.store(0, Ordering::Relaxed);
             counters.calls.store(0, Ordering::Relaxed);
         }
     }
@@ -866,6 +921,58 @@ mod tests {
             assert_eq!(0, row.mem_bytes);
             assert_eq!(0.0, row.mem_share);
         }
+    }
+
+    /// The peak gauge must survive a drop of the current value: a set of 100
+    /// followed by a set of 0 reports `mem_bytes == 0` (current semantics
+    /// unchanged) but keeps `mem_peak_bytes == 100` (high-water, L1-001/C3).
+    #[test]
+    fn memory_peak_survives_a_drop_to_zero() {
+        let _guard = serial();
+        ProfileSnapshot::reset();
+        set_memory(Module::Cache, 100);
+        set_memory(Module::Cache, 0);
+        let snapshot = ProfileSnapshot::collect();
+        let cache = snapshot
+            .modules
+            .iter()
+            .find(|row| row.module == "cache")
+            .expect("cache row");
+        assert_eq!(0, cache.mem_bytes, "current value semantics unchanged");
+        assert_eq!(100, cache.mem_peak_bytes, "peak is kept");
+        assert!(cache.mem_peak_share > 0.0);
+
+        // A reset clears the peak as well as the current value.
+        ProfileSnapshot::reset();
+        let snapshot = ProfileSnapshot::collect();
+        let cache = snapshot
+            .modules
+            .iter()
+            .find(|row| row.module == "cache")
+            .expect("cache row");
+        assert_eq!(0, cache.mem_peak_bytes);
+        assert_eq!(0.0, cache.mem_peak_share);
+    }
+
+    /// Method rows keep their own peak: a guard's release must not erase the
+    /// high-water mark the call site reached.
+    #[test]
+    fn method_memory_peak_survives_release() {
+        let _guard = serial();
+        ProfileSnapshot::reset();
+        {
+            let _timer = timed_method(Method::WafBodyRead);
+            std::thread::sleep(std::time::Duration::from_micros(200));
+        }
+        drop(track_method_memory(Method::WafBodyRead, 4096));
+        let snapshot = ProfileSnapshot::collect();
+        let row = snapshot
+            .methods
+            .iter()
+            .find(|row| row.method == Method::WafBodyRead.as_str())
+            .expect("body_read row");
+        assert_eq!(0, row.mem_bytes, "released");
+        assert_eq!(4096, row.mem_peak_bytes, "peak kept after release");
     }
 
     /// A method row carries the bytes its call site holds, and the guard

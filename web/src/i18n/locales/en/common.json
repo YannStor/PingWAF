@@ -59,7 +59,11 @@
     "memShare": "Share of module",
     "sortBy": "Sort by",
     "sortByElapsed": "Elapsed time",
-    "sortByMem": "Memory"
+    "sortByMem": "Memory",
+    "peak": "peak",
+    "memShareHint": "This method's share of its module's memory; the shares add up to at most 1.",
+    "shareHint": "Share of the total attributed time (not CPU usage).",
+    "samplingHint": "Memory is the value currently held (0 = not reported; —/peak show the high-water mark). Shares are relative to the module or the total attributed time; stage shares must not be added."
   },
   "app": {
     "name": "PingWAF",
@@ -468,7 +472,10 @@
         "removeRule": "Remove rule",
         "gzipHint": "Replacements do not apply to compressed responses (gzip/br).",
         "empty": "No replacement rules. Add one to start replacing response bodies."
-      }
+      },
+      "cloneDomainConflict": "This domain is already in use by another site.",
+      "cloneNameSuffix": "copy",
+      "cloneFrom": "Clone from: {{domain}}"
     },
     "siteDetail": {
       "title": "Site",
@@ -737,14 +744,16 @@
         "includeRoutes": "Include routes",
         "includeRoutesHint": "Append the site's route paths to the generated llms.txt.",
         "preview": "Preview",
-        "previewTitle": "{file} preview",
+        "previewTitle": "{{file}} preview",
         "previewLoading": "Loading preview…",
         "previewEmpty": "(empty body)",
         "cacheMaxAge": "Cache max-age (seconds)",
         "cacheMaxAgeHint": "Cache-Control max-age for the generated files (0–86400).",
         "cacheMaxAgeInvalid": "Must be between 0 and 86400 seconds.",
         "bodyTooLong": "Custom body exceeds the 64 KiB limit — shorten it before saving.",
-        "saved": "AI crawl settings saved"
+        "saved": "AI crawl settings saved",
+        "upstreamHint": "When AI crawl control is off, robots.txt / llms.txt requests pass through to the origin, which decides the response.",
+        "previewFailed": "Failed to load the preview"
       }
     },
     "cc": {
@@ -1204,7 +1213,10 @@
       "copied": "Copied to clipboard",
       "copyFailed": "Could not copy to the clipboard — download the bundle instead.",
       "issueElsewhereHint": "Certificates are issued, uploaded and renewed on the global SSL/TLS page.",
-      "openGlobalSsl": "Open SSL/TLS"
+      "openGlobalSsl": "Open SSL/TLS",
+      "protocols": {
+        "atLeastOne": "At least one protocol must stay enabled."
+      }
     },
     "traffic": {
       "aiBots": {
@@ -2530,7 +2542,14 @@
       "verifyCertDisabledHint": "Turn on \"HTTPS origin\" to configure certificate verification (HTTP origins have no TLS handshake, so there is nothing to verify).",
       "certFollowGlobal": "certificate check follows the deployment default",
       "originTlsSummary": "Origin certificate check (site default):",
-      "originTlsSettingsLink": "Configure on the SSL page →"
+      "originTlsSettingsLink": "Configure on the SSL page →",
+      "addressFamily": "Address family",
+      "addressFamilyHint": "auto prefers IPv4; pin ipv4/ipv6 for single-stack origins (IP literals ignore it).",
+      "addressFamilyOptions": {
+        "auto": "Auto (prefer IPv4)",
+        "ipv4": "IPv4 only",
+        "ipv6": "IPv6 only"
+      }
     },
     "profile": {
       "title": "Account settings",
@@ -2597,5 +2616,8 @@
       "challengeConfirmDescription": "Creates a JS-challenge IP rule for this site; visitors must pass the challenge first.",
       "challengeRuleName": "JS challenge {{ip}}"
     }
+  },
+  "notFound": {
+    "title": "Page not found"
   }
 }

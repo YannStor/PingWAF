@@ -59,7 +59,11 @@
     "memShare": "占模块内存",
     "sortBy": "排序",
     "sortByElapsed": "按耗时",
-    "sortByMem": "按内存"
+    "sortByMem": "按内存",
+    "peak": "峰值",
+    "memShareHint": "该方法内存占所属模块内存的比例；各方法份额之和不超过 1。",
+    "shareHint": "模块耗时占全部归因时间的比例，非 CPU 占比。",
+    "samplingHint": "内存列为当前持有值（0 表示尚未上报，—/peak 为峰值口径）；各占比为占所属模块/全部归因时间的比例，子阶段份额不应相加。"
   },
   "app": {
     "name": "PingWAF",
@@ -468,7 +472,10 @@
         "removeRule": "删除规则",
         "gzipHint": "压缩响应（gzip/br）下替换不生效。",
         "empty": "暂无替换规则，添加一条以开始替换响应内容。"
-      }
+      },
+      "cloneDomainConflict": "该域名已被其他站点使用。",
+      "cloneNameSuffix": "副本",
+      "cloneFrom": "克隆自：{{domain}}"
     },
     "siteDetail": {
       "title": "站点",
@@ -737,14 +744,16 @@
         "includeRoutes": "包含路由",
         "includeRoutesHint": "将站点路由追加到生成的 llms.txt。",
         "preview": "预览",
-        "previewTitle": "{file} 预览",
+        "previewTitle": "{{file}} 预览",
         "previewLoading": "正在加载预览…",
         "previewEmpty": "（正文为空）",
         "cacheMaxAge": "缓存时长（秒）",
         "cacheMaxAgeHint": "生成文件的 Cache-Control max-age（0–86400）。",
         "cacheMaxAgeInvalid": "必须在 0 到 86400 秒之间。",
         "bodyTooLong": "自定义正文超过 64 KiB 上限，请精简后再保存。",
-        "saved": "AI 爬虫设置已保存"
+        "saved": "AI 爬虫设置已保存",
+        "upstreamHint": "未启用 AI 爬虫时，robots.txt / llms.txt 的请求会回源，由源站决定响应。",
+        "previewFailed": "预览加载失败"
       }
     },
     "cc": {
@@ -1204,7 +1213,10 @@
       "copied": "已复制到剪贴板",
       "copyFailed": "复制到剪贴板失败，请改用下载证书包。",
       "issueElsewhereHint": "证书的签发、上传与续期请前往全局 SSL/TLS 页面。",
-      "openGlobalSsl": "打开 SSL/TLS"
+      "openGlobalSsl": "打开 SSL/TLS",
+      "protocols": {
+        "atLeastOne": "至少保留一个协议。"
+      }
     },
     "traffic": {
       "aiBots": {
@@ -2530,7 +2542,14 @@
       "verifyCertDisabledHint": "开启「HTTPS 源站」后可配置证书校验（HTTP 回源没有 TLS 握手，无可校验对象）。",
       "certFollowGlobal": "证书校验：跟随全局默认",
       "originTlsSummary": "源站证书校验（站点默认）：",
-      "originTlsSettingsLink": "前往 SSL 页设置 →"
+      "originTlsSettingsLink": "前往 SSL 页设置 →",
+      "addressFamily": "地址族",
+      "addressFamilyHint": "auto 优先 IPv4；仅支持单栈的源站可固定 ipv4/ipv6（IP 直连地址忽略此项）。",
+      "addressFamilyOptions": {
+        "auto": "自动（优先 IPv4）",
+        "ipv4": "仅 IPv4",
+        "ipv6": "仅 IPv6"
+      }
     },
     "profile": {
       "title": "账户设置",
@@ -2597,5 +2616,8 @@
       "challengeConfirmDescription": "将为该站点创建一条 JS 挑战 IP 规则，访问者须先通过挑战。",
       "challengeRuleName": "JS 挑战 {{ip}}"
     }
+  },
+  "notFound": {
+    "title": "页面不存在"
   }
 }

@@ -1,5 +1,5 @@
 import { apiClient } from './client'
-import { RANGE_HOURS } from './traffic'
+import { rangeQueryFor, RANGE_HOURS } from './traffic'
 import type {
   AiBotCatalogEntry,
   AiCrawlPreview,
@@ -43,7 +43,8 @@ export const aiCrawlApi = {
     apiClient.get<AiCrawlerOverview>('/analytics/ai-crawlers', {
       query: {
         ...(siteId ? { site_id: siteId } : {}),
-        range: aiCrawlRangeFor(range),
+        // Absolute from/to window so 7d/30d actually widen the range server-side.
+        ...rangeQueryFor(range),
         limit: 20,
       },
     }),

@@ -547,9 +547,12 @@ defaults to `"<source name> copy"`). The copy is created inside one
 transaction: site SSL (certificate and protocol switches travel with the
 clone), the upstream pools and their nodes (with pool ids remapped to the
 new site), routes, the AI crawler policy, and the WAF / challenge / geo /
-bot-protection / rewrite / ip-access / cache / rate-limit configuration. The
-new site's status is **`paused`** — a clone that started serving immediately
-would silently double the source site's traffic.
+bot-protection / rewrite / ip-access / cache / rate-limit configuration —
+the WAF part includes the site's **custom rules and their rule-group
+assignments**, copied rule-for-rule into the clone's own groups (a
+previously missing piece). The new site's status is **`paused`** — a
+clone that started serving immediately would silently double the source
+site's traffic.
 
 Two things are deliberately **not** carried over. The forwarded-header
 trust (`trust_proxy_headers`, `trusted_proxy_ranges`,
@@ -794,11 +797,14 @@ Remove a route; matching traffic falls back to the default pool.
 
 ### GET /sites/{site_id}/ssl
 
-Get SSL configuration for a site.
+Get SSL configuration for a site. The response carries the same
+`http1_enabled` / `http2_enabled` protocol switches as
+[`ssl-settings`](#get-sitessite_idssl-settings), so a switch sent via
+`PUT /ssl` reads back from the same resource.
 
 ### PUT /sites/{site_id}/ssl
 
-Create or update SSL settings. `domain` is required; TLS switches (https, HSTS, mTLS, TLS versions) are shared with the ssl-settings endpoint.
+Create or update SSL settings. `domain` is required; TLS switches (https, HSTS, mTLS, TLS versions, `http1_enabled` / `http2_enabled`) are shared with the ssl-settings endpoint.
 
 **Request:**
 ```json
@@ -1847,6 +1853,24 @@ two are told apart by `waf_details`: a downgraded block ends with
 rule's own `rule_action=block`, so a monitor-mode site never looks like a site
 whose block rules silently stopped working.
 
+**`rule_id` is the rule that enforced the verdict.** When the rule that
+executed the block/challenge differs from the detection signature (for
+example, a log-only signature firing alongside a blocking rule), the
+enforcer is stored in `rule_id`; the detection signature is preserved on
+the agent→control-plane wire as `waf_rule_id`, with the enforcer in the
+additional `waf_enforced_rule_id` field (protobuf `LogEntry` field 57).
+Events with no single enforcing rule (anomaly-score gate, stage-1 critical
+fast path) keep the detection signature. Statistics and `rule_id` filters
+therefore match the rule that actually blocked — a log-only rule no longer
+appears as the blocker.
+
+**Rejects during an IP ban are events too.** A request refused because its
+client IP is currently banned writes a `security_events` row with
+`event_type = "defense"`, `rule_id = "ip_ban"`, `action = "block"` and a
+`waf_details` payload carrying the ban reason and the unblock time (or
+`never` for a permanent ban) — so probing that continues after a ban is
+visible in the event counts and analytics, not only in `access_logs`.
+
 **Response (200):** paginated `security_events` rows.
 
 ```json
@@ -2151,7 +2175,10 @@ Most requested paths.
 
 ### GET /analytics/status-codes
 
-Distribution of HTTP response codes.
+Distribution of HTTP response codes. This includes responses PingWAF itself
+produced: the `503` answers of a CC challenge are written to `access_logs`
+(with a mitigated marker), so a challenge storm shows up in the panel with
+the same counts the clients observed.
 
 ### GET /analytics/sites
 
@@ -2159,8 +2186,16 @@ Overview of all sites with request counts.
 
 ### GET /analytics/ai-crawlers
 
-Aggregated AI crawler traffic: one row per crawler family known to the
-catalogue, matched against the raw user agent recorded in `access_logs`.
+Aggregated AI crawler traffic: one row per crawler family that had matching
+traffic inside the window — rows are produced from `access_logs` by
+matching the recorded raw user agent against the catalogue, so a family
+with no requests in the window is absent rather than reported as zero.
+
+**Query Parameters:** `site_id`, `from`, `to` (ISO 8601), or the shorthand
+`range` with one of `24h` (default), `7d`, `30d` — `range` is converted to
+a `from`/`to` window identical to the explicit pair, and an explicit
+`from`/`to` takes precedence when both are given. An unknown `range` value
+answers `400 invalid_range` (it is never silently treated as 24 hours).
 
 ---
 
@@ -2188,13 +2223,18 @@ against the catalogue. Requires the `write` role.
 
 Render the generated file without saving. Returns `{ "mode",
 "content_type": "text/plain; charset=utf-8", "body" }`; `file` selects
-`robots` (default) or `llms`.
+`robots` (default) or `llms`. Any other value — a typo such as
+`?file=bogus` — is rejected with `400 unknown_file` instead of silently
+falling back to `robots`.
 
 ### GET /ai-crawl/catalog
 
-The 18 AI crawler families PingWAF recognises, each with `id`, `operator`,
+The 19 AI crawler families PingWAF recognises, each with `id`, `operator`,
 `name`, `category` (`training` / `search` / `agent` / `other`) and
-`ua_substrings`.
+`ua_substrings`. The 19th entry, added after the initial 18, is
+`facebookexternalhit` (Meta, category `other`) — the link-preview fetcher
+is its own family so it can be observed or allowed independently of the
+Meta-ExternalAgent training crawler.
 
 ---
 
@@ -3665,8 +3705,8 @@ snapshots and compare deltas for a live view.
   "total_cpu_ms": 48213.4,
   "total_elapsed_ms": 48213.4,
   "modules": [
-    { "module": "proxy",  "cpu_ms": 30102.1, "cpu_share": 0.62, "elapsed_ms": 30102.1, "elapsed_share": 0.62, "mem_bytes": 41943040, "mem_share": 0.55, "disk_bytes": 0,       "disk_share": 0.00, "calls": 102341, "avg_us": 294.1 },
-    { "module": "waf",    "cpu_ms": 11101.2, "cpu_share": 0.23, "elapsed_ms": 11101.2, "elapsed_share": 0.23, "mem_bytes": 8388608,  "mem_share": 0.11, "disk_bytes": 0,       "disk_share": 0.00, "calls": 98111,  "avg_us": 113.1 }
+    { "module": "proxy",  "cpu_ms": 30102.1, "cpu_share": 0.62, "elapsed_ms": 30102.1, "elapsed_share": 0.62, "mem_bytes": 41943040, "mem_share": 0.55, "mem_peak_bytes": 41943040, "mem_peak_share": 0.55, "disk_bytes": 0,       "disk_share": 0.00, "calls": 102341, "avg_us": 294.1 },
+    { "module": "waf",    "cpu_ms": 11101.2, "cpu_share": 0.23, "elapsed_ms": 11101.2, "elapsed_share": 0.23, "mem_bytes": 8388608,  "mem_share": 0.11, "mem_peak_bytes": 8388608,  "mem_peak_share": 0.11, "disk_bytes": 0,       "disk_share": 0.00, "calls": 98111,  "avg_us": 113.1 }
   ],
   "methods": [
     { "method": "waf::handle_request",  "cpu_ms": 9200.4, "elapsed_ms": 9200.4, "calls": 98111, "avg_us": 93.8 },
@@ -3681,7 +3721,13 @@ snapshots and compare deltas for a live view.
   wall-clock time (`total_cpu_ms` / `total_elapsed_ms`, always equal);
   `mem_bytes` is bytes the module currently reports as **held in memory**
   (reported, not intercepted — no allocator hook), with `mem_share` its share
-  of the total; `disk_bytes` / `disk_share` are the module's **on-disk**
+  of the total; `mem_peak_bytes` / `mem_peak_share` are the **high-water
+  mark** of that gauge since process start (or the last reset) and its share
+  of the sum of all modules' peaks. A released buffer drops `mem_bytes` to
+  `0` but keeps the peak, so a module sampled between reports still shows
+  what it held — a momentary `mem_bytes` of `0` therefore does **not** mean
+  "no memory": to find the memory-heavy modules, read the peak fields, not
+  the instantaneous ones; `disk_bytes` / `disk_share` are the module's **on-disk**
   footprint and its share — a separate figure reported only by the cache
   module (every other module reports `0`), so a file-backed cache no longer
   inflates the memory row. For the cache module `mem_bytes` is the on-disk
@@ -3723,25 +3769,60 @@ curl -k -H "Authorization: Bearer $TOKEN" \
 
 ---
 
+## Data-plane request boundaries
+
+The proxy edge (the data plane on the site ports, not the `/api/v1` control
+plane) rejects malformed request heads before any location matching, plugin
+execution or upstream contact:
+
+- **Missing `Host`** — an HTTP/1.1 (or later) request without a `Host`
+  header is answered `400`. The internal paths `/healthz`, `/ready` and
+  `/metrics` are exempt, and HTTP/1.0/0.9 requests without `Host` are still
+  allowed (per the RFC) and routed to the explicitly-configured default
+  site, producing a normal `request_id` and access-log row.
+- **Oversized header field** — a single header field (name + value) larger
+  than 8 KiB (`MAX_SINGLE_REQUEST_HEADER_BYTES`, mirroring nginx's default
+  `large_client_header_buffers` line size) is answered `431 Request Header
+  Fields Too Large`.
+- **Unknown method** — only the standard method set plus `PURGE` (GET,
+  HEAD, POST, PUT, DELETE, OPTIONS, PATCH, TRACE, CONNECT, PURGE) is
+  forwarded; anything else (e.g. `FOO`) is refused at the edge with
+  `405 Method Not Allowed` instead of being proxied verbatim.
+
+These responses are produced by the proxy itself; they do not appear in
+`/api/v1` error codes and do not consume an origin connection.
+
 ## Error Responses
 
-All errors follow a consistent format:
+**Every** `4xx`/`5xx` response from `/api/v1` follows one consistent format —
+including the framework-level rejections (bad query strings, malformed JSON
+bodies, unknown routes, wrong methods), which are rewritten into the same
+envelope while keeping their status codes:
 
 ```json
 {
   "error": {
     "code": "not_found",
-    "message": "Site not found"
+    "message": "no route matches /api/v1/ip-access-rules"
   }
 }
 ```
 
+Consumers should branch on `code`, not on parsing the `message` text. For a
+`404` the message echoes the **full** request path including the `/api/v1`
+prefix, so a wrong resource name can be grepped directly.
+
 | HTTP Status | Code | Description |
 |-------------|------|-------------|
 | 400 | `bad_request` | Invalid input |
+| 400 | `invalid_query` | Query string failed deserialization (e.g. `?page=abc`) |
+| 400 | `invalid_body` | Request body is not valid JSON for the endpoint's schema |
+| 400 | `unknown_file` | `ai-crawl/preview` `file` parameter is not `robots` or `llms` |
+| 400 | `invalid_range` | Analytics `range` parameter is not `24h`, `7d` or `30d` |
 | 401 | `unauthorized` | Missing or invalid token |
 | 403 | `forbidden` | Insufficient permissions |
-| 404 | `not_found` | Resource does not exist |
+| 404 | `not_found` | Resource or route does not exist (message contains the full `/api/v1` path) |
+| 405 | `method_not_allowed` | Method not supported by the route |
 | 409 | `conflict` | Duplicate resource |
 | 422 | `unprocessable_entity` | Validation failed by a business rule |
 | 429 | `too_many_requests` | Rate limited (passkey challenges) |

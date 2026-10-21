@@ -116,7 +116,7 @@ curl -k -H "Authorization: Bearer $TOKEN" \
   "total_cpu_ms": 48213.4,
   "total_elapsed_ms": 48213.4,
   "modules": [
-    { "module": "proxy",           "cpu_ms": 30102.1, "cpu_share": 0.62, "elapsed_ms": 30102.1, "elapsed_share": 0.62, "mem_bytes": 41943040, "mem_share": 0.55, "calls": 102341, "avg_us": 294.1 },
+    { "module": "proxy",           "cpu_ms": 30102.1, "cpu_share": 0.62, "elapsed_ms": 30102.1, "elapsed_share": 0.62, "mem_bytes": 41943040, "mem_share": 0.55, "mem_peak_bytes": 41943040, "mem_peak_share": 0.55, "calls": 102341, "avg_us": 294.1 },
     { "module": "waf",             "cpu_ms": 11101.2, "cpu_share": 0.23, "elapsed_ms": 11101.2, "elapsed_share": 0.23, "mem_bytes": 8388608,  "mem_share": 0.11, "calls": 98111,  "avg_us": 113.1 },
     { "module": "cache",           "cpu_ms": 4000.8,  "cpu_share": 0.08, "elapsed_ms": 4000.8,  "elapsed_share": 0.08, "mem_bytes": 15728640, "mem_share": 0.21, "calls": 44120,  "avg_us": 90.7 },
     { "module": "plugin",          "cpu_ms": 1500.1,  "cpu_share": 0.03, "elapsed_ms": 1500.1,  "elapsed_share": 0.03, "mem_bytes": 2097152,  "mem_share": 0.03, "calls": 30112,  "avg_us": 49.8 },
@@ -134,7 +134,7 @@ curl -k -H "Authorization: Bearer $TOKEN" \
   "methods": [
     { "method": "waf::handle_request",   "cpu_ms": 9200.4, "cpu_share": 0.19, "elapsed_ms": 9200.4, "elapsed_share": 0.19, "mem_bytes": 0,       "mem_share": 0.00, "calls": 98111, "avg_us": 93.8 },
     { "method": "proxy::request_filter", "cpu_ms": 7100.9, "cpu_share": 0.15, "elapsed_ms": 7100.9, "elapsed_share": 0.15, "mem_bytes": 0,       "mem_share": 0.00, "calls": 88430, "avg_us": 80.3 },
-    { "method": "waf::body_read",        "cpu_ms": 700.9,  "cpu_share": 0.01, "elapsed_ms": 700.9,  "elapsed_share": 0.01, "mem_bytes": 2097152, "mem_share": 1.00, "calls": 12000, "avg_us": 58.4 }
+    { "method": "waf::body_read",        "cpu_ms": 700.9,  "cpu_share": 0.01, "elapsed_ms": 700.9,  "elapsed_share": 0.01, "mem_bytes": 2097152, "mem_share": 1.00, "mem_peak_bytes": 2097152, "mem_peak_share": 1.00, "calls": 12000, "avg_us": 58.4 }
   ]
 }
 ```
@@ -152,7 +152,7 @@ curl -k -H "Authorization: Bearer $TOKEN" \
 
 - **模块**——进程的功能域记录在定长的原子数组中。每个被插桩的作用域用一次 `fetch_add` 把耗时累加进所属模块；响应中始终出现 14 个模块，顺序固定：`proxy`、`waf`、`cache`、`plugin`、`db`、`control`、`other`（尚未插桩的部分），随后是 WAF 阶段拆分行 `waf_normalize`、`waf_signature`、`waf_expression`、`waf_body`，以及 `log`、`agent`、`http_client`。方法行会累加进所属模块，同一模块内模块总数等于其方法之和；但四个 `waf_*` 阶段行**嵌套**在 `waf` 之内（`waf::handle_request` 的计时覆盖它们），阶段时间同时计入 `waf` 行，只能当作 `waf` 的拆分来看，不能与 `waf` 相加，否则各占比之和会超过 1。`waf` 行继续承接较老的打点，阶段行则指明 WAF 内部时间花在哪。
 - **方法**——具名调用点用 `timed_method` 计时。调用点集合是编译期静态枚举（见「[口径](#口径这些数字是什么不是什么)」），记账是每请求四次 relaxed 原子加（方法行两次、模块行两次）——无哈希查找、无分配。
-- **内存**——**上报**而非拦截。拥有大块结构的模块与方法会发布当前字节数，且每个方法行都带 `mem_bytes` / `mem_share`，仪表盘因此能说出模块内存背后的具体调用点。当前已确认的上报方：cache 后端（索引 + 在读缓冲）、WAF 请求体暂存（`waf::body_read`，同时填充 `waf_body` 模块行）、WAF 解码/归一化值（`waf_normalize`）、为日志条目缓冲的响应体前缀（`log`）。没有分配器钩子，因此适配任何分配器与任何平台。`mem_bytes` 是「当前**在内存中**持有的字节数」，不是累计分配量。
+- **内存**——**上报**而非拦截。拥有大块结构的模块与方法会发布当前字节数，且每个方法行都带 `mem_bytes` / `mem_share`，仪表盘因此能说出模块内存背后的具体调用点。当前已确认的上报方：cache 后端（索引 + 在读缓冲）、WAF 请求体暂存（`waf::body_read`，同时填充 `waf_body` 模块行）、WAF 解码/归一化值（`waf_normalize`）、为日志条目缓冲的响应体前缀（`log`）。没有分配器钩子，因此适配任何分配器与任何平台。`mem_bytes` 是「当前**在内存中**持有的字节数」，不是累计分配量。快照在当前值之外还维护一个**水位峰值**：`mem_peak_bytes` / `mem_peak_share`（在同一条热路径上用 relaxed `fetch_max` 更新——不加锁、无分配）记录该量表自进程启动或上次 reset 以来达到过的最大值，且回落到 0 后仍然保留。缓冲区释放后 `mem_bytes` 可能短暂为 `0`，所以瞬时 `0` 不等于「没有内存」——排查内存大户时应看峰值字段，而不是瞬时值。
 - **磁盘**——磁盘量表仍由 cache 后端在内部记录（磁盘配额沿用该数字），但**不再进入快照**：模块行与方法行只报内存。早先版本的 `disk_bytes` / `disk_share` 字段已移除——把文件系统的字节数并入模块表会诱发「cache 内存 ≈ cache 磁盘占用」的误读。详见「[cache 模块的内存与磁盘口径](#cache-模块的内存与磁盘口径)」。
 
 ### cache 模块的内存与磁盘口径
@@ -186,11 +186,13 @@ cache 插件的 `directory` 配置键决定缓存是文件后端还是内存后�
 | `modules[].cpu_ms` / `elapsed_ms` | 归因到该模块的累计**墙钟**耗时（毫秒）；两字段取值恒等 |
 | `modules[].cpu_share` / `elapsed_share` | 占总归因墙钟时间的比例，0.0–1.0 |
 | `modules[].mem_bytes` / `mem_share` | 模块当前上报**在内存中**持有的字节数，及其占总量的比例 |
+| `modules[].mem_peak_bytes` / `mem_peak_share` | 该量表自进程启动（或上次 reset）以来的峰值水位——当前值回落之后仍然保留——及其占全部模块峰值之和的比例（无任何模块上报过内存时为 `0.0`）。定位内存大户时应看峰值：瞬时 `mem_bytes` 为 `0` 可能只是缓冲区恰好在两次上报之间被释放 |
 | `modules[].calls` / `avg_us` | 计时操作次数与平均每次微秒数 |
 | `methods` | 方法行，最热在前，最多 40 行 |
 | `methods[].method` | 调用点名称（来自编译期静态枚举） |
 | `methods[].cpu_ms` / `elapsed_ms` / `calls` / `avg_us` | 与模块行语义相同 |
 | `methods[].mem_bytes` / `mem_share` | 该调用点当前上报持有的字节数，及其占**所属模块**内存的比例（不是占进程总量的比例；模块未上报内存时为 `0.0`） |
+| `methods[].mem_peak_bytes` / `mem_peak_share` | 该调用点量表的峰值水位（保留策略与模块峰值相同），及其占全部模块峰值之和的比例 |
 
 计数器**自进程启动起累计**（仅重启时清零），因此读法是「启动以来时间花在哪」，不是「此刻哪里最热」。要看实时情况，可间隔数秒取两次快照、比较 `elapsed_ms`（与 `cpu_ms` 同值）的差值——正差值最大的就是当前热点。通常值得关注的是 `waf`（规则求值）、`proxy`（上游转发）与 `cache`（缓存查找）。
 

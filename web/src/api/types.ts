@@ -198,6 +198,12 @@ export interface UpstreamPool {
   health_check_unhealthy_threshold: number
   /** Consecutive successful probes before a node is marked healthy. */
   health_check_healthy_threshold: number
+  /**
+   * Address family the agent may resolve this pool's origin names to:
+   * `auto` prefers IPv4, `ipv4`/`ipv6` pin one family. An IP literal origin
+   * ignores it. Mirrors the DB CHECK constraint (`auto|ipv4|ipv6`).
+   */
+  address_family: 'auto' | 'ipv4' | 'ipv6' | string
   is_default: boolean
   created_at: string
   /**
@@ -245,6 +251,23 @@ export interface SslConfig {
   acme_challenge_type: string | null
   acme_dns_provider: string | null
   acme_dns_config: unknown | null
+  /* ── TLS posture (read-write symmetric with `PUT /sites/{id}/ssl`) ── */
+  https_enabled: boolean
+  min_tls_version: TlsVersion | string
+  max_tls_version: TlsVersion | string | null
+  self_signed: boolean
+  certificate_id: string | null
+  mtls_enabled: boolean
+  has_mtls_client_ca: boolean
+  mtls_organization: string | null
+  mtls_require_client_cert: boolean
+  hsts_enabled: boolean
+  hsts_max_age: number
+  always_use_https: boolean
+  /** Serve HTTP/1.1 alongside HTTP/2 (default true). */
+  http1_enabled: boolean
+  /** Serve HTTP/2; multiplexes requests over one connection (default true). */
+  http2_enabled: boolean
   created_at: string
 }
 
@@ -344,12 +367,17 @@ export interface PoolHealthCheckFields {
   health_check_healthy_threshold?: number
 }
 
+/** The `address_family` values the API accepts (`api::sites::normalize_address_family`). */
+export type AddressFamily = 'auto' | 'ipv4' | 'ipv6'
+
 export interface CreatePoolRequest extends PoolHealthCheckFields {
   name: string
   lb_algorithm?: string
   sni?: string | null
   /** Omitted = follow `origin_settings.verify_cert`. */
   verify_cert?: boolean | null
+  /** Omitted = `auto` (server default: prefer IPv4). */
+  address_family?: AddressFamily | string
 }
 
 export interface UpdatePoolRequest extends PoolHealthCheckFields {
@@ -363,6 +391,8 @@ export interface UpdatePoolRequest extends PoolHealthCheckFields {
    * boolean pins it.
    */
   verify_cert?: boolean | null
+  /** Omitted leaves the stored family alone; unknown values are rejected (400). */
+  address_family?: AddressFamily | string
 }
 
 export interface CreateRouteRequest {

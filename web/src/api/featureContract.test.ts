@@ -98,7 +98,9 @@ describe('profile module memory column contract', () => {
     expect(api).toMatch(/mem_bytes: number/)
     const table = read('src/components/system/ModuleTable.tsx')
     expect(table).not.toContain("t('system.disk')")
-    expect(table).toContain("t('system.notReported')")
+    // The table may pass a fallback as the second argument, so match the call
+    // prefix rather than the exact string.
+    expect(table).toMatch(/t\('system\.notReported'/)
     const methods = read('src/components/system/MethodTable.tsx')
     expect(methods).toContain("t('system.held')")
     expect(methods).toContain("t('system.memShare')")

@@ -17,6 +17,7 @@
 //! anything on the request path.
 
 use axum::extract::{Path, Query, State};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Json;
 use axum::Router;
@@ -498,7 +499,7 @@ async fn preview(
     current: AuthUser,
     Path(site_id): Path<String>,
     Query(query): Query<PreviewQuery>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let id = parse_uuid(&site_id, "site id")?;
     let site = load_site_read(&state.db, id, &current).await?;
     let settings = load_settings(&state.db, id).await?;
@@ -509,10 +510,19 @@ async fn preview(
         .await
         .unwrap_or_default();
 
-    let want_llms = query
-        .file
-        .as_deref()
-        .is_some_and(|value| value.eq_ignore_ascii_case("llms"));
+    // `file` defaults to robots; anything other than robots/llms is a client
+    // error with the contract's `unknown_file` code (C1/L4-007), not a silent
+    // fallback to robots — a typo would otherwise preview the wrong file.
+    let want_llms = match resolve_preview_file(query.file.as_deref()) {
+        Ok(want_llms) => want_llms,
+        Err(value) => {
+            return Ok(crate::api::contract_error(
+                axum::http::StatusCode::BAD_REQUEST,
+                "unknown_file",
+                format!("unknown file '{value}' (allowed: robots, llms)"),
+            ));
+        },
+    };
     let (mode, body) = if want_llms {
         (
             settings.llms_mode.clone(),
@@ -528,7 +538,20 @@ async fn preview(
         "mode": mode,
         "content_type": "text/plain; charset=utf-8",
         "body": body,
-    })))
+    }))
+    .into_response())
+}
+
+/// Resolves the preview `file` parameter (C1/L4-007): `Ok(false)` is robots —
+/// the default when absent — `Ok(true)` is llms, and `Err` carries the value
+/// a caller must see rejected as 400 `unknown_file`.
+fn resolve_preview_file(raw: Option<&str>) -> Result<bool, String> {
+    match raw.map(str::trim) {
+        None | Some("") => Ok(false),
+        Some(value) if value.eq_ignore_ascii_case("robots") => Ok(false),
+        Some(value) if value.eq_ignore_ascii_case("llms") => Ok(true),
+        Some(value) => Err(value.to_string()),
+    }
 }
 
 /// Validates a file mode.
@@ -874,5 +897,26 @@ mod tests {
         assert!(
             check_body(&"x".repeat(MAX_FILE_BYTES + 1), "robots_body").is_err()
         );
+    }
+
+    /// C1/L4-007: the preview `file` parameter defaults to robots and only
+    /// accepts robots/llms; anything else must be reported (the handler turns
+    /// the `Err` into a 400 `unknown_file`) rather than silently previewing
+    /// robots for a typo.
+    #[test]
+    fn the_preview_file_parameter_accepts_robots_llms_and_nothing_else() {
+        assert_eq!(Ok(false), resolve_preview_file(None));
+        assert_eq!(Ok(false), resolve_preview_file(Some("")));
+        assert_eq!(Ok(false), resolve_preview_file(Some("robots")));
+        assert_eq!(Ok(false), resolve_preview_file(Some(" ROBOTS ")));
+        assert_eq!(Ok(true), resolve_preview_file(Some("llms")));
+        assert_eq!(Ok(true), resolve_preview_file(Some("LLMS")));
+        for bogus in ["bogus", "robots.txt", "llms.txt", "sitemap", ".."] {
+            assert_eq!(
+                Err(bogus.trim().to_string()),
+                resolve_preview_file(Some(bogus)),
+                "{bogus:?} must be rejected"
+            );
+        }
     }
 }

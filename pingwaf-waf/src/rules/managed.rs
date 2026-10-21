@@ -28,6 +28,46 @@ struct ManagedSpec {
     tags: &'static [&'static str],
 }
 
+/// Expression of the php2shell (CVE-2026-109618 / CVE-2026-109619) probe rule.
+///
+/// The vulnerability is a use-after-free in PHP's own multipart parser, so
+/// there is no payload signature to match. What is matchable is the request
+/// shape `session.upload_progress` requires: a progress field on a multipart
+/// body, a well-formed session id, and — for the session-file-write variant —
+/// a NUL byte right after the part headers.
+///
+/// Both condition groups share the same prefix, so it is built once here
+/// rather than copied. The media type is matched case-insensitively (`(?i)`):
+/// RFC 2045 makes type/subtype case-insensitive on the wire, while the
+/// `contains` operator is a byte-exact substring test, so `MULTIPART/FORM-DATA`
+/// would otherwise walk straight past the rule. The progress field name stays
+/// case-sensitive on purpose — PHP compares it byte-exactly against
+/// `session.upload_progress.name`, so folding case would only add false
+/// positives.
+fn php_upload_progress_expression() -> String {
+    let prefix = concat!(
+        r#"http.request.body contains "PHP_SESSION_UPLOAD_PROGRESS" and "#,
+        r#"http.request.headers["content-type"] matches "(?i)multipart/form-data""#,
+    );
+    // Plain concatenation, not `format!`: the regex bodies are full of `{n,m}`
+    // quantifiers that `format!` would read as placeholders.
+    [
+        "(",
+        prefix,
+        " and (",
+        r#"http.request.cookies["PHPSESSID"] matches "^[0-9A-Za-z,-]{16,256}$""#,
+        r#" or http.request.body matches 'name="PHPSESSID"[^\x0d\x0a]*"#,
+        r#"\x0d\x0a([^\x0d\x0a]+\x0d\x0a)*\x0d\x0a[0-9A-Za-z,-]{16,256}'"#,
+        r#" or http.request.uri.query matches 'PHPSESSID=[0-9A-Za-z,-]{16,256}'))"#,
+        " or (",
+        prefix,
+        " and ",
+        r#"http.request.body matches 'Content-Disposition:\s*form-data;\s*name="[^"]+"#,
+        r#"\x0d\x0a([^\x0d\x0a]+\x0d\x0a)*\x0d\x0a[\s\S]{0,32}\x00')"#,
+    ]
+    .concat()
+}
+
 /// Returns the built-in managed rule set for the requested level. Rules that
 /// fail to parse are silently skipped (logged at warn level) so a typo in one
 /// default never breaks engine startup.
@@ -203,6 +243,30 @@ pub fn default_managed_rules(level: WafLevel) -> Vec<CompiledRule> {
             strict_only: true,
             tags: &["rce", "anomaly"],
         },
+        ManagedSpec {
+            id: "PINGWAF-1070",
+            // php2shell (CVE-2026-109618 / CVE-2026-109619): see
+            // [`php_upload_progress_expression`] for what the rule matches and
+            // why the media type is folded but the field name is not.
+            //
+            // Strict-only, and deliberately so. Two independent switches feed
+            // `http.request.body`: the site-level `advanced_mode` (which also
+            // selects Strict — the control-plane path) and the plugin-level
+            // `inspect_body` key (standalone TOML deployments, which may stay
+            // Normal). Being Strict-only keeps the rule out of every Normal
+            // engine, so a standalone deployment that turns on `inspect_body`
+            // alone does not get it — an accepted coverage gap, traded for
+            // keeping the false-positive surface to sites that already inspect
+            // bodies.
+            name: "Block PHP session upload-progress exploit probes (CVE-2026-109618/109619)",
+            expression: php_upload_progress_expression(),
+            action: RuleAction::Block,
+            severity: 5,
+            paranoia_level: 2,
+            stacks: StackSet::GENERIC.union(StackSet::PHP),
+            strict_only: true,
+            tags: &["php", "upload-progress", "cve-2026-109618", "rce"],
+        },
     ];
 
     let mut out = Vec::with_capacity(specs.len());
@@ -233,7 +297,7 @@ pub fn default_managed_rules(level: WafLevel) -> Vec<CompiledRule> {
 
 /// Rule ids of the built-in managed set, in spec-table order. Serves as the
 /// write-side whitelist for per-site "monitor this managed rule" settings.
-pub const MANAGED_RULE_IDS: [&str; 14] = [
+pub const MANAGED_RULE_IDS: [&str; 15] = [
     "PINGWAF-1001",
     "PINGWAF-1002",
     "PINGWAF-1003",
@@ -248,6 +312,7 @@ pub const MANAGED_RULE_IDS: [&str; 14] = [
     "PINGWAF-1050",
     "PINGWAF-1051",
     "PINGWAF-1061",
+    "PINGWAF-1070",
 ];
 
 /// Dashboard-facing metadata for one managed rule.
@@ -368,6 +433,34 @@ mod tests {
             .unwrap_or_else(|| panic!("{id} missing"))
     }
 
+    /// Evaluation context for body/header/cookie-oriented rules.
+    fn request_ctx<'a>(
+        body: Option<&'a str>,
+        headers: &'a [(String, String)],
+        cookies: &'a [(String, String)],
+    ) -> EvalContext<'a> {
+        EvalContext {
+            body,
+            headers,
+            cookies,
+            ..score_ctx(0, 0, 0, 0)
+        }
+    }
+
+    fn content_type_header() -> Vec<(String, String)> {
+        vec![(
+            "content-type".to_string(),
+            "multipart/form-data; boundary=----Boundary".to_string(),
+        )]
+    }
+
+    fn session_cookie() -> Vec<(String, String)> {
+        vec![(
+            "PHPSESSID".to_string(),
+            "abcdefghijklmnopqrstuvwxyz".to_string(),
+        )]
+    }
+
     #[test]
     fn all_managed_rules_compile() {
         let rules = default_managed_rules(WafLevel::Normal);
@@ -423,7 +516,7 @@ mod tests {
             assert!(!entry.name.is_empty());
             assert!((1..=5).contains(&entry.severity));
         }
-        assert_eq!(normal.len(), MANAGED_RULE_IDS.len() - 1);
+        assert_eq!(normal.len(), MANAGED_RULE_IDS.len() - 2);
 
         // `strict_only` is exactly the Normal-level set difference.
         let normal_ids: std::collections::HashSet<&str> =
@@ -437,9 +530,10 @@ mod tests {
             );
         }
         assert!(strict.iter().any(|e| e.strict_only));
-        assert!(strict
-            .iter()
-            .all(|e| e.strict_only == (e.id == "PINGWAF-1061")));
+        assert!(strict.iter().all(|e| {
+            e.strict_only
+                == matches!(e.id.as_str(), "PINGWAF-1061" | "PINGWAF-1070")
+        }));
     }
 
     #[test]
@@ -458,6 +552,7 @@ mod tests {
             ("PINGWAF-1003", "xss"),
             ("PINGWAF-1050", "rce"),
             ("PINGWAF-1061", "rce"),
+            ("PINGWAF-1070", "rce"),
         ] {
             assert_eq!(by_id(id).category.as_deref(), Some(category), "{id}");
         }
@@ -467,6 +562,7 @@ mod tests {
             "PINGWAF-1003",
             "PINGWAF-1050",
             "PINGWAF-1061",
+            "PINGWAF-1070",
         ];
         for entry in &strict {
             assert_eq!(
@@ -476,5 +572,126 @@ mod tests {
                 entry.id
             );
         }
+    }
+
+    #[test]
+    fn php_upload_progress_rule_blocks_session_probe() {
+        let strict = default_managed_rules(WafLevel::Strict);
+        let rule = find(&strict, "PINGWAF-1070");
+        assert_eq!(rule.action, RuleAction::Block);
+        assert_eq!(rule.severity, 5);
+        assert_eq!(rule.paranoia_level, 2);
+        assert_eq!(
+            rule.stacks,
+            StackSet::GENERIC.union(StackSet::PHP),
+            "PHP-scoped, generic payloads kept"
+        );
+        // Strict-only: the rule is absent from every Normal engine (see the
+        // spec comment for why that is a deliberate trade-off).
+        assert!(
+            default_managed_rules(WafLevel::Normal)
+                .iter()
+                .all(|r| r.id != "PINGWAF-1070")
+        );
+
+        let ct = content_type_header();
+        let cookie = session_cookie();
+        let progress = concat!(
+            "------Boundary\r\n",
+            "Content-Disposition: form-data; name=\"PHP_SESSION_UPLOAD_PROGRESS\"",
+            "\r\n\r\nx\r\n------Boundary\r\n",
+            "Content-Disposition: form-data; name=\"f\"; filename=\"a.txt\"",
+            "\r\n\r\nAAAA\r\n------Boundary--\r\n",
+        );
+
+        // 1. progress field + a well-formed session id in the cookie.
+        assert!(evaluate(
+            &rule.expression,
+            &request_ctx(Some(progress), &ct, &cookie)
+        ));
+
+        // 2. the same session id carried as a multipart field instead.
+        let as_field = concat!(
+            "------Boundary\r\n",
+            "Content-Disposition: form-data; name=\"PHP_SESSION_UPLOAD_PROGRESS\"",
+            "\r\n\r\nx\r\n------Boundary\r\n",
+            "Content-Disposition: form-data; name=\"PHPSESSID\"\r\n\r\n",
+            "abcdefghijklmnopqrstuvwxyz\r\n------Boundary--\r\n",
+        );
+        assert!(evaluate(
+            &rule.expression,
+            &request_ctx(Some(as_field), &ct, &[])
+        ));
+
+        // 3. session-file write shape: NUL within 32 bytes of the part headers.
+        let nul = concat!(
+            "------Boundary\r\n",
+            "Content-Disposition: form-data; name=\"PHP_SESSION_UPLOAD_PROGRESS\"",
+            "\r\n\r\n<?php echo 1;?>\u{0}\r\n------Boundary--\r\n",
+        );
+        assert!(evaluate(
+            &rule.expression,
+            &request_ctx(Some(nul), &ct, &cookie)
+        ));
+
+        // 4. header stage: no body yet, so the operand is Missing.
+        assert!(!evaluate(
+            &rule.expression,
+            &request_ctx(None, &ct, &cookie)
+        ));
+
+        // 5. progress field with neither a session id nor the NUL shape.
+        assert!(!evaluate(
+            &rule.expression,
+            &request_ctx(Some(progress), &ct, &[])
+        ));
+
+        // 6. an upload that carries no progress field never reaches the
+        // second conjunct.
+        let benign = concat!(
+            "------Boundary\r\n",
+            "Content-Disposition: form-data; name=\"file\"; filename=\"p.jpg\"\r\n",
+            "Content-Type: image/jpeg\r\n\r\nJFIF\r\n------Boundary--\r\n",
+        );
+        assert!(!evaluate(
+            &rule.expression,
+            &request_ctx(Some(benign), &ct, &cookie)
+        ));
+
+        // 7. the media type is matched case-insensitively: `contains` would
+        // let `MULTIPART/FORM-DATA` (legal on the wire) walk past.
+        let uppercase_ct = vec![(
+            "content-type".to_string(),
+            "MULTIPART/FORM-DATA; boundary=----Boundary".to_string(),
+        )];
+        assert!(evaluate(
+            &rule.expression,
+            &request_ctx(Some(progress), &uppercase_ct, &cookie)
+        ));
+
+        // 8. a non-multipart body is never the upload-progress shape.
+        let urlencoded_ct = vec![(
+            "content-type".to_string(),
+            "application/x-www-form-urlencoded".to_string(),
+        )];
+        assert!(!evaluate(
+            &rule.expression,
+            &request_ctx(Some(progress), &urlencoded_ct, &cookie)
+        ));
+
+        // 9. a session id shorter than PHP's minimum is not the shape either.
+        let short_cookie = vec![("PHPSESSID".to_string(), "abc".to_string())];
+        assert!(!evaluate(
+            &rule.expression,
+            &request_ctx(Some(progress), &ct, &short_cookie)
+        ));
+
+        // 10. accepted false positive: an application that genuinely drives
+        // PHP's upload-progress feature looks identical to the probe — the
+        // rule cannot tell them apart, which is why per-rule monitor exists.
+        assert!(evaluate(
+            &rule.expression,
+            &request_ctx(Some(progress), &ct, &cookie)
+        ));
     }
 }

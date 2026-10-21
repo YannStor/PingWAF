@@ -12,6 +12,7 @@ import { sitesApi, siteKeys } from '@/api/sites'
 import { errorMessage } from '@/api/errors'
 import type { CreatePoolRequest, UpdatePoolRequest, UpstreamPool } from '@/api/types'
 import {
+  ADDRESS_FAMILY_OPTIONS,
   emptyPoolForm,
   isHashKeyType,
   LB_OPTION_KEYS,
@@ -20,6 +21,7 @@ import {
   validatePoolHealthCheck,
   verifyCertPayload,
   VERIFY_CERT_OPTIONS,
+  type AddressFamilyOption,
   type PoolFormState,
   type VerifyCertMode,
 } from './types'
@@ -122,6 +124,7 @@ export function PoolDialog({
           lb_algorithm: lbAlgorithm,
           sni: sni ?? '',
           verify_cert: sni ? verifyCertPayload(form.verifyCert) : null,
+          address_family: form.addressFamily,
           ...healthCheck,
         },
       })
@@ -134,6 +137,7 @@ export function PoolDialog({
         lb_algorithm: lbAlgorithm,
         sni,
         verify_cert: sni ? verifyCertPayload(form.verifyCert) : null,
+        address_family: form.addressFamily,
         ...healthCheck,
       },
     })
@@ -221,6 +225,23 @@ export function PoolDialog({
             setForm((f) => ({
               ...f,
               verifyCert: e.target.value as VerifyCertMode,
+            }))
+          }
+        />
+        {/* Which address family the agent resolves origin names to — pins
+            IPv4 or IPv6 for origins reachable on only one stack. */}
+        <Select
+          label={t('pages.basic.addressFamily', 'Address family')}
+          value={form.addressFamily}
+          hint={t('pages.basic.addressFamilyHint', 'auto prefers IPv4')}
+          options={ADDRESS_FAMILY_OPTIONS.map((o) => ({
+            value: o.value,
+            label: t(o.labelKey, o.value),
+          }))}
+          onChange={(e) =>
+            setForm((f) => ({
+              ...f,
+              addressFamily: e.target.value as AddressFamilyOption,
             }))
           }
         />

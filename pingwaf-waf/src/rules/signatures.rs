@@ -1968,11 +1968,23 @@ impl SignatureEngine {
         }
         for m in self.aho.find_iter(haystack) {
             let pid = m.pattern().as_u32();
+            // SSRF IP-literal needles are boundary-anchored: version strings
+            // such as `Chrome/120.0.0.0` contain `0.0.0.0` as a substring,
+            // and a raw `contains` hit there flooded the event stream with
+            // false positives (L3-003). A real SSRF target appears in a URL
+            // or host position — the neighbouring byte is never another
+            // digit or dot.
+            let p = &self.patterns[pid as usize];
+            if p.category == AttackCategory::Ssrf
+                && p.needle.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+                && !ip_literal_boundary_ok(haystack, m.start(), m.end())
+            {
+                continue;
+            }
             if seen.contains(&pid) {
                 continue;
             }
             seen.push(pid);
-            let p = &self.patterns[pid as usize];
             hits.push(SignatureHit {
                 pattern: pid,
                 category: p.category,
@@ -1994,6 +2006,19 @@ impl SignatureEngine {
     pub fn scan_top(&self, haystack: &str) -> Option<SignatureHit> {
         self.scan(haystack).into_iter().max_by_key(|h| h.severity)
     }
+}
+
+/// Boundary check for an IP-literal SSRF needle match (L3-003): the bytes
+/// immediately before and after the match must not extend the numeric-dot
+/// run, otherwise the needle is a fragment of a longer number (a software
+/// version like `120.0.0.0`, an octet of a different address) rather than a
+/// standalone IP target in a URL/host position.
+fn ip_literal_boundary_ok(haystack: &str, start: usize, end: usize) -> bool {
+    let bytes = haystack.as_bytes();
+    let extends = |i: usize| -> bool {
+        matches!(bytes.get(i), Some(b'0'..=b'9') | Some(b'.'))
+    };
+    (start == 0 || !extends(start - 1)) && (end >= bytes.len() || !extends(end))
 }
 
 // ---------------------------------------------------------------------------
@@ -3162,6 +3187,39 @@ mod tests {
         let e = SignatureEngine::new();
         let hits = e.scan("http://169.254.169.254/latest/meta-data/");
         assert!(hits.iter().any(|h| e.pattern_id(h.pattern) == "SSRF-001"));
+    }
+
+    /// L3-003: SSRF IP-literal needles stay anchored to URL/host positions —
+    /// positive samples (≥4) still fire, browser version strings do not.
+    #[test]
+    fn ssrf_ip_literals_are_boundary_anchored() {
+        let e = SignatureEngine::new();
+        let hit_ids = |s: &str| -> Vec<String> {
+            e.scan(s)
+                .iter()
+                .map(|h| e.pattern_id(h.pattern).to_string())
+                .collect()
+        };
+        // Positive samples: real SSRF targets in URL position keep firing.
+        assert!(hit_ids("http://0.0.0.0/").contains(&"SSRF-006".to_string()));
+        assert!(hit_ids("http://127.0.0.1/").contains(&"SSRF-005".to_string()));
+        assert!(hit_ids("http://169.254.169.254/")
+            .contains(&"SSRF-001".to_string()));
+        assert!(hit_ids("http://[::1]/").contains(&"SSRF-004".to_string()));
+        // A port suffix does not break the trailing boundary.
+        assert!(hit_ids("http://127.0.0.1:8080/admin")
+            .contains(&"SSRF-005".to_string()));
+        // Negative samples: browser version strings embed the needle as a
+        // numeric fragment — no SSRF signature may fire on them.
+        assert!(hit_ids("Mozilla/5.0 (Macintosh) Chrome/120.0.0.0").is_empty());
+        assert!(hit_ids(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+             AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+        )
+        .is_empty());
+        assert!(
+            hit_ids("Mozilla/5.0 Chrome/120.0.0.0 Safari/537.36").is_empty()
+        );
     }
 
     #[test]

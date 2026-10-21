@@ -2088,7 +2088,18 @@ fn security_event_row(
             .unwrap_or_else(|| "GET".to_string())),
         host: Set(truncate(&entry.host, MAX_HOST)),
         path: Set(optional(&entry.path)),
-        rule_id: Set(truncate(&entry.waf_rule_id, MAX_RULE_ID)),
+        // The engine reports both the detection signature and, when they
+        // differ, the rule that actually enforced the block. Statistics and
+        // `rule_id` filters must key on the enforcer: recording the signature
+        // made a log-only rule look like the blocker (L3-006).
+        rule_id: Set(truncate(
+            if entry.waf_enforced_rule_id.is_empty() {
+                &entry.waf_rule_id
+            } else {
+                &entry.waf_enforced_rule_id
+            },
+            MAX_RULE_ID,
+        )),
         rule_name: Set(truncate(&entry.waf_rule_name, MAX_RULE_NAME)),
         event_type: Set(optional(&entry.waf_event_type)),
         action: Set(truncate(waf_action, MAX_ACTION)

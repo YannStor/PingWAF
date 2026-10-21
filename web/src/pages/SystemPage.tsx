@@ -122,7 +122,13 @@ export function SystemPage() {
 
       <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
         <Card>
-          <CardHeader title={t('system.modules')} />
+          <CardHeader
+            title={t('system.modules')}
+            description={t(
+              'system.samplingHint',
+              '内存列为当前持有值（0 表示尚未上报，—/peak 为峰值口径）；各占比为占所属模块/全部归因时间的比例，子阶段份额不应相加。',
+            )}
+          />
           <CardBody>
             {profile.isError ? (
               <ErrorState

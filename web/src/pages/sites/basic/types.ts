@@ -65,6 +65,26 @@ export function verifyCertPayload(mode: VerifyCertMode): boolean | null {
   return mode === 'verify'
 }
 
+/* ── Address family ───────────────────────────────────────────────── */
+
+/**
+ * Address family the agent may resolve a pool's origin names to.
+ * `auto` prefers IPv4, `ipv4`/`ipv6` pin one family; mirrors the DB
+ * CHECK constraint (`auto|ipv4|ipv6`).
+ */
+export const ADDRESS_FAMILY_OPTIONS = [
+  { value: 'auto', labelKey: 'pages.basic.addressFamilyOptions.auto' },
+  { value: 'ipv4', labelKey: 'pages.basic.addressFamilyOptions.ipv4' },
+  { value: 'ipv6', labelKey: 'pages.basic.addressFamilyOptions.ipv6' },
+] as const
+
+export type AddressFamilyOption = (typeof ADDRESS_FAMILY_OPTIONS)[number]['value']
+
+/** Normalizes a stored family to a form value; unknown data falls back to `auto`. */
+export function addressFamilyValue(raw: string | undefined | null): AddressFamilyOption {
+  return raw === 'ipv4' || raw === 'ipv6' ? raw : 'auto'
+}
+
 /* ── Form state ───────────────────────────────────────────────────── */
 
 export interface PoolFormState {
@@ -74,6 +94,7 @@ export interface PoolFormState {
   httpsOrigin: boolean
   sni: string
   verifyCert: VerifyCertMode
+  addressFamily: AddressFamilyOption
   healthCheckEnabled: boolean
   /** Kept as strings: raw input, validated on submit. */
   healthCheckPath: string
@@ -90,6 +111,7 @@ export const emptyPoolForm = (): PoolFormState => ({
   httpsOrigin: false,
   sni: '',
   verifyCert: 'inherit',
+  addressFamily: 'auto',
   healthCheckEnabled: false,
   healthCheckPath: '/healthz',
   healthCheckInterval: '10',
@@ -107,6 +129,7 @@ export function poolFormFromPool(pool: UpstreamPool): PoolFormState {
     httpsOrigin: Boolean(pool.sni),
     sni: pool.sni ?? '',
     verifyCert: verifyCertMode(pool.verify_cert),
+    addressFamily: addressFamilyValue(pool.address_family),
     healthCheckEnabled: pool.health_check_enabled,
     healthCheckPath: pool.health_check_path || '/healthz',
     healthCheckInterval: String(pool.health_check_interval_seconds),

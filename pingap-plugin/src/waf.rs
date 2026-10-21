@@ -2031,6 +2031,101 @@ fn emit_generated_access(
     );
 }
 
+/// Emits the access entry for a response the standalone challenge plugin
+/// answered itself (L3-005). The regular WAF pipeline registers the pending
+/// access facts itself, but the challenge plugin can respond on a request
+/// whose facts were never registered — without this the 503/403 it served
+/// never appeared in `analytics/status-codes`. Reuses an existing pending
+/// entry when the WAF plugin already made one; otherwise rebuilds the facts
+/// from the session.
+/// Emits the access-log entry for a response the challenge plugin generated.
+///
+/// `site_id` here is the **host** the challenge engine binds its clearance
+/// cookie to, not the site UUID: the challenge plugin only knows the host, and
+/// the cookie's `site_id` claim has always been the host. The control plane
+/// parses it as a UUID, so challenge rows land in `access_logs` with a NULL
+/// `site_id` (visible globally, absent from per-site views). Passing the host
+/// is therefore intentional and must not be "fixed" by inventing a UUID;
+/// closing that gap needs the host→site mapping on the control plane.
+pub(crate) fn emit_challenge_access(
+    session: &Session,
+    ctx: &Ctx,
+    site_id: &str,
+    client_ip: &str,
+    response: &HttpResponse,
+) {
+    let Some(agent) = PingWafAgent::instance() else {
+        return;
+    };
+    let Some(request_id) = ctx.state.request_id.clone() else {
+        return;
+    };
+    if PENDING_ACCESS.contains_key(&request_id) {
+        emit_generated_access(Some(&agent), &request_id, response);
+        return;
+    }
+    let req_header = session.req_header();
+    let mut headers: Vec<(String, String)> = Vec::new();
+    let mut user_agent = String::new();
+    let mut referer = String::new();
+    for (name, value) in req_header.headers.iter() {
+        let Ok(v) = value.to_str() else {
+            continue;
+        };
+        match name.as_str() {
+            "user-agent" => user_agent = v.to_string(),
+            "referer" => referer = v.to_string(),
+            _ => {},
+        }
+        headers.push((name.as_str().to_string(), v.to_string()));
+    }
+    let scheme = if ctx.conn.tls_version.is_some() {
+        "https"
+    } else {
+        "http"
+    };
+    let protocol = match req_header.version {
+        Version::HTTP_09 => "HTTP/0.9",
+        Version::HTTP_10 => "HTTP/1.0",
+        Version::HTTP_11 => "HTTP/1.1",
+        Version::HTTP_2 => "HTTP/2.0",
+        Version::HTTP_3 => "HTTP/3.0",
+        _ => "HTTP/1.1",
+    };
+    let pending = PendingAccess {
+        site_id: site_id.to_string(),
+        client_ip: client_ip.to_string(),
+        method: req_header.method.as_str().to_string(),
+        scheme: scheme.to_string(),
+        protocol: protocol.to_string(),
+        host: get_host(req_header).unwrap_or_default(),
+        path: req_header.uri.path().to_string(),
+        query: req_header.uri.query().unwrap_or_default().to_string(),
+        user_agent,
+        referer,
+        tls_version: ctx
+            .conn
+            .tls_version
+            .clone()
+            .unwrap_or_default()
+            .to_string(),
+        country_code: String::new(),
+        request_headers: cap_headers(
+            headers
+                .iter()
+                .map(|(name, value)| (name.clone(), value.as_str())),
+        ),
+        request_body: None,
+        request_body_size: 0,
+        request_body_truncated: false,
+        body_limit: log_body_limit(),
+        response: None,
+        start: Instant::now(),
+    };
+    PENDING_ACCESS.insert(request_id.clone(), pending);
+    emit_generated_access(Some(&agent), &request_id, response);
+}
+
 /// Header the WAF and every other edge defence stamps on a response they
 /// generated, so a visitor (or the site owner reading a report) can tell a
 /// PingWAF block from an upstream 403 that happens to carry the same status
@@ -2495,6 +2590,10 @@ impl WafPlugin {
             path: request_data.path.clone(),
             query_string: request_data.query.clone(),
             rule_id: verdict.matched_rules.first().cloned().unwrap_or_default(),
+            enforced_rule_id: verdict
+                .enforced_rule_id
+                .clone()
+                .unwrap_or_default(),
             rule_name: rule_name.to_string(),
             event_type: event_type.to_string(),
             action: action_str(&verdict.action).to_string(),
@@ -2537,6 +2636,7 @@ impl WafPlugin {
                 .then(|| rule_id.to_string())
                 .into_iter()
                 .collect(),
+            enforced_rule_id: None,
             details: detail.to_string(),
             breakdown: ScoreBreakdown::clean(),
         };
@@ -2549,6 +2649,54 @@ impl WafPlugin {
             rule_name,
             event_type,
         );
+    }
+
+    /// Records a refusal served because the client IP sits under an active
+    /// dynamic ban (L3-002). Written directly rather than through the
+    /// verdict pipeline: no detection ran — an existing decision is being
+    /// enforced. The detail names the ban reason and when the ban lifts.
+    fn log_ip_ban_event(
+        agent: &PingWafAgent,
+        site_id: &str,
+        request_id: &str,
+        host: &str,
+        request_data: &RequestData,
+        reason: &str,
+    ) {
+        agent.record_request(true);
+        let unblocks_at =
+            match agent.blocked_expires_at(site_id, &request_data.client_ip) {
+                Some(Some(at)) => format!("; unblocks_at={}", at.to_rfc3339()),
+                Some(None) => "; unblocks_at=never (permanent)".to_string(),
+                None => String::new(),
+            };
+        agent.log_security_event(SecurityEvent {
+            site_id: site_id.to_string(),
+            request_id: request_id.to_string(),
+            client_ip: request_data.client_ip.clone(),
+            method: request_data.method.clone(),
+            scheme: request_data.scheme.clone(),
+            protocol: request_data.protocol.clone(),
+            host: host.to_string(),
+            path: request_data.path.clone(),
+            query_string: request_data.query.clone(),
+            rule_id: "ip_ban".to_string(),
+            enforced_rule_id: String::new(),
+            rule_name: "Dynamic IP ban".to_string(),
+            event_type: "defense".to_string(),
+            action: "block".to_string(),
+            score: 0,
+            details: format!("ip banned: {reason}{unblocks_at}"),
+            response_status: 403,
+            user_agent: request_data
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default(),
+            country_code: request_data.country_code.clone().unwrap_or_default(),
+            matched_tags: Vec::new(),
+        });
     }
 
     /// Reports a fail-closed refusal. No rule produced this decision — the
@@ -2574,6 +2722,7 @@ impl WafPlugin {
             path: request_data.path.clone(),
             query_string: request_data.query.clone(),
             rule_id: String::new(),
+            enforced_rule_id: String::new(),
             rule_name: String::new(),
             event_type: "fail_closed".to_string(),
             action: "block".to_string(),
@@ -2614,6 +2763,7 @@ impl WafPlugin {
             },
             score: 0,
             matched_rules: vec![denial.rule_id.clone()],
+            enforced_rule_id: Some(denial.rule_id.clone()),
             details: denial.detail.clone(),
             breakdown: ScoreBreakdown::clean(),
         };
@@ -2695,7 +2845,15 @@ impl WafPlugin {
         // Custom rule ids carry no name of their own; the site context maps
         // the one that fired back to its configured name.
         let rule_name_of = |verdict: &WafVerdict| -> String {
-            let Some(id) = verdict.matched_rules.first() else {
+            // Prefer the rule that actually enforced the verdict: the control
+            // plane keys `rule_id` on it (L3-006), and taking the name from
+            // `matched_rules.first()` made id and name disagree whenever a
+            // detection signature fired before the enforcing rule.
+            let Some(id) = verdict
+                .enforced_rule_id
+                .as_ref()
+                .or_else(|| verdict.matched_rules.first())
+            else {
                 return String::new();
             };
             context
@@ -2741,6 +2899,7 @@ impl WafPlugin {
             );
             let observed = WafVerdict {
                 action: WafAction::Monitor,
+                enforced_rule_id: None,
                 ..verdict.clone()
             };
             Self::log_event(
@@ -3206,6 +3365,19 @@ impl Plugin for WafPlugin {
                 agent.blocked_reason(&site_id, &request_data.client_ip)
                 && !(waf_blocks_suppressed && reason.starts_with("waf: "))
             {
+                // L3-002: a refusal during an active ban is a defence action
+                // and must stay auditable — without this event the whole
+                // ban window was invisible to security events and analytics.
+                // `rule_id` is the fixed `ip_ban` so these stay separable
+                // from ordinary rule 403s.
+                Self::log_ip_ban_event(
+                    agent,
+                    &site_id,
+                    &request_id,
+                    &host,
+                    &request_data,
+                    &reason,
+                );
                 let response = block_page(
                     &request_id,
                     "IP temporarily blocked by WAF defense",
@@ -3428,6 +3600,7 @@ impl Plugin for WafPlugin {
                         action: WafAction::Monitor,
                         score: 0,
                         matched_rules: vec![denial.rule_id.clone()],
+                        enforced_rule_id: None,
                         details: denial.detail.clone(),
                         breakdown: ScoreBreakdown::clean(),
                     };
@@ -3468,6 +3641,7 @@ impl Plugin for WafPlugin {
                     action: WafAction::Monitor,
                     score: 0,
                     matched_rules: vec![tripped.rule_id.clone()],
+                    enforced_rule_id: None,
                     details: tripped.detail.clone(),
                     breakdown: ScoreBreakdown::clean(),
                 };
@@ -3512,6 +3686,7 @@ impl Plugin for WafPlugin {
                         },
                         score: 0,
                         matched_rules: vec![tripped.rule_id.clone()],
+                        enforced_rule_id: Some(tripped.rule_id.clone()),
                         details: tripped.detail.clone(),
                         breakdown: ScoreBreakdown::clean(),
                     };
@@ -3710,6 +3885,7 @@ impl Plugin for WafPlugin {
                     path: dv.request_data.path.clone(),
                     query_string: dv.request_data.query.clone(),
                     rule_id: String::new(),
+                    enforced_rule_id: String::new(),
                     rule_name: String::new(),
                     event_type: "body_stage_timeout".to_string(),
                     action: "pass".to_string(),
@@ -4308,7 +4484,8 @@ ml_threshold = 0.75
         let verdict = |ids: Vec<String>| WafVerdict {
             action: WafAction::Block,
             score: 10,
-            matched_rules: ids,
+            matched_rules: ids.clone(),
+            enforced_rule_id: ids.first().cloned(),
             details: String::new(),
             breakdown: ScoreBreakdown::clean(),
         };

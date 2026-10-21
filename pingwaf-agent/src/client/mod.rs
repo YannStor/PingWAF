@@ -48,6 +48,9 @@ pub struct LogEntry {
     pub waf_score: u32,
     pub waf_action: String,
     pub waf_rule_id: String,
+    /// Rule that actually enforced the verdict (L3-006); empty when the
+    /// block came from the score gate rather than a specific rule.
+    pub waf_enforced_rule_id: String,
     pub waf_rule_name: String,
     pub waf_event_type: String,
     pub waf_details: String,
@@ -1102,6 +1105,7 @@ impl ControlPlaneClient {
             waf_score: entry.waf_score,
             waf_action: entry.waf_action.clone(),
             waf_rule_id: entry.waf_rule_id.clone(),
+            waf_enforced_rule_id: entry.waf_enforced_rule_id.clone(),
             waf_rule_name: entry.waf_rule_name.clone(),
             waf_event_type: entry.waf_event_type.clone(),
             waf_details: entry.waf_details.clone(),

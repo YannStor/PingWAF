@@ -256,6 +256,13 @@ pub struct WafVerdict {
     pub score: u8,
     /// Identifiers of every rule / signature that fired.
     pub matched_rules: Vec<String>,
+    /// Identifier of the rule that actually produced the enforced action
+    /// (block/challenge), when one exists. Detection signatures and the
+    /// enforcing custom/managed rule are frequently different rules; the
+    /// event pipeline records this separately so dashboards can attribute
+    /// the block to the operator's rule (L3-006). `None` when the verdict
+    /// came from the anomaly-score gate or the Stage-1 critical fast path.
+    pub enforced_rule_id: Option<String>,
     /// Human-readable explanation suitable for logs.
     pub details: String,
     /// Structured score breakdown by attack family.
@@ -269,6 +276,7 @@ impl WafVerdict {
             action: WafAction::Pass,
             score: 0,
             matched_rules: Vec::new(),
+            enforced_rule_id: None,
             details: String::new(),
             breakdown: ScoreBreakdown::clean(),
         }
