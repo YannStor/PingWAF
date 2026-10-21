@@ -1,4 +1,5 @@
 import { apiClient } from './client'
+import type { Page } from './types'
 
 /** One configured delivery target for system alerts. */
 export interface NotificationChannel {
@@ -77,8 +78,12 @@ export const notificationKeys = {
   all: ['notifications'] as const,
   channels: () => [...notificationKeys.all, 'channels'] as const,
   settings: () => [...notificationKeys.all, 'settings'] as const,
-  events: (offset?: number) =>
-    [...notificationKeys.all, 'events', offset ?? 0] as const,
+  events: (page?: number, pageSize?: number, eventType?: string) =>
+    [
+      ...notificationKeys.all,
+      'events',
+      { page: page ?? 1, pageSize: pageSize ?? 20, eventType: eventType ?? '' },
+    ] as const,
 }
 
 export const notificationsApi = {
@@ -110,13 +115,30 @@ export const notificationsApi = {
   saveSettings: (settings: NotificationSettings) =>
     apiClient.put<NotificationSettings>('/notifications/settings', settings),
 
-  listEvents: (limit = 100, offset = 0, eventType?: string) => {
-    const params = new URLSearchParams()
-    params.set('limit', String(limit))
-    params.set('offset', String(offset))
-    if (eventType) params.set('event_type', eventType)
-    return apiClient.get<NotificationEvent[]>(
-      `/notifications/events?${params.toString()}`,
+  listEvents: (params: {
+    page?: number
+    pageSize?: number
+    eventType?: string
+  }) => {
+    const search = new URLSearchParams()
+    search.set('page', String(params.page ?? 1))
+    search.set('page_size', String(params.pageSize ?? 20))
+    if (params.eventType) search.set('event_type', params.eventType)
+    return apiClient.get<Page<NotificationEvent>>(
+      `/notifications/events?${search.toString()}`,
+    )
+  },
+
+  /** Purge alert history: either everything, or entries older than N days. */
+  purgeEvents: (params: { all?: true } | { beforeDays: number }) => {
+    const search = new URLSearchParams()
+    if ('all' in params && params.all) {
+      search.set('all', 'true')
+    } else {
+      search.set('before_days', String((params as { beforeDays: number }).beforeDays))
+    }
+    return apiClient.delete<{ deleted: number }>(
+      `/notifications/events?${search.toString()}`,
     )
   },
 }

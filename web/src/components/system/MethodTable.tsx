@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Check, Copy } from '@phosphor-icons/react'
 import { Table, type Column } from '@/components/ui/Table'
-import { formatSize } from '@/lib/format'
+import { formatLatency, formatMicros, formatSize } from '@/lib/format'
 import type { SystemProfileMethod } from '@/api/debug'
 
 type MethodSort = 'elapsed' | 'mem'
@@ -67,71 +67,43 @@ export function MethodTable({
         accessor: (m) => m.elapsed_ms,
         align: 'right',
         sortable: true,
-        cell: (m) => <span className="tabular-nums">{m.elapsed_ms.toFixed(1)} ms</span>,
+        cell: (m) => <span className="tabular-nums">{formatLatency(m.elapsed_ms)}</span>,
       },
       {
         key: 'mem_bytes',
-        header: t('system.held'),
+        header: (
+          <span title={t('system.heldHint', '记账式估算：仅统计已埋点的持有内存，非堆分配归因')}>
+            {t('system.held')}
+          </span>
+        ),
         accessor: (m) => m.mem_bytes,
         align: 'right',
         sortable: true,
         cell: (m) => {
           const peak = (m as { mem_peak_bytes?: number }).mem_peak_bytes ?? 0
-          const peakShare = (m as { mem_peak_share?: number }).mem_peak_share ?? 0
-          if (m.mem_bytes === 0) {
-            if (peak <= 0) {
-              return (
-                <span
-                  className="flex justify-end tabular-nums text-fg-subtle"
-                  title={t('system.notReported', 'Not reported')}
-                >
-                  —
-                </span>
-              )
-            }
+          if (m.mem_bytes === 0 && peak <= 0) {
             return (
-              <div className="flex items-center justify-end gap-2">
-                <div className="h-1.5 w-16 overflow-hidden rounded-full bg-recessed">
-                  <div
-                    className="h-full rounded-full bg-warning"
-                    style={{ width: `${Math.min(100, peakShare * 100)}%` }}
-                  />
-                </div>
-                <span className="w-20 text-right tabular-nums">
-                  {formatSize(peak)}
-                  <span className="ml-1 rounded bg-recessed px-1 text-[10px] font-medium text-fg-subtle">
-                    {t('system.peak', 'peak')}
-                  </span>
-                </span>
-              </div>
+              <span
+                className="flex justify-end tabular-nums text-fg-subtle"
+                title={t('system.notReported', 'Not reported')}
+              >
+                —
+              </span>
             )
           }
           return (
-            <div className="flex items-center justify-end gap-2">
-              <div className="h-1.5 w-16 overflow-hidden rounded-full bg-recessed">
-                <div
-                  className="h-full rounded-full bg-success"
-                  style={{ width: `${Math.min(100, m.mem_share * 100)}%` }}
-                />
-              </div>
-              <span className="w-20 text-right tabular-nums">{formatSize(m.mem_bytes)}</span>
+            <div className="flex flex-col items-end">
+              <span className="tabular-nums">
+                {formatSize(m.mem_bytes)}
+              </span>
+              {peak > m.mem_bytes ? (
+                <span className="text-[11px] text-fg-subtle tabular-nums">
+                  {t('system.peak', 'peak')} {formatSize(peak)}
+                </span>
+              ) : null}
             </div>
           )
         },
-      },
-      {
-        key: 'mem_share',
-        header: (
-          <span title={t('system.memShareHint', '该方法内存占所属模块内存的比例，各方法份额之和 ≤ 1')}>
-            {t('system.memShare')}
-          </span>
-        ),
-        accessor: (m) => m.mem_share,
-        align: 'right',
-        sortable: true,
-        cell: (m) => (
-          <span className="tabular-nums">{(m.mem_share * 100).toFixed(1)}%</span>
-        ),
       },
       {
         key: 'calls',
@@ -147,7 +119,7 @@ export function MethodTable({
         accessor: (m) => m.avg_us,
         align: 'right',
         sortable: true,
-        cell: (m) => <span className="tabular-nums">{m.avg_us.toFixed(1)} µs</span>,
+        cell: (m) => <span className="tabular-nums">{formatMicros(m.avg_us)}</span>,
       },
     ],
     [t, copied],

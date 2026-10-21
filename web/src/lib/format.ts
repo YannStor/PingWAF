@@ -30,12 +30,34 @@ export function formatPercent(ratio: number | null | undefined, digits = 1): str
   return `${(ratio * 100).toFixed(digits)}%`
 }
 
-/** `1250` → `1.2 ms`; values below 1000 stay integral. */
+/** `820` → `820 µs`; above 1 ms delegates to {@link formatLatency}. */
+export function formatMicros(us: number | null | undefined): string {
+  if (us === null || us === undefined || !Number.isFinite(us)) return '—'
+  // Round first: 999.6 µs is 1000 µs, which must read as 1.0 ms rather than
+  // printing "1000 µs" from the µs branch.
+  const rounded = Math.round(us)
+  if (rounded < 1000) return `${rounded} µs`
+  return formatLatency(us / 1000)
+}
+
+/**
+ * Tiered latency: `0.8 ms` / `850 ms` / `3.2 s` / `5m 12s` / `3h 05m` / `2d 4h`.
+ * Negative or NaN inputs render as `—`.
+ */
 export function formatLatency(ms: number | null | undefined): string {
-  if (ms === null || ms === undefined || !Number.isFinite(ms)) return '—'
+  if (ms === null || ms === undefined || !Number.isFinite(ms) || ms < 0) return '—'
+  // A genuine zero (cache hit, sub-tick timer) is not "0.0 ms"; keep it short
+  // and distinct from a missing value.
+  if (ms === 0) return '0 ms'
+  if (ms < 1) return `${ms.toFixed(1)} ms`
   if (ms < 1000) return `${Math.round(ms)} ms`
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`
-  return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`
+  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`
+  if (ms < 86_400_000) {
+    const h = Math.floor(ms / 3_600_000)
+    return `${h}h ${String(Math.round((ms % 3_600_000) / 60_000)).padStart(2, '0')}m`
+  }
+  return `${Math.floor(ms / 86_400_000)}d ${Math.round((ms % 86_400_000) / 3_600_000)}h`
 }
 
 /**

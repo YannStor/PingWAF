@@ -30,6 +30,7 @@ import {
   Gauge,
   Lightning,
   Robot,
+  Desktop,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { IpQuickActions } from '@/components/waf/IpQuickActions'
@@ -42,6 +43,8 @@ import { SkeletonStat } from '@/components/ui/Skeleton'
 import { ErrorState } from '@/components/ErrorState'
 import { trafficApi, trafficKeys, RANGE_HOURS, TRAFFIC_STEP, groupStatusCodes } from '@/api/traffic'
 import { aiCrawlApi, aiCrawlKeys } from '@/api/aiCrawl'
+import { analyticsApi, analyticsKeys } from '@/api/analytics'
+import { DonutChart } from '@/components/charts/DonutChart'
 import { countryFlag, geoApi, geoKeys } from '@/api/geo'
 import { WorldMapChart } from '@/components/charts/WorldMapChart'
 import { cn } from '@/lib/utils'
@@ -127,6 +130,23 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
     refetchInterval: 60_000,
   })
   const geoStats = geoStatsQuery.data ?? []
+
+  // Live visitors (trailing 5 minutes) and the client-type breakdown, both
+  // scoped to the site when `siteId` is set and fleet-wide otherwise.
+  const activeVisitorsQuery = useQuery({
+    queryKey: analyticsKeys.activeVisitors({ ...(siteId ? { siteId } : {}), minutes: 5 }),
+    queryFn: () => analyticsApi.activeVisitors({ ...(siteId ? { siteId } : {}), minutes: 5 }),
+    enabled: scoped ? Boolean(siteId) : true,
+    refetchInterval: 60_000,
+  })
+
+  const clientTypesQuery = useQuery({
+    queryKey: analyticsKeys.clientTypes({ ...(siteId ? { siteId } : {}), range }),
+    queryFn: () => analyticsApi.clientTypes({ ...(siteId ? { siteId } : {}), range }),
+    enabled: scoped ? Boolean(siteId) : true,
+    refetchInterval: 60_000,
+  })
+  const clientTypes = clientTypesQuery.data
 
   const seriesData = useMemo(
     () =>
@@ -351,6 +371,103 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
             />
           </>
         )}
+      </div>
+
+      {/* Live visitors & client types */}
+      <div className="mb-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader
+            title={t('pages.dashboard.activeVisitors')}
+            description={t('pages.dashboard.activeVisitorsHint')}
+            action={<Users weight="duotone" className="h-4 w-4 text-fg-subtle" />}
+          />
+          <CardBody>
+            {activeVisitorsQuery.isPending ? (
+              <div className="h-9 w-full animate-pulse rounded-lg bg-recessed" />
+            ) : activeVisitorsQuery.isError ? (
+              // Fleet-wide view needs the admin role; a non-admin owning
+              // several sites gets a 404. Degrade quietly instead of parking an
+              // error card on the traffic page.
+              <p
+                className="text-xs text-fg-subtle"
+                title={
+                  activeVisitorsQuery.error instanceof Error
+                    ? activeVisitorsQuery.error.message
+                    : undefined
+                }
+              >
+                —
+              </p>
+            ) : (
+              <div className="flex flex-wrap items-end justify-between gap-2">
+                <div>
+                  <p className="text-3xl font-semibold tracking-tight text-fg-strong tabular-nums">
+                    {formatNumber(activeVisitorsQuery.data?.active_visitors ?? 0)}
+                  </p>
+                  <p className="mt-1 text-xs text-fg-subtle">
+                    {t('pages.dashboard.activeVisitorsHint')}
+                  </p>
+                </div>
+                {activeVisitorsQuery.data?.as_of && (
+                  <span className="text-xs text-fg-subtle tabular-nums">
+                    {t('pages.dashboard.asOf')}{' '}
+                    {new Date(activeVisitorsQuery.data.as_of).toLocaleTimeString([], {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </span>
+                )}
+              </div>
+            )}
+          </CardBody>
+        </Card>
+
+        <Card>
+          <CardHeader
+            title={t('pages.dashboard.clientTypes')}
+            description={t('pages.dashboard.clientTypesHint')}
+            action={<Desktop weight="duotone" className="h-4 w-4 text-fg-subtle" />}
+          />
+          <CardBody>
+            {clientTypesQuery.isPending ? (
+              <div className="h-40 w-full animate-pulse rounded-lg bg-recessed" />
+            ) : clientTypesQuery.isError ? (
+              <p
+                className="text-xs text-fg-subtle"
+                title={
+                  clientTypesQuery.error instanceof Error
+                    ? clientTypesQuery.error.message
+                    : undefined
+                }
+              >
+                —
+              </p>
+            ) : (
+              <DonutChart
+                height={150}
+                centerValue={formatNumber(clientTypes?.total ?? 0)}
+                centerLabel={t('pages.dashboard.clientTypes')}
+                data={[
+                  {
+                    name: t('pages.dashboard.desktop'),
+                    value: clientTypes?.desktop ?? 0,
+                    color: '#0051c3',
+                  },
+                  {
+                    name: t('pages.dashboard.mobile'),
+                    value: clientTypes?.mobile ?? 0,
+                    color: '#18794e',
+                  },
+                  {
+                    name: t('pages.dashboard.other'),
+                    value: clientTypes?.other ?? 0,
+                    color: '#ffb224',
+                  },
+                ]}
+              />
+            )}
+          </CardBody>
+        </Card>
       </div>
 
       {overviewQuery.isError && !data ? (
@@ -592,7 +709,7 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
                     <LineChart data={seriesData} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border-line)" vertical={false} />
                       <XAxis dataKey="label" tick={{ fontSize: 11, fill: 'var(--color-text-subtle)' }} tickLine={false} axisLine={{ stroke: 'var(--color-border-line)' }} minTickGap={24} />
-                      <YAxis tick={{ fontSize: 11, fill: 'var(--color-text-subtle)' }} tickLine={false} axisLine={false} tickFormatter={(v: number) => `${Math.round(v)}ms`} />
+                      <YAxis tick={{ fontSize: 11, fill: 'var(--color-text-subtle)' }} tickLine={false} axisLine={false} tickFormatter={(v) => formatLatency(Number(v))} />
                       <Tooltip contentStyle={tooltipStyle} formatter={(v) => formatLatency(Number(v ?? 0))} />
                       <Line type="monotone" dataKey="latency" name={t('pages.traffic.avgLatency')} stroke="#0051c3" strokeWidth={2} dot={false} />
                     </LineChart>
@@ -684,10 +801,11 @@ export function AiBotsPanel({
       key: 'name',
       header: t('pages.traffic.aiBots.colBot'),
       accessor: (r) => r.name,
+      width: '30%',
       cell: (r) => (
-        <div className="flex items-center gap-2">
-          <span className="text-[13px] font-medium text-fg-strong">{r.name}</span>
-          <Badge size="sm" tone={AI_CATEGORY_TONES[r.category] ?? 'neutral'}>
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate text-[13px] font-medium text-fg-strong">{r.name}</span>
+          <Badge size="sm" tone={AI_CATEGORY_TONES[r.category] ?? 'neutral'} className="shrink-0">
             {t(`pages.bots.aiCrawl.category.${r.category}`, r.category)}
           </Badge>
         </div>
@@ -739,7 +857,7 @@ export function AiBotsPanel({
       width: '1%',
       cell: (r) =>
         r.last_seen ? (
-          <span className="tabular-nums text-[13px] text-fg-subtle">
+          <span className="whitespace-nowrap tabular-nums text-[13px] text-fg-subtle">
             {formatDateTime(r.last_seen)}
           </span>
         ) : (

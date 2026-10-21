@@ -27,6 +27,7 @@ import {
   UploadSimple,
   Cpu,
   Info,
+  Users,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { IpQuickActions } from '@/components/waf/IpQuickActions'
@@ -37,6 +38,7 @@ import { Select } from '@/components/ui/Select'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { Table, type Column } from '@/components/ui/Table'
 import { ErrorState } from '@/components/ErrorState'
+import { DonutChart } from '@/components/charts/DonutChart'
 import { Skeleton, SkeletonRows } from '@/components/ui/Skeleton'
 import { analyticsApi, analyticsKeys } from '@/api/analytics'
 import { agentsApi, agentKeys } from '@/api/agents'
@@ -53,7 +55,7 @@ import {
   formatPercent,
   formatSize,
 } from '@/lib/format'
-import type { RangeQuery, TopIp, TopPath, TopRule } from '@/api/types'
+import type { RangeQuery, TopIp, TopPath, TopRule, TrafficRange } from '@/api/types'
 
 /** Preset windows, in hours. The API caps a single range at 31 days. */
 const RANGE_OPTIONS = [
@@ -109,6 +111,15 @@ function trafficStepFor(hours: number): number {
   if (hours <= 24) return 300
   if (hours <= 168) return 900
   return 3600
+}
+
+/** Preset dashboard window → traffic range label used by `/analytics/client-types`. */
+function trafficRangeFor(hours: number): TrafficRange {
+  if (hours <= 1) return '1h'
+  if (hours <= 6) return '6h'
+  if (hours <= 24) return '24h'
+  if (hours <= 168) return '7d'
+  return '30d'
 }
 
 export function DashboardPage() {
@@ -187,6 +198,31 @@ export function DashboardPage() {
   const statusCodes = useQuery({
     queryKey: analyticsKeys.statusCodes(range),
     queryFn: () => analyticsApi.statusCodes(range),
+    refetchInterval: REFRESH_MS,
+    staleTime: REFRESH_STALE_MS,
+  })
+
+  const activeVisitors = useQuery({
+    queryKey: analyticsKeys.activeVisitors({
+      ...(siteId ? { siteId } : {}),
+      minutes: 5,
+    }),
+    queryFn: () =>
+      analyticsApi.activeVisitors({ ...(siteId ? { siteId } : {}), minutes: 5 }),
+    refetchInterval: REFRESH_MS,
+    staleTime: REFRESH_STALE_MS,
+  })
+
+  const clientTypes = useQuery({
+    queryKey: analyticsKeys.clientTypes({
+      ...(siteId ? { siteId } : {}),
+      range: trafficRangeFor(hours),
+    }),
+    queryFn: () =>
+      analyticsApi.clientTypes({
+        ...(siteId ? { siteId } : {}),
+        range: trafficRangeFor(hours),
+      }),
     refetchInterval: REFRESH_MS,
     staleTime: REFRESH_STALE_MS,
   })
@@ -525,6 +561,103 @@ export function DashboardPage() {
           {isAdmin && <SystemCpuCard />}
         </div>
       )}
+
+      {/* Live visitors & client types */}
+      <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
+        <Card>
+          <CardHeader
+            title={t('pages.dashboard.activeVisitors')}
+            description={t('pages.dashboard.activeVisitorsHint')}
+            action={<Users weight="duotone" className="h-4 w-4 text-fg-subtle" />}
+          />
+          <CardBody>
+            {activeVisitors.isPending ? (
+              <Skeleton className="h-9 w-24" />
+            ) : activeVisitors.isError ? (
+              // The fleet-wide view needs the admin role; a non-admin with
+              // several sites gets a 404 here. Degrade to a placeholder rather
+              // than an error card that would sit on the dashboard forever.
+              <p
+                className="text-xs text-fg-subtle"
+                title={
+                  activeVisitors.error instanceof Error
+                    ? activeVisitors.error.message
+                    : undefined
+                }
+              >
+                —
+              </p>
+            ) : (
+              <div className="flex flex-wrap items-end justify-between gap-2">
+                <div>
+                  <p className="text-3xl font-semibold tracking-tight text-fg-strong tabular-nums">
+                    {formatNumber(activeVisitors.data?.active_visitors ?? 0)}
+                  </p>
+                  <p className="mt-1 text-xs text-fg-subtle">
+                    {t('pages.dashboard.activeVisitorsHint')}
+                  </p>
+                </div>
+                {activeVisitors.data?.as_of && (
+                  <span className="text-xs text-fg-subtle tabular-nums">
+                    {t('pages.dashboard.asOf')}{' '}
+                    {new Date(activeVisitors.data.as_of).toLocaleTimeString([], {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </span>
+                )}
+              </div>
+            )}
+          </CardBody>
+        </Card>
+
+        <Card>
+          <CardHeader
+            title={t('pages.dashboard.clientTypes')}
+            description={t('pages.dashboard.clientTypesHint')}
+            action={<Desktop weight="duotone" className="h-4 w-4 text-fg-subtle" />}
+          />
+          <CardBody>
+            {clientTypes.isPending ? (
+              <Skeleton className="h-40 w-full" />
+            ) : clientTypes.isError ? (
+              <p
+                className="text-xs text-fg-subtle"
+                title={
+                  clientTypes.error instanceof Error
+                    ? clientTypes.error.message
+                    : undefined
+                }
+              >
+                —
+              </p>
+            ) : (
+              <DonutChart
+                height={150}
+                centerValue={formatNumber(clientTypes.data?.total ?? 0)}
+                centerLabel={t('pages.dashboard.clientTypes')}
+                data={[
+                  {
+                    name: t('pages.dashboard.desktop'),
+                    value: clientTypes.data?.desktop ?? 0,
+                    color: '#0051c3',
+                  },
+                  {
+                    name: t('pages.dashboard.mobile'),
+                    value: clientTypes.data?.mobile ?? 0,
+                    color: '#18794e',
+                  },
+                  {
+                    name: t('pages.dashboard.other'),
+                    value: clientTypes.data?.other ?? 0,
+                    color: '#ffb224',
+                  },
+                ]}
+              />
+            )}
+          </CardBody>
+        </Card>
+      </div>
 
       {/* Traffic chart */}
       <Card className="mt-4">

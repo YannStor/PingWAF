@@ -63,7 +63,8 @@
     "peak": "ピーク",
     "memShareHint": "このメソッドが所属モジュールのメモリに占める割合（合計は 1 以下）。",
     "shareHint": "帰属時間全体に占める割合（CPU 使用率ではありません）。",
-    "samplingHint": "メモリ列は現在の保持値（0 は未報告、—/peak はピーク値）。比率は所属モジュールまたは帰属時間全体に対する割合で、子ステージの比率は合算できません。"
+    "samplingHint": "メモリ列は現在の保持値（0 は未報告、—/peak はピーク値）。比率は所属モジュールまたは帰属時間全体に対する割合で、子ステージの比率は合算できません。",
+    "heldHint": "計測ベースの推定値です。計測点で保持しているメモリのみを集計しており、ヒープ割り当ての帰属ではありません。"
   },
   "app": {
     "name": "PingWAF",
@@ -391,7 +392,15 @@
         "hostCpu": "ホスト CPU",
         "cores": "コア数",
         "rss": "RSS"
-      }
+      },
+      "activeVisitors": "アクセス中のビジター",
+      "activeVisitorsHint": "過去5分間のユニークIP",
+      "asOf": "基準時刻",
+      "clientTypes": "クライアント種別",
+      "clientTypesHint": "選択した期間のデスクトップ／モバイル／その他の比率",
+      "desktop": "デスクトップ",
+      "mobile": "モバイル",
+      "other": "その他"
     },
     "sites": {
       "failover": {
@@ -1637,7 +1646,14 @@
       "geoipUploadFailed": "GeoIP のアップロードに失敗しました",
       "geoipLocalOn": "ローカル DB 使用中",
       "geoipLocalOff": "ローカル DB なし",
-      "loginHistoryTitle": "最近のログイン"
+      "loginHistoryTitle": "最近のログイン",
+      "clearHistory": "履歴を消去",
+      "clearHistoryConfirm": "すべてのアラート履歴を削除します。元に戻せません。",
+      "purgeBefore": "{{days}}日前を削除",
+      "purgeBeforeConfirm": "{{days}}日より前のアラート履歴を削除しますか？元に戻せません。",
+      "purgeDays": "{{days}}日前",
+      "purged": "{{count}}件のアラートを削除しました",
+      "purgeFailed": "アラート履歴の削除に失敗しました"
     },
     "assistant": {
       "title": "AI アシスタント",

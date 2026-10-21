@@ -19,6 +19,7 @@ import { Badge } from '@/components/ui/Badge'
 import { Dialog } from '@/components/ui/Dialog'
 import { Table, type Column } from '@/components/ui/Table'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { Pagination } from '@/components/ui/Pagination'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { SkeletonRows } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
@@ -30,7 +31,9 @@ import {
   NOTIFICATION_EVENT_TYPES,
   type NotificationChannel,
   type NotificationSettings,
+  type NotificationEvent,
 } from '@/api/notifications'
+import type { Page } from '@/api/types'
 import {
   loginSecurityApi,
   type LoginSecuritySettings,
@@ -73,10 +76,34 @@ export function NotificationsPage() {
     queryFn: () => notificationsApi.getSettings(),
   })
 
-  const [eventsOffset, setEventsOffset] = useState(0)
+  const [eventPage, setEventPage] = useState(1)
+  const [eventsPageSize, setEventsPageSize] = useState(20)
   const eventsQuery = useQuery({
-    queryKey: notificationKeys.events(eventsOffset),
-    queryFn: () => notificationsApi.listEvents(50, eventsOffset, eventTypeFilter || undefined),
+    queryKey: notificationKeys.events(eventPage, eventsPageSize, eventTypeFilter),
+    queryFn: () =>
+      notificationsApi.listEvents({
+        page: eventPage,
+        pageSize: eventsPageSize,
+        eventType: eventTypeFilter || undefined,
+      }),
+  })
+
+  const [purgeAllOpen, setPurgeAllOpen] = useState(false)
+  const [purgeDays, setPurgeDays] = useState(90)
+  const [purgeDaysOpen, setPurgeDaysOpen] = useState(false)
+
+  const purgeMutation = useMutation({
+    mutationFn: (params: { all?: true } | { beforeDays: number }) =>
+      notificationsApi.purgeEvents(params),
+    onSuccess: (result) => {
+      toast.success(t('pages.notifications.purged', { count: result.deleted }))
+      setPurgeAllOpen(false)
+      setPurgeDaysOpen(false)
+      setEventPage(1)
+      invalidate()
+    },
+    onError: (error) =>
+      toast.error(error.message || t('pages.notifications.purgeFailed')),
   })
 
   const invalidate = () => {
@@ -105,7 +132,8 @@ export function NotificationsPage() {
   })
 
   const channels = useMemo(() => channelsQuery.data ?? [], [channelsQuery.data])
-  const events = useMemo(() => eventsQuery.data ?? [], [eventsQuery.data])
+  const eventPageData: Page<NotificationEvent> | undefined = eventsQuery.data
+  const events = useMemo(() => eventPageData?.items ?? [], [eventPageData])
 
   const columns: Column<NotificationChannel>[] = useMemo(
     () => [
@@ -253,7 +281,7 @@ export function NotificationsPage() {
                 value={eventTypeFilter}
                 onChange={(e) => {
                   setEventTypeFilter(e.target.value)
-                  setEventsOffset(0)
+                  setEventPage(1)
                 }}
                 options={[
                   { value: '', label: t('pages.notifications.allEvents') },
@@ -263,10 +291,42 @@ export function NotificationsPage() {
                   })),
                 ]}
               />
+              {canWrite && (
+                <>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={purgeMutation.isPending}
+                    onClick={() => setPurgeAllOpen(true)}
+                  >
+                    <Trash className="h-4 w-4" />
+                    {t('pages.notifications.clearHistory')}
+                  </Button>
+                  <div className="flex items-center gap-1">
+                    <Select
+                      className="w-32"
+                      value={String(purgeDays)}
+                      onChange={(e) => setPurgeDays(Number(e.target.value))}
+                      options={[7, 30, 90].map((d) => ({
+                        value: String(d),
+                        label: t('pages.notifications.purgeDays', { days: d }),
+                      }))}
+                    />
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={purgeMutation.isPending}
+                      onClick={() => setPurgeDaysOpen(true)}
+                    >
+                      {t('pages.notifications.purgeBefore', { days: purgeDays })}
+                    </Button>
+                  </div>
+                </>
+              )}
               <Button
                 size="sm"
                 variant="ghost"
-                className="ml-auto"
+                className={canWrite ? '' : 'ml-auto'}
                 onClick={() => eventsQuery.refetch()}
               >
                 <ArrowClockwise className="h-4 w-4" />
@@ -304,24 +364,18 @@ export function NotificationsPage() {
                     </div>
                   ))}
                 </div>
-                <div className="mt-3 flex justify-end gap-2">
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={eventsOffset === 0}
-                    onClick={() => setEventsOffset((o) => Math.max(0, o - 50))}
-                  >
-                    {t('pagination.previous')}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={events.length < 50}
-                    onClick={() => setEventsOffset((o) => o + 50)}
-                  >
-                    {t('pagination.next')}
-                  </Button>
-                </div>
+                <Pagination
+                  page={eventPageData?.page ?? eventPage}
+                  pageSize={eventsPageSize}
+                  total={eventPageData?.total ?? 0}
+                  totalTruncated={eventPageData?.total_truncated}
+                  onChange={setEventPage}
+                  pageSizeOptions={[20, 50, 100]}
+                  onPageSizeChange={(size) => {
+                    setEventsPageSize(size)
+                    setEventPage(1)
+                  }}
+                />
               </>
             )}
           </CardBody>
@@ -362,6 +416,30 @@ export function NotificationsPage() {
           setPendingDelete(null)
         }}
         onClose={() => setPendingDelete(null)}
+      />
+
+      <ConfirmDialog
+        open={purgeAllOpen}
+        title={t('pages.notifications.clearHistory')}
+        description={t('pages.notifications.clearHistoryConfirm')}
+        confirmLabel={t('common.delete')}
+        tone="danger"
+        loading={purgeMutation.isPending}
+        onConfirm={() => purgeMutation.mutate({ all: true })}
+        onClose={() => setPurgeAllOpen(false)}
+      />
+
+      <ConfirmDialog
+        open={purgeDaysOpen}
+        title={t('pages.notifications.purgeBefore', { days: purgeDays })}
+        description={t('pages.notifications.purgeBeforeConfirm', {
+          days: purgeDays,
+        })}
+        confirmLabel={t('common.delete')}
+        tone="danger"
+        loading={purgeMutation.isPending}
+        onConfirm={() => purgeMutation.mutate({ beforeDays: purgeDays })}
+        onClose={() => setPurgeDaysOpen(false)}
       />
     </>
   )

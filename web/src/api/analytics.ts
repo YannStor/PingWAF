@@ -1,6 +1,8 @@
 import { apiClient } from './client'
 import type {
+  ActiveVisitorsResponse,
   AnalyticsSummary,
+  ClientTypesResponse,
   RangeQuery,
   SiteTrafficBucket,
   SitesOverviewResponse,
@@ -9,6 +11,7 @@ import type {
   TopIp,
   TopPath,
   TopRule,
+  TrafficRange,
   TrafficSeries,
 } from './types'
 
@@ -54,6 +57,28 @@ export const analyticsApi = {
    */
   sitesOverview: (params: RangeQuery = {}) =>
     apiClient.get<SitesOverviewResponse>('/analytics/sites', { query: params }),
+
+  /** Distinct client IPs seen over the trailing `minutes` window (clamped 1..60, default 5). */
+  activeVisitors: (params: { siteId?: string; minutes?: number } = {}) =>
+    apiClient.get<ActiveVisitorsResponse>('/analytics/active-visitors', {
+      query: {
+        ...(params.siteId ? { site_id: params.siteId } : {}),
+        ...(params.minutes !== undefined ? { minutes: params.minutes } : {}),
+      },
+    }),
+
+  /**
+   * Client-type breakdown (desktop / mobile / other). Preset ranges map to the
+   * server whitelist (`24h|7d|30d`); shorter ranges fall back to explicit
+   * `from`/`to` built with `rangeFor`.
+   */
+  clientTypes: (params: { siteId?: string; range?: TrafficRange } = {}) =>
+    apiClient.get<ClientTypesResponse>('/analytics/client-types', {
+      query: {
+        ...(params.siteId ? { site_id: params.siteId } : {}),
+        ...(params.range ? clientTypesRangeQuery(params.range) : {}),
+      },
+    }),
 }
 
 /** RFC 3339 helper — the backend parses `from`/`to` with `DateTime::parse_from_rfc3339`. */
@@ -66,6 +91,23 @@ export function rangeFor(hours: number): { from: string; to: string } {
   const to = new Date()
   const from = new Date(to.getTime() - hours * 3600_000)
   return { from: toRfc3339(from), to: toRfc3339(to) }
+}
+
+const CLIENT_TYPES_RANGE_HOURS: Record<TrafficRange, number> = {
+  '1h': 1,
+  '6h': 6,
+  '24h': 24,
+  '7d': 24 * 7,
+  '30d': 24 * 30,
+}
+
+/**
+ * Query params for `GET /analytics/client-types` — the endpoint only accepts
+ * `range=24h|7d|30d`, so shorter windows are expressed as `from`/`to`.
+ */
+export function clientTypesRangeQuery(range: TrafficRange): { range: string } | { from: string; to: string } {
+  if (range === '24h' || range === '7d' || range === '30d') return { range }
+  return rangeFor(CLIENT_TYPES_RANGE_HOURS[range])
 }
 
 /**
@@ -92,6 +134,10 @@ export const analyticsKeys = {
   statusCodes: (params: RangeQuery) => [...analyticsKeys.all, 'status-codes', params] as const,
   sites: (params: RangeQuery) => [...analyticsKeys.all, 'sites', params] as const,
   overview: (params: RangeQuery) => [...analyticsKeys.all, 'overview', params] as const,
+  activeVisitors: (params: { siteId?: string; minutes?: number } = {}) =>
+    [...analyticsKeys.all, 'active-visitors', params] as const,
+  clientTypes: (params: { siteId?: string; range?: TrafficRange } = {}) =>
+    [...analyticsKeys.all, 'client-types', params] as const,
 }
 
 export default analyticsApi

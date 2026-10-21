@@ -33,7 +33,7 @@ import { systemApi } from '@/api/system'
 import { analyticsApi } from '@/api/analytics'
 import { useCanWrite, useDebouncedValue, useNow, useSitesList } from '@/hooks'
 import { cn } from '@/lib/utils'
-import { formatDateTime, formatNumber, formatRelative, formatSize } from '@/lib/format'
+import { formatDateTime, formatLatency, formatNumber, formatRelative, formatSize } from '@/lib/format'
 import type { Agent, AgentCommand, AgentEnrollRequest, AgentEnrollResponse, AgentStatus } from '@/api/types'
 
 const STATUS_TONE: Record<AgentStatus, 'success' | 'warning' | 'neutral'> = {
@@ -436,7 +436,7 @@ export function AgentsPage() {
           <span>
             {t('pages.dashboard.avgLatency')}:{' '}
             <strong className="tabular-nums text-fg-strong">
-              {Math.round(summaryQuery.data.avg_latency_ms)} ms
+              {formatLatency(summaryQuery.data.avg_latency_ms)}
             </strong>
           </span>
         </div>

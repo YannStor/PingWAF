@@ -2,7 +2,7 @@ import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/Badge'
 import { Table, type Column } from '@/components/ui/Table'
-import { formatSize } from '@/lib/format'
+import { formatMicros, formatPercent, formatSize } from '@/lib/format'
 import type { SystemProfileModule } from '@/api/debug'
 
 const MODULE_TONES: Record<string, 'brand' | 'success' | 'warning' | 'danger' | 'neutral'> = {
@@ -76,72 +76,43 @@ export function ModuleTable({
         accessor: (m) => m.elapsed_share,
         sortable: true,
         cell: (m) => (
-          <div className="flex items-center justify-end gap-2">
-            <div className="h-1.5 w-24 overflow-hidden rounded-full bg-recessed">
-              <div
-                className="h-full rounded-full bg-brand"
-                style={{ width: `${Math.min(100, m.elapsed_share * 100)}%` }}
-              />
-            </div>
-            <span className="w-14 text-right tabular-nums">
-              {(m.elapsed_share * 100).toFixed(1)}%
-            </span>
-          </div>
+          <span className="block text-right tabular-nums">
+            {formatPercent(m.elapsed_share)}
+          </span>
         ),
       },
       {
         key: 'mem_bytes',
-        header: t('system.held'),
+        header: (
+          <span title={t('system.heldHint', '记账式估算：仅统计已埋点的持有内存，非堆分配归因')}>
+            {t('system.held')}
+          </span>
+        ),
         accessor: (m) => m.mem_bytes,
         align: 'right',
         sortable: true,
         cell: (m) => {
           const peak = (m as { mem_peak_bytes?: number }).mem_peak_bytes ?? 0
-          const peakShare = (m as { mem_peak_share?: number }).mem_peak_share ?? 0
-          if (m.mem_bytes === 0) {
-            // 未上报（C3）：当前值与峰值都缺省时不渲染 0 宽度进度条
-            if (peak <= 0) {
-              return (
-                <span
-                  className="flex justify-end tabular-nums text-fg-subtle"
-                  title={t('system.notReported', 'Not reported')}
-                >
-                  —
-                </span>
-              )
-            }
-            // 当前值为 0 但存在峰值保持：显示峰值并标注 peak
+          if (m.mem_bytes === 0 && peak <= 0) {
             return (
-              <div className="flex items-center justify-end gap-2">
-                <div className="h-1.5 w-16 overflow-hidden rounded-full bg-recessed">
-                  <div
-                    className="h-full rounded-full bg-warning"
-                    style={{ width: `${Math.min(100, peakShare * 100)}%` }}
-                  />
-                </div>
-                <span className="w-20 text-right tabular-nums">
-                  {formatSize(peak)}
-                  <span className="ml-1 rounded bg-recessed px-1 text-[10px] font-medium text-fg-subtle">
-                    {t('system.peak', 'peak')}
-                  </span>
-                </span>
-              </div>
+              <span
+                className="flex justify-end tabular-nums text-fg-subtle"
+                title={t('system.notReported', 'Not reported')}
+              >
+                —
+              </span>
             )
           }
           return (
-            <div className="flex items-center justify-end gap-2">
-              <div className="h-1.5 w-16 overflow-hidden rounded-full bg-recessed">
-                <div
-                  className="h-full rounded-full bg-success"
-                  style={{ width: `${Math.min(100, m.mem_share * 100)}%` }}
-                />
-              </div>
-              <span className="w-20 text-right tabular-nums">
+            <div className="flex flex-col items-end">
+              <span className="tabular-nums">
                 {formatSize(m.mem_bytes)}
-                {m.mem_share > 0 ? (
-                  <span className="ml-1 text-fg-subtle">{`${(m.mem_share * 100).toFixed(0)}%`}</span>
-                ) : null}
               </span>
+              {peak > m.mem_bytes ? (
+                <span className="text-[11px] text-fg-subtle tabular-nums">
+                  {t('system.peak', 'peak')} {formatSize(peak)}
+                </span>
+              ) : null}
             </div>
           )
         },
@@ -160,7 +131,7 @@ export function ModuleTable({
         accessor: (m) => m.avg_us,
         align: 'right',
         sortable: true,
-        cell: (m) => <span className="tabular-nums">{m.avg_us.toFixed(1)} µs</span>,
+        cell: (m) => <span className="tabular-nums">{formatMicros(m.avg_us)}</span>,
       },
     ],
     [t],

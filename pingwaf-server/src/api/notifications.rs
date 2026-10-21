@@ -8,15 +8,16 @@
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, DeleteResult, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, QueryTrait, Set,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::api::common::{require_write, Page, Pagination};
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::auth::AuthUser;
@@ -51,7 +52,10 @@ pub fn routes() -> Router<AppState> {
             "/notifications/settings",
             get(show_settings).put(update_settings),
         )
-        .route("/notifications/events", get(list_events))
+        .route(
+            "/notifications/events",
+            get(list_events).delete(delete_events),
+        )
 }
 
 /// Validates the stored config for a channel kind, so a broken channel is
@@ -441,25 +445,27 @@ fn clamp_threshold(value: u8) -> u8 {
 
 #[derive(Debug, Deserialize)]
 pub struct ListEventsQuery {
-    pub limit: Option<u64>,
-    pub offset: Option<u64>,
+    #[serde(flatten)]
+    pub pagination: Pagination,
     pub event_type: Option<String>,
 }
 
 /// `GET /api/v1/notifications/events` — administrators only. The alert
-/// history, newest first.
+/// history, newest first, one page at a time.
 async fn list_events(
     State(state): State<AppState>,
     current: AuthUser,
     Query(query): Query<ListEventsQuery>,
-) -> Result<Json<Vec<notification_event::Model>>, ApiError> {
+) -> Result<Json<Page<notification_event::Model>>, ApiError> {
     current.require_admin().map_err(ApiError::from)?;
-    let limit = query.limit.unwrap_or(100).clamp(1, 500);
-    let offset = query.offset.unwrap_or(0);
+    // The shared default (50) is the documented one. Re-basing it on the value
+    // alone made an explicit `page_size=50` silently return 20 rows.
+    let pagination = query.pagination.normalise();
     let mut db_query = notification_event::Entity::find()
+        // `id DESC` breaks ties between rows sharing a timestamp so pages
+        // stay stable while history is written.
         .order_by_desc(notification_event::Column::CreatedAt)
-        .limit(limit)
-        .offset(offset);
+        .order_by_desc(notification_event::Column::Id);
     if let Some(kind) = query
         .event_type
         .as_deref()
@@ -469,7 +475,111 @@ async fn list_events(
         db_query =
             db_query.filter(notification_event::Column::EventType.eq(kind));
     }
-    Ok(Json(db_query.all(&state.db).await?))
+    let paginator = db_query.paginate(&state.db, pagination.limit());
+    let total = paginator.num_items().await?;
+    let items = paginator.fetch_page(pagination.index()).await?;
+    Ok(Json(Page::new(items, total, pagination)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteEventsQuery {
+    /// `all=true` clears the whole history.
+    pub all: Option<bool>,
+    /// Deletes events strictly older than this many days.
+    pub before_days: Option<u32>,
+}
+
+/// Validates the C4 cleanup query: `all` and `before_days` are mutually
+/// exclusive and exactly one must be present.
+///
+/// `before_days` is rejected outside `1..=365` rather than silently clamped:
+/// `0` would mean "older than now", i.e. the whole table, and a silent clamp
+/// to one day would delete a different set than the caller asked for (`logs.rs`
+/// rejects the same input for the same reason).
+fn parse_delete_events_query(
+    query: &DeleteEventsQuery,
+) -> Result<Cleanup, ApiError> {
+    match (query.all, query.before_days) {
+        (Some(true), None) => Ok(Cleanup::All),
+        (Some(false), None) => Err(ApiError::BadRequest(
+            "all=false is meaningless; pass all=true or before_days=N"
+                .to_string(),
+        )),
+        (None, Some(days)) if (1..=365).contains(&days) => {
+            Ok(Cleanup::Before(days))
+        },
+        (None, Some(days)) => Err(ApiError::BadRequest(format!(
+            "before_days must be between 1 and 365 (got {days})"
+        ))),
+        (Some(_), Some(_)) => Err(ApiError::BadRequest(
+            "all and before_days are mutually exclusive: pass exactly one"
+                .to_string(),
+        )),
+        (None, None) => Err(ApiError::BadRequest(
+            "either all=true or before_days=N is required".to_string(),
+        )),
+    }
+}
+
+/// Rows removed per statement. A single unbounded `DELETE` holds locks for the
+/// whole scan and blocks the alert writer; the loop below keeps each statement
+/// short. Mirrors `logs::purge_logs`.
+const EVENTS_PURGE_BATCH_SIZE: u64 = 2_000;
+
+/// What [`delete_events`] was asked to remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cleanup {
+    All,
+    Before(u32),
+}
+
+/// `DELETE /api/v1/notifications/events` — administrators only. Purges the
+/// alert history, either entirely or strictly before `now() - N days`.
+async fn delete_events(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Query(query): Query<DeleteEventsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    require_write(&current)?;
+    let cleanup = parse_delete_events_query(&query)?;
+    let cutoff = match cleanup {
+        Cleanup::All => None,
+        Cleanup::Before(days) => {
+            Some(Utc::now() - Duration::days(i64::from(days)))
+        },
+    };
+    // Delete in bounded batches: `?all=true` on a busy deployment can match
+    // hundreds of thousands of rows, and a single `DELETE` would hold locks
+    // for the whole scan while the alert writer waits behind it.
+    let mut deleted = 0_u64;
+    loop {
+        let mut batch = notification_event::Entity::find()
+            .select_only()
+            .column(notification_event::Column::Id)
+            .order_by_asc(notification_event::Column::Id)
+            .limit(EVENTS_PURGE_BATCH_SIZE);
+        if let Some(cutoff) = cutoff {
+            batch =
+                batch.filter(notification_event::Column::CreatedAt.lt(cutoff));
+        }
+        let result: DeleteResult = notification_event::Entity::delete_many()
+            .filter(
+                notification_event::Column::Id.in_subquery(batch.into_query()),
+            )
+            .exec(&state.db)
+            .await?;
+        deleted += result.rows_affected;
+        if result.rows_affected < EVENTS_PURGE_BATCH_SIZE {
+            break;
+        }
+    }
+    tracing::info!(
+        actor = %current.email,
+        deleted,
+        ?cleanup,
+        "notification event history purged"
+    );
+    Ok(Json(json!({ "deleted": deleted })))
 }
 
 /// Nudges the notification manager to re-read channels and settings. A no-op
@@ -489,4 +599,137 @@ fn reload_channels() {
 #[allow(dead_code)]
 fn severities() -> [&'static str; 3] {
     severity::ALL
+}
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::QueryTrait;
+
+    use super::*;
+
+    #[test]
+    fn delete_query_requires_exactly_one_selector() {
+        let err = parse_delete_events_query(&DeleteEventsQuery {
+            all: None,
+            before_days: None,
+        })
+        .unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(_)));
+
+        let err = parse_delete_events_query(&DeleteEventsQuery {
+            all: Some(true),
+            before_days: Some(7),
+        })
+        .unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(_)));
+    }
+
+    #[test]
+    fn delete_query_rejects_all_false() {
+        assert!(parse_delete_events_query(&DeleteEventsQuery {
+            all: Some(false),
+            before_days: None,
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn delete_query_rejects_out_of_range_days() {
+        // `0` would mean "older than now" (the whole table) and a silent clamp
+        // would delete a different set than the caller asked for.
+        assert!(
+            parse_delete_events_query(&DeleteEventsQuery {
+                all: None,
+                before_days: Some(0),
+            })
+            .is_err(),
+            "before_days=0 must be rejected, not clamped"
+        );
+        assert!(
+            parse_delete_events_query(&DeleteEventsQuery {
+                all: None,
+                before_days: Some(366),
+            })
+            .is_err(),
+            "before_days above the cap must be rejected"
+        );
+        assert_eq!(
+            parse_delete_events_query(&DeleteEventsQuery {
+                all: None,
+                before_days: Some(1),
+            })
+            .unwrap(),
+            Cleanup::Before(1),
+        );
+        assert_eq!(
+            parse_delete_events_query(&DeleteEventsQuery {
+                all: None,
+                before_days: Some(365),
+            })
+            .unwrap(),
+            Cleanup::Before(365),
+        );
+        assert_eq!(
+            parse_delete_events_query(&DeleteEventsQuery {
+                all: Some(true),
+                before_days: None,
+            })
+            .unwrap(),
+            Cleanup::All,
+        );
+    }
+
+    /// The purge must be strictly older (`created_at <`), never
+    /// `<=`: an event written exactly at the cutoff stays.
+    #[test]
+    fn purge_filter_is_strictly_before_the_cutoff() {
+        let query = notification_event::Entity::delete_many()
+            .filter(
+                notification_event::Column::CreatedAt
+                    .lt(Utc::now() - Duration::days(30)),
+            )
+            .build(sea_orm::DbBackend::Postgres);
+        assert!(
+            query.sql.contains(r#""created_at" < "#),
+            "expected a strict `<` bound, got: {}",
+            query.sql
+        );
+        assert!(!query.sql.contains("<="), "{}", query.sql);
+
+        // A full purge builds no WHERE clause at all.
+        let query = notification_event::Entity::delete_many()
+            .build(sea_orm::DbBackend::Postgres);
+        assert!(!query.sql.to_uppercase().contains("WHERE"), "{}", query.sql);
+    }
+
+    #[test]
+    fn list_events_query_uses_pagination() {
+        let query: ListEventsQuery =
+            serde_json::from_str(r#"{"page":"2","page_size":"50"}"#).unwrap();
+        assert_eq!(query.pagination.page, 2);
+        assert_eq!(query.pagination.page_size, 50);
+        assert_eq!(query.event_type, None);
+
+        // Page defaults to 1 and `page_size` keeps the shared default (50), so
+        // an explicit `page_size=50` is honoured instead of being rewritten.
+        let query: ListEventsQuery = serde_json::from_str("{}").unwrap();
+        assert_eq!(query.pagination.page, 1);
+        assert_eq!(
+            query.pagination.normalise().page_size,
+            crate::api::common::DEFAULT_PAGE_SIZE
+        );
+        let explicit: ListEventsQuery =
+            serde_json::from_str(r#"{"page_size":"50"}"#).unwrap();
+        assert_eq!(
+            explicit.pagination.normalise().page_size,
+            crate::api::common::DEFAULT_PAGE_SIZE
+        );
+
+        let query: ListEventsQuery = serde_json::from_str(
+            r#"{"event_type":"agent.offline","page_size":"1000"}"#,
+        )
+        .unwrap();
+        assert_eq!(query.event_type.as_deref(), Some("agent.offline"));
+        assert_eq!(query.pagination.normalise().page_size, 200);
+    }
 }

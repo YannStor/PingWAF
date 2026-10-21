@@ -1,7 +1,7 @@
 //! Axum extractors that turn a `Authorization: Bearer <jwt>` header into an
 //! [`AuthUser`], plus role helpers used by the write endpoints.
 
-use axum::extract::{FromRef, FromRequestParts, Request, State};
+use axum::extract::{FromRef, FromRequestParts, OriginalUri, Request, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
@@ -167,13 +167,21 @@ const PASSWORD_CHANGE_EXEMPT_PREFIX: &str = "/api/v1/auth/";
 
 /// Paths inside [`PASSWORD_CHANGE_EXEMPT_PREFIX`] that are *not* exempt.
 ///
-/// `PUT /auth/me` can change the login e-mail, and the passkey registry lives
-/// under the same prefix; both are ordinary account mutations that have no
-/// business running before the shipped default password is replaced.
+/// The passkey registry is an ordinary account mutation that has no business
+/// running before the shipped default password is replaced: it would let the
+/// session that holds the public default password add a credential of its own
+/// and keep a foothold after the change.
+///
+/// `PUT /auth/me` is deliberately *not* listed — blocking it would also block
+/// the `GET /auth/me` the console needs on boot, and it already demands the
+/// current password before it can change the login e-mail.
 const PASSWORD_CHANGE_REQUIRES_CHANGE: &[&str] =
     &["/api/v1/auth/passkeys", "/api/v1/auth/passkey"];
 
 /// Whether `path` may be used by a session that still owes a password change.
+///
+/// `path` is the path the client sent, *including* the [`crate::api::API_PREFIX`]
+/// segment — see [`request_path`] for why the request's own URI is not that.
 fn password_change_exempt(path: &str) -> bool {
     if !path.starts_with(PASSWORD_CHANGE_EXEMPT_PREFIX) {
         return false;
@@ -181,6 +189,26 @@ fn password_change_exempt(path: &str) -> bool {
     !PASSWORD_CHANGE_REQUIRES_CHANGE.iter().any(|blocked| {
         path == *blocked || path.starts_with(&format!("{blocked}/"))
     })
+}
+
+/// The path the client sent, with the API prefix still on it.
+///
+/// This middleware is layered on the router that is *nested* under
+/// [`crate::api::API_PREFIX`], and axum's `nest` strips that prefix from
+/// `request.uri()` before the nested layers run (it keeps the full URI in the
+/// `OriginalUri` extension). Reading `request.uri()` here therefore yields
+/// `/auth/password` rather than `/api/v1/auth/password`, which never matches
+/// the exemption table below — the forced-change gate then refuses the very
+/// endpoint that clears it and the account can never recover.
+///
+/// Falling back to `request.uri()` keeps this working when the middleware is
+/// mounted outside a nested router (tests, or a future non-nested layout).
+fn request_path(request: &Request) -> String {
+    request
+        .extensions()
+        .get::<OriginalUri>()
+        .map(|uri| uri.0.path().to_string())
+        .unwrap_or_else(|| request.uri().path().to_string())
 }
 
 /// Refuses every authenticated request from an account that still carries the
@@ -202,7 +230,7 @@ pub async fn require_password_change(
     request: Request,
     next: Next,
 ) -> Response {
-    let path = request.uri().path().to_string();
+    let path = request_path(&request);
     if password_change_exempt(&path) {
         return next.run(request).await;
     }
@@ -399,6 +427,103 @@ mod tests {
             "/api/v1/auth/passkey/register/begin",
         ] {
             assert!(!password_change_exempt(path), "{path} must be refused");
+        }
+    }
+
+    /// Regression: the gate is layered on the router *nested* under
+    /// `/api/v1`, and axum strips that prefix from `request.uri()` before the
+    /// layer runs. Reading the raw URI therefore produced `/auth/password`,
+    /// which matched nothing in the exemption table — the forced-change gate
+    /// then refused `PUT /api/v1/auth/password` itself, so the flag could
+    /// never be cleared and the seeded administrator was locked out.
+    ///
+    /// The gate is reproduced with the same predicate the middleware uses, so
+    /// the test asserts the *decision*, not just the resolved string: the
+    /// passable endpoints must stay reachable and everything else must still
+    /// be refused — including the path spellings a caller might use to slip
+    /// past the exemption table.
+    #[tokio::test]
+    async fn the_gate_resolves_the_path_the_client_sent() {
+        use axum::http::Method;
+        use axum::routing::{get, post, put};
+        use tower::ServiceExt;
+
+        let inner = axum::Router::new()
+            .route("/auth/password", put(|| async { "ok" }))
+            .route("/auth/me", get(|| async { "ok" }))
+            .route("/auth/passkeys", post(|| async { "ok" }))
+            .route("/sites", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(
+                |request: Request, _next: Next| async move {
+                    let path = request_path(&request);
+                    let status = if password_change_exempt(&path) {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::FORBIDDEN
+                    };
+                    (status, path).into_response()
+                },
+            ));
+        // Same shape as `api::build_router`: middleware inside, `nest` outside.
+        let app = axum::Router::new().nest(crate::api::API_PREFIX, inner);
+
+        let call = |method: Method, uri: &'static str| {
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(uri)
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let body = axum::body::to_bytes(response.into_body(), 1024)
+                    .await
+                    .unwrap();
+                (status, String::from_utf8(body.to_vec()).unwrap())
+            }
+        };
+
+        // The forced change is possible at all: the console's escape hatch and
+        // its boot-time profile read pass, and the request carries the prefix
+        // the exemption table is written against.
+        for (method, uri) in [
+            (Method::PUT, "/api/v1/auth/password"),
+            (Method::GET, "/api/v1/auth/me"),
+        ] {
+            let (status, seen) = call(method, uri).await;
+            assert_eq!(StatusCode::OK, status, "{uri} must stay reachable");
+            assert_eq!(uri, seen, "the middleware must see the full path");
+        }
+
+        // Everything else is still refused while the flag is set.
+        for (method, uri) in [
+            (Method::GET, "/api/v1/sites"),
+            (Method::POST, "/api/v1/auth/passkeys"),
+        ] {
+            let (status, seen) = call(method, uri).await;
+            assert_eq!(StatusCode::FORBIDDEN, status, "{uri} must be refused");
+            assert_eq!(uri, seen);
+        }
+
+        // Path spellings that must never turn into an allowed request: each is
+        // either refused by the gate or unmatched by the router, never `200`.
+        for (method, uri) in [
+            (Method::PUT, "/api/v1/auth/password/"),
+            (Method::PUT, "/api/v1//auth/password"),
+            (Method::GET, "/api/v1/auth/sites"),
+            (Method::GET, "/api/v1/auth/../sites"),
+            (Method::POST, "/api/v1/auth/%70asskeys"),
+            (Method::POST, "/api/v1/auth/passkeys/"),
+            (Method::POST, "/api/v1/auth/passkeys?next=/sites"),
+            (Method::GET, "/API/V1/auth/me"),
+        ] {
+            let (status, _) = call(method, uri).await;
+            assert_ne!(StatusCode::OK, status, "{uri} must not be allowed");
         }
     }
 

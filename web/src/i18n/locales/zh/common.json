@@ -63,7 +63,8 @@
     "peak": "峰值",
     "memShareHint": "该方法内存占所属模块内存的比例；各方法份额之和不超过 1。",
     "shareHint": "模块耗时占全部归因时间的比例，非 CPU 占比。",
-    "samplingHint": "内存列为当前持有值（0 表示尚未上报，—/peak 为峰值口径）；各占比为占所属模块/全部归因时间的比例，子阶段份额不应相加。"
+    "samplingHint": "内存列为当前持有值（0 表示尚未上报，—/peak 为峰值口径）；各占比为占所属模块/全部归因时间的比例，子阶段份额不应相加。",
+    "heldHint": "记账式估算：仅统计已埋点的持有内存，非堆分配归因。"
   },
   "app": {
     "name": "PingWAF",
@@ -391,7 +392,15 @@
         "hostCpu": "主机 CPU",
         "cores": "核心数",
         "rss": "RSS"
-      }
+      },
+      "activeVisitors": "在线访客",
+      "activeVisitorsHint": "最近 5 分钟独立 IP",
+      "asOf": "更新于",
+      "clientTypes": "客户端类型",
+      "clientTypesHint": "所选时间范围内的桌面 / 移动 / 其它客户端占比",
+      "desktop": "桌面端",
+      "mobile": "移动端",
+      "other": "其它"
     },
     "sites": {
       "failover": {
@@ -1637,7 +1646,14 @@
       "geoipUploadFailed": "GeoIP 上传失败",
       "geoipLocalOn": "使用本地数据库",
       "geoipLocalOff": "无本地数据库",
-      "loginHistoryTitle": "最近登录"
+      "loginHistoryTitle": "最近登录",
+      "clearHistory": "清空历史",
+      "clearHistoryConfirm": "将删除全部告警历史，无法恢复。",
+      "purgeBefore": "清理 {{days}} 天前",
+      "purgeBeforeConfirm": "删除 {{days}} 天前的告警历史？无法恢复。",
+      "purgeDays": "{{days}} 天前",
+      "purged": "已删除 {{count}} 条告警",
+      "purgeFailed": "清理告警历史失败"
     },
     "assistant": {
       "title": "AI 助手",

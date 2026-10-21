@@ -917,6 +917,24 @@ export interface RangeQuery {
   limit?: number
 }
 
+/** `api::analytics::ActiveVisitorsResponse` */
+export interface ActiveVisitorsResponse {
+  active_visitors: number
+  window_minutes: number
+  as_of: string
+}
+
+/** `api::analytics::ClientTypesResponse` */
+export interface ClientTypesResponse {
+  desktop: number
+  mobile: number
+  other: number
+  total: number
+  desktop_share: number
+  mobile_share: number
+  other_share: number
+}
+
 /** `api::analytics::Summary` */
 export interface AnalyticsSummary {
   from: string

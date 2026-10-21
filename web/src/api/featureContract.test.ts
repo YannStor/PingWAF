@@ -88,9 +88,9 @@ describe('GET /api/v1/system/nodes contract', () => {
   })
 })
 
-/** 模块表内存列契约（磁盘列已下线，两表均加内存）。 */
+/** 模块表内存列契约（磁盘列已下线；占比不再画条，内存只展示绝对值）。 */
 describe('profile module memory column contract', () => {
-  it('SystemProfileModule drops disk fields; MethodTable adds memory columns and sort toggle', () => {
+  it('SystemProfileModule drops disk fields; tables show absolute memory without share bars', () => {
     const api = read('src/api/debug.ts')
     expect(api).not.toContain('disk_bytes')
     expect(api).not.toContain('disk_share')
@@ -101,9 +101,19 @@ describe('profile module memory column contract', () => {
     // The table may pass a fallback as the second argument, so match the call
     // prefix rather than the exact string.
     expect(table).toMatch(/t\('system\.notReported'/)
+    // Memory is a bookkeeping estimate with an incomparable denominator, so the
+    // tables show bytes (plus a peak line) and draw no share bar.
+    expect(table).toContain('formatSize(m.mem_bytes)')
+    expect(table).not.toContain('bg-success')
+    expect(table).toMatch(/t\('system\.heldHint'/)
     const methods = read('src/components/system/MethodTable.tsx')
     expect(methods).toContain("t('system.held')")
-    expect(methods).toContain("t('system.memShare')")
+    // The mem_share column is gone on purpose; only absolute bytes remain.
+    expect(methods).not.toContain("t('system.memShare')")
+    expect(methods).not.toContain('bg-success')
+    // Durations scale past a second instead of printing raw milliseconds.
+    expect(methods).toContain('formatLatency')
+    expect(methods).toContain('formatMicros')
     expect(methods).toContain("'system.sortByElapsed'")
     expect(methods).toContain("'system.sortByMem'")
   })

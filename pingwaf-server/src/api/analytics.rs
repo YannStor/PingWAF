@@ -81,6 +81,32 @@ fn range_window_hours(raw: &str) -> Option<i64> {
     }
 }
 
+/// Converts a named `range` into its explicit `from`/`to` equivalent (C5),
+/// shared by every endpoint that accepts the parameter. Explicit `from`/`to`
+/// win when both are given; an unknown range is a 400 `invalid_range`.
+fn expand_range(query: RangeQuery) -> Result<RangeQuery, Box<Response>> {
+    match non_empty(&query.range) {
+        None => Ok(query),
+        Some(raw) => match range_window_hours(&raw) {
+            Some(hours) if query.from.is_none() && query.to.is_none() => {
+                let to = Utc::now();
+                Ok(RangeQuery {
+                    from: Some((to - Duration::hours(hours)).to_rfc3339()),
+                    to: Some(to.to_rfc3339()),
+                    range: None,
+                    ..query
+                })
+            },
+            Some(_) => Ok(query),
+            None => Err(Box::new(crate::api::contract_error(
+                axum::http::StatusCode::BAD_REQUEST,
+                "invalid_range",
+                "range must be one of 24h, 7d, 30d",
+            ))),
+        },
+    }
+}
+
 fn default_interval() -> String {
     "hour".to_string()
 }
@@ -266,6 +292,203 @@ pub fn routes() -> Router<AppState> {
         .route("/analytics/status-codes", get(status_codes))
         .route("/analytics/sites", get(sites_overview))
         .route("/analytics/ai-crawlers", get(ai_crawlers))
+        .route("/analytics/active-visitors", get(active_visitors))
+        .route("/analytics/client-types", get(client_types))
+}
+
+/// Default and bounds for the `/analytics/active-visitors` window.
+const DEFAULT_ACTIVE_MINUTES: u32 = 5;
+const MIN_ACTIVE_MINUTES: u32 = 1;
+const MAX_ACTIVE_MINUTES: u32 = 60;
+
+#[derive(Debug, Deserialize)]
+pub struct ActiveVisitorsQuery {
+    pub site_id: Option<String>,
+    pub minutes: Option<u32>,
+}
+
+/// Clamps the caller-supplied window onto `1..=60` minutes.
+fn clamp_active_minutes(minutes: Option<u32>) -> u32 {
+    minutes
+        .unwrap_or(DEFAULT_ACTIVE_MINUTES)
+        .clamp(MIN_ACTIVE_MINUTES, MAX_ACTIVE_MINUTES)
+}
+
+/// Builds the active-visitors statement; the window length is a bound
+/// parameter (`$n::text || ' minutes'`), never interpolated into the SQL text.
+fn active_visitors_sql(site_scoped: bool) -> (String, usize) {
+    let minutes_placeholder = if site_scoped { 2 } else { 1 };
+    let site_clause = if site_scoped { " AND site_id = $1" } else { "" };
+    let sql = format!(
+        "SELECT COUNT(DISTINCT client_ip) AS active FROM access_logs \
+         WHERE timestamp >= now() - (${minutes_placeholder}::text || ' minutes')::interval{site_clause}"
+    );
+    (sql, minutes_placeholder)
+}
+
+/// `GET /api/v1/analytics/active-visitors` (C1)
+///
+/// Distinct client IPs seen within the last `minutes` (default 5, clamped
+/// to `1..=60`). The window value is always bound, never inlined.
+async fn active_visitors(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Query(query): Query<ActiveVisitorsQuery>,
+) -> Result<Json<ActiveVisitors>, ApiError> {
+    let site_id = match non_empty(&query.site_id) {
+        Some(raw) => {
+            let id = parse_uuid(&raw, "site id")?;
+            load_site_read(&state.db, id, &current).await?;
+            Some(id)
+        },
+        None if current.is_admin() => None,
+        // Reuse the tenant visibility rules of the other endpoints.
+        None => {
+            let owned = site::Entity::find()
+                .filter(site::Column::UserId.eq(current.id))
+                .all(&state.db)
+                .await?;
+            match owned.len() {
+                0 => {
+                    return Err(ApiError::NotFound(
+                        "this account does not own any site".to_string(),
+                    ))
+                }
+                1 => Some(owned[0].id),
+                _ => {
+                    return Err(ApiError::BadRequest(
+                        "site_id is required when the account owns more than one site".to_string(),
+                    ))
+                }
+            }
+        },
+    };
+
+    let minutes = clamp_active_minutes(query.minutes);
+    let (sql, minutes_placeholder) = active_visitors_sql(site_id.is_some());
+    let mut values: Vec<Value> = Vec::with_capacity(2);
+    if let Some(id) = site_id {
+        values.push(id.into());
+    }
+    values.push(Value::from(i64::from(minutes)));
+    debug_assert_eq!(values.len(), minutes_placeholder);
+
+    let rows = query_all(&state.db, &sql, values).await?;
+    let active = rows
+        .first()
+        .map(|row| get_value::<i64>(row, "active"))
+        .unwrap_or(0);
+    Ok(Json(ActiveVisitors {
+        active_visitors: active,
+        window_minutes: minutes,
+        as_of: Utc::now(),
+    }))
+}
+
+/// Response of `/analytics/active-visitors`.
+#[derive(Debug, Serialize)]
+pub struct ActiveVisitors {
+    pub active_visitors: i64,
+    pub window_minutes: u32,
+    pub as_of: DateTime<Utc>,
+}
+
+/// The fixed client-type classifier (C2): constant predicates only, ordered
+/// mobile → other → desktop so later branches cannot shadow earlier ones.
+fn client_type_case() -> String {
+    const MOBILE: [&str; 5] = ["mobile", "android", "iphone", "ipad", "ipod"];
+    const OTHER: [&str; 8] = [
+        "bot",
+        "spider",
+        "crawler",
+        "curl",
+        "wget",
+        "python",
+        "go-http-client",
+        "headless",
+    ];
+    let mut sql = String::from("CASE");
+    for pattern in MOBILE {
+        sql.push_str(&format!(
+            " WHEN user_agent ILIKE '%{pattern}%' THEN 'mobile'"
+        ));
+    }
+    sql.push_str(" WHEN user_agent IS NULL OR user_agent = '' THEN 'other'");
+    for pattern in OTHER {
+        sql.push_str(&format!(
+            " WHEN user_agent ILIKE '%{pattern}%' THEN 'other'"
+        ));
+    }
+    sql.push_str(" ELSE 'desktop' END");
+    sql
+}
+
+/// Response of `/analytics/client-types`.
+#[derive(Debug, Serialize)]
+pub struct ClientTypes {
+    pub desktop: i64,
+    pub mobile: i64,
+    pub other: i64,
+    pub total: i64,
+    pub desktop_share: f64,
+    pub mobile_share: f64,
+    pub other_share: f64,
+}
+
+/// share = count / total; an empty window yields 0.0 everywhere.
+fn share(count: i64, total: i64) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        count as f64 / total as f64
+    }
+}
+
+/// `GET /api/v1/analytics/client-types` (C2)
+///
+/// Splits the window's requests into desktop / mobile / other with one
+/// grouped `CASE` query. Accepts the named `range` like `/analytics/ai-crawlers`;
+/// explicit `from`/`to` win when both are sent, an unknown range is a 400.
+async fn client_types(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Query(query): Query<RangeQuery>,
+) -> Result<Response, ApiError> {
+    let query = match expand_range(query) {
+        Ok(query) => query,
+        Err(response) => return Ok(*response),
+    };
+    let resolved = resolve(&state, &current, &query).await?;
+
+    let case_sql = client_type_case();
+    let (where_sql, values) = resolved.filter("access_logs");
+    let sql = format!(
+        "SELECT {case_sql} AS kind, COUNT(*) AS requests \
+         FROM access_logs WHERE {where_sql} GROUP BY kind"
+    );
+    let rows = query_all(&state.db, &sql, values).await?;
+
+    let mut desktop = 0i64;
+    let mut mobile = 0i64;
+    let mut other = 0i64;
+    for row in &rows {
+        match get_value::<String>(row, "kind").as_str() {
+            "desktop" => desktop = get_value::<i64>(row, "requests"),
+            "mobile" => mobile = get_value::<i64>(row, "requests"),
+            _ => other = get_value::<i64>(row, "requests"),
+        }
+    }
+    let total = desktop + mobile + other;
+    Ok(Json(ClientTypes {
+        desktop,
+        mobile,
+        other,
+        total,
+        desktop_share: share(desktop, total),
+        mobile_share: share(mobile, total),
+        other_share: share(other, total),
+    })
+    .into_response())
 }
 
 /// One AI crawler family in the traffic panel.
@@ -308,30 +531,11 @@ async fn ai_crawlers(
     current: AuthUser,
     Query(query): Query<RangeQuery>,
 ) -> Result<Response, ApiError> {
-    let query = match non_empty(&query.range) {
-        None => query,
-        Some(raw) => match range_window_hours(&raw) {
-            Some(hours) if query.from.is_none() && query.to.is_none() => {
-                let to = Utc::now();
-                RangeQuery {
-                    from: Some((to - Duration::hours(hours)).to_rfc3339()),
-                    to: Some(to.to_rfc3339()),
-                    range: None,
-                    ..query
-                }
-            },
-            Some(_) => query,
-            None => {
-                return Ok(crate::api::contract_error(
-                    axum::http::StatusCode::BAD_REQUEST,
-                    "invalid_range",
-                    "range must be one of 24h, 7d, 30d",
-                ));
-            },
-        },
+    let query = match expand_range(query) {
+        Ok(query) => query,
+        Err(response) => return Ok((*response).into_response()),
     };
     let resolved = resolve(&state, &current, &query).await?;
-
     let (case_sql, filter_sql) = ai_crawler_predicates();
     let (where_sql, mut values) = resolved.filter("access_logs");
     let limit_placeholder = resolved.next_placeholder();
@@ -1252,5 +1456,154 @@ mod tests {
         assert!(!TRAFFIC_STEPS.contains(&7));
         assert!(!TRAFFIC_STEPS.contains(&86_401));
         assert_eq!(default_traffic_step(), 5);
+    }
+
+    /// C1: the active-visitors window defaults to 5 minutes and is clamped
+    /// onto `1..=60` before it can reach the SQL layer.
+    #[test]
+    fn active_minutes_are_clamped() {
+        assert_eq!(5, clamp_active_minutes(None));
+        assert_eq!(1, clamp_active_minutes(Some(0)));
+        assert_eq!(60, clamp_active_minutes(Some(999)));
+        assert_eq!(30, clamp_active_minutes(Some(30)));
+    }
+
+    /// C1: the window value is a bound parameter, never a literal in the SQL.
+    #[test]
+    fn active_visitors_binds_the_window_and_site() {
+        let (open_sql, placeholder) = active_visitors_sql(false);
+        assert!(open_sql.ends_with("::interval"));
+        assert!(!open_sql.contains("site_id"));
+        assert_eq!(placeholder, 1);
+        assert!(open_sql.contains("$1::text || ' minutes'"));
+
+        let (scoped_sql, placeholder) = active_visitors_sql(true);
+        assert!(scoped_sql.contains("site_id = $1"));
+        assert!(scoped_sql.contains("$2::text || ' minutes'"));
+        assert_eq!(placeholder, 2);
+    }
+
+    /// C2: `range=7d` resolves to the same window shape as the equivalent
+    /// explicit `from`/`to` pair (same span, same handling), and an unknown
+    /// range is a 400 `invalid_range` response.
+    #[test]
+    fn range_seven_days_expands_like_explicit_from_to() {
+        let to = Utc::now();
+        let from = to - Duration::hours(7 * 24);
+        let explicit = expand_range(RangeQuery {
+            site_id: None,
+            from: Some(from.to_rfc3339()),
+            to: Some(to.to_rfc3339()),
+            range: None,
+            interval: default_interval(),
+            limit: default_limit(),
+        })
+        .expect("explicit range is always accepted");
+        let explicit = resolve_range(
+            &RangeQuery {
+                site_id: None,
+                from: explicit.from,
+                to: explicit.to,
+                range: None,
+                interval: default_interval(),
+                limit: default_limit(),
+            },
+            None,
+        )
+        .expect("explicit from/to are valid");
+        let named = expand_range(RangeQuery {
+            site_id: None,
+            from: None,
+            to: None,
+            range: Some("7d".to_string()),
+            interval: default_interval(),
+            limit: default_limit(),
+        })
+        .expect("7d is a valid named range");
+        let named =
+            resolve_range(&named, None).expect("7d expands to a valid window");
+        assert_eq!(named.to - named.from, explicit.to - explicit.from);
+        assert_eq!(named.to - named.from, Duration::hours(7 * 24));
+
+        let rejected = expand_range(RangeQuery {
+            site_id: None,
+            from: None,
+            to: None,
+            range: Some("14d".to_string()),
+            interval: default_interval(),
+            limit: default_limit(),
+        });
+        assert!(rejected.is_err(), "unknown range must be a 400 response");
+    }
+
+    /// C2: every UA pattern falls into its contract bucket and the branch
+    /// order is fixed mobile → other → desktop, so a desktop agent can never
+    /// shadow a mobile one.
+    #[test]
+    fn client_type_case_classifies_in_contract_order() {
+        let sql = client_type_case();
+        assert!(sql.starts_with("CASE"));
+        assert!(sql.ends_with("ELSE 'desktop' END"));
+
+        let mobile = ["mobile", "android", "iphone", "ipad", "ipod"];
+        let other = [
+            "bot",
+            "spider",
+            "crawler",
+            "curl",
+            "wget",
+            "python",
+            "go-http-client",
+            "headless",
+        ];
+        for pattern in mobile {
+            let clause = sql
+                .split("WHEN")
+                .find(|clause| clause.contains(pattern))
+                .unwrap_or_else(|| panic!("missing pattern {pattern}"));
+            assert!(
+                clause.contains("THEN 'mobile'"),
+                "{pattern} must classify as mobile: {clause}"
+            );
+        }
+        for pattern in other {
+            let clause = sql
+                .split("WHEN")
+                .find(|clause| clause.contains(pattern))
+                .unwrap_or_else(|| panic!("missing pattern {pattern}"));
+            assert!(
+                clause.contains("THEN 'other'"),
+                "{pattern} must classify as other: {clause}"
+            );
+        }
+        // NULL / empty user agents are "other", before any ILIKE branch.
+        assert!(
+            sql.contains("user_agent IS NULL OR user_agent = '' THEN 'other'")
+        );
+        // No user input can reach this SQL: only the constant patterns above.
+        for pattern in mobile.iter().chain(other.iter()) {
+            assert!(sql.contains(&format!("ILIKE '%{pattern}%'")));
+        }
+        assert_eq!(sql.matches("THEN").count(), mobile.len() + other.len() + 1);
+    }
+
+    /// C2: shares are count/total and an empty window yields 0.0 everywhere.
+    #[test]
+    fn client_type_shares_are_zero_without_traffic() {
+        let empty = ClientTypes {
+            desktop: 0,
+            mobile: 0,
+            other: 0,
+            total: 0,
+            desktop_share: share(0, 0),
+            mobile_share: share(0, 0),
+            other_share: share(0, 0),
+        };
+        assert_eq!(empty.desktop_share, 0.0);
+        assert_eq!(empty.mobile_share, 0.0);
+        assert_eq!(empty.other_share, 0.0);
+
+        assert_eq!(share(25, 100), 0.25);
+        assert_eq!(share(1, 3), 1.0 / 3.0);
     }
 }

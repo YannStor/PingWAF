@@ -3,7 +3,7 @@ import { Badge } from '@/components/ui/Badge'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
 import { Table, type Column } from '@/components/ui/Table'
 import { ErrorState } from '@/components/ErrorState'
-import { formatRelative, formatSize } from '@/lib/format'
+import { formatLatency, formatRelative, formatSize } from '@/lib/format'
 import { normaliseUsagePercent } from '@/api/debug'
 import type { SystemAgentNode, SystemControlNode } from '@/api/debug'
 
@@ -104,7 +104,7 @@ export function ControlNodeCard({ control }: { control: SystemControlNode }) {
         <Metric label={t('system.nodes.requests')} value={control.requests.toLocaleString()} />
         <Metric
           label={t('system.nodes.avgElapsed')}
-          value={`${control.avg_elapsed_ms.toFixed(1)} ms`}
+          value={formatLatency(control.avg_elapsed_ms)}
         />
       </div>
       {hostBar && (

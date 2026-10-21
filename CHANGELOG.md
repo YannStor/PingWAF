@@ -8,6 +8,49 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.29.2] — 2026-10-22
+
+### Fixed
+
+- **The forced-password-change gate blocked the password change itself.** The
+  gate runs on the router nested under `/api/v1`, and axum strips that prefix
+  from `request.uri()` before nested layers execute, so the exemption table
+  never matched `/auth/password` — an account still carrying the shipped
+  default password could not reach the only endpoint that clears it. The
+  middleware now reads `OriginalUri`.
+- **Alert-history purge is batched.** `DELETE /notifications/events?all=true`
+  deleted in a single statement and held locks for the whole scan while the
+  alert writer waited; it now removes 2 000 rows per statement.
+- **`before_days` outside `1..=365` answers `400`** instead of being silently
+  clamped (`0` meant "older than now", i.e. the whole table).
+- **`page_size=50` is honoured** on the alert history; a value-equality check
+  no longer rewrites the shared default to 20.
+- **Duration formatting edges**: `formatMicros(999.9)` prints `1.0 ms` (was
+  `1000 µs`), and `formatLatency(0)` prints `0 ms` (was `0.0 ms`).
+
+### Changed
+
+- **Module and method tables no longer draw share bars.** `mem_share` is the
+  ratio against the sum of instrumented holders (not process RSS) sampled from
+  a gauge that is usually zero between requests, so a bar invited reading it
+  as real memory usage. Memory is shown as bytes plus a peak line
+  (`mem_peak_bytes`); the duration share stays as text only.
+- **Durations scale with magnitude** everywhere in the console: `850 ms`,
+  `3.2 s`, `5m 12s`, `3h 05m`, `2d 4h`.
+
+### Added
+
+- **Live visitors and client types.** `GET /analytics/active-visitors`
+  (distinct client IPs in the last five minutes) and
+  `GET /analytics/client-types` (desktop/mobile/other share over the selected
+  range), surfaced as two cards on the dashboard and the site traffic page
+  with a new donut chart component.
+- **Alert history pagination and cleanup.** `GET /notifications/events` now
+  returns `Page<T>` (`page`/`page_size`, `total`); `DELETE
+  /notifications/events` clears the whole history (`all=true`) or everything
+  older than `before_days=N`. The console gained page controls plus
+  "clear history" and "purge older than 7/30/90 days" actions.
+
 ## [PingWAF 0.29.1] — 2026-10-21
 
 ### Added
@@ -94,6 +137,15 @@ verbatim for reference and attribution, and is not maintained here.
   `http://169.254.169.254/` are still detected.
 - **AI-crawl preview rejects unknown `file` values** with
   `400 unknown_file` instead of silently falling back to `robots`.
+- **The forced password-change gate could lock the seeded admin out.**
+  The D20 middleware read the request path after axum's `nest` had stripped
+  the `/api/v1` prefix, so it compared `/auth/password` against an exemption
+  table of `/api/v1/auth/...` entries and never matched — `PUT
+  /api/v1/auth/password` itself answered `403 password_change_required` and
+  an account that still carried the default password could not change it.
+  The gate now reads the original URI (prefix included), restoring the
+  intended exemptions (`auth/status|login|register|refresh|logout|password`,
+  `GET /auth/me`, still excluding `/auth/passkeys*`).
 
 ## [PingWAF 0.29.0] — 2026-10-21
 

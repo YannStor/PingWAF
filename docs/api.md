@@ -57,10 +57,17 @@ Authenticate and receive tokens.
 }
 ```
 
-The user object (also returned by `GET /auth/me`) carries two extra flags:
-`must_change_password` is `true` for freshly seeded accounts — the server
-rejects every write until the password is changed — and `disabled` accounts
-cannot sign in at all.
+The user object (also returned by `GET /auth/me`) carries two extra flags.
+`disabled` accounts cannot sign in at all. A freshly seeded account also
+starts with `must_change_password: true`: until the password is changed,
+every *authenticated* request — reads and writes alike — answers `403` with
+`{"error":{"code":"password_change_required","message":"change the default
+password first"}}`. Only the endpoints needed to finish the change stay
+reachable: `/auth/status`, `/auth/login`, `/auth/register`,
+`/auth/refresh`, `/auth/logout`, `/auth/password` and `GET /auth/me`. The
+passkey endpoints (`/auth/passkeys*`) are deliberately *not* exempt, so they
+are refused too. Requests without a bearer token are unaffected by this gate
+and keep returning their usual `401` from the handlers.
 
 ### POST /auth/register
 
@@ -2196,6 +2203,77 @@ with no requests in the window is absent rather than reported as zero.
 a `from`/`to` window identical to the explicit pair, and an explicit
 `from`/`to` takes precedence when both are given. An unknown `range` value
 answers `400 invalid_range` (it is never silently treated as 24 hours).
+
+### GET /analytics/active-visitors
+
+Unique client IPs seen in the last few minutes — the "live visitors" figure.
+The window is fixed at five minutes on the dashboard; `minutes` is accepted
+(1–60, default 5) for callers that need a different span. Always scoped to
+`access_logs`, so a request that never reached an agent is not counted.
+
+```json
+{ "active_visitors": 12, "window_minutes": 5, "as_of": "2026-10-21T11:02:03Z" }
+```
+
+### GET /analytics/client-types
+
+Share of desktop vs. mobile vs. other clients over a window. Classification
+is a constant predicate over the recorded user agent: `mobile` matches
+Mobile/Android/iPhone/iPad/iPod, `other` matches an empty agent plus
+bot/spider/crawler/curl/wget/python/go-http-client/headless, and everything
+else counts as `desktop`. Shares are computed server-side (`count / total`,
+`0.0` when the window is empty) so a client never divides by zero.
+
+**Query Parameters:** `site_id`, `from`, `to`, or `range` (same semantics as
+`/analytics/ai-crawlers`).
+
+```json
+{ "desktop": 100, "mobile": 40, "other": 5, "total": 145,
+  "desktop_share": 0.6897, "mobile_share": 0.2759, "other_share": 0.0345 }
+```
+
+---
+
+## Notifications
+
+Alert channels, thresholds, and the alert history the control plane records.
+All endpoints require an authenticated user; mutations require the `write`
+role.
+
+### GET /notifications/events
+
+Paginated alert history, newest first (`created_at DESC, id DESC`, so pages
+stay stable while new events arrive).
+
+**Query Parameters:** `page` (default 1), `page_size` (default 50, 1–200 —
+the console explicitly requests 20), `event_type` (optional filter, e.g.
+`attack_spike`).
+
+```json
+{ "items": [ { "id": "…", "event_type": "…", "severity": "…",
+               "title": "…", "message": "…", "details": null,
+               "created_at": "2026-10-21T10:00:00Z" } ],
+  "total": 123, "total_truncated": false, "page": 1, "page_size": 20 }
+```
+
+### DELETE /notifications/events
+
+Deletes alert history. Exactly one of the two selectors is required — sending
+both (or neither) answers `400 invalid_query`, and `all=false` is rejected
+rather than silently interpreted as "delete nothing".
+
+| Selector | Effect |
+|---|---|
+| `?all=true` | Deletes every alert event |
+| `?before_days=N` | Deletes events older than `N` days (`1`–`365`; out of range is `400`, not clamped) |
+
+Rows are removed in bounded batches (2 000 per statement) so a large purge
+does not hold locks for one long scan while alerts keep being written. The
+`deleted` count is the total across batches.
+
+```json
+{ "deleted": 42 }
+```
 
 ---
 

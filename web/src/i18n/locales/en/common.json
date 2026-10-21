@@ -63,7 +63,8 @@
     "peak": "peak",
     "memShareHint": "This method's share of its module's memory; the shares add up to at most 1.",
     "shareHint": "Share of the total attributed time (not CPU usage).",
-    "samplingHint": "Memory is the value currently held (0 = not reported; —/peak show the high-water mark). Shares are relative to the module or the total attributed time; stage shares must not be added."
+    "samplingHint": "Memory is the value currently held (0 = not reported; —/peak show the high-water mark). Shares are relative to the module or the total attributed time; stage shares must not be added.",
+    "heldHint": "Bookkeeping estimate: only instrumented holders are counted, not a heap-allocation attribution."
   },
   "app": {
     "name": "PingWAF",
@@ -391,7 +392,15 @@
         "hostCpu": "Host CPU",
         "cores": "Cores",
         "rss": "RSS"
-      }
+      },
+      "activeVisitors": "Live Visitors",
+      "activeVisitorsHint": "Unique IPs in the last 5 minutes",
+      "asOf": "as of",
+      "clientTypes": "Client Types",
+      "clientTypesHint": "Desktop vs. mobile vs. other clients over the selected range",
+      "desktop": "Desktop",
+      "mobile": "Mobile",
+      "other": "Other"
     },
     "sites": {
       "failover": {
@@ -1637,7 +1646,14 @@
       "geoipUploadFailed": "GeoIP upload failed",
       "geoipLocalOn": "Local database in use",
       "geoipLocalOff": "No local database",
-      "loginHistoryTitle": "Recent logins"
+      "loginHistoryTitle": "Recent logins",
+      "clearHistory": "Clear history",
+      "clearHistoryConfirm": "This will delete ALL alert history. This cannot be undone.",
+      "purgeBefore": "Clean up before {{days}}d",
+      "purgeBeforeConfirm": "Delete alert history older than {{days}} days? This cannot be undone.",
+      "purgeDays": "{{days}} days ago",
+      "purged": "Deleted {{count}} alert events",
+      "purgeFailed": "Failed to purge alert history"
     },
     "assistant": {
       "title": "AI Assistant",

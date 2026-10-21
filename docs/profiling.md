@@ -178,6 +178,20 @@ curl -k -H "Authorization: Bearer $TOKEN" \
   `elapsed_share`, which say what is measured. Both pairs always carry the
   same value (`total_cpu_ms` == `total_elapsed_ms`). New consumers should
   use `elapsed_*`.
+- **Memory is bookkeeping, not a heap profile.** `mem_bytes` is what the
+  instrumented call sites currently hold (cache objects, a request body in
+  staging, a queued log batch); `mem_peak_bytes` is the high-water mark since
+  start or the last reset. Neither is a heap allocation attribution: only
+  instrumented sites report, the denominator is the sum of those sites rather
+  than process RSS, and a buffer shared by nested scopes is counted in each
+  scope that holds it. That is why the dashboard shows bytes and a peak line
+  but no share bar — a "55 %" would invite reading the figure as process
+  memory, and a value of `0` usually means "nothing was held at the sampling
+  instant" rather than "this module uses no memory". Locate a holder by
+  comparing `mem_peak_bytes` across modules, not by adding shares.
+- **Durations scale with magnitude.** The console formats every duration
+  through one helper: sub-millisecond, milliseconds, seconds, `m s`, `h mm`,
+  and `d h` — so a multi-hour timer no longer overflows its column.
 - **Instrumentation scope.** The 14 module rows are fed by timers on
   instrumented hot paths — the data-plane request pipeline (connection
   handling, upstream connect), the WAF pipeline split into its stages
