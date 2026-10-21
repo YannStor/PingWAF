@@ -6,12 +6,12 @@
 
 pub mod agents;
 pub mod ai;
+pub mod ai_crawl;
 pub mod ai_rate_limit;
 pub mod analytics;
 pub mod api_protection;
 pub mod auth;
 pub mod blocked_ips;
-pub mod ai_crawl;
 pub mod bot;
 pub mod cache;
 pub mod cache_settings;

@@ -1398,9 +1398,8 @@ impl RuleCache {
         // Configuration sync is the agent's heaviest control-plane operation:
         // converting a bundle and rebuilding the domain index is accounted
         // separately from the proxy path.
-        let _sync = pingwaf_profiler::timed_method(
-            pingwaf_profiler::Method::AgentSync,
-        );
+        let _sync =
+            pingwaf_profiler::timed_method(pingwaf_profiler::Method::AgentSync);
         let site_rules = Arc::new(Self::convert_bundle(bundle));
         let site_id = bundle.site_id.clone();
         let domain = site_rules.domain.clone();
@@ -2473,10 +2472,7 @@ impl RuleCache {
                 .response_replace
                 .as_ref()
                 .map(Self::convert_response_replace),
-            ai_crawl: bundle
-                .ai_crawl
-                .as_ref()
-                .map(Self::convert_ai_crawl),
+            ai_crawl: bundle.ai_crawl.as_ref().map(Self::convert_ai_crawl),
         }
     }
 

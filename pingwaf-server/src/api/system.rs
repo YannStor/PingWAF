@@ -607,10 +607,7 @@ mod tests {
             "every module is present even before instrumentation runs"
         );
         assert!(
-            snapshot
-                .modules
-                .iter()
-                .any(|row| row.module == "waf_body"),
+            snapshot.modules.iter().any(|row| row.module == "waf_body"),
             "the WAF stage split is part of the table"
         );
         assert!(

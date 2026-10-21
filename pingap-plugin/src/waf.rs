@@ -3326,7 +3326,8 @@ impl Plugin for WafPlugin {
         // the engine, applying whether or not the WAF engine is enabled ──
         // ── AI crawler control: per-family actions, independent of the
         // traditional bot whitelist ──
-        if let Some(rules) = context.as_ref().map(|site| site.ai_bots.as_slice())
+        if let Some(rules) =
+            context.as_ref().map(|site| site.ai_bots.as_slice())
             && let Some(rule) =
                 rules.iter().find(|rule| rule.matches(&user_agent))
         {
@@ -3676,8 +3677,8 @@ impl Plugin for WafPlugin {
         let _body_timer = pingwaf_profiler::timed_method(
             pingwaf_profiler::Method::WafBodyRead,
         );
-        let staged_bytes = entry.buffer.len()
-            + body.as_ref().map_or(0, |chunk| chunk.len());
+        let staged_bytes =
+            entry.buffer.len() + body.as_ref().map_or(0, |chunk| chunk.len());
         let _body_memory = pingwaf_profiler::track_method_memory(
             pingwaf_profiler::Method::WafBodyRead,
             staged_bytes as u64,

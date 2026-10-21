@@ -125,7 +125,7 @@ pub fn parse_certificates(
 #[derive(Debug)]
 pub struct TlsSettingParams {
     pub server_name: String,
-    pub enabled_h2: bool,            // Enable HTTP/2 support
+    pub enabled_h2: bool, // Enable HTTP/2 support
     /// Whether HTTP/1.1 stays available. `false` with `enabled_h2` true makes
     /// the listener advertise h2 only, which is how a site that turned
     /// HTTP/1.1 off is actually served.
@@ -246,10 +246,8 @@ impl GlobalCertificate {
                 .map_err(|e| invalid("new tls settings", &e))?;
         // `enable_h2()` is exactly `set_alpn(H2H1)`; spelling the pair out
         // lets a site that turned HTTP/1.1 off advertise h2 alone.
-        tls_settings.set_alpn(alpn_for(
-            params.http1_enabled,
-            params.enabled_h2,
-        ));
+        tls_settings
+            .set_alpn(alpn_for(params.http1_enabled, params.enabled_h2));
         if let Some(cipher_list) = &params.cipher_list {
             tls_settings
                 .set_cipher_list(cipher_list)
@@ -363,10 +361,8 @@ impl GlobalCertificate {
         tls_settings.set_cert_resolver(Arc::new(self.clone()));
         // `enable_h2()` is exactly `set_alpn(H2H1)`; spelling the pair out
         // lets a site that turned HTTP/1.1 off advertise h2 alone.
-        tls_settings.set_alpn(alpn_for(
-            params.http1_enabled,
-            params.enabled_h2,
-        ));
+        tls_settings
+            .set_alpn(alpn_for(params.http1_enabled, params.enabled_h2));
         // pingora's rustls listener fixes TLS 1.2 + 1.3 with rustls' default
         // cipher suites; say so rather than silently dropping the settings.
         for (setting, value) in [

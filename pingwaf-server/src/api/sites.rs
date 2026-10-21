@@ -31,8 +31,8 @@ use crate::models::{
     acme_challenge, bot_protection, cache_rules, challenge_settings, geo_rules,
     ip_access_rules, ip_groups, rate_limit_rules, rewrite_rules,
     route_match_type, rule, rule_groups, site, site_ai_bot_policies,
-    site_ai_crawl_settings, site_certificates, site_routes,
-    site_ssl, site_status, site_upstream_pools, site_upstreams, tls_version,
+    site_ai_crawl_settings, site_certificates, site_routes, site_ssl,
+    site_status, site_upstream_pools, site_upstreams, tls_version,
     trusted_header, waf_settings, ResponseReplaceConfig, ResponseReplaceRule,
 };
 
@@ -1288,10 +1288,7 @@ async fn clone_site(
     active.trusted_proxy_ranges = Set(Vec::new());
     active.trusted_proxy_group_ids = Set(Vec::new());
     active.created_at = Set(timestamp);
-    let model = active
-        .insert(&txn)
-        .await
-        .map_err(map_domain_conflict)?;
+    let model = active.insert(&txn).await.map_err(map_domain_conflict)?;
 
     // Upstream pools first: nodes and routes reference them by id, so the
     // clone needs its own pool ids and a mapping from the source's.

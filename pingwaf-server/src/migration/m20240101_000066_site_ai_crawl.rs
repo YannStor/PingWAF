@@ -102,22 +102,28 @@ impl MigrationTrait for Migration {
                             .default(3600),
                     )
                     .col(
-                        ColumnDef::new(SiteAiCrawlSettings::ContentSignalSearch)
-                            .boolean()
-                            .not_null()
-                            .default(true),
+                        ColumnDef::new(
+                            SiteAiCrawlSettings::ContentSignalSearch,
+                        )
+                        .boolean()
+                        .not_null()
+                        .default(true),
                     )
                     .col(
-                        ColumnDef::new(SiteAiCrawlSettings::ContentSignalAiTrain)
-                            .boolean()
-                            .not_null()
-                            .default(false),
+                        ColumnDef::new(
+                            SiteAiCrawlSettings::ContentSignalAiTrain,
+                        )
+                        .boolean()
+                        .not_null()
+                        .default(false),
                     )
                     .col(
-                        ColumnDef::new(SiteAiCrawlSettings::ContentSignalAiInput)
-                            .boolean()
-                            .not_null()
-                            .default(false),
+                        ColumnDef::new(
+                            SiteAiCrawlSettings::ContentSignalAiInput,
+                        )
+                        .boolean()
+                        .not_null()
+                        .default(false),
                     )
                     .col(
                         ColumnDef::new(SiteAiCrawlSettings::CreatedAt)
@@ -199,16 +205,12 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .drop_table(
-                Table::drop()
-                    .table(SiteAiBotPolicies::Table)
-                    .to_owned(),
+                Table::drop().table(SiteAiBotPolicies::Table).to_owned(),
             )
             .await?;
         manager
             .drop_table(
-                Table::drop()
-                    .table(SiteAiCrawlSettings::Table)
-                    .to_owned(),
+                Table::drop().table(SiteAiCrawlSettings::Table).to_owned(),
             )
             .await
     }

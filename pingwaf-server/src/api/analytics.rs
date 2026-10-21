@@ -308,8 +308,7 @@ async fn ai_crawlers(
         "SELECT rule_name, COUNT(*) AS blocked FROM security_events \
          WHERE {event_where} AND event_type = 'ai_bot' GROUP BY rule_name"
     );
-    let blocked_rows =
-        query_all(&state.db, &blocked_sql, event_values).await?;
+    let blocked_rows = query_all(&state.db, &blocked_sql, event_values).await?;
     let mut blocked_by_bot: HashMap<String, i64> = HashMap::new();
     for row in &blocked_rows {
         let rule_name = get_value::<String>(row, "rule_name");
@@ -335,9 +334,12 @@ async fn ai_crawlers(
             total += requests;
             blocked += family_blocked;
             AiCrawlerRow {
-                name: bot.map_or_else(|| bot_id.clone(), |bot| bot.name.to_string()),
-                category: bot
-                    .map_or_else(|| "other".to_string(), |bot| bot.category.to_string()),
+                name: bot
+                    .map_or_else(|| bot_id.clone(), |bot| bot.name.to_string()),
+                category: bot.map_or_else(
+                    || "other".to_string(),
+                    |bot| bot.category.to_string(),
+                ),
                 bot_id,
                 requests,
                 blocked: family_blocked,
@@ -349,8 +351,9 @@ async fn ai_crawlers(
     // Share against every request in the same window, not just the matched
     // rows: "AI crawlers are 3% of traffic" is the number an operator acts on.
     let (all_where, all_values) = resolved.filter("access_logs");
-    let all_sql =
-        format!("SELECT COUNT(*) AS requests FROM access_logs WHERE {all_where}");
+    let all_sql = format!(
+        "SELECT COUNT(*) AS requests FROM access_logs WHERE {all_where}"
+    );
     let all_rows = query_all(&state.db, &all_sql, all_values).await?;
     let window_requests = all_rows
         .first()

@@ -15,10 +15,9 @@ use pingwaf_proto::control_plane::{
     BotProtectionConfig, CacheRule, CacheTypeCategory, CacheTypePolicy,
     ChallengeConfig, CustomErrorPage, FailoverMode, GeoConfig,
     GlobalCacheSettings, HealthCheckConfig, IpAccessRule, RateLimitRule,
-    ResponseReplaceConfig, ResponseReplaceRule, RewriteOperation,
-    RewriteRule, RouteConfig, RuleBundle, RuleOverride, Site,
-    SiteCacheSettings, SiteConfig, SitePolicy, SslConfig, UpstreamConfig,
-    UpstreamPeer, WafConfig, WafRule,
+    ResponseReplaceConfig, ResponseReplaceRule, RewriteOperation, RewriteRule,
+    RouteConfig, RuleBundle, RuleOverride, Site, SiteCacheSettings, SiteConfig,
+    SitePolicy, SslConfig, UpstreamConfig, UpstreamPeer, WafConfig, WafRule,
 };
 use prost::Message;
 use prost_types::Timestamp;
@@ -1301,29 +1300,29 @@ async fn load_ai_crawl(
 ) -> Result<Option<AiCrawlConfig>, DbErr> {
     let settings = crate::api::ai_crawl::load_settings(db, site_row.id)
         .await
-        .map_err(|err| DbErr::Custom(format!("ai_crawl settings: {err}")))?;
+        .map_err(|err| {
+        DbErr::Custom(format!("ai_crawl settings: {err}"))
+    })?;
     let policies = crate::api::ai_crawl::load_policies(db, site_row.id)
         .await
-        .map_err(|err| DbErr::Custom(format!("ai_crawl policies: {err}")))?;
+        .map_err(|err| {
+        DbErr::Custom(format!("ai_crawl policies: {err}"))
+    })?;
 
-    let robots_body = render_ai_file(
-        &settings.robots_mode,
-        &settings.robots_body,
-        || crate::api::ai_crawl::render_robots(
-            &settings,
-            &policies,
-            &site_row.domain,
-        ),
-    );
-    let llms_body = render_ai_file(
-        &settings.llms_mode,
-        &settings.llms_body,
-        || {
+    let robots_body =
+        render_ai_file(&settings.robots_mode, &settings.robots_body, || {
+            crate::api::ai_crawl::render_robots(
+                &settings,
+                &policies,
+                &site_row.domain,
+            )
+        });
+    let llms_body =
+        render_ai_file(&settings.llms_mode, &settings.llms_body, || {
             crate::api::ai_crawl::render_llms(
                 &settings, &policies, site_row, routes,
             )
-        },
-    );
+        });
 
     let policies = policies
         .iter()

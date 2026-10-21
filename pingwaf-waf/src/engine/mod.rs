@@ -19,7 +19,7 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::Instant;
 
-use pingwaf_profiler::{Method, Module, record_method, track_memory};
+use pingwaf_profiler::{record_method, track_memory, Method, Module};
 use serde::{Deserialize, Serialize};
 
 use crate::normalize::ValueSource;

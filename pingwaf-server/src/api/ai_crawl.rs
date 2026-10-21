@@ -21,9 +21,7 @@ use axum::routing::get;
 use axum::Json;
 use axum::Router;
 use chrono::Utc;
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set,
-};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -353,8 +351,7 @@ pub async fn load_settings<C: sea_orm::ConnectionTrait>(
         .filter(settings_model::Column::SiteId.eq(site_id))
         .one(db)
         .await?;
-    Ok(row.map(AiCrawlSettings::from_model)
-        .unwrap_or_default())
+    Ok(row.map(AiCrawlSettings::from_model).unwrap_or_default())
 }
 
 /// Loads the per-family overrides.
@@ -726,7 +723,11 @@ pub fn render_robots(
 }
 
 fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 /// Renders llms.txt: a title, a summary and the site's routes as links.
@@ -848,32 +849,30 @@ mod tests {
 
     #[test]
     fn policies_are_validated_against_the_catalogue() {
-        assert!(
-            validate_policies(vec![AiBotPolicyView {
-                bot_id: "not-a-bot".to_string(),
+        assert!(validate_policies(vec![AiBotPolicyView {
+            bot_id: "not-a-bot".to_string(),
+            action: "block".to_string(),
+        }])
+        .is_err());
+        assert!(validate_policies(vec![
+            AiBotPolicyView {
+                bot_id: "gptbot".to_string(),
                 action: "block".to_string(),
-            }])
-            .is_err()
-        );
-        assert!(
-            validate_policies(vec![
-                AiBotPolicyView {
-                    bot_id: "gptbot".to_string(),
-                    action: "block".to_string(),
-                },
-                AiBotPolicyView {
-                    bot_id: "gptbot".to_string(),
-                    action: "allow".to_string(),
-                },
-            ])
-            .is_err()
-        );
+            },
+            AiBotPolicyView {
+                bot_id: "gptbot".to_string(),
+                action: "allow".to_string(),
+            },
+        ])
+        .is_err());
     }
 
     #[test]
     fn bodies_are_bounded_and_cannot_carry_crlf() {
         let body = check_body("a\r\nb", "robots_body").expect("valid");
         assert_eq!("a\nb", body);
-        assert!(check_body(&"x".repeat(MAX_FILE_BYTES + 1), "robots_body").is_err());
+        assert!(
+            check_body(&"x".repeat(MAX_FILE_BYTES + 1), "robots_body").is_err()
+        );
     }
 }

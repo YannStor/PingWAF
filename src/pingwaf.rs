@@ -792,11 +792,8 @@ fn cached_rules_to_pingap_config(
 
         // The generated AI files run first: a `robots.txt` request must be
         // answered before the WAF inspects (and possibly logs or blocks) it.
-        let mut site_plugins = site_ai_file_plugins(
-            site_id,
-            site.ai_crawl.as_ref(),
-            &mut plugins,
-        );
+        let mut site_plugins =
+            site_ai_file_plugins(site_id, site.ai_crawl.as_ref(), &mut plugins);
         site_plugins.extend(location_plugins.clone());
         site_plugins.extend(site_posture_plugins(
             site_id,

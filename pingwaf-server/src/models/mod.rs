@@ -11,10 +11,10 @@
 #![allow(clippy::module_inception)]
 
 pub mod agent_blocked_ips;
-pub mod ai_crawl;
 pub mod agent_metrics;
 pub mod agents;
 pub mod ai;
+pub mod ai_crawl;
 pub mod api_protection;
 pub mod bot_protection;
 pub mod cache_settings;
@@ -47,13 +47,13 @@ pub mod users;
 pub mod waf_settings;
 
 pub use agent_blocked_ips::agent_blocked_ips as agent_blocked_ip;
-pub use ai_crawl::{site_ai_bot_policies, site_ai_crawl_settings};
 pub use agent_metrics::agent_metrics as agent_metric;
 pub use agents::{agent_status, agents as agent};
 pub use ai::{
     ai_conversations as ai_conversation, ai_defaults,
     ai_messages as ai_message, ai_settings as ai_setting, message_role,
 };
+pub use ai_crawl::{site_ai_bot_policies, site_ai_crawl_settings};
 pub use api_protection::{
     api_protection_settings as api_protection_setting,
     control_plane_access_logs as control_plane_access_log,
