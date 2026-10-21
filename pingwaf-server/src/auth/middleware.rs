@@ -158,12 +158,17 @@ impl IntoResponse for AuthError {
 
 /// Endpoints a first-login account may still reach (D20).
 ///
-/// Everything under `/api/v1/auth/` that a session needs in order to *become*
-/// a normal session — status probe, login/refresh/logout, the password change
-/// itself and the profile read the console makes on boot — stays reachable.
-/// Every other authenticated endpoint is refused while
-/// `must_change_password` is set.
-const PASSWORD_CHANGE_EXEMPT_PREFIX: &str = "/api/v1/auth/";
+/// Everything under `/auth/` that a session needs in order to *become* a
+/// normal session — status probe, login/refresh, the password change itself
+/// and the profile read the console makes on boot — stays reachable. Every
+/// other authenticated endpoint is refused while `must_change_password` is
+/// set.
+///
+/// Relative to [`crate::api::API_PREFIX`]: the table is matched against the
+/// path with the prefix already stripped, so it cannot drift from the routes
+/// it describes (a hard-coded `/api/v1/...` copy is what turned this gate
+/// into a lockout once).
+const PASSWORD_CHANGE_EXEMPT_PREFIX: &str = "/auth/";
 
 /// Paths inside [`PASSWORD_CHANGE_EXEMPT_PREFIX`] that are *not* exempt.
 ///
@@ -176,18 +181,25 @@ const PASSWORD_CHANGE_EXEMPT_PREFIX: &str = "/api/v1/auth/";
 /// the `GET /auth/me` the console needs on boot, and it already demands the
 /// current password before it can change the login e-mail.
 const PASSWORD_CHANGE_REQUIRES_CHANGE: &[&str] =
-    &["/api/v1/auth/passkeys", "/api/v1/auth/passkey"];
+    &["/auth/passkeys", "/auth/passkey"];
 
 /// Whether `path` may be used by a session that still owes a password change.
 ///
 /// `path` is the path the client sent, *including* the [`crate::api::API_PREFIX`]
 /// segment — see [`request_path`] for why the request's own URI is not that.
+/// The prefix is stripped here rather than written into the tables above so
+/// the gate cannot disagree with the router about where the API lives.
 fn password_change_exempt(path: &str) -> bool {
-    if !path.starts_with(PASSWORD_CHANGE_EXEMPT_PREFIX) {
+    let Some(inner) = path.strip_prefix(crate::api::API_PREFIX) else {
+        return false;
+    };
+    if !inner.starts_with(PASSWORD_CHANGE_EXEMPT_PREFIX) {
         return false;
     }
     !PASSWORD_CHANGE_REQUIRES_CHANGE.iter().any(|blocked| {
-        path == *blocked || path.starts_with(&format!("{blocked}/"))
+        inner
+            .strip_prefix(blocked)
+            .is_some_and(|tail| tail.is_empty() || tail.starts_with('/'))
     })
 }
 
@@ -390,41 +402,68 @@ mod tests {
         assert!(admin.require_admin().is_ok());
     }
 
+    /// The path as the client sends it: the API prefix plus an inner route.
+    ///
+    /// Composed from [`crate::api::API_PREFIX`] so a prefix change moves the
+    /// tests with the router instead of leaving a stale `/api/v1` table here.
+    fn api(path: &str) -> String {
+        format!("{}{path}", crate::api::API_PREFIX)
+    }
+
     /// D20: only the endpoints a first-login account needs to finish the
     /// forced change stay reachable; everything else is refused.
     #[test]
     fn password_change_exemptions_cover_only_the_login_flow() {
         for path in [
-            "/api/v1/auth/status",
-            "/api/v1/auth/login",
-            "/api/v1/auth/register",
-            "/api/v1/auth/refresh",
-            "/api/v1/auth/logout",
-            "/api/v1/auth/password",
-            "/api/v1/auth/me",
+            "/auth/status",
+            "/auth/login",
+            "/auth/register",
+            "/auth/refresh",
+            "/auth/password",
+            // Both methods: the console reads the profile on boot, and
+            // blocking `PUT` would take `GET` down with it (see the table's
+            // doc comment).
+            "/auth/me",
         ] {
-            assert!(password_change_exempt(path), "{path} must stay reachable");
+            let path = api(path);
+            assert!(
+                password_change_exempt(&path),
+                "{path} must stay reachable"
+            );
         }
 
         for path in [
             // Read surfaces the shipped default password would otherwise open.
-            "/api/v1/sites",
-            "/api/v1/sites/abc",
-            "/api/v1/keys",
-            "/api/v1/users",
-            "/api/v1/logs",
-            "/api/v1/login-history",
-            "/api/v1/agents",
-            "/api/v1/settings",
-            "/api/v1/system/info",
-            // MCP lives outside the API prefix entirely.
-            "/mcp",
-            // Not the auth namespace even though it starts with a similar
-            // string — a prefix check must not be fooled by `auth` alone.
-            "/api/v1/authority",
+            "/sites",
+            "/sites/abc",
+            "/keys",
+            "/users",
+            "/logs",
+            "/login-history",
+            "/agents",
+            "/settings",
+            "/system/info",
+            // Not the auth namespace even though it shares the first segment.
+            "/authority",
             // Ordinary account mutations hidden inside the auth prefix.
-            "/api/v1/auth/passkeys",
-            "/api/v1/auth/passkey/register/begin",
+            "/auth/passkeys",
+            "/auth/passkeys/0a1b2c",
+            "/auth/passkey/register/begin",
+        ] {
+            let path = api(path);
+            assert!(!password_change_exempt(&path), "{path} must be refused");
+        }
+
+        // Paths that are not under the API prefix at all are never exempt,
+        // and neither is anything that merely starts with a similar string.
+        for path in [
+            "/mcp",
+            "/",
+            // The bare prefix, with no inner route after it.
+            crate::api::API_PREFIX,
+            // Near misses: a shared leading segment is not the prefix.
+            "/api/v10/auth/password",
+            "/api/auth/password",
         ] {
             assert!(!password_change_exempt(path), "{path} must be refused");
         }

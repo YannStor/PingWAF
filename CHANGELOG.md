@@ -27,6 +27,23 @@ verbatim for reference and attribution, and is not maintained here.
   no longer rewrites the shared default to 20.
 - **Duration formatting edges**: `formatMicros(999.9)` prints `1.0 ms` (was
   `1000 µs`), and `formatLatency(0)` prints `0 ms` (was `0.0 ms`).
+- **Changing the password no longer ends in a bogus error dialog.** The change
+  revokes every token for the account, but the console then re-read the profile
+  with the dead access token: the forced-change dialog and the profile page
+  turned the resulting `401` into an error message (or a silent sign-out) after
+  a change that had actually succeeded. Both now sign out, drop the cached
+  data and ask the operator to sign in again with the new password.
+- **Changing your own login name from the users table** bumps the token
+  version server-side; the page now signs out instead of letting the next
+  request drop the session without explanation.
+- **The display name can be cleared.** `PUT /auth/me` treats `null` as "leave
+  unchanged" and only an empty string clears it; the profile form sent `null`.
+- **`pingwaf user reset-password` revokes the account's sessions** by bumping
+  its token version, like `PUT /auth/password` and `PUT /users/{id}` already
+  did — a leaked refresh token used to survive the reset.
+- **The forced-change exemption table is derived from `API_PREFIX`** instead of
+  repeating `/api/v1`, so a prefix change cannot silently re-arm the lockout
+  the entry above describes.
 
 ### Changed
 
@@ -144,7 +161,7 @@ verbatim for reference and attribution, and is not maintained here.
   /api/v1/auth/password` itself answered `403 password_change_required` and
   an account that still carried the default password could not change it.
   The gate now reads the original URI (prefix included), restoring the
-  intended exemptions (`auth/status|login|register|refresh|logout|password`,
+  intended exemptions (`auth/status|login|register|refresh|password`,
   `GET /auth/me`, still excluding `/auth/passkeys*`).
 
 ## [PingWAF 0.29.0] — 2026-10-21

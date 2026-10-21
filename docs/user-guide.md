@@ -9,10 +9,12 @@
 2. Log in with the seeded credentials:
    - Email: `admin@pingwaf.local`
    - Password: `pingwaf123`
-3. **Change your password when prompted**: the console blocks every write
-   operation behind a change-password dialog on the first sign-in. Pick a new
-   password and the console unlocks immediately — the flag is stored per
-   account, not per browser
+3. **Change your password when prompted**: the console blocks the whole UI
+   behind a change-password dialog on the first sign-in (the server refuses
+   every authenticated request except the auth endpoints). Changing the
+   password revokes all of that account's sessions, so the console signs you
+   out and asks you to sign in again with the new password — the flag is
+   stored per account, not per browser
 
 ### Dashboard Overview
 
@@ -506,10 +508,12 @@ user's profile, password, API keys, and — for administrators — the user list
 ### Profile & Password
 
 Update your display name and email, or change your password (current password
-required; the new one must be at least 8 characters). Your personal API keys
-live on the same page: any account can mint keys for itself, with `read` or
-`write` permission — a key with `write` is only accepted when its owner is an
-administrator.
+required; the new one must be at least 8 characters). Changing the password,
+or the email you sign in with, signs you out everywhere — including this
+browser — so you are asked to sign in again. Your personal API keys live on the
+same page: any account can mint keys for itself, but only an administrator's
+key can carry more than `read` (a non-administrator's request is silently
+narrowed to `read`).
 
 ### User Management (administrators)
 
@@ -534,10 +538,13 @@ access.
 
 ### Forced First-Sign-In Password Change
 
-Every account starts with a `must change password` flag. On the first sign-in
-the console blocks all other pages behind a change-password dialog, and the
-server rejects every write until the password is replaced. Changing the
-password clears the flag immediately.
+Accounts seeded with the shipped default password — the first administrator on
+a fresh deployment, and any account created with `pingwaf user add-admin` —
+start with a `must change password` flag. On the first sign-in the console
+blocks the whole UI behind a change-password dialog, and the server refuses
+every authenticated request except the auth endpoints until the password is
+replaced. Changing the password clears the flag and revokes every session, so
+the console sends you back to the login form.
 
 ### JWT Secret Provisioning
 

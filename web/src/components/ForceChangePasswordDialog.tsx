@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useNavigate } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Eye, EyeSlash } from '@phosphor-icons/react'
 import { Dialog } from '@/components/ui/Dialog'
@@ -16,15 +17,23 @@ const MIN_PASSWORD = 8
 
 /**
  * Blocks the console behind a password replace until the first sign-in gate
- * clears. Not dismissible by design: the server keeps rejecting writes until
- * the password is changed anyway.
+ * clears. Not dismissible by design: while `must_change_password` is set the
+ * server refuses every authenticated request except the auth endpoints, so
+ * the console has nothing to show.
+ *
+ * A successful change is also a session change — the server bumps the
+ * account's token version, which kills the access and refresh tokens this
+ * dialog was opened with. The console therefore signs out and hands the
+ * operator to the login form; calling `GET /auth/me` with the dead token (what
+ * this used to do) turned a successful change into a bogus error.
  */
 export function ForceChangePasswordDialog() {
   const { t } = useTranslation()
   const toast = useToast()
+  const navigate = useNavigate()
   const queryClient = useQueryClient()
   const user = useAuthStore((s) => s.user)
-  const setUser = useAuthStore((s) => s.setUser)
+  const logout = useAuthStore((s) => s.logout)
 
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
@@ -35,18 +44,19 @@ export function ForceChangePasswordDialog() {
   const open = user?.must_change_password === true
 
   const submit = useMutation({
-    mutationFn: async () => {
-      await authApi.changePassword({
+    mutationFn: () =>
+      authApi.changePassword({
         current_password: currentPassword,
         new_password: newPassword,
-      })
-      return authApi.me()
-    },
+      }),
     meta: { silentToast: true },
-    onSuccess: (updated) => {
-      setUser(updated)
-      void queryClient.invalidateQueries({ queryKey: ['auth'] })
-      toast.success(t('pages.settings.passwordChanged'))
+    onSuccess: () => {
+      // Credentials changed: drop the revoked session and its cached data
+      // before the router takes over.
+      logout()
+      queryClient.clear()
+      toast.success(t('pages.settings.passwordChangedSignIn'))
+      navigate('/login', { replace: true })
     },
     onError: (err) => setError(errorMessage(err)),
   })

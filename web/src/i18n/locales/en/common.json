@@ -1818,7 +1818,7 @@
       "confirmPassword": "Confirm new password",
       "updatePassword": "Update password",
       "profileSaved": "Profile updated",
-      "passwordChanged": "Password changed",
+      "passwordChangedSignIn": "Password changed — please sign in again",
       "passwordMismatch": "The new passwords do not match",
       "passwordUnchanged": "The new password must differ from the current one",
       "passwordWrongCurrent": "The current password is incorrect",

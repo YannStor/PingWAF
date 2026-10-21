@@ -56,7 +56,10 @@ export function AccountCard() {
   }
 
   const profile = useMutation({
-    mutationFn: () => authApi.updateProfile({ name: name.trim() || null }),
+    // `null` means "leave the display name alone" server-side; an empty
+    // string is what actually clears it (the same field, two opposite
+    // meanings — see `update_profile`).
+    mutationFn: () => authApi.updateProfile({ name: name.trim() }),
     onSuccess: (updated) => {
       setUser(updated)
       void queryClient.invalidateQueries({ queryKey: ['auth'] })
@@ -75,8 +78,9 @@ export function AccountCard() {
     // sign out and send the operator to the login form.
     onSuccess: () => {
       logout()
-      navigate('/login')
+      queryClient.clear()
       toast.success(t('pages.settings.loginNameChanged'))
+      navigate('/login', { replace: true })
     },
     onError: (err) => {
       const message = errorMessage(err)
@@ -113,19 +117,18 @@ export function AccountCard() {
     // A wrong current password is a 400 whose message belongs next to the
     // fields, not in a toast.
     meta: { silentToast: true },
-    onSuccess: async () => {
+    onSuccess: () => {
       setCurrentPassword('')
       setNewPassword('')
       setConfirmPassword('')
       setPasswordError(null)
-      // Re-sync the stored profile so the `must_change_password` gate clears
-      // (and the role badge stays fresh) without a reload.
-      try {
-        setUser(await authApi.me())
-      } catch {
-        /* keep the stale profile; the next reload re-syncs */
-      }
-      toast.success(t('pages.settings.passwordChanged'))
+      // The change revoked every token, this session included: re-reading the
+      // profile with the dead token would only 401. Sign out and let the
+      // operator back in with the new password.
+      logout()
+      queryClient.clear()
+      toast.success(t('pages.settings.passwordChangedSignIn'))
+      navigate('/login', { replace: true })
     },
     onError: (err) => {
       const message = errorMessage(err)

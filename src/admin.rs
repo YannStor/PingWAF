@@ -242,15 +242,24 @@ async fn reset_password(opts: ResetPasswordOpts) -> anyhow::Result<()> {
 
     let password_hash = hash_password(&password)
         .map_err(|err| anyhow::anyhow!("cannot hash the password: {err}"))?;
+    // A reset is a credential change like any other: revoke every token the
+    // account still holds, exactly as `PUT /auth/password` does. Skipping this
+    // left a leaked session working until its own expiry, which defeats the
+    // point of resetting a compromised password from the CLI.
+    let next_token_version = row.token_version + 1;
     let mut active: user::ActiveModel = row.into();
     active.password_hash = Set(password_hash);
+    active.token_version = Set(next_token_version);
     active.updated_at = Set(Utc::now());
     let row = active
         .update(&db)
         .await
         .context("cannot update the password")?;
 
-    println!("password updated for {} ({})", row.email, row.role);
+    println!(
+        "password updated for {} ({}); all existing sessions are now invalid",
+        row.email, row.role
+    );
     if generated {
         print_generated(&password);
     }

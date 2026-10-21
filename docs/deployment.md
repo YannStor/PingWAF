@@ -639,7 +639,9 @@ A hardening pass before exposing the control plane beyond localhost:
 - **Session revocation semantics.** Accounts carry a token version;
   changing a password, disabling an account, or changing its role bumps the
   version and immediately invalidates that account's access and refresh
-  tokens. Password changes by the user do the same for their own sessions.
+  tokens. Password changes by the user do the same for their own sessions, and
+  so does `pingwaf user reset-password` (the forced-change flag, if the account
+  carried one, is left as it is).
 
 ## Backup & Recovery
 

@@ -58,16 +58,20 @@ Authenticate and receive tokens.
 ```
 
 The user object (also returned by `GET /auth/me`) carries two extra flags.
-`disabled` accounts cannot sign in at all. A freshly seeded account also
-starts with `must_change_password: true`: until the password is changed,
-every *authenticated* request — reads and writes alike — answers `403` with
+`disabled` accounts cannot sign in at all. An account seeded with the shipped
+default password also starts with `must_change_password: true`: until the
+password is changed, every *authenticated* request — reads and writes alike —
+answers `403` with
 `{"error":{"code":"password_change_required","message":"change the default
 password first"}}`. Only the endpoints needed to finish the change stay
-reachable: `/auth/status`, `/auth/login`, `/auth/register`,
-`/auth/refresh`, `/auth/logout`, `/auth/password` and `GET /auth/me`. The
-passkey endpoints (`/auth/passkeys*`) are deliberately *not* exempt, so they
-are refused too. Requests without a bearer token are unaffected by this gate
-and keep returning their usual `401` from the handlers.
+reachable: `/auth/status`, `/auth/login`, `/auth/register`, `/auth/refresh`,
+`PUT /auth/password` and `/auth/me` — both methods of the profile route, since
+the console needs the read and the route cannot be split by method. A
+first-sign-in account can therefore still rename itself; changing the login
+name additionally requires `current_password`. The passkey endpoints
+(`/auth/passkeys*`) are deliberately *not* exempt, so they are refused too.
+Requests without a bearer token are unaffected by this gate and keep returning
+their usual `401` from the handlers.
 
 ### POST /auth/register
 
@@ -151,6 +155,11 @@ typo as a dead session. Answers `204` on success. Changing the password also
 clears the account's `must_change_password` flag, which is what releases a
 first sign-in from the forced password change.
 
+Like a login-name change, a password change revokes every token issued to the
+account — including the access token the request itself was authenticated with
+and its refresh token. The response carries no replacement pair, so the client
+must sign in again with the new password.
+
 ---
 
 ## Users
@@ -170,7 +179,10 @@ List users (paginated).
 ### POST /users
 
 Create an account. `role` defaults to `viewer`; `password` must be at least 8
-characters. The new account starts with `must_change_password: true`.
+characters. The new account starts with `must_change_password: false` — the
+administrator picked its password, so the console does not force a change at
+first sign-in. Only the seeded administrator and accounts created with
+`pingwaf user add-admin` start with the flag set.
 
 **Request:**
 ```json
@@ -1218,7 +1230,10 @@ own. The plaintext is never returned here.
 
 ### POST /keys
 
-Create a new API key. Requires the `write` role.
+Create a new API key. Every authenticated account may create keys for itself;
+a key can never exceed its owner's role, so a non-administrator's requested
+permissions are silently narrowed to `["read"]` (the `agent` permission, which
+is what a WAF agent needs, is administrator-only).
 
 **Request:**
 ```json
@@ -3496,9 +3511,10 @@ REST API — disabled accounts and stale tokens (superseded by a newer sign-in)
 are refused, and an account that must change its password at next sign-in is
 rejected outright since MCP offers no way to complete that flow.
 
-The endpoint is rate limited alongside the REST API and capped for abuse
-resistance: a JSON-RPC batch may contain at most 16 calls (larger batches are
-rejected with `-32600`), and the request body is limited to 256 KiB.
+The endpoint sits outside the REST credential rate limiter, so it is capped
+for abuse resistance instead: a JSON-RPC batch may contain at most 16 calls
+(larger batches are rejected with `-32600`), and the request body is limited to
+256 KiB.
 
 Supported methods: `initialize`, `ping`, `tools/list`, `tools/call`,
 `resources/list`, `resources/read`, `resources/templates/list`,
@@ -3898,14 +3914,24 @@ prefix, so a wrong resource name can be grepped directly.
 | 400 | `unknown_file` | `ai-crawl/preview` `file` parameter is not `robots` or `llms` |
 | 400 | `invalid_range` | Analytics `range` parameter is not `24h`, `7d` or `30d` |
 | 401 | `unauthorized` | Missing or invalid token |
+| 401 | `token_expired` | Access token passed its expiry; refresh or sign in again |
 | 403 | `forbidden` | Insufficient permissions |
+| 403 | `password_change_required` | Account still holds the seeded default password; only the auth endpoints are reachable |
 | 404 | `not_found` | Resource or route does not exist (message contains the full `/api/v1` path) |
 | 405 | `method_not_allowed` | Method not supported by the route |
 | 409 | `conflict` | Duplicate resource |
 | 422 | `unprocessable_entity` | Validation failed by a business rule |
-| 429 | `too_many_requests` | Rate limited (passkey challenges) |
+| 429 | `too_many_requests` | Rate limited: the credential limiter (`/auth/login`, `/auth/register`, `/auth/refresh`, `PUT /auth/password`, passkey login) answers with `Retry-After`; the separate passkey-ceremony budget (120 challenges per minute, process-wide) answers without it |
 | 500 | `internal_error` | Server error |
 | 501 | `not_implemented` | Feature disabled on this deployment (passkeys) |
+| 502 | `bad_gateway` | An upstream dependency answered with an error |
+| 503 | `service_unavailable` | A dependency or feature is unavailable right now |
+
+Rejections produced by a layer below the handlers (body-size limits, malformed
+query strings, …) are rewritten into the same envelope: `invalid_query` and
+`invalid_body` where axum's rejection text identifies them, `rate_limited` for
+a bare `429`, and `request_failed` for any other status without a more
+specific code.
 
 ---
 

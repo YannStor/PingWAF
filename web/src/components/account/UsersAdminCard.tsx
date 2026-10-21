@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, PencilSimple, Plus, Prohibit, UserCircle } from '@phosphor-icons/react'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
@@ -26,6 +27,18 @@ const MIN_PASSWORD = 8
 const USER_ROLES = ['admin', 'auditor', 'viewer'] as const
 
 /**
+ * Edit request plus the pre-computed "this change revokes our own session"
+ * flag. The flag is decided at submit time because the store's profile may be
+ * gone by the time the response lands (see the `onSuccess` handler).
+ */
+interface UpdateUserPayload {
+  id: string
+  data: UpdateUserRequest
+  /** Omitted for the enable/disable toggles, which never touch credentials. */
+  selfEmailChange?: boolean
+}
+
+/**
  * Dashboard user administration (global configuration).
  *
  * Shows the most recent successful login per account, resolved server-side
@@ -37,6 +50,8 @@ export function UsersAdminCard() {
   const queryClient = useQueryClient()
   const me = useAuthStore((s) => s.user)
   const setUser = useAuthStore((s) => s.setUser)
+  const logout = useAuthStore((s) => s.logout)
+  const navigate = useNavigate()
 
   const [createOpen, setCreateOpen] = useState(false)
   const [email, setEmail] = useState('')
@@ -71,12 +86,21 @@ export function UsersAdminCard() {
   })
 
   const update = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: UpdateUserRequest }) =>
-      usersApi.update(id, data),
-    onSuccess: (updated) => {
+    mutationFn: ({ id, data }: UpdateUserPayload) => usersApi.update(id, data),
+    onSuccess: (updated, { selfEmailChange = false }) => {
       setEditing(null)
       setPendingDisable(null)
       void queryClient.invalidateQueries({ queryKey: usersKeys.all })
+      if (selfEmailChange) {
+        // The server bumped this account's token version, so the session we
+        // are holding is already dead: close it deliberately instead of
+        // letting the next request drop the operator out of nowhere.
+        logout()
+        queryClient.clear()
+        toast.success(t('pages.settings.loginNameChanged'))
+        navigate('/login', { replace: true })
+        return
+      }
       // A self-update (display name) must refresh the stored session profile.
       if (updated.id === me?.id) setUser(updated)
       toast.success(t('pages.account.users.updated'))
@@ -327,7 +351,13 @@ export function UsersAdminCard() {
                   data.email = editEmail.trim()
                 }
                 if (!isSelf) data.role = editRole
-                update.mutate({ id: editing.id, data })
+                // Changing your own login name revokes every token we hold.
+                // Without a loaded profile we cannot prove the target is
+                // somebody else, so assume it is ours: closing the session on
+                // purpose beats having it die on the next request.
+                const selfEmailChange =
+                  data.email !== undefined && (me?.id === undefined || isSelf)
+                update.mutate({ id: editing.id, data, selfEmailChange })
               }}
             >
               {t('common.save')}
