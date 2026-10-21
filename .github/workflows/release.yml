@@ -134,11 +134,45 @@ jobs:
         shell: bash
         run: echo "PROTOC=$(command -v protoc)" >> "$GITHUB_ENV"
 
-      - name: Build pingwaf
+      # Build and package in one step. On run 39534691893 (v0.29.0) the
+      # separate `Package` step reported success but executed nothing — the
+      # archive never appeared, so the release shipped with zero assets and
+      # the upload action logged "Pattern ... does not match any files".
+      # Keeping the packaging inside the step whose output proves it ran
+      # (the cargo build) removes that failure mode.
+      - name: Build and package pingwaf
         shell: bash
         run: |
+          set -euo pipefail
           cargo build --release --bin pingwaf ${{ matrix.features }} --target ${{ matrix.target }}
           ls -lh "target/${{ matrix.target }}/release/pingwaf"
+
+          ASSET="pingwaf-${{ matrix.plat }}-${{ matrix.arch }}"
+          rm -rf "$ASSET" "$ASSET.tar.xz" "$ASSET.tar.gz" \
+                 "$ASSET.tar.xz.sha256" "$ASSET.tar.gz.sha256"
+          mkdir -p "$ASSET"
+          cp "target/${{ matrix.target }}/release/pingwaf" "$ASSET/pingwaf"
+          cp LICENSE README.md "$ASSET/"
+          # Optional extras: shipped when present, never fatal when absent.
+          cp pingwaf.toml "$ASSET/" 2>/dev/null || true
+          cp pingwaf.service "$ASSET/" 2>/dev/null || true
+          chmod +x "$ASSET/pingwaf"
+          # .tar.xz is the primary format (smaller); the legacy .tar.gz is
+          # kept as the install.sh fallback for hosts without xz(1) and for
+          # tooling pinned to the old asset names.
+          tar -cJf "$ASSET.tar.xz" "$ASSET"
+          tar -czf "$ASSET.tar.gz" "$ASSET"
+          # `shasum` is a Perl script that is absent on minimal images;
+          # `sha256sum` is the GNU coreutils one that is always present.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$ASSET.tar.xz" > "$ASSET.tar.xz.sha256"
+            sha256sum "$ASSET.tar.gz" > "$ASSET.tar.gz.sha256"
+          else
+            shasum -a 256 "$ASSET.tar.xz" > "$ASSET.tar.xz.sha256"
+            shasum -a 256 "$ASSET.tar.gz" > "$ASSET.tar.gz.sha256"
+          fi
+          ls -lh "$ASSET".tar.xz "$ASSET".tar.gz \
+                 "$ASSET".tar.xz.sha256 "$ASSET".tar.gz.sha256"
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
@@ -146,29 +180,6 @@ jobs:
           name: pingwaf-binary-${{ matrix.arch }}
           path: target/${{ matrix.target }}/release/pingwaf
           retention-days: 1
-
-      - name: Package
-        shell: bash
-        run: |
-          set -euo pipefail
-          ASSET="pingwaf-${{ matrix.plat }}-${{ matrix.arch }}"
-          STAGE="$ASSET"
-          rm -rf "$STAGE" "$ASSET".tar.{xz,gz} "$ASSET".tar.{xz,gz}.sha256"
-          mkdir -p "$STAGE"
-          cp "target/${{ matrix.target }}/release/pingwaf" "$STAGE/pingwaf"
-          cp LICENSE README.md "$STAGE/"
-          # Optional extras: shipped when present, never fatal when absent.
-          cp pingwaf.toml "$STAGE/" 2>/dev/null || true
-          cp pingwaf.service "$STAGE/" 2>/dev/null || true
-          chmod +x "$STAGE/pingwaf"
-          # .tar.xz is the primary format (smaller); the legacy .tar.gz is
-          # kept as the install.sh fallback for hosts without xz(1) and for
-          # tooling pinned to the old asset names.
-          tar -cJf "$ASSET.tar.xz" "$STAGE"
-          tar -czf "$ASSET.tar.gz" "$STAGE"
-          shasum -a 256 "$ASSET.tar.xz" > "$ASSET.tar.xz.sha256"
-          shasum -a 256 "$ASSET.tar.gz" > "$ASSET.tar.gz.sha256"
-          ls -lh "$ASSET".tar.{xz,gz} "$ASSET".tar.{xz,gz}.sha256"
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
