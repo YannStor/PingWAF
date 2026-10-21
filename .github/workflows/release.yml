@@ -171,8 +171,8 @@ jobs:
             shasum -a 256 "$ASSET.tar.xz" > "$ASSET.tar.xz.sha256"
             shasum -a 256 "$ASSET.tar.gz" > "$ASSET.tar.gz.sha256"
           fi
-          ls -lh "$ASSET".tar.xz "$ASSET".tar.gz \
-                 "$ASSET".tar.xz.sha256 "$ASSET".tar.gz.sha256"
+          ls -lh "$ASSET.tar.xz" "$ASSET.tar.gz" \
+                 "$ASSET.tar.xz.sha256" "$ASSET.tar.gz.sha256"
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
