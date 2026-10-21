@@ -588,11 +588,9 @@ mod tests {
         );
         // Strict-only: the rule is absent from every Normal engine (see the
         // spec comment for why that is a deliberate trade-off).
-        assert!(
-            default_managed_rules(WafLevel::Normal)
-                .iter()
-                .all(|r| r.id != "PINGWAF-1070")
-        );
+        assert!(default_managed_rules(WafLevel::Normal)
+            .iter()
+            .all(|r| r.id != "PINGWAF-1070"));
 
         let ct = content_type_header();
         let cookie = session_cookie();
