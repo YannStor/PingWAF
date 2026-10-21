@@ -278,6 +278,8 @@ async fn site_ssl_row(
         hsts_enabled: Set(false),
         hsts_max_age: Set(0),
         always_use_https: Set(false),
+        http1_enabled: Set(true),
+        http2_enabled: Set(true),
         created_at: Set(Utc::now()),
     };
     Ok(active.insert(&state.db).await?)

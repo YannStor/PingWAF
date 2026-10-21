@@ -1635,6 +1635,7 @@ purge_ip_list = ["192.168.1.1"]
             proxy_trust: pingwaf_agent::cache::ProxyTrustConfig::default(),
             cache_settings: None,
             response_replace: None,
+            ai_crawl: None,
         }
     }
 

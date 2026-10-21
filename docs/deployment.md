@@ -66,6 +66,13 @@ curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh |
 > Prebuilt release assets are published for **Linux** (amd64/arm64) only; on
 > macOS, [build from source](./quick-start.md#path-2-build-from-source).
 >
+> Each release ships two archives per architecture:
+> `pingwaf-linux-{amd64,arm64}.tar.xz` (primary, smaller) and
+> `pingwaf-linux-{amd64,arm64}.tar.gz` (compatibility fallback), each with a
+> `.sha256` sidecar. `install.sh` prefers the `.tar.xz` asset, skips straight
+> to `.tar.gz` when `xz(1)` is not installed locally, and falls back on a
+> failed download (e.g. releases that predate `.tar.xz`).
+>
 > The binaries are linked against the glibc of the runner that builds them
 > (Ubuntu 24.04, **glibc 2.39**), so they run on Debian 12+/Ubuntu 24.04+ and
 > equivalent. On older distributions (CentOS/RHEL 8, Debian 11, Ubuntu 22.04,
@@ -331,6 +338,42 @@ through the location form / `PUT /api/v1/sites/{site_id}` locations):
 Typical use: a pool of origins behind one address that route by
 `Host` (virtual hosts, multi-tenant origins) — set `upstream_host` to the
 name the origin expects instead of asking every client to send it.
+
+## Release & Build Constraints
+
+Facts worth knowing before you build, ship or debug a release — the
+reasons live in the sources this section points at.
+
+### tokio is pinned to `=1.53.3`
+
+The workspace pins tokio to exactly `1.53.3`
+(`[workspace.dependencies]` in the root `Cargo.toml`, comment included):
+tokio 1.54.0 added `assert!(capacity > 0)` to
+`BufReader::with_capacity` / `BufStream::with_capacity`, while
+`pingora-core 0.9.0` still constructs both with a hardcoded `(0, 0)`
+(`L4BufferSettings::unbuffered` and the `From<TcpStream>` /
+`From<UnixStream>` impls). The result is a panic on the **first accepted
+connection** of the data plane — see upstream
+[cloudflare/pingora#1059](https://github.com/cloudflare/pingora/issues/1059),
+which is still open and not in any crates.io release.
+
+**Do not raise the pin casually** — dependabot is configured to ignore
+`tokio >= 1.54.0` (`.github/dependabot.yml`), so a dependabot PR will not
+silently break the accept path. Un-pin (raise to `>= 1.54`) **only once**
+pingora ships a release containing that fix, and drop the matching
+`ignore` entry in `.github/dependabot.yml` at the same time.
+
+### CI shape
+
+`.github/workflows/ci.yml` runs the test matrix on two toolchains
+(`1.96.0` MSRV and stable) with nextest (doctests go through a separate
+`cargo test --doc` step, which nextest does not execute). Docs-only PRs
+skip the heavy rust/web jobs but never the static `docs` job; a
+`web-dist` job builds the dashboard once and a `release-binary` job on
+`main` pushes builds the shipped binary outside the test matrix. Release
+images/manifests are built by `release.yml` on a `v*` tag, with per-arch
+jobs pinned to `ubuntu-24.04` / `ubuntu-24.04-arm` runners so both
+architectures build on the same distro.
 
 ## Small-Memory Instances
 

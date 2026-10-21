@@ -116,17 +116,25 @@ curl -k -H "Authorization: Bearer $TOKEN" \
   "total_cpu_ms": 48213.4,
   "total_elapsed_ms": 48213.4,
   "modules": [
-    { "module": "proxy",   "cpu_ms": 30102.1, "cpu_share": 0.62, "elapsed_ms": 30102.1, "elapsed_share": 0.62, "mem_bytes": 41943040, "mem_share": 0.55, "disk_bytes": 0,        "disk_share": 0.00, "calls": 102341, "avg_us": 294.1 },
-    { "module": "waf",     "cpu_ms": 11101.2, "cpu_share": 0.23, "elapsed_ms": 11101.2, "elapsed_share": 0.23, "mem_bytes": 8388608,  "mem_share": 0.11, "disk_bytes": 0,        "disk_share": 0.00, "calls": 98111,  "avg_us": 113.1 },
-    { "module": "cache",   "cpu_ms": 4000.8,  "cpu_share": 0.08, "elapsed_ms": 4000.8,  "elapsed_share": 0.08, "mem_bytes": 15728640, "mem_share": 0.21, "disk_bytes": 734003200, "disk_share": 1.00, "calls": 44120,  "avg_us": 90.7 },
-    { "module": "plugin",  "cpu_ms": 1500.1,  "cpu_share": 0.03, "elapsed_ms": 1500.1,  "elapsed_share": 0.03, "mem_bytes": 2097152,  "mem_share": 0.03, "disk_bytes": 0,        "disk_share": 0.00, "calls": 30112,  "avg_us": 49.8 },
-    { "module": "db",      "cpu_ms": 1000.6,  "cpu_share": 0.02, "elapsed_ms": 1000.6,  "elapsed_share": 0.02, "mem_bytes": 1048576,  "mem_share": 0.01, "disk_bytes": 0,        "disk_share": 0.00, "calls": 2140,   "avg_us": 467.6 },
-    { "module": "control", "cpu_ms": 400.2,   "cpu_share": 0.01, "elapsed_ms": 400.2,   "elapsed_share": 0.01, "mem_bytes": 524288,   "mem_share": 0.01, "disk_bytes": 0,        "disk_share": 0.00, "calls": 980,    "avg_us": 408.4 },
-    { "module": "other",   "cpu_ms": 108.4,   "cpu_share": 0.00, "elapsed_ms": 108.4,   "elapsed_share": 0.00, "mem_bytes": 0,        "mem_share": 0.00, "disk_bytes": 0,        "disk_share": 0.00, "calls": 210,    "avg_us": 516.2 }
+    { "module": "proxy",           "cpu_ms": 30102.1, "cpu_share": 0.62, "elapsed_ms": 30102.1, "elapsed_share": 0.62, "mem_bytes": 41943040, "mem_share": 0.55, "calls": 102341, "avg_us": 294.1 },
+    { "module": "waf",             "cpu_ms": 11101.2, "cpu_share": 0.23, "elapsed_ms": 11101.2, "elapsed_share": 0.23, "mem_bytes": 8388608,  "mem_share": 0.11, "calls": 98111,  "avg_us": 113.1 },
+    { "module": "cache",           "cpu_ms": 4000.8,  "cpu_share": 0.08, "elapsed_ms": 4000.8,  "elapsed_share": 0.08, "mem_bytes": 15728640, "mem_share": 0.21, "calls": 44120,  "avg_us": 90.7 },
+    { "module": "plugin",          "cpu_ms": 1500.1,  "cpu_share": 0.03, "elapsed_ms": 1500.1,  "elapsed_share": 0.03, "mem_bytes": 2097152,  "mem_share": 0.03, "calls": 30112,  "avg_us": 49.8 },
+    { "module": "db",              "cpu_ms": 1000.6,  "cpu_share": 0.02, "elapsed_ms": 1000.6,  "elapsed_share": 0.02, "mem_bytes": 1048576,  "mem_share": 0.01, "calls": 2140,   "avg_us": 467.6 },
+    { "module": "control",         "cpu_ms": 400.2,   "cpu_share": 0.01, "elapsed_ms": 400.2,   "elapsed_share": 0.01, "mem_bytes": 524288,   "mem_share": 0.01, "calls": 980,    "avg_us": 408.4 },
+    { "module": "other",           "cpu_ms": 108.4,   "cpu_share": 0.00, "elapsed_ms": 108.4,   "elapsed_share": 0.00, "mem_bytes": 0,        "mem_share": 0.00, "calls": 210,    "avg_us": 516.2 },
+    { "module": "waf_normalize",   "cpu_ms": 2200.5,  "cpu_share": 0.05, "elapsed_ms": 2200.5,  "elapsed_share": 0.05, "mem_bytes": 1048576,  "mem_share": 0.01, "calls": 98111,  "avg_us": 22.4 },
+    { "module": "waf_signature",   "cpu_ms": 1800.3,  "cpu_share": 0.04, "elapsed_ms": 1800.3,  "elapsed_share": 0.04, "mem_bytes": 0,        "mem_share": 0.00, "calls": 98111,  "avg_us": 18.3 },
+    { "module": "waf_expression",  "cpu_ms": 900.1,   "cpu_share": 0.02, "elapsed_ms": 900.1,   "elapsed_share": 0.02, "mem_bytes": 0,        "mem_share": 0.00, "calls": 40012,  "avg_us": 22.5 },
+    { "module": "waf_body",        "cpu_ms": 700.9,   "cpu_share": 0.01, "elapsed_ms": 700.9,   "elapsed_share": 0.01, "mem_bytes": 2097152,  "mem_share": 0.03, "calls": 12000,  "avg_us": 58.4 },
+    { "module": "log",             "cpu_ms": 300.2,   "cpu_share": 0.01, "elapsed_ms": 300.2,   "elapsed_share": 0.01, "mem_bytes": 524288,   "mem_share": 0.01, "calls": 40012,  "avg_us": 7.5 },
+    { "module": "agent",           "cpu_ms": 200.8,   "cpu_share": 0.00, "elapsed_ms": 200.8,   "elapsed_share": 0.00, "mem_bytes": 262144,   "mem_share": 0.00, "calls": 60,     "avg_us": 3346.7 },
+    { "module": "http_client",     "cpu_ms": 100.4,   "cpu_share": 0.00, "elapsed_ms": 100.4,   "elapsed_share": 0.00, "mem_bytes": 0,        "mem_share": 0.00, "calls": 45,     "avg_us": 2231.1 }
   ],
   "methods": [
-    { "method": "waf::handle_request",   "cpu_ms": 9200.4, "elapsed_ms": 9200.4, "calls": 98111, "avg_us": 93.8 },
-    { "method": "proxy::request_filter", "cpu_ms": 7100.9, "elapsed_ms": 7100.9, "calls": 88430, "avg_us": 80.3 }
+    { "method": "waf::handle_request",   "cpu_ms": 9200.4, "cpu_share": 0.19, "elapsed_ms": 9200.4, "elapsed_share": 0.19, "mem_bytes": 0,       "mem_share": 0.00, "calls": 98111, "avg_us": 93.8 },
+    { "method": "proxy::request_filter", "cpu_ms": 7100.9, "cpu_share": 0.15, "elapsed_ms": 7100.9, "elapsed_share": 0.15, "mem_bytes": 0,       "mem_share": 0.00, "calls": 88430, "avg_us": 80.3 },
+    { "method": "waf::body_read",        "cpu_ms": 700.9,  "cpu_share": 0.01, "elapsed_ms": 700.9,  "elapsed_share": 0.01, "mem_bytes": 2097152, "mem_share": 1.00, "calls": 12000, "avg_us": 58.4 }
   ]
 }
 ```
@@ -137,24 +145,24 @@ curl -k -H "Authorization: Bearer $TOKEN" \
 
 - **墙钟耗时，不是 CPU 时间。** 所有计时器都基于 `Instant`，度量的是被计时作用域内**流逝的时间**。等待数据库查询、锁或上游的作用域同样会计入这段等待；任务被执行器调度出去时时钟仍在走。所有占比都应读作「占归因墙钟时间的比例」，而非「占进程烧掉的 CPU 的比例」——把 `cpu_ms` 当 CPU 秒读，正是当年让 `control::http` 看起来占 90% CPU（实际大部分在等待）的错误。
 - **`cpu_*` 是 `elapsed_*` 的弃用别名。** 快照把每个数字发布两遍：保留历史 `cpu_ms` / `cpu_share` 字段名（既有仪表盘可继续解析），同时提供 `elapsed_ms` / `elapsed_share`（名称与实际度量一致）。两对字段取值恒相等（`total_cpu_ms` == `total_elapsed_ms`）。新消费方应使用 `elapsed_*`。
-- **打点范围。** 七个模块行来自插桩热路径上的计时器——数据面的请求管线、WAF 求值、缓存与改写规则，以及两个控制面作用域（agent 心跳持久化、`/api/v1` 请求）。`/api/v1` 计时器位于 CORS、压缩、安全头与 body limit 层**之内**，这些中间件的开销不计入 `control` 行。同一计时器同时填充 `control` 模块行与 `control::http` 方法行。模块行从未被重复记账：重构前模块计时器与方法计时器各写各的行，每请求各记一条。升级后若 `control` 占比明显下降，真实原因是打点范围从根监听收窄到 `/api/v1` 请求（MCP、`/healthz` 与 SPA 回退不再计入），外加每请求少了一次方法表的字符串哈希——不是性能突变。
-- **方法名是编译期静态枚举。** 被插桩的调用点在构建期固定（`proxy::request_filter`、`waf::handle_request`、`cache::handle_request`、`plugin::rewrite`、`db::persist_heartbeat`、`control::http`）；记账是数组寻址加每请求四次 relaxed 原子加（方法行两次、模块行两次）——无哈希查找、无分配。从未运行过的方法不会出现对应行。
+- **打点范围。** 14 个模块行来自插桩热路径上的计时器——数据面的请求管线（连接处理、上游建连）、按阶段拆分的 WAF 管线（`waf_normalize` / `waf_signature` / `waf_expression` / `waf_body`）、缓存、改写与其他插件、访问日志的组装与刷写（`log`）、agent 配置同步（`agent`）、出站 HTTP 客户端（`http_client`），以及两个控制面作用域（agent 心跳持久化、`/api/v1` 请求）。`/api/v1` 计时器位于 CORS、压缩、安全头与 body limit 层**之内**，这些中间件的开销不计入 `control` 行。同一计时器同时填充 `control` 模块行与 `control::http` 方法行。模块行从未被重复记账：重构前模块计时器与方法计时器各写各的行，每请求各记一条。升级后若 `control` 占比明显下降，真实原因是打点范围从根监听收窄到 `/api/v1` 请求（MCP、`/healthz` 与 SPA 回退不再计入），外加每请求少了一次方法表的字符串哈希——不是性能突变。
+- **方法名是编译期静态枚举。** 被插桩的调用点在构建期固定——20 个具名调用点（`proxy::request_filter`、`proxy::upstream_connect`、`waf::handle_request`、`waf::normalize`、`waf::signature`、`waf::expression`、`waf::body_read`、`cache::handle_request`、`cache::lookup`、`cache::store`、`plugin::rewrite`、`plugin::sub_filter`、`plugin::challenge`、`db::persist_heartbeat`、`db::persist_logs`、`db::persist_events`、`control::http`、`control::grpc_stream`、`agent::sync`、`log::flush`）；记账是数组寻址加每请求四次 relaxed 原子加（方法行两次、模块行两次）——无哈希查找、无分配。从未运行过的方法不会出现对应行。
 
 ### 归因机制
 
-- **模块**——进程的功能域记录在定长的原子数组中。每个被插桩的作用域用一次 `fetch_add` 把耗时累加进所属模块；响应中始终出现 7 个模块：`proxy`、`waf`、`cache`、`plugin`、`db`、`control`、`other`（尚未插桩的部分）。
+- **模块**——进程的功能域记录在定长的原子数组中。每个被插桩的作用域用一次 `fetch_add` 把耗时累加进所属模块；响应中始终出现 14 个模块，顺序固定：`proxy`、`waf`、`cache`、`plugin`、`db`、`control`、`other`（尚未插桩的部分），随后是 WAF 阶段拆分行 `waf_normalize`、`waf_signature`、`waf_expression`、`waf_body`，以及 `log`、`agent`、`http_client`。方法行会累加进所属模块，同一模块内模块总数等于其方法之和；但四个 `waf_*` 阶段行**嵌套**在 `waf` 之内（`waf::handle_request` 的计时覆盖它们），阶段时间同时计入 `waf` 行，只能当作 `waf` 的拆分来看，不能与 `waf` 相加，否则各占比之和会超过 1。`waf` 行继续承接较老的打点，阶段行则指明 WAF 内部时间花在哪。
 - **方法**——具名调用点用 `timed_method` 计时。调用点集合是编译期静态枚举（见「[口径](#口径这些数字是什么不是什么)」），记账是每请求四次 relaxed 原子加（方法行两次、模块行两次）——无哈希查找、无分配。
-- **内存**——**上报**而非拦截。拥有大块结构的模块（缓存容量、WAF body 缓冲、日志批次）自行发布当前字节数；没有分配器钩子，因此适配任何分配器与任何平台。`mem_bytes` 是「当前**在内存中**持有的字节数」，不是累计分配量。
-- **磁盘**——同一机制上报的**独立**指标。`disk_bytes` 是模块在磁盘上的占用，仅由 cache 模块发布，其余模块恒为 `0`。详见「[cache 模块的内存与磁盘口径](#cache-模块的内存与磁盘口径)」。
+- **内存**——**上报**而非拦截。拥有大块结构的模块与方法会发布当前字节数，且每个方法行都带 `mem_bytes` / `mem_share`，仪表盘因此能说出模块内存背后的具体调用点。当前已确认的上报方：cache 后端（索引 + 在读缓冲）、WAF 请求体暂存（`waf::body_read`，同时填充 `waf_body` 模块行）、WAF 解码/归一化值（`waf_normalize`）、为日志条目缓冲的响应体前缀（`log`）。没有分配器钩子，因此适配任何分配器与任何平台。`mem_bytes` 是「当前**在内存中**持有的字节数」，不是累计分配量。
+- **磁盘**——磁盘量表仍由 cache 后端在内部记录（磁盘配额沿用该数字），但**不再进入快照**：模块行与方法行只报内存。早先版本的 `disk_bytes` / `disk_share` 字段已移除——把文件系统的字节数并入模块表会诱发「cache 内存 ≈ cache 磁盘占用」的误读。详见「[cache 模块的内存与磁盘口径](#cache-模块的内存与磁盘口径)」。
 
 ### cache 模块的内存与磁盘口径
 
-`cache` 行是唯一同时上报两类数字的行，两者不可读作一个数：
+cache 后端同时拥有两类数字，两者不可读作一个数——这正是快照只发布内存那一类的原因：
 
 - **`mem_bytes`——真实内存**：磁盘上的索引结构**加上** `in_flight_bytes`（正在从缓存读出服务的对象的读缓冲）。磁盘缓存的体量不应让进程看起来像把每个缓存字节都装进了内存。
-- **`disk_bytes`——磁盘占用**：缓存后端当前在其存储目录中的占用。不受进程内存限制；配置的磁盘配额（如有）约束的是这一数字，而非 `mem_bytes`。
+- **磁盘占用——仅内部记录**：缓存后端当前在其存储目录中的占用。该数字仍被记录（配置的磁盘配额约束的是它），但不再出现在 `/system/profile` 快照中。
 
-**为什么要拆分。** 早先版本把后端的 `current_size`——**磁盘**占用——通过内存量表发布，于是 `cache` 模块行把磁盘用量当内存报。几 GiB 的文件缓存读起来就像几 GiB 的 RSS，模块表随之错排内存热点。修复将磁盘数字移到独立量表（`disk_bytes` / `disk_share`）；`mem_bytes` 现在只计索引 + 在读缓冲。
+**为什么要拆分。** 早先版本把后端的 `current_size`——**磁盘**占用——通过内存量表发布，于是 `cache` 模块行把磁盘用量当内存报。几 GiB 的文件缓存读起来就像几 GiB 的 RSS，模块表随之错排内存热点。修复将磁盘数字移到独立量表，后续变更又将 `disk_bytes` / `disk_share` 从快照中整体移除（量表保留在内部供 cache 记账）；`mem_bytes` 只计索引 + 在读缓冲，模块表从此不可能再把文件系统的字节数报成常驻内存。
 
 **流式读取与 `in_flight_bytes`。** 超过内联阈值（256 KiB）的对象在命中时绝不整体读入内存：后端交回一个打开的文件句柄，响应体按 64 KiB 分块流式发给客户端（pingora 写出每一块后才读下一块）。命中被服务期间，`in_flight_bytes` 记入分块预算（以及正在读取的内联对象）；读取结束——无论成功还是出错——RAII 守卫即释放它，`in_flight_bytes` 归零、不泄漏。小对象保持内联（单缓冲，同样的 RAII 释放）。未命中不产生任何记账。
 
@@ -162,7 +170,7 @@ curl -k -H "Authorization: Bearer $TOKEN" \
 
 cache 插件的 `directory` 配置键决定缓存是文件后端还是内存后端：
 
-- **未设置**时现在的默认值是 **`/tmp/pingwaf-cache`**（文件后端）。更早版本的默认值是内存后端，因此升级会改变每个从未设置该键的配置的行为：缓存的字节从进程内存（`mem_bytes` / RSS）移到存储目录，`cache` 模块行以 `disk_bytes` 报告它们。
+- **未设置**时现在的默认值是 **`/tmp/pingwaf-cache`**（文件后端）。更早版本的默认值是内存后端，因此升级会改变每个从未设置该键的配置的行为：缓存的字节从进程内存（`mem_bytes` / RSS）移到存储目录，由 cache 后端记入其内部磁盘量表（供配额记账；不再进入快照）。
 - **`directory = ""` 或 `memory://`** 仍然选择内存后端——在此默认值出现之前写下的每份配置都由此保持原语义。
 
 > **容器内 `/tmp` 常为 tmpfs。** 容器内的 `/tmp` 通常是 tmpfs 挂载——指向它的文件缓存实际消耗的是**内存**（计入容器内存限额），且随容器一起消失。生产环境应在缓存目录挂载真实卷，或把 `directory` 指向持久路径（如 `directory = "/var/lib/pingwaf/cache"`）。
@@ -173,22 +181,22 @@ cache 插件的 `directory` 配置键决定缓存是文件后端还是内存后�
 | --- | --- |
 | `collected_at_ms` | 快照采集时刻（Unix 毫秒时间戳） |
 | `total_cpu_ms` / `total_elapsed_ms` | 所有模块累计归因的墙钟耗时（毫秒）；两值恒等，`total_elapsed_ms` 是与度量一致的名称 |
-| `modules` | 固定 7 行，每模块一行，顺序固定（`proxy`、`waf`、`cache`、`plugin`、`db`、`control`、`other`） |
+| `modules` | 固定 14 行，每模块一行，顺序固定（`proxy`、`waf`、`cache`、`plugin`、`db`、`control`、`other`、`waf_normalize`、`waf_signature`、`waf_expression`、`waf_body`、`log`、`agent`、`http_client`） |
 | `modules[].module` | 模块键 |
 | `modules[].cpu_ms` / `elapsed_ms` | 归因到该模块的累计**墙钟**耗时（毫秒）；两字段取值恒等 |
 | `modules[].cpu_share` / `elapsed_share` | 占总归因墙钟时间的比例，0.0–1.0 |
 | `modules[].mem_bytes` / `mem_share` | 模块当前上报**在内存中**持有的字节数，及其占总量的比例 |
-| `modules[].disk_bytes` / `disk_share` | 模块当前在磁盘上的占用字节数，及其占总量的比例——仅 cache 模块上报（其余为 `0`） |
 | `modules[].calls` / `avg_us` | 计时操作次数与平均每次微秒数 |
 | `methods` | 方法行，最热在前，最多 40 行 |
 | `methods[].method` | 调用点名称（来自编译期静态枚举） |
 | `methods[].cpu_ms` / `elapsed_ms` / `calls` / `avg_us` | 与模块行语义相同 |
+| `methods[].mem_bytes` / `mem_share` | 该调用点当前上报持有的字节数，及其占**所属模块**内存的比例（不是占进程总量的比例；模块未上报内存时为 `0.0`） |
 
 计数器**自进程启动起累计**（仅重启时清零），因此读法是「启动以来时间花在哪」，不是「此刻哪里最热」。要看实时情况，可间隔数秒取两次快照、比较 `elapsed_ms`（与 `cpu_ms` 同值）的差值——正差值最大的就是当前热点。通常值得关注的是 `waf`（规则求值）、`proxy`（上游转发）与 `cache`（缓存查找）。
 
 ### 开销
 
-记账只是每个被插桩作用域上的几次 relaxed 原子加（请求路径上为方法行加模块行的四次原子加：方法行两次、模块行两次）：没有采样信号、没有栈回溯、没有符号化，热路径上没有额外分配，也没有哈希查找——方法槽位是定长数组成员。同一套记账在笔记本的 debug 构建和容器里 strip 过的 release 构建下行为一致，这也是该端点没有平台限制、没有 feature 开关、不需要诊断镜像的原因。端点本身天然有界——7 行模块、最多 40 行方法、KB 级 JSON——且由原子计数计算得出，轮询成本很低。
+记账只是每个被插桩作用域上的几次 relaxed 原子加（请求路径上为方法行加模块行的四次原子加：方法行两次、模块行两次）：没有采样信号、没有栈回溯、没有符号化，热路径上没有额外分配，也没有哈希查找——方法槽位是定长数组成员。同一套记账在笔记本的 debug 构建和容器里 strip 过的 release 构建下行为一致，这也是该端点没有平台限制、没有 feature 开关、不需要诊断镜像的原因。端点本身天然有界——14 行模块、最多 40 行方法、KB 级 JSON——且由原子计数计算得出，轮询成本很低。
 
 ## 与 pprof 的差异
 

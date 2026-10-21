@@ -5,16 +5,24 @@ name: CI
 #   - push to `main`  -> full gate (rust matrix + rustls + web + docker)
 #   - pull_request    -> rust matrix + rustls + web (docker only runs on main)
 #
-# The `rust` job runs the test suite on three toolchains - the MSRV (1.96.0),
-# 1.97.0 and stable - against the default OpenSSL backend and the `full`
-# feature set (the configuration the release pipeline and the Dockerfile use).
-# Formatting, clippy (whose MSRV is enforced via clippy.toml), the release
-# build and typos run once, on stable. The `rustls` job exercises the
-# alternative TLS backend with the same clippy gate and the full test suite -
-# the CI equivalents of `make lint-rustls` / `make test-rustls`.
+# The `rust` job runs the test suite on two toolchains - the MSRV (1.96.0) and
+# stable - against the default OpenSSL backend and the `full` feature set (the
+# configuration the release pipeline and the Dockerfile use). The former
+# middle leg (1.97.0) carried no independent signal (covered by both stable
+# and the MSRV leg) and was dropped to shorten the matrix's critical path.
+# Formatting, clippy (whose MSRV is enforced via clippy.toml) and typos run
+# once, on stable. The `rustls` job exercises the alternative TLS backend with
+# the same clippy gate and the full test suite - the CI equivalents of
+# `make lint-rustls` / `make test-rustls`. Tests run under nextest (doctests
+# still go through `cargo test --doc`, which nextest does not execute).
 # `--all-features` is deliberately NOT used anywhere: `openssl` and
 # `tls-rustls` are mutually exclusive TLS backends and enabling both fails to
 # link, which is why the backends live in separate jobs with separate caches.
+#
+# Docs-only changes skip the rust/rustls/web jobs entirely via the `changes`
+# paths-filter job; the `docs` job always runs so its static checks stay
+# enforced on every PR. The :main Docker image build lives in its own
+# `release-binary` job so it no longer sits inside the test matrix.
 
 on:
   push:
@@ -33,15 +41,49 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # CI runs tests in batches rather than in an edit loop: incremental caches
+  # only add I/O and rust-cache upload weight, and dropping test-binary debug
+  # info cuts link times and target/ size.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
+  # Docs-only PRs skip the heavy jobs below but never the `docs` job, so the
+  # static checks stay enforced on every run.
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read # dorny/paths-filter reads PR files via the API
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Check paths
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - '**'
+              - '!docs/**'
+              - '!**/*.md'
+              - '!website/**'
+
   rust:
     name: Rust ${{ matrix.toolchain }} (test)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        toolchain: ["1.96.0", "1.97.0", stable]
+        # MSRV + stable only: the 1.97.0 leg carried no independent signal
+        # (stable is a superset, the MSRV leg guards the floor).
+        toolchain: ["1.96.0", stable]
     env:
       # pingwaf-proto/build.rs honours PROTOC; point it at the apt-installed
       # protoc so the tonic/prost gRPC stubs are generated instead of the empty
@@ -80,7 +122,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           # One cache per toolchain: a shared one would thrash between the
-          # three matrix legs' differing metadata.
+          # matrix legs' differing metadata.
           key: ${{ matrix.toolchain }}
 
       # pingwaf-server embeds ../web/dist/ at compile time via rust-embed. The
@@ -88,6 +130,11 @@ jobs:
       # the real bundle, so an empty placeholder is enough here.
       - name: Ensure embedded frontend directory exists
         run: mkdir -p web/dist
+
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
 
       - name: Check formatting
         if: matrix.toolchain == 'stable'
@@ -97,41 +144,12 @@ jobs:
         if: matrix.toolchain == 'stable'
         run: cargo clippy --all-targets --features full -- -D warnings
 
-      # Release build feeds the :main Docker image (see the docker job below).
-      # PRs skip it entirely: clippy + test already cover compile correctness,
-      # and release-profile risk is exercised by every main push + release.yml.
-      # The binary must embed the REAL dashboard (rust-embed reads ../web/dist
-      # at compile time), so the frontend is built here on main pushes —
-      # feature parity with the old Dockerfile source build (--features full).
-      - name: Setup Node (release binary dashboard)
-        if: matrix.toolchain == 'stable' && github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/setup-node@v7
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
+      - name: Test (workspace, nextest)
+        run: cargo nextest run --workspace --features full --no-fail-fast
 
-      - name: Build frontend (release binary dashboard)
-        if: matrix.toolchain == 'stable' && github.event_name == 'push' && github.ref == 'refs/heads/main'
-        working-directory: web
-        run: |
-          npm ci
-          npm run build
-
-      - name: Build (release, pingwaf, full)
-        if: matrix.toolchain == 'stable' && github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: cargo build --release --bin pingwaf --features full
-
-      - name: Upload release binary for :main image
-        if: matrix.toolchain == 'stable' && github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@v4
-        with:
-          name: pingwaf-main-binary
-          path: target/release/pingwaf
-          retention-days: 1
-
-      - name: Test (workspace)
-        run: cargo test --workspace --features full --no-fail-fast
+      # nextest deliberately does not run doctests; cover them separately.
+      - name: Test (workspace doc tests)
+        run: cargo test --workspace --features full --doc
 
       - name: Typos
         if: matrix.toolchain == 'stable' && always()
@@ -142,6 +160,8 @@ jobs:
   # features, so sharing a cache with the openssl matrix would thrash.
   rustls:
     name: Rust rustls backend (clippy / test)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     env:
       PROTOC: /usr/bin/protoc
@@ -175,14 +195,24 @@ jobs:
       - name: Ensure embedded frontend directory exists
         run: mkdir -p web/dist
 
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
       - name: Clippy (rustls backend)
         run: cargo clippy --no-default-features --features=tls-rustls,full --all-targets --all -- --deny=warnings
 
-      - name: Test (workspace, rustls backend)
-        run: cargo test --workspace --no-default-features --features=tls-rustls,full --no-fail-fast
+      - name: Test (workspace, nextest, rustls backend)
+        run: cargo nextest run --workspace --no-default-features --features=tls-rustls,full --no-fail-fast
+
+      - name: Test (workspace doc tests, rustls backend)
+        run: cargo test --workspace --no-default-features --features=tls-rustls,full --doc
 
   web:
     name: Web (lint / build)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -210,9 +240,77 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Reused by release-binary on main pushes (rust-embed reads ../web/dist
+      # at compile time); building the dashboard once here instead of inside
+      # the binary job keeps npm out of the release-build critical path.
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          retention-days: 1
+
+  # Packs the release binary for the :main Docker image (Dockerfile.runtime,
+  # same pattern as release.yml) instead of rebuilding everything from source
+  # in-container. Runs on main pushes only: a PR run would burn a lot of
+  # minutes for little signal — clippy + nextest already cover compile
+  # correctness, and release-profile risk is exercised by release.yml. Needs
+  # the real dashboard, so it consumes the `web-dist` artifact instead of
+  # rebuilding the frontend. The :latest tag belongs to the release pipeline,
+  # which publishes a multi-arch manifest — tagging it here would clobber it.
+  release-binary:
+    name: Release binary (pingwaf, full)
+    needs: [changes, web]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    env:
+      # Same reason as in the rust job: pingwaf-proto/build.rs honours PROTOC.
+      PROTOC: /usr/bin/protoc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          # SYNC: keep this list in lockstep with Dockerfile / release.yml
+          sudo apt-get install -y --no-install-recommends \
+            protobuf-compiler \
+            libprotobuf-dev \
+            cmake \
+            libclang-dev \
+            pkg-config \
+            libssl-dev \
+            nasm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-binary
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+
+      - name: Build (release, pingwaf, full)
+        run: cargo build --release --bin pingwaf --features full
+
+      - name: Upload release binary for :main image
+        uses: actions/upload-artifact@v4
+        with:
+          name: pingwaf-main-binary
+          path: target/release/pingwaf
+          retention-days: 1
+
   # Static consistency checks for docs and agent prompts (frontmatter, model
   # names, cross references, relative links). Pure bash, no toolchain, so it
-  # adds seconds, not minutes, to a PR run.
+  # adds seconds, not minutes, to a PR run. Deliberately NOT gated on the
+  # paths filter: it stays green/loud on docs-only PRs too.
   docs:
     name: Docs & agent prompts (static checks)
     runs-on: ubuntu-latest
@@ -234,17 +332,18 @@ jobs:
       - name: Check docs & agent prompts
         run: ./scripts/check-docs-prompts.sh
 
-  # Packs the :main snapshot image from the release binary built by the
-  # `rust` job's stable leg (Dockerfile.runtime, same pattern as release.yml)
-  # instead of rebuilding everything from source in-container — that rebuild
-  # was the push-main critical path (~800s on its own). Only on main: a PR
-  # run would burn a lot of minutes for little signal. The :latest tag
-  # belongs to the release pipeline, which publishes a multi-arch manifest —
-  # tagging it here would clobber that.
+  # Packs the :main snapshot image from the binary built by the
+  # `release-binary` job. Only on main (and only when code changed): a PR run
+  # would burn a lot of minutes for little signal.
   docker:
     name: Docker build & push :main
-    needs: rust
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: release-binary
+    # `needs` alone would skip this on a docs-only push; state the condition
+    # so a future change to the dependency list cannot make it run without an
+    # artifact.
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      needs.release-binary.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

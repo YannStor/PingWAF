@@ -3,6 +3,7 @@ import type {
   CreatePoolRequest,
   CreateRouteRequest,
   CreateSiteRequest,
+  CloneSiteRequest,
   CreateUpstreamRequest,
   Page,
   Route,
@@ -38,6 +39,14 @@ export const sitesApi = {
     apiClient.put<Site>(`/sites/${id}`, data),
 
   delete: (id: string) => apiClient.delete<void>(`/sites/${id}`),
+
+  /**
+   * Clone a site's configuration (rules, pools, routes, cache, WAF) under a
+   * new primary domain. Answers `201` with the created site (same shape as
+   * `POST /sites`).
+   */
+  cloneSite: (id: string, data: CloneSiteRequest) =>
+    apiClient.post<Site>(`/sites/${id}/clone`, data),
 
   /* ── Origin nodes ────────────────────────────────────────────────── */
   listUpstreams: (siteId: string) =>

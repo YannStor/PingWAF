@@ -3,7 +3,7 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, put};
+use axum::routing::{get, post, put};
 use axum::Json;
 use axum::Router;
 use chrono::{DateTime, Utc};
@@ -28,10 +28,12 @@ use crate::api::validation::validate_pem_bundle;
 use crate::auth::AuthUser;
 use crate::grpc::notify_config_changed;
 use crate::models::{
-    acme_challenge, cache_rules, ip_groups, rate_limit_rules, route_match_type,
-    rule, rule_groups, site, site_certificates, site_routes, site_ssl,
-    site_status, site_upstream_pools, site_upstreams, tls_version,
-    trusted_header, ResponseReplaceConfig, ResponseReplaceRule,
+    acme_challenge, bot_protection, cache_rules, challenge_settings, geo_rules,
+    ip_access_rules, ip_groups, rate_limit_rules, rewrite_rules,
+    route_match_type, rule, rule_groups, site, site_ai_bot_policies,
+    site_ai_crawl_settings, site_certificates, site_routes,
+    site_ssl, site_status, site_upstream_pools, site_upstreams, tls_version,
+    trusted_header, waf_settings, ResponseReplaceConfig, ResponseReplaceRule,
 };
 
 /// Longest accepted route `rewrite_path`, in **bytes**, mirroring
@@ -642,6 +644,12 @@ pub struct TlsPostureRequest {
     pub hsts_max_age: Option<i32>,
     #[serde(default)]
     pub always_use_https: Option<bool>,
+    /// Downstream protocol switches. Both default to on: a client that omits
+    /// them keeps (or gains) HTTP/2 rather than being pinned to HTTP/1.1.
+    #[serde(default)]
+    pub http1_enabled: Option<bool>,
+    #[serde(default)]
+    pub http2_enabled: Option<bool>,
 }
 
 /// Largest HSTS lifetime accepted, in seconds (two years).
@@ -662,6 +670,8 @@ pub(crate) struct TlsPosture {
     pub hsts_enabled: bool,
     pub hsts_max_age: i32,
     pub always_use_https: bool,
+    pub http1_enabled: bool,
+    pub http2_enabled: bool,
 }
 
 impl TlsPosture {
@@ -681,6 +691,9 @@ impl TlsPosture {
             hsts_enabled: false,
             hsts_max_age: 0,
             always_use_https: false,
+            // A fresh site serves both protocols; HTTP/2 is the faster one.
+            http1_enabled: true,
+            http2_enabled: true,
         }
     }
 
@@ -698,6 +711,8 @@ impl TlsPosture {
             hsts_enabled: model.hsts_enabled,
             hsts_max_age: model.hsts_max_age,
             always_use_https: model.always_use_https,
+            http1_enabled: model.http1_enabled,
+            http2_enabled: model.http2_enabled,
         }
     }
 
@@ -728,6 +743,12 @@ impl TlsPosture {
         }
         if let Some(value) = req.always_use_https {
             next.always_use_https = value;
+        }
+        if let Some(value) = req.http1_enabled {
+            next.http1_enabled = value;
+        }
+        if let Some(value) = req.http2_enabled {
+            next.http2_enabled = value;
         }
         if let Some(raw) = non_empty(&req.min_tls_version) {
             next.min_tls_version = normalise_tls_version(&raw)?;
@@ -790,6 +811,14 @@ impl TlsPosture {
             next.certificate_id = None;
             next.https_enabled = true;
         }
+        // A site that speaks neither protocol is unreachable; reject it here
+        // rather than pushing a listener an agent cannot build.
+        if !next.http1_enabled && !next.http2_enabled {
+            return Err(ApiError::BadRequest(
+                "at least one of HTTP/1.1 and HTTP/2 must stay enabled"
+                    .to_string(),
+            ));
+        }
 
         Ok(next)
     }
@@ -807,6 +836,8 @@ impl TlsPosture {
         active.hsts_enabled = Set(self.hsts_enabled);
         active.hsts_max_age = Set(self.hsts_max_age);
         active.always_use_https = Set(self.always_use_https);
+        active.http1_enabled = Set(self.http1_enabled);
+        active.http2_enabled = Set(self.http2_enabled);
     }
 }
 
@@ -876,6 +907,8 @@ pub(crate) async fn save_tls_posture<C: ConnectionTrait>(
                 hsts_enabled: Set(false),
                 hsts_max_age: Set(0),
                 always_use_https: Set(false),
+                http1_enabled: Set(true),
+                http2_enabled: Set(true),
                 created_at: Set(Utc::now()),
             };
             next.apply_to(&mut active);
@@ -948,6 +981,7 @@ pub fn routes() -> Router<AppState> {
             "/sites/{site_id}/ssl",
             get(show_ssl).put(upsert_ssl).delete(delete_ssl),
         )
+        .route("/sites/{site_id}/clone", post(clone_site))
 }
 
 /// `GET /api/v1/sites`
@@ -1151,6 +1185,9 @@ async fn create(
         hsts_enabled: Set(false),
         hsts_max_age: Set(0),
         always_use_https: Set(false),
+        // New sites serve both protocols; HTTP/2 is what makes them faster.
+        http1_enabled: Set(true),
+        http2_enabled: Set(true),
         created_at: Set(timestamp),
     }
     .insert(&state.db)
@@ -1158,6 +1195,192 @@ async fn create(
 
     tracing::info!(%id, %domain, upstream = %upstream_address, owner = %current.id, "site created");
     notify_config_changed(&state, id, Some(&current.email)).await;
+
+    Ok((StatusCode::CREATED, Json(SiteResponse::from(model))).into_response())
+}
+
+/// `POST /api/v1/sites/{site_id}/clone`
+///
+/// Copies a site's configuration onto a new site id. The caller must supply
+/// the new primary domain: every hostname has to stay unique, and reusing the
+/// source's would collide with `uq_sites_domain` and the conflict trigger.
+#[derive(Debug, Deserialize)]
+pub struct CloneSiteRequest {
+    pub domain: String,
+    #[serde(default)]
+    pub alternate_domains: Option<Vec<String>>,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// Copies every row of a site-scoped table, re-keying `id` and `site_id`.
+///
+/// Tables whose rows reference each other by another id (`site_upstreams` /
+/// `site_routes` → `site_upstream_pools`) are copied by hand instead.
+macro_rules! clone_site_rows {
+    ($txn:expr, $entity:ident, $src:expr, $dst:expr) => {{
+        let rows = $entity::Entity::find()
+            .filter($entity::Column::SiteId.eq($src))
+            .all($txn)
+            .await?;
+        for row in rows {
+            let mut active: $entity::ActiveModel = row.into();
+            active.id = Set(Uuid::new_v4());
+            active.site_id = Set($dst);
+            active.insert($txn).await?;
+        }
+    }};
+}
+
+async fn clone_site(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Path(site_id): Path<String>,
+    Json(payload): Json<CloneSiteRequest>,
+) -> Result<Response, ApiError> {
+    require_write(&current)?;
+    let source_id = parse_uuid(&site_id, "site id")?;
+    let source = load_site_write(&state.db, source_id, &current).await?;
+
+    let domain = normalise_domain(&payload.domain)?;
+    let alternate_domains = normalise_domain_list(
+        &domain,
+        &payload.alternate_domains.unwrap_or_default(),
+    )?;
+    let mut all_domains = vec![domain.clone()];
+    all_domains.extend(alternate_domains.iter().cloned());
+    ensure_domains_available(&state.db, &all_domains, None).await?;
+
+    let user_name = payload
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{} copy", source.name));
+    if user_name.len() > 100 {
+        return Err(ApiError::BadRequest(
+            "name must be 1-100 characters".to_string(),
+        ));
+    }
+
+    let new_id = Uuid::new_v4();
+    let timestamp = Utc::now();
+    let txn = state.db.begin().await?;
+
+    let mut active: site::ActiveModel = source.clone().into();
+    active.id = Set(new_id);
+    active.user_id = Set(current.id);
+    active.name = Set(user_name);
+    active.domain = Set(domain.clone());
+    active.alternate_domains = Set(alternate_domains);
+    // Paused: a clone that starts serving immediately would silently double
+    // the traffic the source site receives.
+    active.status = Set(site_status::PAUSED.to_string());
+    // Forwarded-header trust is a property of where the site sits, not of its
+    // rules: carrying it over would let the clone read an X-Forwarded-For the
+    // source's proxy path supplies but the clone's does not, which spoofs the
+    // client IP that access rules, rate limits and audit logs key on.
+    active.trust_proxy_headers = Set(false);
+    active.trusted_header =
+        Set(crate::models::trusted_header::DEFAULT.to_string());
+    active.trust_last_hop = Set(true);
+    active.trusted_proxy_ranges = Set(Vec::new());
+    active.trusted_proxy_group_ids = Set(Vec::new());
+    active.created_at = Set(timestamp);
+    let model = active
+        .insert(&txn)
+        .await
+        .map_err(map_domain_conflict)?;
+
+    // Upstream pools first: nodes and routes reference them by id, so the
+    // clone needs its own pool ids and a mapping from the source's.
+    let mut pool_ids: HashMap<Uuid, Uuid> = HashMap::new();
+    let pools = site_upstream_pools::Entity::find()
+        .filter(site_upstream_pools::Column::SiteId.eq(source_id))
+        .all(&txn)
+        .await?;
+    for row in pools {
+        let old_id = row.id;
+        let mut node: site_upstream_pools::ActiveModel = row.into();
+        node.id = Set(Uuid::new_v4());
+        node.site_id = Set(new_id);
+        node.created_at = Set(timestamp);
+        let inserted = node.insert(&txn).await?;
+        pool_ids.insert(old_id, inserted.id);
+    }
+
+    let upstreams = site_upstreams::Entity::find()
+        .filter(site_upstreams::Column::SiteId.eq(source_id))
+        .all(&txn)
+        .await?;
+    for row in upstreams {
+        let old_pool = row.pool_id;
+        let mut node: site_upstreams::ActiveModel = row.into();
+        node.id = Set(Uuid::new_v4());
+        node.site_id = Set(new_id);
+        node.pool_id =
+            Set(pool_ids.get(&old_pool).copied().unwrap_or(old_pool));
+        node.created_at = Set(timestamp);
+        node.insert(&txn).await?;
+    }
+
+    let routes = site_routes::Entity::find()
+        .filter(site_routes::Column::SiteId.eq(source_id))
+        .all(&txn)
+        .await?;
+    for row in routes {
+        let old_pool = row.pool_id;
+        let mut node: site_routes::ActiveModel = row.into();
+        node.id = Set(Uuid::new_v4());
+        node.site_id = Set(new_id);
+        node.pool_id =
+            Set(pool_ids.get(&old_pool).copied().unwrap_or(old_pool));
+        node.created_at = Set(timestamp);
+        node.insert(&txn).await?;
+    }
+
+    // TLS material travels with the site: the clone serves the same
+    // certificate and protocol switches until an operator changes them.
+    if let Some(row) = site_ssl::Entity::find()
+        .filter(site_ssl::Column::SiteId.eq(source_id))
+        .one(&txn)
+        .await?
+    {
+        let mut node: site_ssl::ActiveModel = row.into();
+        node.id = Set(Uuid::new_v4());
+        node.site_id = Set(new_id);
+        node.domain = Set(domain.clone());
+        node.created_at = Set(timestamp);
+        node.insert(&txn).await?;
+    }
+
+    clone_site_rows!(&txn, waf_settings, source_id, new_id);
+    clone_site_rows!(&txn, challenge_settings, source_id, new_id);
+    clone_site_rows!(&txn, geo_rules, source_id, new_id);
+    clone_site_rows!(&txn, bot_protection, source_id, new_id);
+    // `site_basic_auth` is deliberately not cloned: the row stores credentials
+    // (masked in the API, plaintext at rest) and reusing them on a new host
+    // would turn "a and b share a password" into a way to reach the clone with
+    // a credential that has already circulated. The operator re-enters it.
+    clone_site_rows!(&txn, rewrite_rules, source_id, new_id);
+    clone_site_rows!(&txn, ip_access_rules, source_id, new_id);
+    clone_site_rows!(&txn, cache_rules, source_id, new_id);
+    clone_site_rows!(&txn, rate_limit_rules, source_id, new_id);
+    clone_site_rows!(&txn, site_ai_crawl_settings, source_id, new_id);
+    clone_site_rows!(&txn, site_ai_bot_policies, source_id, new_id);
+
+    txn.commit().await?;
+
+    tracing::info!(
+        site_id = %new_id,
+        source = %source_id,
+        %domain,
+        owner = %current.id,
+        "site cloned"
+    );
+    touch_site(&state, new_id).await?;
+    notify_config_changed(&state, new_id, Some(&current.email)).await;
 
     Ok((StatusCode::CREATED, Json(SiteResponse::from(model))).into_response())
 }
@@ -2127,6 +2350,8 @@ async fn upsert_ssl(
                 hsts_enabled: Set(false),
                 hsts_max_age: Set(0),
                 always_use_https: Set(false),
+                http1_enabled: Set(true),
+                http2_enabled: Set(true),
                 created_at: Set(Utc::now()),
             };
             posture.apply_to(&mut active);
@@ -3239,6 +3464,34 @@ mod tests {
             healthy_threshold: 10,
         };
         hc.validate().expect("upper bounds must validate");
+    }
+
+    #[test]
+    fn merged_rejects_disabling_both_http_protocols() {
+        let base = TlsPosture::unset();
+        // A fresh site serves both protocols, HTTP/2 included.
+        assert!(base.http1_enabled);
+        assert!(base.http2_enabled);
+
+        let err = base
+            .merged(&TlsPostureRequest {
+                http1_enabled: Some(false),
+                http2_enabled: Some(false),
+                ..Default::default()
+            })
+            .expect_err("a site must keep one protocol enabled");
+        assert!(err.to_string().contains("at least one of HTTP/1.1"));
+
+        // Turning HTTP/1.1 off alone is valid: the listener then advertises
+        // h2 only.
+        let h2_only = base
+            .merged(&TlsPostureRequest {
+                http1_enabled: Some(false),
+                ..Default::default()
+            })
+            .expect("h2-only is a supported posture");
+        assert!(!h2_only.http1_enabled);
+        assert!(h2_only.http2_enabled);
     }
 
     #[test]

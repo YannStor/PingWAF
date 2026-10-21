@@ -11,6 +11,7 @@ pub mod analytics;
 pub mod api_protection;
 pub mod auth;
 pub mod blocked_ips;
+pub mod ai_crawl;
 pub mod bot;
 pub mod cache;
 pub mod cache_settings;
@@ -106,6 +107,7 @@ pub fn build_router(state: AppState) -> Router {
     let api = Router::new()
         .merge(auth::routes())
         .merge(sites::routes())
+        .merge(ai_crawl::routes())
         .merge(site_basic_auth::routes())
         .merge(keys::routes())
         .merge(users::routes())

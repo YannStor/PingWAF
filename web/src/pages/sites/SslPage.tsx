@@ -71,6 +71,8 @@ interface TlsDraft {
   hsts_enabled: boolean
   hsts_max_age: number
   always_use_https: boolean
+  http1_enabled: boolean
+  http2_enabled: boolean
 }
 
 interface MtlsDraft {
@@ -97,6 +99,8 @@ const toTlsDraft = (s: SslSettings): TlsDraft => ({
   hsts_enabled: s.hsts_enabled,
   hsts_max_age: s.hsts_max_age,
   always_use_https: s.always_use_https,
+  http1_enabled: s.http1_enabled ?? true,
+  http2_enabled: s.http2_enabled ?? true,
 })
 
 const toMtlsDraft = (s: SslSettings): MtlsDraft => ({
@@ -233,6 +237,7 @@ export function SslPage() {
   const [httpsError, setHttpsError] = useState<string | null>(null)
   const [tlsError, setTlsError] = useState<string | null>(null)
   const [mtlsError, setMtlsError] = useState<string | null>(null)
+  const [protocolsError, setProtocolsError] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<SslCertificate | null>(null)
   const [details, setDetails] = useState<SslCertificate | null>(null)
 
@@ -315,6 +320,7 @@ export function SslPage() {
       setHttpsError(null)
       setTlsError(null)
       setMtlsError(null)
+      setProtocolsError(null)
       // The CA is never echoed back — drop the pasted copy once it is stored.
       if (scope === 'mtls' && payload.mtls_client_ca) setClientCa('')
       toast.success(t('pages.ssl.settingsSaved'))
@@ -365,9 +371,15 @@ export function SslPage() {
   const saveTls = () => {
     if (!drafts) return
     setTlsError(null)
+    setProtocolsError(null)
     const { min_tls_version, max_tls_version } = drafts.tls
     if (max_tls_version && Number(max_tls_version) < Number(min_tls_version)) {
       setTlsError(t('pages.ssl.versionRangeInvalid'))
+      return
+    }
+    // At least one protocol must stay on — the server rejects the pair-off.
+    if (!drafts.tls.http1_enabled && !drafts.tls.http2_enabled) {
+      setProtocolsError(t('pages.ssl.protocolsRequired'))
       return
     }
     saveSettings.mutate({
@@ -378,6 +390,8 @@ export function SslPage() {
         hsts_enabled: drafts.tls.hsts_enabled,
         hsts_max_age: drafts.tls.hsts_max_age,
         always_use_https: drafts.tls.always_use_https,
+        http1_enabled: drafts.tls.http1_enabled,
+        http2_enabled: drafts.tls.http2_enabled,
       },
     })
   }
@@ -790,6 +804,52 @@ export function SslPage() {
             />
 
             <CardError message={tlsError} />
+          </CardBody>
+        </Card>
+      )}
+
+      {/* HTTP protocol switches — HTTP/1.1 vs HTTP/2 */}
+      {drafts && (
+        <Card className="mb-6">
+          <CardHeader
+            title={t('pages.ssl.protocolsTitle')}
+            description={t('pages.ssl.protocolsHint')}
+            action={
+              canWrite && (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  loading={savingScope === 'tls'}
+                  disabled={!drafts.tls.http1_enabled && !drafts.tls.http2_enabled}
+                  onClick={saveTls}
+                >
+                  {t('common.save')}
+                </Button>
+              )
+            }
+          />
+          <CardBody className="flex flex-col gap-5">
+            <Switch
+              checked={drafts.tls.http1_enabled}
+              disabled={!canWrite}
+              onCheckedChange={(http1_enabled) => patchTls({ http1_enabled })}
+              label={t('pages.ssl.http1Enabled')}
+              description={t('pages.ssl.http1Hint')}
+            />
+            <Switch
+              checked={drafts.tls.http2_enabled}
+              disabled={!canWrite}
+              onCheckedChange={(http2_enabled) => patchTls({ http2_enabled })}
+              label={t('pages.ssl.http2Enabled')}
+              description={t('pages.ssl.http2Hint')}
+            />
+            {drafts.tls.http2_enabled && (
+              <p className="-mt-3 flex max-w-2xl items-start gap-1.5 text-xs text-fg-subtle">
+                <Info weight="duotone" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                {t('pages.ssl.http2Info')}
+              </p>
+            )}
+            {protocolsError && <CardError message={protocolsError} />}
           </CardBody>
         </Card>
       )}

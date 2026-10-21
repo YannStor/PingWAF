@@ -17,6 +17,8 @@ tls-rustls = ["pingap-upstream/tls-rustls"]
 
 [dependencies]
 pingwaf-proto = { path = "../pingwaf-proto" }
+# Self-accounting for configuration sync; atomics only, no allocator hook.
+pingwaf-profiler = { path = "../pingwaf-profiler" }
 pingap-cache = { workspace = true }
 # Host-keyed caches must key on the same canonical form the request path
 # produces (`pingap_core::get_host` → `normalize_host`).

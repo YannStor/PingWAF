@@ -2,6 +2,10 @@
 
 PingWAF 是 [`vicanso/pingap`](https://github.com/vicanso/pingap) 的**硬分叉**（hard fork），不是其下游集成或插件。本仓库与上游没有自动合并关系：`pingap-*` 系列代码虽继承自上游，但已为 WAF 场景深度改造（例如 `pingap-plugin/src/waf.rs` 整个请求检测链为 PingWAF 新增），上游的提交无法直接 rebase 进来。本文档说明两边各自的边界、同步方式与测试归属。
 
+## Pingora 归属
+
+代理层的异步网络底座是 Cloudflare 的 [Pingora](https://github.com/cloudflare/pingora)（当前 pin 在 0.9.0，见根 `Cargo.toml` 的 `[workspace.dependencies]`）——pingap 自身即构建于 Pingora 之上，PingWAF 继承了这一层次。对 Pingora 的归属说明与 pingap 的致谢一并保留：README（英文/中文）的 Acknowledgements 一节同时致谢 pingap 与 Pingora，上游版权声明与 Apache-2.0 许可（[LICENSE](./LICENSE)）继续随发布物保留。PingWAF 与 Cloudflare、pingap 维护者均无隶属或背书关系。
+
 ## 模块归属
 
 | 归属 | 模块 | 说明 |

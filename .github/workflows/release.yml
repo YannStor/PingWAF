@@ -5,10 +5,16 @@ name: Release
 #   trigger: push of a `v*` tag (e.g. v0.14.3)
 #
 # It produces the tarballs install.sh downloads, named EXACTLY:
-#   pingwaf-linux-amd64.tar.gz   pingwaf-linux-arm64.tar.gz
-# install.sh resolves the asset as `pingwaf-${OS}-${ARCH}.tar.gz` from
+#   pingwaf-linux-amd64.tar.xz  pingwaf-linux-amd64.tar.gz
+#   pingwaf-linux-arm64.tar.xz  pingwaf-linux-arm64.tar.gz
+# install.sh prefers the .tar.xz asset (smaller) and falls back to the legacy
+# .tar.gz when xz(1) is missing locally or the download 404s, resolving
+# `pingwaf-${OS}-${ARCH}.tar.{xz,gz}` from
 #   https://github.com/shuaiZend/PingWAF/releases/download/v${VERSION}/<asset>
-# so these names must not drift. Each tarball also ships a `.sha256` checksum.
+# so these names must not drift. Each tarball ships a matching `.sha256`.
+#
+# The dashboard bundle is built ONCE by the `web-dist` job and embedded by
+# rust-embed in both matrix legs (they read ../web/dist at compile time).
 #
 # Releases are Linux-only (server deployments). Both matrix legs use the
 # default OpenSSL backend, matching the Dockerfile.
@@ -31,8 +37,39 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Build the dashboard bundle once; both binaries legs embed it via rust-embed
+  # (which reads ../web/dist at compile time), replacing the per-leg Node setup
+  # + frontend build that used to duplicate the npm critical path.
+  web-dist:
+    name: Build frontend dist
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          retention-days: 1
+
   binaries:
     name: Build ${{ matrix.plat }}/${{ matrix.arch }}
+    needs: web-dist
     runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 120
     permissions:
@@ -57,20 +94,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      # The released binary embeds the dashboard, so build the real bundle
-      # before cargo (rust-embed reads ../web/dist at compile time).
-      - name: Setup Node
-        uses: actions/setup-node@v7
+      # The released binary embeds the dashboard built by the web-dist job;
+      # rust-embed reads ../web/dist at compile time, so unpack it there.
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
         with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
-      - name: Build frontend
-        working-directory: web
-        run: |
-          npm ci
-          npm run build
+          name: web-dist
+          path: web/dist
 
       - name: Install system dependencies
         run: |
@@ -123,7 +153,7 @@ jobs:
           set -euo pipefail
           ASSET="pingwaf-${{ matrix.plat }}-${{ matrix.arch }}"
           STAGE="$ASSET"
-          rm -rf "$STAGE" "$ASSET.tar.gz" "$ASSET.tar.gz.sha256"
+          rm -rf "$STAGE" "$ASSET".tar.{xz,gz} "$ASSET".tar.{xz,gz}.sha256"
           mkdir -p "$STAGE"
           cp "target/${{ matrix.target }}/release/pingwaf" "$STAGE/pingwaf"
           cp LICENSE README.md "$STAGE/"
@@ -131,9 +161,14 @@ jobs:
           cp pingwaf.toml "$STAGE/" 2>/dev/null || true
           cp pingwaf.service "$STAGE/" 2>/dev/null || true
           chmod +x "$STAGE/pingwaf"
+          # .tar.xz is the primary format (smaller); the legacy .tar.gz is
+          # kept as the install.sh fallback for hosts without xz(1) and for
+          # tooling pinned to the old asset names.
+          tar -cJf "$ASSET.tar.xz" "$STAGE"
           tar -czf "$ASSET.tar.gz" "$STAGE"
+          shasum -a 256 "$ASSET.tar.xz" > "$ASSET.tar.xz.sha256"
           shasum -a 256 "$ASSET.tar.gz" > "$ASSET.tar.gz.sha256"
-          ls -lh "$ASSET.tar.gz" "$ASSET.tar.gz.sha256"
+          ls -lh "$ASSET".tar.{xz,gz} "$ASSET".tar.{xz,gz}.sha256"
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
@@ -141,6 +176,8 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           generate_release_notes: true
           files: |
+            pingwaf-${{ matrix.plat }}-${{ matrix.arch }}.tar.xz
+            pingwaf-${{ matrix.plat }}-${{ matrix.arch }}.tar.xz.sha256
             pingwaf-${{ matrix.plat }}-${{ matrix.arch }}.tar.gz
             pingwaf-${{ matrix.plat }}-${{ matrix.arch }}.tar.gz.sha256
 
@@ -160,7 +197,11 @@ jobs:
             runs-on: ubuntu-latest
             platform: linux/amd64
           - arch: arm64
-            runs-on: ubuntu-22.04-arm
+            # Keep this runner aligned with the binaries matrix leg above:
+            # ubuntu-24.04-arm ships the same protoc (>= 3.15, proto3 optional
+            # works) and the same glibc, so runtime-embedded binaries and
+            # from-source builds stay reproducible across jobs.
+            runs-on: ubuntu-24.04-arm
             platform: linux/arm64
     steps:
       - name: Derive version

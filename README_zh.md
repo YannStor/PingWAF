@@ -233,6 +233,8 @@ cargo build --release --bin pingwaf --features full
 curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | sudo bash -s -- --mode all-in-one
 ```
 
+> 每个架构的 release 同时提供两种归档：`pingwaf-linux-{amd64,arm64}.tar.xz`（主格式，更小）与 `.tar.gz`（兼容回退），各带 `.sha256` 校验文件。脚本优先下载 `.tar.xz`，在本地缺少 `xz(1)` 或下载失败时回退到 `.tar.gz`。
+
 ---
 
 ## 🧭 运行模式

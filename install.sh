@@ -194,38 +194,49 @@ VERSION="${VERSION#v}"
 info "Installing PingWAF v${VERSION}"
 
 # ─── Download ─────────────────────────────────────────────────────────────────
-resolve_asset_name() {
-    local os="$1" arch="$2"
-    case "$os" in
-        linux)
-            case "$arch" in
-                amd64) echo "pingwaf-linux-amd64.tar.gz" ;;
-                arm64) echo "pingwaf-linux-arm64.tar.gz" ;;
-            esac
-            ;;
-    esac
+# Releases ship both .tar.xz (primary, smaller) and .tar.gz (compatibility
+# fallback). Prefer xz; skip straight to .tar.gz when xz(1) is not installed,
+# and fall back on a failed download (e.g. releases that predate .tar.xz).
+fetch_asset() {
+    local ext url
+    for ext in tar.xz tar.gz; do
+        if [[ "$ext" == "tar.xz" ]] && ! has xz; then
+            info "xz(1) not found — falling back to the .tar.gz asset."
+            continue
+        fi
+        ASSET_NAME="pingwaf-${OS}-${ARCH}.${ext}"
+        url="https://github.com/${REPO}/releases/download/v${VERSION}/${ASSET_NAME}"
+        info "Downloading ${ASSET_NAME}..."
+        info "URL: ${url}"
+        if has curl; then
+            if curl -fsSL "$url" -o "${TMPDIR}/${ASSET_NAME}"; then
+                return 0
+            fi
+        elif has wget; then
+            if wget -q "$url" -O "${TMPDIR}/${ASSET_NAME}"; then
+                return 0
+            fi
+        else
+            fatal "Neither curl nor wget found. Please install one of them."
+        fi
+        warn "Download failed for ${ASSET_NAME} — trying the next format."
+    done
+    fatal "Download failed. Check that version v${VERSION} exists and has a pingwaf-${OS}-${ARCH} asset."
 }
-
-ASSET_NAME="$(resolve_asset_name "$OS" "$ARCH")"
-DOWNLOAD_URL="https://github.com/${REPO}/releases/download/v${VERSION}/${ASSET_NAME}"
 
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-info "Downloading ${ASSET_NAME}..."
-info "URL: ${DOWNLOAD_URL}"
-
-if has curl; then
-    curl -fsSL "$DOWNLOAD_URL" -o "${TMPDIR}/${ASSET_NAME}" || \
-        fatal "Download failed. Check that version v${VERSION} exists and has a ${ASSET_NAME} asset."
-elif has wget; then
-    wget -q "$DOWNLOAD_URL" -O "${TMPDIR}/${ASSET_NAME}" || \
-        fatal "Download failed. Check that version v${VERSION} exists and has a ${ASSET_NAME} asset."
-fi
+ASSET_NAME=""
+fetch_asset
 
 # ─── Extract & Install Binary ─────────────────────────────────────────────────
 info "Extracting..."
-tar -xzf "${TMPDIR}/${ASSET_NAME}" -C "$TMPDIR"
+case "$ASSET_NAME" in
+    *.tar.xz) tar -xJf "${TMPDIR}/${ASSET_NAME}" -C "$TMPDIR" ;;
+    *.tar.gz) tar -xzf "${TMPDIR}/${ASSET_NAME}" -C "$TMPDIR" ;;
+    *)        fatal "Unexpected asset name: ${ASSET_NAME}" ;;
+esac
 
 # Find the binary
 BINARY_PATH="$(find "$TMPDIR" -name "$BINARY_NAME" -type f | head -n1)"

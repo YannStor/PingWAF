@@ -3,26 +3,27 @@
 //! The alternative to a profiler that samples stacks: the code that knows
 //! what it is doing accounts for itself.
 //!
-//! * **Modules** are the seven functional areas of the process — proxy, waf,
-//!   cache, plugin, db, control, other — recorded in a fixed array of
+//! * **Modules** are the functional areas of the process — proxy, waf (and its
+//!   normalize / signature / expression / body stages), cache, plugin, db,
+//!   control, log, agent, http-client, other — recorded in a fixed array of
 //!   atomics, so recording costs one relaxed add and no allocation.
 //! * **Methods** are the instrumented call sites (`"proxy::request_filter"`,
 //!   …). The set is fixed at compile time ([`Method`]), so recording a method
 //!   is an array index — no hash, no lock, no allocation. A method also rolls
 //!   up into its [`Module`], so a call site is instrumented once and two rows
 //!   are accounted for.
-//! * **Memory** is *reported*, not intercepted: modules that own large
-//!   structures (cache capacity, WAF body buffers, log batches) publish
-//!   their current byte count with [`set_memory`]/[`add_memory`]. Nothing
-//!   hooks the allocator, so this works with any allocator and on any
-//!   platform.
-//! * **Disk** is a separate gauge, not part of the memory figure: a module
-//!   that keeps data on disk publishes its footprint with
-//!   [`set_disk_bytes`]. The two are told apart on purpose — a cache that
-//!   holds gigabytes on disk and one that holds them in memory have the same
-//!   problem and completely different fixes, and reporting the on-disk byte
-//!   count as "memory" (what the cache backend used to do) makes the module
-//!   table say the process is using the filesystem's bytes.
+//! * **Memory** is *reported*, not intercepted: modules and methods that own
+//!   large structures (cache capacity, WAF body buffers, log batches, agent
+//!   snapshots) publish their current byte count with
+//!   [`set_memory`]/[`add_memory`] and [`add_method_memory`], and a
+//!   [`track_memory`] guard releases it on drop. Nothing hooks the allocator,
+//!   so this works with any allocator and on any platform.
+//! * **Disk** is still collected internally by [`set_disk_bytes`], but it is
+//!   no longer part of the snapshot: the dashboard's module table reports
+//!   memory only. Keeping the on-disk gauge separate is deliberate — a cache
+//!   that holds gigabytes on disk and one that holds them in memory need
+//!   completely different fixes, and folding the filesystem's bytes into the
+//!   memory figure is what made the table claim the process used them.
 //!
 //! There is no sampling and no symbolisation: an accounting call is a few
 //! nanoseconds and works the same in a debug build on a laptop and a release
@@ -51,6 +52,11 @@ use serde::Serialize;
 
 /// The functional areas attribution is grouped into.
 ///
+/// The WAF stages (`WafNormalize`, `WafSignature`, `WafExpression`, `WafBody`)
+/// are **nested** inside `Waf`: the `waf::handle_request` timer spans all of
+/// them, so their time is also counted in the `waf` row. Read the stage rows
+/// as a breakdown of `waf` — never add them to it, or the shares exceed 1.
+///
 /// `#[repr(usize)]` on purpose: [`Module::index`] is then a cast, and
 /// [`Module::ALL`] is written in discriminant order so a slot's index is its
 /// position in the snapshot.
@@ -59,7 +65,8 @@ use serde::Serialize;
 pub enum Module {
     /// Request intake, connection handling, upstream forwarding.
     Proxy = 0,
-    /// WAF rule evaluation, body inspection, decisions.
+    /// WAF rule evaluation, body inspection, decisions — the stages that are
+    /// not split out below, kept so older instrumentation still lands here.
     Waf = 1,
     /// Cache lookup, storage, eviction and purge.
     Cache = 2,
@@ -71,11 +78,25 @@ pub enum Module {
     Control = 5,
     /// Anything not yet instrumented.
     Other = 6,
+    /// WAF normalization: decoding, path/query canonicalisation.
+    WafNormalize = 7,
+    /// WAF signature matching (libinjection, Aho-Corasick rule sets).
+    WafSignature = 8,
+    /// WAF expression evaluation.
+    WafExpression = 9,
+    /// WAF request-body buffering and staged inspection.
+    WafBody = 10,
+    /// Access/security log assembly, batching and flush.
+    Log = 11,
+    /// Agent configuration sync: received bundles, snapshots, rule tables.
+    Agent = 12,
+    /// Outbound HTTP client (webhooks, ACME, notifications).
+    HttpClient = 13,
 }
 
 impl Module {
     /// Every module, in the order the snapshot presents them.
-    pub const ALL: [Module; 7] = [
+    pub const ALL: [Module; 14] = [
         Module::Proxy,
         Module::Waf,
         Module::Cache,
@@ -83,6 +104,13 @@ impl Module {
         Module::Db,
         Module::Control,
         Module::Other,
+        Module::WafNormalize,
+        Module::WafSignature,
+        Module::WafExpression,
+        Module::WafBody,
+        Module::Log,
+        Module::Agent,
+        Module::HttpClient,
     ];
 
     /// Stable key used in the snapshot.
@@ -95,6 +123,13 @@ impl Module {
             Module::Db => "db",
             Module::Control => "control",
             Module::Other => "other",
+            Module::WafNormalize => "waf_normalize",
+            Module::WafSignature => "waf_signature",
+            Module::WafExpression => "waf_expression",
+            Module::WafBody => "waf_body",
+            Module::Log => "log",
+            Module::Agent => "agent",
+            Module::HttpClient => "http_client",
         }
     }
 
@@ -133,12 +168,40 @@ pub enum Method {
     /// layout is complete and a new call site has a home before it earns a
     /// variant.
     Other = 6,
+    /// `pingwaf-waf` normalization: decoding and canonicalisation.
+    WafNormalize = 7,
+    /// `pingwaf-waf` signature matching.
+    WafSignature = 8,
+    /// `pingwaf-waf` expression evaluation.
+    WafExpression = 9,
+    /// `pingwaf-waf` request-body read/staging.
+    WafBodyRead = 10,
+    /// Cache lookup (hit path).
+    CacheLookup = 11,
+    /// Cache store (miss path).
+    CacheStore = 12,
+    /// `pingap-plugin` sub_filter: response body rewriting.
+    PluginSubFilter = 13,
+    /// `pingap-plugin` challenge: page issuance and verification.
+    PluginChallenge = 14,
+    /// Control-plane access-log persistence.
+    DbPersistLogs = 15,
+    /// Control-plane security-event persistence.
+    DbPersistEvents = 16,
+    /// Control-plane gRPC stream (agent sync).
+    ControlGrpcStream = 17,
+    /// Agent-side configuration sync and snapshot rebuild.
+    AgentSync = 18,
+    /// Access-log batch flush.
+    LogFlush = 19,
+    /// Upstream connection establishment (connect + TLS).
+    ProxyUpstreamConnect = 20,
 }
 
 impl Method {
     /// Every method, in slot order. Length must stay `<=`
     /// [`ProfileSnapshot::MAX_METHODS`] or the snapshot truncates rows.
-    pub const ALL: [Method; 7] = [
+    pub const ALL: [Method; 21] = [
         Method::ProxyRequestFilter,
         Method::WafHandleRequest,
         Method::CacheHandleRequest,
@@ -146,6 +209,20 @@ impl Method {
         Method::DbPersistHeartbeat,
         Method::ControlHttp,
         Method::Other,
+        Method::WafNormalize,
+        Method::WafSignature,
+        Method::WafExpression,
+        Method::WafBodyRead,
+        Method::CacheLookup,
+        Method::CacheStore,
+        Method::PluginSubFilter,
+        Method::PluginChallenge,
+        Method::DbPersistLogs,
+        Method::DbPersistEvents,
+        Method::ControlGrpcStream,
+        Method::AgentSync,
+        Method::LogFlush,
+        Method::ProxyUpstreamConnect,
     ];
 
     /// Call-site name used in the snapshot.
@@ -161,6 +238,20 @@ impl Method {
             Method::DbPersistHeartbeat => "db::persist_heartbeat",
             Method::ControlHttp => "control::http",
             Method::Other => "other::unattributed",
+            Method::WafNormalize => "waf::normalize",
+            Method::WafSignature => "waf::signature",
+            Method::WafExpression => "waf::expression",
+            Method::WafBodyRead => "waf::body_read",
+            Method::CacheLookup => "cache::lookup",
+            Method::CacheStore => "cache::store",
+            Method::PluginSubFilter => "plugin::sub_filter",
+            Method::PluginChallenge => "plugin::challenge",
+            Method::DbPersistLogs => "db::persist_logs",
+            Method::DbPersistEvents => "db::persist_events",
+            Method::ControlGrpcStream => "control::grpc_stream",
+            Method::AgentSync => "agent::sync",
+            Method::LogFlush => "log::flush",
+            Method::ProxyUpstreamConnect => "proxy::upstream_connect",
         }
     }
 
@@ -174,6 +265,20 @@ impl Method {
             Method::DbPersistHeartbeat => Module::Db,
             Method::ControlHttp => Module::Control,
             Method::Other => Module::Other,
+            Method::WafNormalize => Module::WafNormalize,
+            Method::WafSignature => Module::WafSignature,
+            Method::WafExpression => Module::WafExpression,
+            Method::WafBodyRead => Module::WafBody,
+            Method::CacheLookup => Module::Cache,
+            Method::CacheStore => Module::Cache,
+            Method::PluginSubFilter => Module::Plugin,
+            Method::PluginChallenge => Module::Plugin,
+            Method::DbPersistLogs => Module::Db,
+            Method::DbPersistEvents => Module::Db,
+            Method::ControlGrpcStream => Module::Control,
+            Method::AgentSync => Module::Agent,
+            Method::LogFlush => Module::Log,
+            Method::ProxyUpstreamConnect => Module::Proxy,
         }
     }
 
@@ -226,6 +331,10 @@ impl ModuleCounters {
 
 struct MethodCounters {
     elapsed_ns: AtomicU64,
+    /// Bytes the call site currently holds. Only scopes that own a buffer
+    /// report here; a method whose work allocates and drops within the call
+    /// stays at zero.
+    mem_bytes: AtomicI64,
     calls: AtomicU64,
 }
 
@@ -233,6 +342,7 @@ impl MethodCounters {
     const fn new() -> Self {
         Self {
             elapsed_ns: AtomicU64::new(0),
+            mem_bytes: AtomicI64::new(0),
             calls: AtomicU64::new(0),
         }
     }
@@ -294,6 +404,82 @@ pub fn set_disk_bytes(module: Module, bytes: u64) {
     MODULES[module.index()]
         .disk_bytes
         .store(bytes, Ordering::Relaxed);
+}
+
+/// Records `ns` nanoseconds directly against `method` and its module.
+///
+/// [`timed_method`] is preferred for a scope that can own a guard; this is for
+/// a span that ends in the middle of a function, where a guard's drop point
+/// would be the end of the function instead.
+pub fn record_method(method: Method, ns: u64) {
+    if ns == 0 {
+        return;
+    }
+    let counters = &METHODS[method.index()];
+    counters.elapsed_ns.fetch_add(ns, Ordering::Relaxed);
+    counters.calls.fetch_add(1, Ordering::Relaxed);
+    let module = &MODULES[method.module().index()];
+    module.elapsed_ns.fetch_add(ns, Ordering::Relaxed);
+    module.calls.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Adds `delta` bytes (negative for release) to a method's held-bytes gauge.
+///
+/// The method figure is what lets the dashboard name the call site behind a
+/// module's memory, not just the module.
+pub fn add_method_memory(method: Method, delta: i64) {
+    if delta == 0 {
+        return;
+    }
+    METHODS[method.index()]
+        .mem_bytes
+        .fetch_add(delta, Ordering::Relaxed);
+}
+
+/// Releases the bytes it was created with on drop, from both the method row
+/// and its module roll-up.
+///
+/// Bind it to a named local for as long as the buffer is held:
+/// `let _buf_guard = track_method_memory(Method::WafBodyRead, bytes);`
+pub struct MemoryGuard {
+    method: Option<Method>,
+    module: Module,
+    bytes: u64,
+}
+
+impl Drop for MemoryGuard {
+    fn drop(&mut self) {
+        let delta = -(self.bytes.min(i64::MAX as u64) as i64);
+        add_memory(self.module, delta);
+        if let Some(method) = self.method {
+            add_method_memory(method, delta);
+        }
+    }
+}
+
+/// Reports `bytes` as held by `method` (and its module) until the guard drops.
+pub fn track_method_memory(method: Method, bytes: u64) -> MemoryGuard {
+    if bytes > 0 {
+        add_memory(method.module(), bytes as i64);
+        add_method_memory(method, bytes as i64);
+    }
+    MemoryGuard {
+        method: Some(method),
+        module: method.module(),
+        bytes,
+    }
+}
+
+/// Reports `bytes` as held by a module that has no dedicated method row.
+pub fn track_memory(module: Module, bytes: u64) -> MemoryGuard {
+    if bytes > 0 {
+        add_memory(module, bytes as i64);
+    }
+    MemoryGuard {
+        method: None,
+        module,
+        bytes,
+    }
 }
 
 /// Times the scope it lives in and attributes it to `module` on drop.
@@ -391,12 +577,6 @@ pub struct ModuleView {
     pub mem_bytes: u64,
     /// Share of the total held bytes across modules, 0.0–1.0.
     pub mem_share: f64,
-    /// Bytes the module currently reports as held **on disk**. A module with
-    /// no on-disk footprint (proxy, waf, …) reports zero here.
-    pub disk_bytes: u64,
-    /// Share of the total on-disk bytes across modules, 0.0–1.0. Zero when
-    /// nothing reports disk usage.
-    pub disk_share: f64,
     /// Number of timed operations attributed to the module.
     pub calls: u64,
     /// Average microseconds per timed operation.
@@ -422,6 +602,11 @@ pub struct MethodView {
     /// Share of the total attributed wall-clock time, 0.0–1.0. Same value as
     /// [`Self::cpu_share`].
     pub elapsed_share: f64,
+    /// Bytes this call site currently reports as held.
+    pub mem_bytes: u64,
+    /// Share of the method's module memory, 0.0–1.0. Zero when the module
+    /// reports nothing, so a method's share never divides by zero.
+    pub mem_share: f64,
     /// Number of timed calls.
     pub calls: u64,
     /// Average microseconds per call.
@@ -464,7 +649,9 @@ impl ProfileSnapshot {
         let mut modules = Vec::with_capacity(Module::ALL.len());
         let mut total_elapsed_ns = 0u64;
         let mut total_mem = 0u64;
-        let mut total_disk = 0u64;
+        // Per-module memory, so a method row can express its share of the
+        // module it rolls up into.
+        let mut module_mem = [0u64; Module::ALL.len()];
         for module in Module::ALL {
             let counters = &MODULES[module.index()];
             let elapsed_ns = counters.elapsed_ns.load(Ordering::Relaxed);
@@ -472,8 +659,7 @@ impl ProfileSnapshot {
             let mem_bytes =
                 counters.mem_bytes.load(Ordering::Relaxed).max(0) as u64;
             total_mem = total_mem.saturating_add(mem_bytes);
-            let disk_bytes = counters.disk_bytes.load(Ordering::Relaxed);
-            total_disk = total_disk.saturating_add(disk_bytes);
+            module_mem[module.index()] = mem_bytes;
             let calls = counters.calls.load(Ordering::Relaxed);
             let elapsed_ms = elapsed_ns as f64 / 1_000_000.0;
             modules.push(ModuleView {
@@ -484,8 +670,6 @@ impl ProfileSnapshot {
                 elapsed_share: 0.0,
                 mem_bytes,
                 mem_share: 0.0,
-                disk_bytes,
-                disk_share: 0.0,
                 calls,
                 avg_us: if calls == 0 {
                     0.0
@@ -507,14 +691,6 @@ impl ProfileSnapshot {
             } else {
                 row.mem_bytes as f64 / total_mem as f64
             };
-            // Its own denominator: a module can own gigabytes on disk and
-            // nothing in memory, and the share must still read 1.0 there
-            // rather than "0 of the memory total".
-            row.disk_share = if total_disk == 0 {
-                0.0
-            } else {
-                row.disk_bytes as f64 / total_disk as f64
-            };
         }
         let mut methods: Vec<MethodView> = Method::ALL
             .iter()
@@ -534,12 +710,21 @@ impl ProfileSnapshot {
                 } else {
                     elapsed_ms * 1_000_000.0 / total_elapsed_ns as f64
                 };
+                let mem_bytes =
+                    counters.mem_bytes.load(Ordering::Relaxed).max(0) as u64;
+                let module_total = module_mem[method.module().index()];
                 Some(MethodView {
                     method: method.as_str(),
                     cpu_ms: elapsed_ms,
                     cpu_share: share,
                     elapsed_ms,
                     elapsed_share: share,
+                    mem_bytes,
+                    mem_share: if module_total == 0 {
+                        0.0
+                    } else {
+                        mem_bytes as f64 / module_total as f64
+                    },
                     calls,
                     avg_us: elapsed_ns as f64 / calls as f64 / 1_000.0,
                 })
@@ -575,6 +760,7 @@ impl ProfileSnapshot {
         }
         for counters in &METHODS {
             counters.elapsed_ns.store(0, Ordering::Relaxed);
+            counters.mem_bytes.store(0, Ordering::Relaxed);
             counters.calls.store(0, Ordering::Relaxed);
         }
     }
@@ -647,11 +833,11 @@ mod tests {
 
     /// The cache backend used to publish its **on-disk** byte count through
     /// [`set_memory`], so the module table said "cache memory ≈ cache disk
-    /// usage". The two gauges must stay independent: setting one must not
-    /// move the other, each must have its own share denominator, and
-    /// `reset` must clear both.
+    /// usage". The disk gauge is still recorded, but it must never leak into
+    /// the memory figure or the snapshot (the row no longer has a disk field
+    /// at all — that part is a compile-time guarantee).
     #[test]
-    fn cache_memory_and_disk_are_reported_separately() {
+    fn disk_gauge_stays_out_of_the_snapshot() {
         let _guard = serial();
         ProfileSnapshot::reset();
         set_memory(Module::Cache, 1024);
@@ -662,50 +848,66 @@ mod tests {
             .iter()
             .find(|row| row.module == "cache")
             .expect("cache row");
-        assert_eq!(1024, cache.mem_bytes, "memory gauge is untouched");
+        assert_eq!(1024, cache.mem_bytes, "the disk gauge must not leak in");
+        assert!((cache.mem_share - 1.0).abs() < 1e-9);
+        // The on-disk figure is still kept internally for cache accounting.
         assert_eq!(
             8 * 1024 * 1024,
-            cache.disk_bytes,
-            "disk gauge is untouched"
+            MODULES[Module::Cache.index()]
+                .disk_bytes
+                .load(Ordering::Relaxed)
         );
-        assert_ne!(cache.mem_bytes, cache.disk_bytes);
-        // Each share uses its own total: the cache is all of the disk and
-        // all of the memory here, even though the two figures differ.
-        assert!((cache.mem_share - 1.0).abs() < 1e-9);
-        assert!((cache.disk_share - 1.0).abs() < 1e-9);
 
-        // A module with nothing on disk reports zero, not a share of someone
-        // else's footprint.
-        let proxy = snapshot
-            .modules
-            .iter()
-            .find(|row| row.module == "proxy")
-            .expect("proxy row");
-        assert_eq!(0, proxy.disk_bytes);
-        assert_eq!(0.0, proxy.disk_share);
-
-        // With several owners the disk share is split, while memory keeps its
-        // own denominator.
-        set_disk_bytes(Module::Db, 8 * 1024 * 1024);
-        let snapshot = ProfileSnapshot::collect();
-        let cache = snapshot
-            .modules
-            .iter()
-            .find(|row| row.module == "cache")
-            .expect("cache row");
-        assert!((cache.disk_share - 0.5).abs() < 1e-9);
-        assert!((cache.mem_share - 1.0).abs() < 1e-9);
-
-        // Nothing on disk anywhere: every share is zero, not a division by
-        // zero or a NaN in the JSON.
+        // A reset clears the memory gauge, and an empty snapshot has no NaN
+        // shares.
         ProfileSnapshot::reset();
         let snapshot = ProfileSnapshot::collect();
         for row in &snapshot.modules {
-            assert_eq!(0, row.disk_bytes);
-            assert_eq!(0.0, row.disk_share);
             assert_eq!(0, row.mem_bytes);
             assert_eq!(0.0, row.mem_share);
         }
+    }
+
+    /// A method row carries the bytes its call site holds, and the guard
+    /// releases them on drop — otherwise the profile would only ever grow.
+    #[test]
+    fn method_memory_is_reported_and_released() {
+        let _guard = serial();
+        ProfileSnapshot::reset();
+        // A method with no calls has no row at all, so give it one. The
+        // sleep keeps the measurement above zero: a zero-length scope is
+        // deliberately dropped by `MethodTimer::drop` and the row would not
+        // exist (which made this test flaky under parallel execution).
+        {
+            let _timer = timed_method(Method::WafBodyRead);
+            std::thread::sleep(std::time::Duration::from_micros(200));
+        }
+        let held = track_method_memory(Method::WafBodyRead, 4096);
+
+        let snapshot = ProfileSnapshot::collect();
+        let row = snapshot
+            .methods
+            .iter()
+            .find(|row| row.method == Method::WafBodyRead.as_str())
+            .expect("body_read row");
+        assert_eq!(4096, row.mem_bytes);
+        assert!((row.mem_share - 1.0).abs() < 1e-9);
+        let module = snapshot
+            .modules
+            .iter()
+            .find(|row| row.module == "waf_body")
+            .expect("waf_body row");
+        assert_eq!(4096, module.mem_bytes, "method memory rolls up");
+
+        drop(held);
+        let snapshot = ProfileSnapshot::collect();
+        let row = snapshot
+            .methods
+            .iter()
+            .find(|row| row.method == Method::WafBodyRead.as_str())
+            .expect("the row survives, its memory does not");
+        assert_eq!(0, row.mem_bytes);
+        assert_eq!(0, snapshot.modules[Module::WafBody.index()].mem_bytes);
     }
 
     /// A method row's slot, its snapshot name and its module must all line up
@@ -714,7 +916,7 @@ mod tests {
     /// another's name.
     #[test]
     fn method_indices_are_stable_and_unique() {
-        assert_eq!(Method::ALL.len(), 7);
+        assert_eq!(Method::ALL.len(), 21);
         let mut names = std::collections::HashSet::new();
         for (index, method) in Method::ALL.iter().enumerate() {
             assert_eq!(
@@ -779,14 +981,16 @@ mod tests {
             );
         }
         // The last discriminant has a slot: `ALL` did not stop short.
-        assert!(
-            Module::ALL.len() > Module::Other.index(),
+        assert_eq!(
+            Module::ALL.len(),
+            Module::HttpClient.index() + 1,
             "Module::ALL is missing a variant; MODULES would be indexed out of bounds"
         );
         // The method table is sized the same way.
         assert_eq!(METHODS.len(), Method::ALL.len());
-        assert!(
-            Method::ALL.len() > Method::Other.index(),
+        assert_eq!(
+            Method::ALL.len(),
+            Method::ProxyUpstreamConnect.index() + 1,
             "Method::ALL is missing a variant; METHODS would be indexed out of bounds"
         );
     }

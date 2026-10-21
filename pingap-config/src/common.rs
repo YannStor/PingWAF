@@ -1143,6 +1143,11 @@ pub struct ServerConf {
     /// Whether to enable HTTP/2 protocol support
     pub enabled_h2: Option<bool>,
 
+    /// Whether HTTP/1.1 stays offered to clients. Unset keeps the historical
+    /// behaviour (on). Turning it off while `enabled_h2` is on makes the
+    /// listener advertise h2 only over TLS; turning both off is rejected.
+    pub http1_enabled: Option<bool>,
+
     /// Cap on concurrent HTTP/2 streams per downstream connection. Unset
     /// keeps pingora's bounded default of 100.
     pub h2_max_concurrent_streams: Option<u32>,
@@ -1294,6 +1299,14 @@ impl ServerConf {
     /// does not check them itself: a zero or an oversized value would only
     /// surface as a protocol error on the first client connection.
     fn validate_h2(&self) -> Result<()> {
+        // A listener that offers neither protocol cannot answer anything, and
+        // pingora's ALPN callback would have to pick one anyway.
+        if self.http1_enabled == Some(false) && self.enabled_h2 != Some(true) {
+            return Err(Error::Invalid {
+                message: "http1_enabled=false requires enabled_h2=true"
+                    .to_string(),
+            });
+        }
         if self.h2_max_concurrent_streams == Some(0) {
             return Err(Error::Invalid {
                 message: "h2 max concurrent streams should be greater than 0"

@@ -1747,24 +1747,18 @@ mod tests {
             "memory and disk are separate figures"
         );
 
-        // And the disk figure reaches the module row the profile endpoint
-        // serialises, without being mixed into the memory column.
+        // The module row the profile endpoint serialises reports memory only:
+        // the on-disk gauge stays on this backend (asserted above) and is no
+        // longer part of the wire shape.
         let snapshot = pingwaf_profiler::ProfileSnapshot::collect();
         let row = snapshot
             .modules
             .iter()
             .find(|row| row.module == "cache")
             .expect("cache row");
-        assert!(
-            row.disk_bytes >= file_len,
-            "disk {} must cover this backend's {file_len} bytes",
-            row.disk_bytes
-        );
-        // The profile endpoint is a plain serialisation of this snapshot, so
-        // the disk figure has to be in the JSON next to the memory one.
         let json = serde_json::to_value(row).expect("module row serialises");
-        assert!(json.get("disk_bytes").is_some(), "{json}");
-        assert!(json.get("disk_share").is_some(), "{json}");
+        assert!(json.get("disk_bytes").is_none(), "{json}");
+        assert!(json.get("disk_share").is_none(), "{json}");
         assert!(json.get("mem_bytes").is_some(), "{json}");
     }
 }

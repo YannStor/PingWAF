@@ -138,6 +138,43 @@ pub struct SiteRules {
     /// every snapshot written before the policy existed.
     #[serde(default)]
     pub response_replace: Option<ResponseReplaceConfig>,
+    /// AI crawler control: the rendered robots.txt / llms.txt bodies and the
+    /// family actions. `None` for sites (and snapshots) without it.
+    #[serde(default)]
+    pub ai_crawl: Option<AiCrawlConfig>,
+}
+
+/// AI crawler control for one site.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AiCrawlConfig {
+    /// Whether the family actions are enforced.
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub default_action: String,
+    /// Rendered bodies; empty means the file is not served.
+    #[serde(default)]
+    pub robots_body: String,
+    #[serde(default)]
+    pub llms_body: String,
+    #[serde(default)]
+    pub cache_max_age: u32,
+    #[serde(default)]
+    pub policies: Vec<AiBotPolicy>,
+}
+
+/// One AI crawler family the site distinguishes.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AiBotPolicy {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub ua_substrings: Vec<String>,
+    #[serde(default)]
+    pub category: String,
+    /// `allow` / `monitor` / `block`, inheritance already resolved.
+    #[serde(default)]
+    pub action: String,
 }
 
 /// One literal or regex replacement of a [`ResponseReplaceConfig`].
@@ -862,6 +899,12 @@ pub struct SslConfig {
     /// predates the flag, when turning mTLS on always required one.
     #[serde(default)]
     pub mtls_require_client_cert: Option<bool>,
+    /// Downstream protocol switches. `None` (a cache written by an older
+    /// control plane) means both protocols stay on.
+    #[serde(default)]
+    pub http1_enabled: Option<bool>,
+    #[serde(default)]
+    pub http2_enabled: Option<bool>,
 }
 
 impl SslConfig {
@@ -1352,6 +1395,12 @@ impl RuleCache {
         &self,
         bundle: &proto::RuleBundle,
     ) -> anyhow::Result<()> {
+        // Configuration sync is the agent's heaviest control-plane operation:
+        // converting a bundle and rebuilding the domain index is accounted
+        // separately from the proxy path.
+        let _sync = pingwaf_profiler::timed_method(
+            pingwaf_profiler::Method::AgentSync,
+        );
         let site_rules = Arc::new(Self::convert_bundle(bundle));
         let site_id = bundle.site_id.clone();
         let domain = site_rules.domain.clone();
@@ -2424,6 +2473,10 @@ impl RuleCache {
                 .response_replace
                 .as_ref()
                 .map(Self::convert_response_replace),
+            ai_crawl: bundle
+                .ai_crawl
+                .as_ref()
+                .map(Self::convert_ai_crawl),
         }
     }
 
@@ -2657,6 +2710,30 @@ impl RuleCache {
         }
     }
 
+    fn convert_ai_crawl(c: &proto::AiCrawlConfig) -> AiCrawlConfig {
+        AiCrawlConfig {
+            enabled: c.enabled,
+            default_action: c.default_action.clone(),
+            robots_body: c.robots_body.clone(),
+            llms_body: c.llms_body.clone(),
+            cache_max_age: c.cache_max_age,
+            policies: c
+                .policies
+                .iter()
+                .map(|policy| AiBotPolicy {
+                    id: policy.id.clone(),
+                    ua_substrings: policy
+                        .ua_substrings
+                        .iter()
+                        .map(|pattern| pattern.to_lowercase())
+                        .collect(),
+                    category: policy.category.clone(),
+                    action: policy.action.clone(),
+                })
+                .collect(),
+        }
+    }
+
     fn convert_ssl_config(s: &proto::SslConfig) -> SslConfig {
         SslConfig {
             cert_pem: s.cert_pem.clone(),
@@ -2687,6 +2764,8 @@ impl RuleCache {
                 .collect(),
             mtls_organization: s.mtls_organization.clone(),
             mtls_require_client_cert: Some(s.mtls_require_client_cert),
+            http1_enabled: s.http1_enabled,
+            http2_enabled: s.http2_enabled,
         }
     }
 
@@ -3385,6 +3464,7 @@ mod tests {
                             is_regex: false,
                         }],
                     }),
+                    ai_crawl: None,
                 }),
             )]
             .into_iter()
@@ -3526,6 +3606,7 @@ mod tests {
                 proxy_trust: ProxyTrustConfig::default(),
                 cache_settings: None,
                 response_replace: None,
+                ai_crawl: None,
             })
         };
         let store = |global_space_mb: Option<u32>, quota_mb: u32| {

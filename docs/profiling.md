@@ -138,17 +138,25 @@ curl -k -H "Authorization: Bearer $TOKEN" \
   "total_cpu_ms": 48213.4,
   "total_elapsed_ms": 48213.4,
   "modules": [
-    { "module": "proxy",   "cpu_ms": 30102.1, "cpu_share": 0.62, "elapsed_ms": 30102.1, "elapsed_share": 0.62, "mem_bytes": 41943040, "mem_share": 0.55, "disk_bytes": 0,        "disk_share": 0.00, "calls": 102341, "avg_us": 294.1 },
-    { "module": "waf",     "cpu_ms": 11101.2, "cpu_share": 0.23, "elapsed_ms": 11101.2, "elapsed_share": 0.23, "mem_bytes": 8388608,  "mem_share": 0.11, "disk_bytes": 0,        "disk_share": 0.00, "calls": 98111,  "avg_us": 113.1 },
-    { "module": "cache",   "cpu_ms": 4000.8,  "cpu_share": 0.08, "elapsed_ms": 4000.8,  "elapsed_share": 0.08, "mem_bytes": 15728640, "mem_share": 0.21, "disk_bytes": 734003200, "disk_share": 1.00, "calls": 44120,  "avg_us": 90.7 },
-    { "module": "plugin",  "cpu_ms": 1500.1,  "cpu_share": 0.03, "elapsed_ms": 1500.1,  "elapsed_share": 0.03, "mem_bytes": 2097152,  "mem_share": 0.03, "disk_bytes": 0,        "disk_share": 0.00, "calls": 30112,  "avg_us": 49.8 },
-    { "module": "db",      "cpu_ms": 1000.6,  "cpu_share": 0.02, "elapsed_ms": 1000.6,  "elapsed_share": 0.02, "mem_bytes": 1048576,  "mem_share": 0.01, "disk_bytes": 0,        "disk_share": 0.00, "calls": 2140,   "avg_us": 467.6 },
-    { "module": "control", "cpu_ms": 400.2,   "cpu_share": 0.01, "elapsed_ms": 400.2,   "elapsed_share": 0.01, "mem_bytes": 524288,   "mem_share": 0.01, "disk_bytes": 0,        "disk_share": 0.00, "calls": 980,    "avg_us": 408.4 },
-    { "module": "other",   "cpu_ms": 108.4,   "cpu_share": 0.00, "elapsed_ms": 108.4,   "elapsed_share": 0.00, "mem_bytes": 0,        "mem_share": 0.00, "disk_bytes": 0,        "disk_share": 0.00, "calls": 210,    "avg_us": 516.2 }
+    { "module": "proxy",           "cpu_ms": 30102.1, "cpu_share": 0.62, "elapsed_ms": 30102.1, "elapsed_share": 0.62, "mem_bytes": 41943040, "mem_share": 0.55, "calls": 102341, "avg_us": 294.1 },
+    { "module": "waf",             "cpu_ms": 11101.2, "cpu_share": 0.23, "elapsed_ms": 11101.2, "elapsed_share": 0.23, "mem_bytes": 8388608,  "mem_share": 0.11, "calls": 98111,  "avg_us": 113.1 },
+    { "module": "cache",           "cpu_ms": 4000.8,  "cpu_share": 0.08, "elapsed_ms": 4000.8,  "elapsed_share": 0.08, "mem_bytes": 15728640, "mem_share": 0.21, "calls": 44120,  "avg_us": 90.7 },
+    { "module": "plugin",          "cpu_ms": 1500.1,  "cpu_share": 0.03, "elapsed_ms": 1500.1,  "elapsed_share": 0.03, "mem_bytes": 2097152,  "mem_share": 0.03, "calls": 30112,  "avg_us": 49.8 },
+    { "module": "db",              "cpu_ms": 1000.6,  "cpu_share": 0.02, "elapsed_ms": 1000.6,  "elapsed_share": 0.02, "mem_bytes": 1048576,  "mem_share": 0.01, "calls": 2140,   "avg_us": 467.6 },
+    { "module": "control",         "cpu_ms": 400.2,   "cpu_share": 0.01, "elapsed_ms": 400.2,   "elapsed_share": 0.01, "mem_bytes": 524288,   "mem_share": 0.01, "calls": 980,    "avg_us": 408.4 },
+    { "module": "other",           "cpu_ms": 108.4,   "cpu_share": 0.00, "elapsed_ms": 108.4,   "elapsed_share": 0.00, "mem_bytes": 0,        "mem_share": 0.00, "calls": 210,    "avg_us": 516.2 },
+    { "module": "waf_normalize",   "cpu_ms": 2200.5,  "cpu_share": 0.05, "elapsed_ms": 2200.5,  "elapsed_share": 0.05, "mem_bytes": 1048576,  "mem_share": 0.01, "calls": 98111,  "avg_us": 22.4 },
+    { "module": "waf_signature",   "cpu_ms": 1800.3,  "cpu_share": 0.04, "elapsed_ms": 1800.3,  "elapsed_share": 0.04, "mem_bytes": 0,        "mem_share": 0.00, "calls": 98111,  "avg_us": 18.3 },
+    { "module": "waf_expression",  "cpu_ms": 900.1,   "cpu_share": 0.02, "elapsed_ms": 900.1,   "elapsed_share": 0.02, "mem_bytes": 0,        "mem_share": 0.00, "calls": 40012,  "avg_us": 22.5 },
+    { "module": "waf_body",        "cpu_ms": 700.9,   "cpu_share": 0.01, "elapsed_ms": 700.9,   "elapsed_share": 0.01, "mem_bytes": 2097152,  "mem_share": 0.03, "calls": 12000,  "avg_us": 58.4 },
+    { "module": "log",             "cpu_ms": 300.2,   "cpu_share": 0.01, "elapsed_ms": 300.2,   "elapsed_share": 0.01, "mem_bytes": 524288,   "mem_share": 0.01, "calls": 40012,  "avg_us": 7.5 },
+    { "module": "agent",           "cpu_ms": 200.8,   "cpu_share": 0.00, "elapsed_ms": 200.8,   "elapsed_share": 0.00, "mem_bytes": 262144,   "mem_share": 0.00, "calls": 60,     "avg_us": 3346.7 },
+    { "module": "http_client",     "cpu_ms": 100.4,   "cpu_share": 0.00, "elapsed_ms": 100.4,   "elapsed_share": 0.00, "mem_bytes": 0,        "mem_share": 0.00, "calls": 45,     "avg_us": 2231.1 }
   ],
   "methods": [
-    { "method": "waf::handle_request",   "cpu_ms": 9200.4, "elapsed_ms": 9200.4, "calls": 98111, "avg_us": 93.8 },
-    { "method": "proxy::request_filter", "cpu_ms": 7100.9, "elapsed_ms": 7100.9, "calls": 88430, "avg_us": 80.3 }
+    { "method": "waf::handle_request",   "cpu_ms": 9200.4, "cpu_share": 0.19, "elapsed_ms": 9200.4, "elapsed_share": 0.19, "mem_bytes": 0,       "mem_share": 0.00, "calls": 98111, "avg_us": 93.8 },
+    { "method": "proxy::request_filter", "cpu_ms": 7100.9, "cpu_share": 0.15, "elapsed_ms": 7100.9, "elapsed_share": 0.15, "mem_bytes": 0,       "mem_share": 0.00, "calls": 88430, "avg_us": 80.3 },
+    { "method": "waf::body_read",        "cpu_ms": 700.9,  "cpu_share": 0.01, "elapsed_ms": 700.9,  "elapsed_share": 0.01, "mem_bytes": 2097152, "mem_share": 1.00, "calls": 12000, "avg_us": 58.4 }
   ]
 }
 ```
@@ -170,10 +178,14 @@ curl -k -H "Authorization: Bearer $TOKEN" \
   `elapsed_share`, which say what is measured. Both pairs always carry the
   same value (`total_cpu_ms` == `total_elapsed_ms`). New consumers should
   use `elapsed_*`.
-- **Instrumentation scope.** The seven module rows are fed by timers on
-  instrumented hot paths — the data-plane request pipeline, WAF evaluation,
-  cache and rewrite rules, plus two control-plane scopes (the agent
-  heartbeat persistence and `/api/v1` requests). The `/api/v1` timer sits
+- **Instrumentation scope.** The 14 module rows are fed by timers on
+  instrumented hot paths — the data-plane request pipeline (connection
+  handling, upstream connect), the WAF pipeline split into its stages
+  (`waf_normalize` / `waf_signature` / `waf_expression` / `waf_body`),
+  cache, rewrite and the other plugins, access-log assembly and flush
+  (`log`), agent configuration sync (`agent`), the outbound HTTP client
+  (`http_client`), and two control-plane scopes (the agent heartbeat
+  persistence and `/api/v1` requests). The `/api/v1` timer sits
   *inside* the CORS, compression, security-header and body-limit layers, so
   those middleware costs are not part of the `control` row. The same timer
   fills both the `control` module row and the `control::http` method row.
@@ -184,10 +196,20 @@ curl -k -H "Authorization: Bearer $TOKEN" \
   requests only, so MCP, `/healthz` and the SPA fallback are no longer
   attributed) and the removal of a per-request method-map hash — not a
   sudden performance change.
+
+  The four `waf_*` stage rows are **nested** inside `waf`: the
+  `waf::handle_request` timer spans them, so their time is also counted in
+  the `waf` row. Read them as a breakdown of `waf`; adding them to it makes
+  the shares exceed 1.
 - **Method names are a compile-time static enumeration.** The instrumented
-  call sites are fixed at build time (`proxy::request_filter`,
-  `waf::handle_request`, `cache::handle_request`, `plugin::rewrite`,
-  `db::persist_heartbeat`, `control::http`); recording is array indexing
+  call sites are fixed at build time — 20 named ones (`proxy::request_filter`,
+  `proxy::upstream_connect`, `waf::handle_request`, `waf::normalize`,
+  `waf::signature`, `waf::expression`, `waf::body_read`,
+  `cache::handle_request`, `cache::lookup`, `cache::store`,
+  `plugin::rewrite`, `plugin::sub_filter`, `plugin::challenge`,
+  `db::persist_heartbeat`, `db::persist_logs`, `db::persist_events`,
+  `control::http`, `control::grpc_stream`, `agent::sync`, `log::flush`);
+  recording is array indexing
   plus four relaxed atomic adds per request (two for the method rows, two
   for the module row) — no hash lookup, no allocation.
   A method that never ran gets no row.
@@ -196,44 +218,61 @@ curl -k -H "Authorization: Bearer $TOKEN" \
 
 - **Modules** — the process's functional areas are recorded in a fixed array
   of atomics. Every instrumented scope adds its elapsed time to its module
-  with one `fetch_add`; the seven modules always appear in the response:
-  `proxy`, `waf`, `cache`, `plugin`, `db`, `control`, `other` (anything not
-  yet instrumented).
+  with one `fetch_add`; the 14 modules always appear in the response, in
+  fixed order: `proxy`, `waf`, `cache`, `plugin`, `db`, `control`, `other`
+  (anything not yet instrumented), then the WAF stage split-outs
+  `waf_normalize`, `waf_signature`, `waf_expression`, `waf_body`, and
+  `log`, `agent`, `http_client`. Method rows roll up into their module, so
+  a module's total is the sum of its methods — the `waf` row keeps working
+  for older instrumentation while the stage rows name where inside WAF the
+  time went.
 - **Methods** — named call sites are timed with `timed_method`. The set of
   call sites is a compile-time static enumeration (see
   [口径](#口径--what-the-numbers-are-and-what-they-are-not)), so recording
   is four relaxed atomic adds per request (two for the method rows, two
   for the module row) — no hash lookup, no allocation.
-- **Memory** — *reported*, not intercepted. Modules that own large structures
-  (cache capacity, WAF body buffers, log batches) publish their current byte
-  count; nothing hooks the allocator, so this works with any allocator and on
+- **Memory** — *reported*, not intercepted. Modules and methods that own
+  large structures publish their current byte count, and every method row
+  carries a `mem_bytes` / `mem_share` pair so a dashboard can name the
+  call site behind a module's memory, not just the module. Confirmed
+  reporters today: the cache backend (index + in-flight buffers), WAF
+  request-body staging (`waf::body_read`, which also fills the
+  `waf_body` module row), WAF decoded/normalized values (`waf_normalize`),
+  and the access-log body prefix buffered for the log entry (`log`).
+  Nothing hooks the allocator, so this works with any allocator and on
   any platform. `mem_bytes` is "bytes currently held **in memory**", not
   cumulative allocation.
-- **Disk** — *reported*, same mechanism, separate figure. `disk_bytes` is the
-  module's on-disk footprint and is published only by the cache module; every
-  other module reports `0`. See
+- **Disk** — the on-disk gauge is still collected internally by the cache
+  backend (quota accounting uses it), but it is **no longer part of the
+  snapshot**: module and method rows report memory only. The earlier
+  releases' `disk_bytes` / `disk_share` fields were removed because
+  folding the filesystem's bytes into a module table invited the
+  "cache memory ≈ cache disk usage" misreading — see
   [Memory vs. disk in the cache module](#memory-vs-disk-in-the-cache-module).
 
 ### Memory vs. disk in the cache module
 
-The `cache` row is the only one that reports both figures, and the two must
-not be read as one number:
+The cache backend owns both figures, and the two must not be read as one
+number — which is exactly why the snapshot publishes only the memory one:
 
 - **`mem_bytes` — real memory**: the on-disk index structures **plus**
   `in_flight_bytes`, the read buffers of objects currently being served out
   of the cache. A cache that stores everything on disk should not make the
   process look like it holds every cached byte in RAM.
-- **`disk_bytes` — disk footprint**: what the cache backend currently
-  occupies on its storage directory. Unbounded by the process's memory; the
-  quota (if configured) applies to this figure, not to `mem_bytes`.
+- **disk footprint — internal only**: what the cache backend currently
+  occupies on its storage directory. It is still recorded (the quota, if
+  configured, applies to it), but it no longer appears in the
+  `/system/profile` snapshot.
 
 **Why the split exists.** Earlier releases published the backend's
 `current_size` — the **disk** footprint — through the memory gauge, so the
 `cache` module row reported disk usage as memory. A file-backed cache of a
 few GiB read as a few GiB of RSS and the module table misranked the memory
-hotspots. The fix moved the disk figure to its own gauge
-(`disk_bytes` / `disk_share`); `mem_bytes` now counts index + in-flight
-buffers only.
+hotspots. The fix moved the disk figure to its own gauge, and a later
+change removed `disk_bytes` / `disk_share` from the snapshot entirely
+(the gauge is kept internally for cache accounting); `mem_bytes` counts
+index + in-flight buffers only, and the module table cannot report the
+filesystem's bytes as resident memory any more.
 
 **Streaming reads and `in_flight_bytes`.** Objects larger than the inline
 threshold (256 KiB) are never read fully into memory on a hit: the backend
@@ -254,7 +293,8 @@ is file-backed or in-memory:
   Earlier releases defaulted to the in-memory backend, so an upgrade changes
   behaviour for every config that never set the key: the cache's bytes move
   from the process's memory (`mem_bytes` / RSS) to the storage directory,
-  where the `cache` module row reports them as `disk_bytes`.
+  where the cache backend tracks them in its internal on-disk gauge (kept
+  for quota accounting; no longer part of the snapshot).
 - **`directory = ""` or `memory://`** still selects the in-memory backend —
   this is how every config written before the default existed keeps its
   semantics.
@@ -272,16 +312,16 @@ is file-backed or in-memory:
 | --- | --- |
 | `collected_at_ms` | Unix epoch milliseconds at which the snapshot was taken |
 | `total_cpu_ms` / `total_elapsed_ms` | Total wall-clock time attributed across all modules, in milliseconds (always equal; `total_elapsed_ms` is the name that matches the measurement) |
-| `modules` | Exactly 7 rows, one per module, in fixed order (`proxy`, `waf`, `cache`, `plugin`, `db`, `control`, `other`) |
+| `modules` | Exactly 14 rows, one per module, in fixed order (`proxy`, `waf`, `cache`, `plugin`, `db`, `control`, `other`, `waf_normalize`, `waf_signature`, `waf_expression`, `waf_body`, `log`, `agent`, `http_client`) |
 | `modules[].module` | Module key |
 | `modules[].cpu_ms` / `elapsed_ms` | Cumulative **wall-clock** time attributed to the module (ms); the two fields always carry the same value |
 | `modules[].cpu_share` / `elapsed_share` | Share of the total attributed wall-clock time, 0.0–1.0 |
 | `modules[].mem_bytes` / `mem_share` | Bytes the module currently reports as held in memory, and its share of the total |
-| `modules[].disk_bytes` / `disk_share` | Bytes the module currently occupies on disk, and its share of the total — reported only by the cache module (`0` elsewhere) |
 | `modules[].calls` / `avg_us` | Number of timed operations and average microseconds per operation |
 | `methods` | Method rows, hottest first, capped at 40 |
 | `methods[].method` | Call-site name (from the compile-time static enumeration) |
 | `methods[].cpu_ms` / `elapsed_ms` / `calls` / `avg_us` | Same semantics as the module rows |
+| `methods[].mem_bytes` / `mem_share` | Bytes the call site currently reports as held, and its share of **its module's** memory (not of the process total; `0.0` when the module reports nothing) |
 
 Counters are **cumulative since process start** (they reset only when the
 process restarts), so read them as "where has the time gone since boot",
@@ -300,7 +340,7 @@ path — method slots are fixed array entries. The same accounting works in a
 debug build on a
 laptop and a stripped release build in a container, which is why the endpoint
 has no platform restriction, no feature flag and no diagnostic image. The
-endpoint itself is bounded by construction — 7 module rows, at most 40 method
+endpoint itself is bounded by construction — 14 module rows, at most 40 method
 rows, KB-scale JSON — and computed from atomics, so polling it is cheap.
 
 ## What changed vs. pprof

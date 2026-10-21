@@ -6,6 +6,9 @@ description = "PingWAF detection engine: normalization, signature matching, rule
 license = "Apache-2.0"
 
 [dependencies]
+# Self-accounting only (module/method timers and memory gauges); no allocator
+# hook, no sampling, so it is safe on the detection hot path.
+pingwaf-profiler = { path = "../pingwaf-profiler" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

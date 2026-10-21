@@ -120,6 +120,8 @@ pub struct SslSettingsResponse {
     pub hsts_enabled: bool,
     pub hsts_max_age: i32,
     pub always_use_https: bool,
+    pub http1_enabled: bool,
+    pub http2_enabled: bool,
 }
 
 impl From<TlsPosture> for SslSettingsResponse {
@@ -137,6 +139,8 @@ impl From<TlsPosture> for SslSettingsResponse {
             hsts_enabled: posture.hsts_enabled,
             hsts_max_age: posture.hsts_max_age,
             always_use_https: posture.always_use_https,
+            http1_enabled: posture.http1_enabled,
+            http2_enabled: posture.http2_enabled,
         }
     }
 }

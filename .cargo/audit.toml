@@ -59,4 +59,21 @@ ignore = [
     # the input is the host's own executable, never attacker-controlled
     # network data. Remove when pyroscope allows object 0.40+.
     "RUSTSEC-2026-0344",
+
+    # webpki-roots 0.26.11 (RUSTSEC-2026-0381, the bundled root set still
+    # trusts distrusted emSign intermediates). The 1.x copy in this tree is
+    # already 1.0.10 (patched); 0.26 has no patched release — the line ends at
+    # 0.26.11. Two dependencies still pull 0.26:
+    #   * sqlx-core 0.8 (`_tls-rustls-ring-webpki`, via sea-orm 1.1). It is
+    #     consulted only when `sslmode=verify-ca|verify-full` is set; the
+    #     default `Prefer` path negotiates TLS but verifies with
+    #     sqlx's DummyTlsVerifier, so the bundle never decides trust there.
+    #   * sentry 0.36 (`webpki-roots` feature, reached through
+    #     `pingora/sentry` under the `tracing` feature).
+    # 0.26.11's root data is re-exported from webpki-roots 1.0.10 (a
+    # `webpki-roots 0.26.11 -> webpki-roots 1.0.10` dependency edge in
+    # Cargo.lock), so the runtime set is the patched one; cargo-audit matches
+    # on package name and version only. Remove when sea-orm moves to sqlx 0.9
+    # (sea-orm 2) AND pingora ships a sentry release that uses 1.x.
+    "RUSTSEC-2026-0381",
 ]

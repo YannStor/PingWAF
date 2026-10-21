@@ -8,6 +8,92 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+### Added
+
+- **AI Crawl Control.** Per-site AI crawler policy: a catalogue of 18 AI
+  crawler families (`GET /api/v1/ai-crawl/catalog`), site-level
+  `GET`/`PUT /api/v1/sites/{id}/ai-crawl` with a default action
+  (`allow`/`monitor`/`block`) and per-family overrides, a render preview
+  (`GET /api/v1/sites/{id}/ai-crawl/preview?file=robots|llms`), and
+  per-family traffic aggregation (`GET /api/v1/analytics/ai-crawlers`).
+  Generated `robots.txt` / `llms.txt` (`off`/`generate` modes) are rendered
+  by the control plane at configuration-build time and served by the data
+  plane from exact-path `mock` plugins registered ahead of the WAF —
+  nothing is assembled on the request path. Generated robots.txt carries
+  the Content Signals line; family hits produce
+  `security_events.event_type = "ai_bot"`. Backed by the
+  `site_ai_crawl_settings` / `site_ai_bot_policies` tables (migration 066).
+  Security boundaries: bodies capped at 64 KiB, CR characters stripped on
+  save (no header injection into the `mock` response), exact-path matching
+  only. See [docs/ai-crawl.md](./docs/ai-crawl.md).
+- **Site cloning.** `POST /api/v1/sites/{id}/clone` copies a site's
+  configuration onto a new site in one transaction — site SSL, upstream
+  pools and nodes (pool ids remapped), routes, and the WAF / challenge /
+  geo / bot-protection / basic-auth / rewrite / ip-access / cache /
+  rate-limit configuration. Body: `{domain, alternate_domains?, name?}`;
+  the response is `201` with the new `SiteResponse`; the clone starts
+  `paused`; a domain already in use answers `400 bad_request` with
+  `"already in use"` in the message.
+- **Per-site downstream protocol switches.** `site_ssl` gained
+  `http1_enabled` / `http2_enabled` (also on
+  `PUT /sites/{id}/ssl-settings`); new sites start with both on, existing
+  sites were migrated to `http1_enabled = true` / `http2_enabled = false`
+  so live traffic keeps serving HTTP/1.1. The two switches may not both be
+  `false` (`400`). The `:443` listener is shared by every HTTPS site and
+  ALPN is negotiated per connection, so the effective protocol set is the
+  **union** of the enabled sites' switches: if any enabled HTTPS site
+  turns HTTP/2 on, the listener negotiates HTTP/2. `pingap-config` gained
+  the `http1_enabled` server key and rejects `http1_enabled=false` without
+  `enabled_h2=true`.
+- **System profile expanded.** `/api/v1/system/profile` grew from 7 to 14
+  module rows (`waf_normalize`, `waf_signature`, `waf_expression`,
+  `waf_body`, `log`, `agent`, `http_client` join the originals) and from 7
+  to 21 instrumented method call sites (`waf::normalize/signature/
+  expression/body_read`, `db::persist_logs/events`, `agent::sync` among
+  the new ones). Method rows now carry `mem_bytes` / `mem_share` (share of
+  the method's module memory): WAF body staging, decoded/normalized
+  values and the access-log body prefix are reported as held memory.
+
+### Changed
+
+- **`/api/v1/system/profile` no longer reports disk.** The
+  `disk_bytes` / `disk_share` module fields were removed from the
+  snapshot; the cache backend's on-disk gauge is still collected
+  internally for quota accounting, but the module/method tables report
+  memory only — folding the filesystem's bytes into the table invited the
+  "cache memory ≈ cache disk usage" misreading the split was meant to fix.
+
+### Fixed
+
+- **tokio pinned to `=1.53.3`.** tokio 1.54.0 added
+  `assert!(capacity > 0)` to `BufReader::with_capacity` /
+  `BufStream::with_capacity`, while `pingora-core 0.9.0` still constructs
+  both with a hardcoded `(0, 0)`, so the first accepted connection
+  panicked (upstream [cloudflare/pingora#1059](https://github.com/cloudflare/pingora/issues/1059),
+  still open). The workspace pins tokio to exactly 1.53.3 and dependabot
+  ignores `tokio >= 1.54.0`; un-pin once pingora ships a release with the
+  fix, together with the dependabot ignore entry.
+- **CI/release plumbing.** The rust test matrix runs on `1.96.0` + stable
+  (previously three toolchains) with nextest; docs-only PRs skip the
+  heavy rust/web jobs but keep the `docs` job; `web-dist` and
+  `release-binary` jobs were added; the release workflow builds the web
+  frontend once; Docker arm64 builds are pinned to `ubuntu-24.04-arm`.
+  Releases now ship **both** `pingwaf-linux-{amd64,arm64}.tar.xz`
+  (primary) and `.tar.gz` (compatibility fallback) with `.sha256`
+  sidecars; `install.sh` prefers xz and falls back to gz, asset names are
+  unchanged.
+
+### Docs
+
+- `docs/profiling.md` (+ 中文镜像) aligned with the implementation: 14
+  modules, 21 methods, method memory gauges, disk fields removed from the
+  snapshot; new `docs/ai-crawl.md` (+ 中文镜像); `docs/api.md` gained the
+  clone endpoint, the protocol switches and the AI Crawl Control section;
+  `docs/deployment.md` records the tokio pin and the release artifact
+  formats.
+
 ## [PingWAF 0.28.4] — 2026-10-21
 
 ### Fixed

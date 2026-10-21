@@ -88,15 +88,22 @@ describe('GET /api/v1/system/nodes contract', () => {
   })
 })
 
-/** 模块表磁盘列契约。 */
-describe('profile module disk column contract', () => {
-  it('SystemProfileModule carries disk_bytes/disk_share and ModuleTable renders them', () => {
+/** 模块表内存列契约（磁盘列已下线，两表均加内存）。 */
+describe('profile module memory column contract', () => {
+  it('SystemProfileModule drops disk fields; MethodTable adds memory columns and sort toggle', () => {
     const api = read('src/api/debug.ts')
-    expect(api).toContain('disk_bytes: number')
-    expect(api).toContain('disk_share: number')
+    expect(api).not.toContain('disk_bytes')
+    expect(api).not.toContain('disk_share')
+    expect(api).toContain('total_elapsed_ms')
+    expect(api).toMatch(/mem_bytes: number/)
     const table = read('src/components/system/ModuleTable.tsx')
-    expect(table).toContain("t('system.disk')")
-    expect(table).toContain("t('system.diskHint')")
+    expect(table).not.toContain("t('system.disk')")
+    expect(table).toContain("t('system.notReported')")
+    const methods = read('src/components/system/MethodTable.tsx')
+    expect(methods).toContain("t('system.held')")
+    expect(methods).toContain("t('system.memShare')")
+    expect(methods).toContain("'system.sortByElapsed'")
+    expect(methods).toContain("'system.sortByMem'")
   })
 })
 

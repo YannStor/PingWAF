@@ -439,7 +439,15 @@ tempfile = "3.27.0"
 tera = { version = "2", default-features = false }
 time = { version = "0.3.55", features = ["local-offset"] }
 TinyUFO = "0.9.0"
-tokio = { version = "1.53.1", default-features = false, features = ["fs"] }
+# Pin tokio to exactly 1.53.3: 1.54.0 added `assert!(capacity > 0)` to
+# `BufReader::with_capacity` / `BufStream::with_capacity`, while pingora 0.9.0
+# still constructs both with a hardcoded (0, 0) (`L4BufferSettings::unbuffered`
+# and the `From<TcpStream>/From<UnixStream>` impls), so the first accepted
+# connection panics — see upstream cloudflare/pingora#1059 (still open, and
+# 0.9.0 is the newest crates.io release). Un-pin (= raise to >= 1.54) once
+# pingora ships a release containing that fix, and drop the matching `ignore`
+# entry in .github/dependabot.yml at the same time.
+tokio = { version = "=1.53.3", default-features = false, features = ["fs"] }
 toml = "1.1.6"
 hcl-rs = "0.19"
 kdl = "6.7.1"

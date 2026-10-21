@@ -16,6 +16,7 @@ centrally-controlled Web Application Firewall built on
 | [user-guide.md](./user-guide.md) | Dashboard walkthrough — sites, rules, policies, IP access, rate limiting |
 | [http-lifecycle.md](./http-lifecycle.md) | Where every feature acts in the request pipeline — the WAF check order, caching, error pages, and how to debug with it |
 | [api.md](./api.md) | REST API reference (base URL `https://<host>:9080/api/v1`) |
+| [ai-crawl.md](./ai-crawl.md) | AI Crawl Control — crawler families, per-site policy, generated robots.txt / llms.txt |
 | [profiling.md](./profiling.md) | System observation and attribution: `/system/metrics` CPU/memory snapshots, `/system/profile` module/method attribution |
 
 ## 🧭 Project & community

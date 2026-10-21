@@ -527,6 +527,40 @@ decompression** are passed through as the original compressed bytes.
 
 Delete a site and all associated resources.
 
+### POST /sites/{site_id}/clone
+
+Copy a site's configuration onto a new site. The caller must supply the new
+primary domain — every hostname has to stay unique, so a domain already in
+use answers `400 bad_request` (the message contains `"already in use"`).
+
+**Request:**
+```json
+{
+  "domain": "example.net",
+  "alternate_domains": ["*.example.net"],
+  "name": "My Site copy"
+}
+```
+
+`domain` is required; `alternate_domains` and `name` are optional (the name
+defaults to `"<source name> copy"`). The copy is created inside one
+transaction: site SSL (certificate and protocol switches travel with the
+clone), the upstream pools and their nodes (with pool ids remapped to the
+new site), routes, the AI crawler policy, and the WAF / challenge / geo /
+bot-protection / rewrite / ip-access / cache / rate-limit configuration. The
+new site's status is **`paused`** — a clone that started serving immediately
+would silently double the source site's traffic.
+
+Two things are deliberately **not** carried over. The forwarded-header
+trust (`trust_proxy_headers`, `trusted_proxy_ranges`,
+`trusted_proxy_group_ids`, `trust_last_hop`) is reset to the defaults: it
+describes where the site sits, and inheriting it would let the clone read an
+`X-Forwarded-For` its own proxy path does not supply. Site basic-auth
+credentials are not copied at all — re-entering them keeps a password that
+has already circulated from becoming the clone's gate.
+
+**Response:** `201 Created` with the new `SiteResponse`.
+
 ---
 
 ## Site Upstreams
@@ -799,7 +833,9 @@ The effective TLS posture of the site.
   "mtls_require_client_cert": false,
   "hsts_enabled": true,
   "hsts_max_age": 15552000,
-  "always_use_https": true
+  "always_use_https": true,
+  "http1_enabled": true,
+  "http2_enabled": false
 }
 ```
 
@@ -816,7 +852,8 @@ role.
   "always_use_https": true,
   "mtls_enabled": true,
   "mtls_require_client_cert": true,
-  "mtls_organization": "Acme Devices"
+  "mtls_organization": "Acme Devices",
+  "http2_enabled": true
 }
 ```
 
@@ -826,6 +863,7 @@ role.
 | `always_use_https` | Plain HTTP requests are answered `301` with the `https://` equivalent before any rule runs. The two listeners share one location, so this is safe to enable with traffic on both ports. **Browsers cache HSTS**: when testing, keep `hsts_max_age` low or use a throwaway domain, or a redirect will haunt the browser for months. |
 | `mtls_enabled` / `mtls_require_client_cert` / `mtls_organization` | Requires a client certificate; see [mTLS](#mtls). |
 | `min_tls_version` / `max_tls_version` | Accepted as `1.0`, `1.1`, `1.2` (default) or `1.3`. |
+| `http1_enabled` / `http2_enabled` | The site's downstream protocol switches. Setting both to `false` is rejected with a `400` — a site that speaks neither protocol is unreachable. **Listener-level aggregation**: the `:443` listener is shared by every HTTPS site and ALPN is negotiated once per connection, so the effective protocol set is the union of the enabled sites' switches — if *any* enabled HTTPS site has `http2_enabled: true`, the listener negotiates HTTP/2. Sites created after this field existed default to both on; existing sites were migrated with `http1_enabled: true` / `http2_enabled: false` to keep serving HTTP/1.1 exactly as before. |
 
 ---
 
@@ -2118,6 +2156,45 @@ Distribution of HTTP response codes.
 ### GET /analytics/sites
 
 Overview of all sites with request counts.
+
+### GET /analytics/ai-crawlers
+
+Aggregated AI crawler traffic: one row per crawler family known to the
+catalogue, matched against the raw user agent recorded in `access_logs`.
+
+---
+
+## AI Crawl Control
+
+Per-site AI crawler policy: which families are recognised, what happens to
+each, and the generated `robots.txt` / `llms.txt` the edge serves. Full
+semantics (generated-file rendering, Content Signals, security boundaries)
+are documented in [ai-crawl.md](./ai-crawl.md).
+
+### GET /sites/{site_id}/ai-crawl
+
+The site's AI crawl settings plus the per-family override list. See
+[ai-crawl.md](./ai-crawl.md#get-apisv1sitessite_idai-crawl) for the
+response shape and the defaults a site without a settings row reports.
+
+### PUT /sites/{site_id}/ai-crawl
+
+Update settings and/or replace the override set (`policies`, when present,
+replaces the whole set). Bodies are capped at 64 KiB and CR characters are
+stripped on save; setting both file modes and the action set is validated
+against the catalogue. Requires the `write` role.
+
+### GET /sites/{site_id}/ai-crawl/preview?file=robots|llms
+
+Render the generated file without saving. Returns `{ "mode",
+"content_type": "text/plain; charset=utf-8", "body" }`; `file` selects
+`robots` (default) or `llms`.
+
+### GET /ai-crawl/catalog
+
+The 18 AI crawler families PingWAF recognises, each with `id`, `operator`,
+`name`, `category` (`training` / `search` / `agent` / `other`) and
+`ua_substrings`.
 
 ---
 

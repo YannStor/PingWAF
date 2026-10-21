@@ -72,8 +72,6 @@ const MODULE: SystemProfileModule = {
   cpu_share: 0.25,
   mem_bytes: 4096,
   mem_share: 0.1,
-  disk_bytes: 1048576,
-  disk_share: 0.2,
   elapsed_ms: 40,
   elapsed_share: 0.4,
   calls: 100,
@@ -83,7 +81,11 @@ const MODULE: SystemProfileModule = {
 const METHOD: SystemProfileMethod = {
   method: 'proxy.handle',
   cpu_ms: 5,
+  cpu_share: 0.1,
   elapsed_ms: 20,
+  elapsed_share: 0.2,
+  mem_bytes: 1024,
+  mem_share: 0.25,
   calls: 50,
   avg_us: 400,
 }
@@ -91,6 +93,7 @@ const METHOD: SystemProfileMethod = {
 const PROFILE: SystemProfile = {
   collected_at_ms: 1730000000000,
   total_cpu_ms: 50,
+  total_elapsed_ms: 200,
   modules: [MODULE],
   methods: [METHOD],
 }

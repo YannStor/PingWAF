@@ -17,7 +17,9 @@
 
 use std::net::IpAddr;
 use std::str::FromStr;
+use std::time::Instant;
 
+use pingwaf_profiler::{Method, Module, record_method, track_memory};
 use serde::{Deserialize, Serialize};
 
 use crate::normalize::ValueSource;
@@ -474,6 +476,7 @@ impl WafEngine {
             return WafVerdict::pass();
         }
 
+        let normalize_started = Instant::now();
         let normalized = normalize_request(
             &request.method,
             &request.path,
@@ -483,6 +486,19 @@ impl WafEngine {
             self.max_decode_layers,
             self.level.is_strict(),
         );
+        record_method(
+            Method::WafNormalize,
+            normalize_started.elapsed().as_nanos() as u64,
+        );
+        // The decoded values are the biggest structure the inspection builds;
+        // report what they hold for as long as this inspection owns them.
+        let decoded_bytes: usize = normalized
+            .decoded_values
+            .iter()
+            .map(|value| value.decoded.len())
+            .sum();
+        let _normalized_memory =
+            track_memory(Module::WafNormalize, decoded_bytes as u64);
         let paranoia = self.effective_paranoia();
 
         let mut breakdown = ScoreBreakdown::clean();
@@ -498,6 +514,7 @@ impl WafEngine {
         let mut seen: Vec<u32> = Vec::new();
 
         // ----- Stage 1: signatures + libinjection over every decoded value -----
+        let stage1_started = Instant::now();
         for value in &normalized.decoded_values {
             let needle = value.decoded.as_str();
             if needle.is_empty() {
@@ -1182,6 +1199,11 @@ impl WafEngine {
             };
         }
 
+        record_method(
+            Method::WafSignature,
+            stage1_started.elapsed().as_nanos() as u64,
+        );
+
         // ----- Fast-path Block on critical Stage-1 hit -----
         if self.fast_path_block_on_critical && critical_hit {
             return self.finalize_verdict(
@@ -1195,6 +1217,7 @@ impl WafEngine {
         }
 
         // ----- Stage 2: rule engine (non-Allow rules) -----
+        let stage2_started = Instant::now();
         let mut rule_recs: Vec<RuleRec> = Vec::new();
         let mut forced_action: Option<WafAction> = None;
         for rule in &self.rules {
@@ -1260,6 +1283,11 @@ impl WafEngine {
                 },
             }
         }
+
+        record_method(
+            Method::WafExpression,
+            stage2_started.elapsed().as_nanos() as u64,
+        );
 
         // ----- Final scoring -----
         breakdown.overall_class = self.scorer.classify(breakdown.block_total);

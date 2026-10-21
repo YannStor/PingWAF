@@ -233,6 +233,8 @@ On a Linux server, the one-line script downloads the prebuilt binary, installs i
 curl -fsSL https://raw.githubusercontent.com/shuaiZend/PingWAF/main/install.sh | sudo bash -s -- --mode all-in-one
 ```
 
+> Releases ship two archives per architecture: `pingwaf-linux-{amd64,arm64}.tar.xz` (primary, smaller) and `.tar.gz` (compatibility fallback), each with a `.sha256` sidecar. The script prefers `.tar.xz` and falls back to `.tar.gz` when `xz(1)` is missing locally or the download fails.
+
 👉 For a full walkthrough (database setup, first site, distributed agents, systemd), see **[docs/quick-start.md](./docs/quick-start.md)**.
 
 ---

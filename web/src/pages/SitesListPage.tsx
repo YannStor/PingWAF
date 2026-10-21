@@ -11,6 +11,7 @@ import {
   Play,
   Trash,
   X,
+  CopySimple,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody } from '@/components/ui/Card'
@@ -26,10 +27,18 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { sitesApi, siteKeys } from '@/api/sites'
+import { ApiError } from '@/api/client'
+import { errorMessage } from '@/api/errors'
 import { analyticsApi, analyticsKeys } from '@/api/analytics'
 import { useCanWrite, useDebouncedValue } from '@/hooks'
 import { formatCompactNumber, formatDateTime, formatNumber } from '@/lib/format'
-import type { CreateSiteRequest, Site, SiteStatus, UpdateSiteRequest } from '@/api/types'
+import type {
+  CloneSiteRequest,
+  CreateSiteRequest,
+  Site,
+  SiteStatus,
+  UpdateSiteRequest,
+} from '@/api/types'
 
 const STATUS_TONE: Record<SiteStatus, BadgeTone> = {
   active: 'success',
@@ -43,6 +52,7 @@ interface SiteFormErrors {
   domain?: string
   alternateDomains?: string
   upstream?: string
+  top?: string
 }
 
 interface SiteFormState {
@@ -99,6 +109,12 @@ export function SitesListPage() {
   >(null)
   const [pendingDelete, setPendingDelete] = useState<Site | null>(null)
   const [pendingToggle, setPendingToggle] = useState<Site | null>(null)
+
+  /* ── Clone dialog ────────────────────────────────────────────────── */
+  const [cloneOpen, setCloneOpen] = useState(false)
+  const [cloneSource, setCloneSource] = useState<Site | null>(null)
+  const [cloneForm, setCloneForm] = useState<SiteFormState>(emptyForm)
+  const [cloneErrors, setCloneErrors] = useState<SiteFormErrors>({})
 
   const sitesQuery = useQuery({
     queryKey: siteKeys.list({ search: debouncedQuery || undefined }),
@@ -260,6 +276,89 @@ export function SitesListPage() {
     setFormErrors({})
     setDialogOpen(true)
   }
+
+  const openClone = (site: Site) => {
+    setCloneSource(site)
+    setCloneForm({
+      ...emptyForm,
+      // The clone reuses everything but the primary domain, which must be new.
+      name: site.name ? `${site.name} copy` : `${site.domain} copy`,
+      alternateDomains: site.alternate_domains ?? [],
+    })
+    setCloneErrors({})
+    setCloneOpen(true)
+  }
+
+  const closeCloneDialog = () => {
+    setCloneOpen(false)
+    setCloneSource(null)
+    setCloneForm(emptyForm)
+    setCloneErrors({})
+  }
+
+  const cloneSite = useMutation({
+    mutationFn: ({ id, data }: { id: string; data: CloneSiteRequest }) =>
+      sitesApi.cloneSite(id, data),
+    onSuccess: (site) => {
+      toast.success(t('pages.sites.cloneSuccess'), site.domain)
+      closeCloneDialog()
+      invalidate()
+      clearSelection()
+    },
+    onError: (err) => {
+      // 后端域名冲突返回 bad_request，message 含 "already in use by another site"。
+      const isDomainConflict =
+        err instanceof ApiError &&
+        (err.code === 'domain_conflict' || /already in use|conflict/i.test(err.message || ''))
+      if (isDomainConflict) {
+        setCloneErrors((e) => ({ ...e, domain: t('pages.sites.domainConflict') }))
+      } else {
+        setCloneErrors((e) => ({
+          ...e,
+          top: errorMessage(err) || t('pages.sites.cloneFailed'),
+        }))
+      }
+    },
+  })
+
+  const submitClone = () => {
+    if (!cloneSource) return
+    const domain = normaliseDomainInput(cloneForm.domain)
+    const name = cloneForm.name.trim()
+    const errors: SiteFormErrors = {}
+
+    if (!domain) errors.domain = t('pages.sites.domainRequired')
+    else if (!DOMAIN_PATTERN.test(domain)) errors.domain = t('pages.sites.domainInvalid')
+
+    const alternateDomains: string[] = []
+    for (const raw of cloneForm.alternateDomains) {
+      const value = normaliseDomainInput(raw)
+      if (!value) continue
+      if (!DOMAIN_PATTERN.test(value)) {
+        errors.alternateDomains = t('pages.sites.domainInvalid')
+        break
+      }
+      if (value === domain || alternateDomains.includes(value)) {
+        errors.alternateDomains = t('pages.sites.domainDuplicate', { domain: value })
+        break
+      }
+      alternateDomains.push(value)
+    }
+
+    setCloneErrors(errors)
+    if (Object.values(errors).some(Boolean)) return
+
+    cloneSite.mutate({
+      id: cloneSource.id,
+      data: {
+        domain,
+        alternate_domains: alternateDomains,
+        ...(name ? { name } : {}),
+      },
+    })
+  }
+
+  const clonePending = cloneSite.isPending
 
   const openEdit = (site: Site) => {
     setEditing(site)
@@ -493,6 +592,14 @@ export function SitesListPage() {
             disabled={!canWrite}
             onClick={() => openEdit(r)}
             icon={<PencilSimple weight="duotone" className="h-4 w-4" />}
+          />
+          <Button
+            size="icon"
+            variant="ghost"
+            aria-label={t('pages.sites.clone')}
+            disabled={!canWrite || clonePending}
+            onClick={() => openClone(r)}
+            icon={<CopySimple weight="duotone" className="h-4 w-4" />}
           />
           <Button
             size="icon"
@@ -752,6 +859,112 @@ export function SitesListPage() {
               </div>
             </>
           )}
+        </div>
+      </Dialog>
+
+      {/* Clone dialog — reuses the site's config, but the primary domain must be new */}
+      <Dialog
+        open={cloneOpen}
+        onClose={clonePending ? () => undefined : closeCloneDialog}
+        title={t('pages.sites.cloneTitle')}
+        description={t('pages.sites.cloneDescription')}
+        footer={
+          <>
+            <Button variant="ghost" onClick={closeCloneDialog} disabled={clonePending}>
+              {t('common.cancel')}
+            </Button>
+            <Button variant="primary" onClick={submitClone} loading={clonePending}>
+              {t('pages.sites.clone')}
+            </Button>
+          </>
+        }
+      >
+        <div className="flex flex-col gap-4">
+          {cloneErrors.top && (
+            <p
+              role="alert"
+              className="rounded-md border border-danger/40 bg-danger/8 px-3 py-2 text-[13px] text-fg-danger"
+            >
+              {cloneErrors.top}
+            </p>
+          )}
+          <Input
+            label={t('common.name')}
+            value={cloneForm.name}
+            placeholder={t('pages.sites.namePlaceholder')}
+            onChange={(e) => setCloneForm((f) => ({ ...f, name: e.target.value }))}
+            autoFocus
+          />
+          <Input
+            label={t('pages.sites.domain')}
+            value={cloneForm.domain}
+            placeholder="example.com"
+            hint={t('pages.sites.cloneDomainHint')}
+            error={cloneErrors.domain}
+            prefixIcon={<Globe weight="duotone" />}
+            onChange={(e) =>
+              setCloneForm((f) => ({ ...f, domain: e.target.value }))
+            }
+            required
+          />
+
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[13px] font-medium text-fg-subtle">
+                {t('pages.sites.alternateDomains')}
+              </span>
+              <Button
+                size="sm"
+                variant="ghost"
+                icon={<Plus weight="bold" className="h-3.5 w-3.5" />}
+                onClick={() =>
+                  setCloneForm((f) => ({
+                    ...f,
+                    alternateDomains: [...f.alternateDomains, ''],
+                  }))
+                }
+              >
+                {t('common.add')}
+              </Button>
+            </div>
+            {cloneForm.alternateDomains.map((value, index) => (
+              <div key={index} className="flex items-center gap-2">
+                <div className="flex-1">
+                  <Input
+                    value={value}
+                    placeholder="*.example.com"
+                    aria-label={t('pages.sites.alternateDomains')}
+                    prefixIcon={<Globe weight="duotone" />}
+                    onChange={(e) =>
+                      setCloneForm((f) => ({
+                        ...f,
+                        alternateDomains: f.alternateDomains.map((item, i) =>
+                          i === index ? e.target.value : item,
+                        ),
+                      }))
+                    }
+                  />
+                </div>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  aria-label={t('common.remove')}
+                  className="hover:text-fg-danger"
+                  onClick={() =>
+                    setCloneForm((f) => ({
+                      ...f,
+                      alternateDomains: f.alternateDomains.filter((_, i) => i !== index),
+                    }))
+                  }
+                  icon={<X weight="bold" className="h-4 w-4" />}
+                />
+              </div>
+            ))}
+            {cloneErrors.alternateDomains && (
+              <p className="text-xs text-fg-danger">{cloneErrors.alternateDomains}</p>
+            )}
+            <p className="text-xs text-fg-subtle">{t('pages.sites.alternateDomainsHint')}</p>
+          </div>
         </div>
       </Dialog>
 

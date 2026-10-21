@@ -292,6 +292,11 @@ pub mod site_ssl {
         pub hsts_enabled: bool,
         pub hsts_max_age: i32,
         pub always_use_https: bool,
+        /// Whether the site answers HTTP/1.1 requests.
+        pub http1_enabled: bool,
+        /// Whether the site answers HTTP/2 requests. Both switches cannot be
+        /// off at once; the API rejects that combination.
+        pub http2_enabled: bool,
         pub created_at: DateTimeUtc,
     }
 

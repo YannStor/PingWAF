@@ -597,10 +597,21 @@ mod tests {
     #[test]
     fn profile_snapshot_shape() {
         let snapshot = pingwaf_profiler::ProfileSnapshot::collect();
-        assert_eq!(snapshot.modules.len(), 7);
+        assert_eq!(
+            snapshot.modules.len(),
+            pingwaf_profiler::Module::ALL.len(),
+            "one row per module, even before instrumentation runs"
+        );
         assert!(
             snapshot.modules.iter().any(|row| row.module == "proxy"),
             "every module is present even before instrumentation runs"
+        );
+        assert!(
+            snapshot
+                .modules
+                .iter()
+                .any(|row| row.module == "waf_body"),
+            "the WAF stage split is part of the table"
         );
         assert!(
             snapshot.methods.len()

@@ -96,6 +96,9 @@ const langLabels: Record<string, string> = { en: 'English', zh: '中文', ja: '�
 /** Public project repository shown in the About card. */
 const PROJECT_URL = 'https://github.com/shuaiZend/PingWAF'
 
+/** Upstream proxy engine shown in the About card. */
+const UPSTREAM_URL = 'https://github.com/cloudflare/pingora'
+
 /**
  * Quick-navigation anchors in page order; each id must match the `id` of the
  * section that wraps the matching card below.
@@ -2670,9 +2673,32 @@ function AboutCard() {
               </div>
               <div>
                 <dt className="text-xs font-medium text-fg-subtle">{t('pages.settings.aboutUpstream')}</dt>
-                <dd className="mt-1 text-fg">{t('pages.settings.aboutUpstreamValue')}</dd>
+                <dd className="mt-1 flex items-center gap-2 text-fg">
+                  <span>{t('pages.settings.aboutUpstreamValue')}</span>
+                  <a
+                    href={UPSTREAM_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-brand hover:underline"
+                  >
+                    Cloudflare Pingora
+                    <ArrowSquareOut weight="duotone" className="h-3.5 w-3.5" />
+                  </a>
+                  <Button
+                    size="icon"
+                    variant="secondary"
+                    aria-label={`${t('pages.settings.copy')}: ${t('pages.settings.aboutUpstream')}`}
+                    icon={<Copy weight="duotone" className="h-4 w-4" />}
+                    onClick={() => copy(UPSTREAM_URL)}
+                  />
+                </dd>
               </div>
             </dl>
+
+            <p className="flex items-start gap-2 rounded-md border border-line bg-recessed px-3 py-2 text-[13px] leading-relaxed text-fg-subtle">
+              <ShieldCheck weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-brand" />
+              {t('pages.settings.aboutAttribution')}
+            </p>
 
             <div>
               <p className="mb-1.5 text-xs font-medium text-fg-subtle">

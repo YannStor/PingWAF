@@ -11,19 +11,20 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use chrono::{DateTime, TimeZone, Utc};
 use pingwaf_proto::control_plane::{
-    BasicAuthConfig, BasicAuthCredential, BotProtectionConfig, CacheRule,
-    CacheTypeCategory, CacheTypePolicy, ChallengeConfig, CustomErrorPage,
-    FailoverMode, GeoConfig, GlobalCacheSettings, HealthCheckConfig,
-    IpAccessRule, RateLimitRule, ResponseReplaceConfig, ResponseReplaceRule,
-    RewriteOperation, RewriteRule, RouteConfig, RuleBundle, RuleOverride, Site,
+    AiBotPolicy, AiCrawlConfig, BasicAuthConfig, BasicAuthCredential,
+    BotProtectionConfig, CacheRule, CacheTypeCategory, CacheTypePolicy,
+    ChallengeConfig, CustomErrorPage, FailoverMode, GeoConfig,
+    GlobalCacheSettings, HealthCheckConfig, IpAccessRule, RateLimitRule,
+    ResponseReplaceConfig, ResponseReplaceRule, RewriteOperation,
+    RewriteRule, RouteConfig, RuleBundle, RuleOverride, Site,
     SiteCacheSettings, SiteConfig, SitePolicy, SslConfig, UpstreamConfig,
     UpstreamPeer, WafConfig, WafRule,
 };
 use prost::Message;
 use prost_types::Timestamp;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, QueryTrait,
+    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter,
+    QueryOrder, QuerySelect, QueryTrait,
 };
 use uuid::Uuid;
 
@@ -594,6 +595,8 @@ fn ssl_to_proto(
         // Turning mTLS on means clients must present a certificate.
         mtls_require_client_cert: row.mtls_enabled
             && row.mtls_require_client_cert,
+        http1_enabled: Some(row.http1_enabled),
+        http2_enabled: Some(row.http2_enabled),
     }
 }
 
@@ -1193,6 +1196,7 @@ pub async fn build_rule_bundle(
     let bot = load_bot_protection(db, site_row.id).await?;
     let verified_bot_ranges =
         load_verified_bot_ranges(db, bot.as_ref()).await?;
+    let ai_crawl = load_ai_crawl(db, site_row, &routes).await?;
     let mtls = load_mtls(db, site_row.id).await?;
     // A missing settings row means observation mode was never switched on, so
     // the data plane keeps enforcing; the failover default likewise falls
@@ -1277,10 +1281,117 @@ pub async fn build_rule_bundle(
         cache_settings: site_cache_settings,
         origin_verify_cert,
         response_replace: response_replace_to_proto(site_row),
+        ai_crawl,
     };
 
     bundle.config_hash = fingerprint(&bundle);
     Ok(bundle)
+}
+
+/// Reads the site's AI crawler policy into its protocol shape.
+///
+/// The file bodies are rendered here — configuration-build time, once per
+/// changed bundle — so neither file is assembled on the request path. A mode
+/// of `off` sends empty bodies, which the data plane reads as "do not serve
+/// the file".
+async fn load_ai_crawl(
+    db: &DatabaseConnection,
+    site_row: &site::Model,
+    routes: &[site_routes::Model],
+) -> Result<Option<AiCrawlConfig>, DbErr> {
+    let settings = crate::api::ai_crawl::load_settings(db, site_row.id)
+        .await
+        .map_err(|err| DbErr::Custom(format!("ai_crawl settings: {err}")))?;
+    let policies = crate::api::ai_crawl::load_policies(db, site_row.id)
+        .await
+        .map_err(|err| DbErr::Custom(format!("ai_crawl policies: {err}")))?;
+
+    let robots_body = render_ai_file(
+        &settings.robots_mode,
+        &settings.robots_body,
+        || crate::api::ai_crawl::render_robots(
+            &settings,
+            &policies,
+            &site_row.domain,
+        ),
+    );
+    let llms_body = render_ai_file(
+        &settings.llms_mode,
+        &settings.llms_body,
+        || {
+            crate::api::ai_crawl::render_llms(
+                &settings, &policies, site_row, routes,
+            )
+        },
+    );
+
+    let policies = policies
+        .iter()
+        .filter_map(|policy| {
+            let bot = crate::api::ai_crawl::find_bot(&policy.bot_id)?;
+            Some(AiBotPolicy {
+                id: bot.id.to_string(),
+                ua_substrings: bot
+                    .ua_substrings
+                    .iter()
+                    .map(|pattern| (*pattern).to_string())
+                    .collect(),
+                category: bot.category.to_string(),
+                action: if policy.action == "inherit" {
+                    settings.default_action.clone()
+                } else {
+                    policy.action.clone()
+                },
+            })
+        })
+        .collect();
+
+    Ok(Some(AiCrawlConfig {
+        enabled: settings.enabled,
+        default_action: settings.default_action,
+        robots_body,
+        llms_body,
+        cache_max_age: settings.cache_max_age.max(0) as u32,
+        policies,
+    }))
+}
+
+/// The body a generated file serves: empty when the mode is `off`, the
+/// operator's text when they wrote one, the template otherwise.
+fn render_ai_file(
+    mode: &str,
+    custom: &str,
+    render: impl FnOnce() -> String,
+) -> String {
+    if mode != "generate" {
+        return String::new();
+    }
+    let body = if custom.trim().is_empty() {
+        render()
+    } else {
+        custom.to_string()
+    };
+    // A site with thousands of routes produces an llms.txt past the cap the
+    // API enforces on hand-written bodies; truncate on a char boundary so the
+    // pushed bundle never carries an oversized file.
+    truncate_ai_body(body, crate::api::ai_crawl::MAX_FILE_BYTES)
+}
+
+/// Caps a generated file at `max` bytes without splitting a UTF-8 sequence.
+fn truncate_ai_body(mut body: String, max: usize) -> String {
+    if body.len() <= max {
+        return body;
+    }
+    let mut cut = max;
+    while cut > 0 && !body.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    body.truncate(cut);
+    tracing::warn!(
+        bytes = cut,
+        "generated robots/llms body exceeded the size cap and was truncated"
+    );
+    body
 }
 
 /// Reads the site's response replacement policy into its protocol shape.

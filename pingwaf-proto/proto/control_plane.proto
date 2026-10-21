@@ -322,6 +322,37 @@ message RuleBundle {
   // `sub_filter` plugin instance. Absent = the site replaces nothing and no
   // plugin is generated for it (old servers never send it).
   optional ResponseReplaceConfig response_replace = 29;
+
+  // AI crawler policy: the rendered robots.txt / llms.txt bodies and the
+  // per-family actions. Absent = no AI crawler control on this site (old
+  // servers never send it).
+  optional AiCrawlConfig ai_crawl = 30;
+}
+
+// AI crawler control. The control plane renders the file bodies (they are
+// served by a `mock` plugin on an exact-path location) and sends the family
+// patterns the data plane matches user agents against.
+message AiCrawlConfig {
+  bool enabled = 1;
+  // `allow` / `monitor` / `block`, applied to a family with no override.
+  string default_action = 2;
+  // Rendered bodies; empty means the file is not served.
+  string robots_body = 3;
+  string llms_body = 4;
+  // `Cache-Control: max-age` for both files.
+  uint32 cache_max_age = 5;
+  repeated AiBotPolicy policies = 6;
+}
+
+message AiBotPolicy {
+  // Stable family id (matches the control plane catalogue).
+  string id = 1;
+  // Lowercase UA substrings identifying the family.
+  repeated string ua_substrings = 2;
+  // `training` / `search` / `agent` / `other`.
+  string category = 3;
+  // `allow` / `monitor` / `block` after inheritance is resolved.
+  string action = 4;
 }
 
 // One literal or regex replacement inside a ResponseReplaceConfig. The pair
@@ -693,6 +724,10 @@ message SslConfig {
   // Whether a client certificate is required at all; defaults to
   // `mtls_enabled` when unset for backward compatibility.
   bool mtls_require_client_cert = 20;
+  // Downstream protocol switches. Unset means "enabled", so an agent that
+  // predates these fields keeps serving both protocols.
+  optional bool http1_enabled = 21;
+  optional bool http2_enabled = 22;
 }
 
 enum AcmeChallengeType {

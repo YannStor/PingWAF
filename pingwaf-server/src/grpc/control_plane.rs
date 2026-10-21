@@ -1952,6 +1952,9 @@ async fn flush(
 ) -> Result<(), Status> {
     if !access.is_empty() {
         let rows = std::mem::take(access);
+        let _timer = pingwaf_profiler::timed_method(
+            pingwaf_profiler::Method::DbPersistLogs,
+        );
         if let Err(err) = access_log::Entity::insert_many(rows).exec(db).await {
             tracing::error!(error = %err, "failed to persist access logs");
             return Err(db_status(err));
@@ -1959,6 +1962,9 @@ async fn flush(
     }
     if !events.is_empty() {
         let rows = std::mem::take(events);
+        let _timer = pingwaf_profiler::timed_method(
+            pingwaf_profiler::Method::DbPersistEvents,
+        );
         if let Err(err) =
             security_event::Entity::insert_many(rows).exec(db).await
         {

@@ -10,6 +10,8 @@ import {
   Fingerprint,
   Brain,
   UserFocus,
+  Robot,
+  Eye,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
@@ -22,9 +24,25 @@ import { Badge } from '@/components/ui/Badge'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { botApi, botKeys, defaultBotConfig, COMMON_KNOWN_BOTS } from '@/api/bot'
+import {
+  aiCrawlApi,
+  aiCrawlKeys,
+  aiCrawlBodyTooLong,
+  AI_CRAWL_MAX_CACHE_AGE,
+} from '@/api/aiCrawl'
 import { ipGroupsApi, ipGroupKeys } from '@/api/ipGroups'
 import { useCanWrite } from '@/hooks'
-import { BOT_ACTIONS, type BotConfig } from '@/api/types'
+import { Dialog } from '@/components/ui/Dialog'
+import { BOT_ACTIONS, AI_CRAWL_ACTIONS, AI_CRAWL_POLICY_ACTIONS } from '@/api/types'
+import type {
+  AiBotCatalogEntry,
+  AiBotPolicySetting,
+  AiCrawlPolicyAction,
+  AiCrawlPreview,
+  AiCrawlSettings,
+  BotConfig,
+  UpdateAiCrawlSettingsRequest,
+} from '@/api/types'
 
 export function BotPage() {
   const { t } = useTranslation()
@@ -342,8 +360,457 @@ export function BotPage() {
               )}
             </CardBody>
           </Card>
+
+          <AiCrawlCard siteId={siteId} canWrite={canWrite} />
         </div>
       ) : null}
+    </div>
+  )
+}
+
+const CATEGORY_TONES: Record<string, 'brand' | 'info' | 'warning' | 'neutral'> = {
+  training: 'warning',
+  search: 'brand',
+  agent: 'info',
+  other: 'neutral',
+}
+
+/**
+ * AI Crawl Control card — the site-wide switch, per-family overrides, and the
+ * robots.txt / llms.txt generators, all saved with one PUT.
+ */
+function AiCrawlCard({ siteId, canWrite }: { siteId: string; canWrite: boolean }) {
+  const { t } = useTranslation()
+  const toast = useToast()
+  const queryClient = useQueryClient()
+
+  const [draft, setDraft] = useState<AiCrawlSettings | null>(null)
+  // Per-family UI action; `inherit` entries are omitted from the PUT payload.
+  const [policyMap, setPolicyMap] = useState<Record<string, AiCrawlPolicyAction>>({})
+  const [dirty, setDirty] = useState(false)
+  const [preview, setPreview] = useState<{
+    file: 'robots' | 'llms'
+    data: AiCrawlPreview | null
+  } | null>(null)
+
+  // Long-lived static data: the family catalog rarely changes.
+  const catalogQuery = useQuery({
+    queryKey: aiCrawlKeys.catalog(),
+    queryFn: () => aiCrawlApi.catalog(),
+    staleTime: 24 * 3600_000,
+  })
+  const catalog: AiBotCatalogEntry[] = catalogQuery.data ?? []
+
+  const settingsQuery = useQuery({
+    queryKey: aiCrawlKeys.settings(siteId),
+    queryFn: () => aiCrawlApi.get(siteId),
+    enabled: Boolean(siteId),
+  })
+
+  // Seed the form from the query (render-phase reset, same pattern as the
+  // classic bot config above) so no stale values flash on the first paint.
+  const serverSettings = settingsQuery.data
+  const [sync, setSync] = useState<typeof serverSettings | null>(null)
+  if (sync !== serverSettings) {
+    setSync(serverSettings)
+    if (serverSettings) {
+      setDraft(serverSettings)
+      const map: Record<string, AiCrawlPolicyAction> = {}
+      for (const p of serverSettings.policies ?? []) {
+        map[p.bot_id] = (p.action as AiCrawlPolicyAction) ?? 'inherit'
+      }
+      setPolicyMap(map)
+      setDirty(false)
+    }
+  }
+
+  const patch = (part: Partial<AiCrawlSettings>) => {
+    setDraft((d) => (d ? { ...d, ...part } : d))
+    setDirty(true)
+  }
+
+  const setPolicy = (botId: string, action: AiCrawlPolicyAction) => {
+    setPolicyMap((m) => ({ ...m, [botId]: action }))
+    setDirty(true)
+  }
+
+  const buildPayload = (): UpdateAiCrawlSettingsRequest | null => {
+    if (!draft) return null
+    // Front-end validation mirroring the server bounds.
+    const age = Number.isFinite(draft.cache_max_age) ? Math.floor(draft.cache_max_age) : -1
+    if (age < 0 || age > AI_CRAWL_MAX_CACHE_AGE) return null
+    if (aiCrawlBodyTooLong(draft.robots_body) || aiCrawlBodyTooLong(draft.llms_body))
+      return null
+    // The server replaces the whole policy set when `policies` is present.
+    // Without the catalogue the table cannot render its selects, so sending
+    // an (empty) set would silently wipe overrides the operator never saw.
+    const catalogReady = catalogQuery.isSuccess && catalog.length > 0
+    const policies: AiBotPolicySetting[] | undefined = catalogReady
+      ? Object.entries(policyMap)
+          .filter(([, action]) => action !== 'inherit')
+          .map(([bot_id, action]) => ({ bot_id, action }))
+      : undefined
+    return {
+      enabled: draft.enabled,
+      default_action: draft.default_action,
+      robots_mode: draft.robots_mode,
+      robots_body: draft.robots_body,
+      llms_mode: draft.llms_mode,
+      llms_body: draft.llms_body,
+      llms_include_routes: draft.llms_include_routes,
+      cache_max_age: age,
+      content_signal_search: draft.content_signal_search,
+      content_signal_ai_train: draft.content_signal_ai_train,
+      content_signal_ai_input: draft.content_signal_ai_input,
+      ...(policies ? { policies } : {}),
+    }
+  }
+
+  const cacheAgeInvalid =
+    draft !== null &&
+    (!Number.isFinite(draft.cache_max_age) ||
+      draft.cache_max_age < 0 ||
+      draft.cache_max_age > AI_CRAWL_MAX_CACHE_AGE)
+  const bodyTooLong =
+    draft !== null &&
+    (aiCrawlBodyTooLong(draft.robots_body) || aiCrawlBodyTooLong(draft.llms_body))
+
+  const save = useMutation({
+    mutationFn: (payload: UpdateAiCrawlSettingsRequest) =>
+      aiCrawlApi.update(siteId, payload),
+    onSuccess: (saved) => {
+      setDraft(saved)
+      const map: Record<string, AiCrawlPolicyAction> = {}
+      for (const p of saved.policies ?? []) {
+        map[p.bot_id] = (p.action as AiCrawlPolicyAction) ?? 'inherit'
+      }
+      setPolicyMap(map)
+      setDirty(false)
+      queryClient.setQueryData(aiCrawlKeys.settings(siteId), saved)
+      void queryClient.invalidateQueries({ queryKey: aiCrawlKeys.settings(siteId) })
+      toast.success(t('pages.bots.aiCrawl.saved'))
+    },
+    onError: (err) => {
+      toast.error(
+        err instanceof Error ? err.message : t('errors.unknown'),
+      )
+    },
+  })
+
+  const openPreview = (file: 'robots' | 'llms') => {
+    setPreview({ file, data: null })
+    aiCrawlApi
+      .preview(siteId, file)
+      .then((data) => setPreview({ file, data }))
+      .catch(() => setPreview(null))
+  }
+
+  const actionOptions = AI_CRAWL_POLICY_ACTIONS.map((a) => ({
+    value: a,
+    label:
+      a === 'inherit'
+        ? t('pages.bots.aiCrawl.inherit')
+        : t(`pages.bots.aiCrawl.action.${a}`),
+  }))
+
+  return (
+    <Card>
+      <CardHeader
+        title={t('pages.bots.aiCrawl.title')}
+        description={t('pages.bots.aiCrawl.description')}
+        action={<Robot weight="duotone" className="h-4 w-4 text-fg-subtle" />}
+      />
+      <CardBody className="flex flex-col gap-5">
+        {settingsQuery.isError && !draft ? (
+          <ErrorState
+            error={settingsQuery.error}
+            onRetry={() => settingsQuery.refetch()}
+            retrying={settingsQuery.isFetching}
+          />
+        ) : !draft ? (
+          <div className="h-24 animate-pulse rounded-lg bg-recessed" />
+        ) : (
+          <>
+            {/* Posture */}
+            <Switch
+              checked={draft.enabled}
+              disabled={!canWrite}
+              onCheckedChange={(enabled) => patch({ enabled })}
+              label={t('pages.bots.aiCrawl.enable')}
+              description={t('pages.bots.aiCrawl.enableHint')}
+            />
+            <Select
+              label={t('pages.bots.aiCrawl.defaultAction')}
+              value={draft.default_action}
+              disabled={!canWrite || !draft.enabled}
+              containerClassName="max-w-xs"
+              hint={t('pages.bots.aiCrawl.defaultActionHint')}
+              options={AI_CRAWL_ACTIONS.map((a) => ({
+                value: a,
+                label: t(`pages.bots.aiCrawl.action.${a}`),
+              }))}
+              onChange={(e) => patch({ default_action: e.target.value })}
+            />
+            <div>
+              <p className="mb-2 text-sm font-medium text-fg-strong">
+                {t('pages.bots.aiCrawl.contentSignals')}
+              </p>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <Switch
+                  checked={draft.content_signal_search}
+                  disabled={!canWrite}
+                  onCheckedChange={(content_signal_search) =>
+                    patch({ content_signal_search })
+                  }
+                  label={t('pages.bots.aiCrawl.signalSearch')}
+                  description={t('pages.bots.aiCrawl.signalSearchHint')}
+                />
+                <Switch
+                  checked={draft.content_signal_ai_train}
+                  disabled={!canWrite}
+                  onCheckedChange={(content_signal_ai_train) =>
+                    patch({ content_signal_ai_train })
+                  }
+                  label={t('pages.bots.aiCrawl.signalTrain')}
+                  description={t('pages.bots.aiCrawl.signalTrainHint')}
+                />
+                <Switch
+                  checked={draft.content_signal_ai_input}
+                  disabled={!canWrite}
+                  onCheckedChange={(content_signal_ai_input) =>
+                    patch({ content_signal_ai_input })
+                  }
+                  label={t('pages.bots.aiCrawl.signalInput')}
+                  description={t('pages.bots.aiCrawl.signalInputHint')}
+                />
+              </div>
+            </div>
+
+            {/* Family table */}
+            <div>
+              <p className="mb-2 text-sm font-medium text-fg-strong">
+                {t('pages.bots.aiCrawl.families')}
+              </p>
+              <div className="overflow-x-auto rounded-lg border border-line">
+                <table className="w-full text-left text-[13px]">
+                  <thead className="bg-recessed/60 text-xs uppercase tracking-wide text-fg-subtle">
+                    <tr>
+                      <th className="px-3 py-2 font-medium">
+                        {t('pages.bots.aiCrawl.colName')}
+                      </th>
+                      <th className="px-3 py-2 font-medium">
+                        {t('pages.bots.aiCrawl.colOperator')}
+                      </th>
+                      <th className="px-3 py-2 font-medium">
+                        {t('pages.bots.aiCrawl.colCategory')}
+                      </th>
+                      <th className="w-40 px-3 py-2 text-right font-medium">
+                        {t('pages.bots.aiCrawl.colAction')}
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {catalog.map((entry) => (
+                      <tr key={entry.id} className="border-t border-line">
+                        <td className="px-3 py-2 font-medium text-fg-strong">
+                          {entry.name}
+                        </td>
+                        <td className="px-3 py-2 text-fg-subtle">{entry.operator}</td>
+                        <td className="px-3 py-2">
+                          <Badge size="sm" tone={CATEGORY_TONES[entry.category] ?? 'neutral'}>
+                            {t(`pages.bots.aiCrawl.category.${entry.category}`, entry.category)}
+                          </Badge>
+                        </td>
+                        <td className="px-3 py-2">
+                          <Select
+                            className="h-8 text-xs"
+                            value={policyMap[entry.id] ?? 'inherit'}
+                            disabled={!canWrite || !draft.enabled}
+                            options={actionOptions}
+                            onChange={(e) =>
+                              setPolicy(entry.id, e.target.value as AiCrawlPolicyAction)
+                            }
+                          />
+                        </td>
+                      </tr>
+                    ))}
+                    {catalog.length === 0 && (
+                      <tr>
+                        <td colSpan={4} className="px-3 py-6 text-center text-fg-subtle">
+                          {t('common.noData')}
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* robots.txt / llms.txt */}
+            <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+              <FileConfig
+                title="robots.txt"
+                mode={draft.robots_mode}
+                body={draft.robots_body}
+                disabled={!canWrite}
+                modeLabel={(v) =>
+                  t(`pages.bots.aiCrawl.mode.${v === 'generate' ? 'generate' : 'off'}`)
+                }
+                onMode={(robots_mode) => patch({ robots_mode })}
+                onBody={(robots_body) => patch({ robots_body })}
+                onPreview={() => openPreview('robots')}
+              />
+              <FileConfig
+                title="llms.txt"
+                mode={draft.llms_mode}
+                body={draft.llms_body}
+                disabled={!canWrite}
+                modeLabel={(v) =>
+                  t(`pages.bots.aiCrawl.mode.${v === 'generate' ? 'generate' : 'off'}`)
+                }
+                onMode={(llms_mode) => patch({ llms_mode })}
+                onBody={(llms_body) => patch({ llms_body })}
+                onPreview={() => openPreview('llms')}
+                extra={
+                  <Switch
+                    checked={draft.llms_include_routes}
+                    disabled={!canWrite}
+                    onCheckedChange={(llms_include_routes) =>
+                      patch({ llms_include_routes })
+                    }
+                    label={t('pages.bots.aiCrawl.includeRoutes')}
+                    description={t('pages.bots.aiCrawl.includeRoutesHint')}
+                  />
+                }
+              />
+            </div>
+
+            <Input
+              label={t('pages.bots.aiCrawl.cacheMaxAge')}
+              type="number"
+              min={0}
+              max={AI_CRAWL_MAX_CACHE_AGE}
+              value={draft.cache_max_age}
+              disabled={!canWrite}
+              containerClassName="max-w-xs"
+              hint={t('pages.bots.aiCrawl.cacheMaxAgeHint')}
+              error={cacheAgeInvalid ? t('pages.bots.aiCrawl.cacheMaxAgeInvalid') : undefined}
+              onChange={(e) => patch({ cache_max_age: Number(e.target.value) })}
+            />
+            {bodyTooLong && (
+              <p className="text-sm text-fg-danger">{t('pages.bots.aiCrawl.bodyTooLong')}</p>
+            )}
+
+            {canWrite && (
+              <div className="flex items-center justify-end gap-2 border-t border-line pt-4">
+                <Button
+                  variant="primary"
+                  disabled={!dirty || cacheAgeInvalid || bodyTooLong || save.isPending}
+                  loading={save.isPending}
+                  onClick={() => {
+                    const payload = buildPayload()
+                    if (payload) save.mutate(payload)
+                  }}
+                >
+                  {t('common.save')}
+                </Button>
+              </div>
+            )}
+          </>
+        )}
+      </CardBody>
+
+      <Dialog
+        open={preview !== null}
+        onClose={() => setPreview(null)}
+        size="lg"
+        title={t('pages.bots.aiCrawl.previewTitle', {
+          file: preview?.file === 'llms' ? 'llms.txt' : 'robots.txt',
+        })}
+        description={preview?.data?.content_type}
+        footer={
+          <Button variant="secondary" onClick={() => setPreview(null)}>
+            {t('common.close')}
+          </Button>
+        }
+      >
+        {preview?.data ? (
+          <pre className="pw-mono max-h-[60vh] overflow-auto whitespace-pre-wrap rounded-lg bg-recessed p-3 text-xs text-fg">
+            {preview.data.body || t('pages.bots.aiCrawl.previewEmpty')}
+          </pre>
+        ) : (
+          <div className="flex h-32 items-center justify-center">
+            <span className="flex items-center gap-2 text-sm text-fg-subtle">
+              <Eye weight="duotone" className="h-4 w-4 animate-pulse" />
+              {t('pages.bots.aiCrawl.previewLoading')}
+            </span>
+          </div>
+        )}
+      </Dialog>
+    </Card>
+  )
+}
+
+/** One generated-file block: mode picker, optional body editor, preview. */
+function FileConfig({
+  title,
+  mode,
+  body,
+  disabled,
+  modeLabel,
+  onMode,
+  onBody,
+  onPreview,
+  extra,
+}: {
+  title: string
+  mode: string
+  body: string
+  disabled: boolean
+  modeLabel: (mode: string) => string
+  onMode: (mode: string) => void
+  onBody: (body: string) => void
+  onPreview: () => void
+  extra?: ReactNode
+}) {
+  const { t } = useTranslation()
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-line bg-recessed/40 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <p className="pw-mono text-sm font-medium text-fg-strong">{title}</p>
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={disabled}
+          onClick={onPreview}
+          icon={<Eye weight="duotone" className="h-4 w-4" />}
+        >
+          {t('pages.bots.aiCrawl.preview')}
+        </Button>
+      </div>
+      <Select
+        label={t('pages.bots.aiCrawl.modeLabel')}
+        value={mode === 'generate' ? 'generate' : 'off'}
+        disabled={disabled}
+        options={[
+          { value: 'off', label: modeLabel('off') },
+          { value: 'generate', label: modeLabel('generate') },
+        ]}
+        onChange={(e) => onMode(e.target.value)}
+      />
+      {mode === 'generate' && (
+        <>
+          <textarea
+            className="pw-mono min-h-28 w-full rounded-md border border-line bg-elevated px-3 py-2 text-xs text-fg focus:border-brand focus:outline-none"
+            placeholder={t('pages.bots.aiCrawl.bodyPlaceholder')}
+            value={body}
+            disabled={disabled}
+            onChange={(e) => onBody(e.target.value)}
+          />
+          <p className="text-xs text-fg-subtle">{t('pages.bots.aiCrawl.bodyHint')}</p>
+        </>
+      )}
+      {extra}
     </div>
   )
 }

@@ -274,6 +274,16 @@ export interface CreateSiteRequest {
   plan?: string
 }
 
+/** `POST /sites/{site_id}/clone` — duplicate a site under a new primary domain. */
+export interface CloneSiteRequest {
+  /** New primary hostname; must not collide with any existing site. */
+  domain: string
+  /** Extra hostnames for the clone (wildcards allowed). */
+  alternate_domains?: string[]
+  /** Display name; the server falls back to the source site's name when omitted. */
+  name?: string
+}
+
 export interface UpdateSiteRequest {
   name?: string
   domain?: string
@@ -1471,6 +1481,10 @@ export interface SslSettings {
   hsts_enabled: boolean
   hsts_max_age: number
   always_use_https: boolean
+  /** Serve HTTP/1.1 alongside HTTP/2; the server always reports it (default true). */
+  http1_enabled: boolean
+  /** Serve HTTP/2; multiplexes requests over one connection (default true). */
+  http2_enabled: boolean
 }
 
 /** `api::sites::TlsPostureRequest` — the write side of `SslSettings`. */
@@ -1487,6 +1501,8 @@ export interface UpdateSslSettingsRequest {
   hsts_enabled?: boolean
   hsts_max_age?: number
   always_use_https?: boolean
+  http1_enabled?: boolean
+  http2_enabled?: boolean
 }
 
 /* ── Managed mTLS material ─────────────────────────────────────────── */
@@ -2291,6 +2307,92 @@ export interface McpStatus {
   tools: McpToolInfo[]
   prompts: number
   resources: number
+}
+
+/* ── AI crawl control ─────────────────────────────────────────────── */
+
+/** Per-family enforcement action. */
+export type AiCrawlAction = 'allow' | 'monitor' | 'block'
+
+/** Actions the family dropdown offers; `inherit` follows `default_action`. */
+export type AiCrawlPolicyAction = 'inherit' | AiCrawlAction
+
+export const AI_CRAWL_ACTIONS: AiCrawlAction[] = ['allow', 'monitor', 'block']
+export const AI_CRAWL_POLICY_ACTIONS: AiCrawlPolicyAction[] = [
+  'inherit',
+  'allow',
+  'monitor',
+  'block',
+]
+
+/** Crawler families the data plane recognises (`GET /ai-crawl/catalog`). */
+export interface AiBotCatalogEntry {
+  id: string
+  operator: string
+  name: string
+  /** `training` | `search` | `agent` | `other`. */
+  category: string
+  /** Case-insensitive User-Agent substrings identifying the family. */
+  ua_substrings: string[]
+}
+
+/** One per-family override stored with the site settings. */
+export interface AiBotPolicySetting {
+  bot_id: string
+  action: AiCrawlAction | string
+}
+
+/** `GET /sites/{siteId}/ai-crawl` — the site's AI crawl posture. */
+export interface AiCrawlSettings {
+  enabled: boolean
+  default_action: AiCrawlAction | string
+  /** `off` | `generate` — whether robots.txt / llms.txt are served. */
+  robots_mode: string
+  /** Custom body; empty means the template generator applies. */
+  robots_body: string
+  llms_mode: string
+  llms_body: string
+  /** Append the site's routes to the generated llms.txt. */
+  llms_include_routes: boolean
+  /** Cache-Control max-age for the generated files (0..86400). */
+  cache_max_age: number
+  content_signal_search: boolean
+  content_signal_ai_train: boolean
+  content_signal_ai_input: boolean
+  policies: AiBotPolicySetting[]
+}
+
+/** `PUT /sites/{siteId}/ai-crawl` — every field optional; `policies` present
+ * replaces the whole list (entries the caller omits fall back to inherit). */
+export type UpdateAiCrawlSettingsRequest = Partial<
+  Omit<AiCrawlSettings, 'policies'> & { policies?: AiBotPolicySetting[] }
+>
+
+/** `GET /sites/{siteId}/ai-crawl/preview?file=robots|llms` */
+export interface AiCrawlPreview {
+  mode: string
+  content_type: string
+  body: string
+}
+
+/** One family row of `/analytics/ai-crawlers`. */
+export interface AiCrawlerRow {
+  bot_id: string
+  name: string
+  category: string
+  requests: number
+  blocked: number
+  last_seen: string | null
+}
+
+/** `GET /analytics/ai-crawlers` — AI crawler traffic overview. */
+export interface AiCrawlerOverview {
+  requests: number
+  blocked: number
+  /** Fraction of all requests in the window (0..1). */
+  share: number
+  families: number
+  rows: AiCrawlerRow[]
 }
 
 

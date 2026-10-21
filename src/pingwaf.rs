@@ -328,6 +328,56 @@ fn site_posture_plugins(
     names
 }
 
+/// Builds the `mock` plugins that serve the site's generated robots.txt and
+/// llms.txt, and returns their names.
+///
+/// The bodies are rendered by the control plane at configuration-build time;
+/// this only wires them into an exact-path `mock` instance, which answers the
+/// matching request before the origin is contacted. Empty bodies mean "do not
+/// serve the file" and register nothing.
+fn site_ai_file_plugins(
+    site_id: &str,
+    ai: Option<&pingwaf_agent::cache::AiCrawlConfig>,
+    plugins: &mut HashMap<String, PluginConf>,
+) -> Vec<String> {
+    let Some(ai) = ai else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for (suffix, path, body) in [
+        ("robots", "/robots.txt", ai.robots_body.as_str()),
+        ("llms", "/llms.txt", ai.llms_body.as_str()),
+    ] {
+        if body.trim().is_empty() {
+            continue;
+        }
+        let name = format!("{site_id}_ai_{suffix}");
+        let mut conf = PluginConf::new();
+        conf.insert(
+            "category".to_string(),
+            toml::Value::String("mock".to_string()),
+        );
+        conf.insert("path".to_string(), toml::Value::String(path.to_string()));
+        conf.insert("data".to_string(), toml::Value::String(body.to_string()));
+        conf.insert("status".to_string(), toml::Value::Integer(200));
+        conf.insert(
+            "headers".to_string(),
+            toml::Value::Array(vec![
+                toml::Value::String(
+                    "Content-Type: text/plain; charset=utf-8".to_string(),
+                ),
+                toml::Value::String(format!(
+                    "Cache-Control: public, max-age={}",
+                    ai.cache_max_age
+                )),
+            ]),
+        );
+        plugins.insert(name.clone(), conf);
+        names.push(name);
+    }
+    names
+}
+
 /// Builds the site's `sub_filter` plugin — the data-plane half of the control
 /// plane's `sites.response_replace` policy — and returns its name.
 ///
@@ -505,6 +555,12 @@ fn cached_rules_to_pingap_config(
     // across sites; pinning a certificate to its site is left to the WAF
     // plugin, which sees the request's SNI.
     let mut mtls_ca_bundle = String::new();
+    // The 443 listener is shared by every site and ALPN is negotiated once per
+    // connection, so the per-site switches collapse into one listener-level
+    // choice: HTTP/2 is advertised when any HTTPS site wants it, HTTP/1.1
+    // when any site still serves it.
+    let mut listener_http1 = false;
+    let mut listener_http2 = false;
     // The WAF plugin is referenced from every location: this is what makes
     // the data plane enforce rules and emit access/security events.
     let mut plugins: HashMap<String, PluginConf> = HashMap::new();
@@ -600,6 +656,13 @@ fn cached_rules_to_pingap_config(
     for (site_id, site) in &cached.sites {
         if site.domain.is_empty() {
             continue;
+        }
+
+        // Only a site that actually serves HTTPS contributes a protocol to
+        // the shared listener.
+        if let Some(ssl) = site.ssl_config.as_ref().filter(|ssl| ssl.enabled) {
+            listener_http1 |= ssl.http1_enabled.unwrap_or(true);
+            listener_http2 |= ssl.http2_enabled.unwrap_or(true);
         }
 
         // One upstream per origin pool. Pools without peers are skipped:
@@ -727,7 +790,14 @@ fn cached_rules_to_pingap_config(
             hosts.join(",")
         };
 
-        let mut site_plugins = location_plugins.clone();
+        // The generated AI files run first: a `robots.txt` request must be
+        // answered before the WAF inspects (and possibly logs or blocks) it.
+        let mut site_plugins = site_ai_file_plugins(
+            site_id,
+            site.ai_crawl.as_ref(),
+            &mut plugins,
+        );
+        site_plugins.extend(location_plugins.clone());
         site_plugins.extend(site_posture_plugins(
             site_id,
             site.ssl_config.as_ref(),
@@ -911,6 +981,16 @@ fn cached_rules_to_pingap_config(
             global_certificates: Some(true),
             client_ca_pem: (!mtls_ca_bundle.is_empty())
                 .then_some(mtls_ca_bundle),
+            // Without these the listener stayed on pingap's default
+            // (`enabled_h2 = false`), which is why no site ever negotiated
+            // HTTP/2. A deployment with no HTTPS site leaves both unset:
+            // writing `false/false` would trip pingap-config's
+            // "at least one protocol" validation and the listener would not
+            // start at all.
+            enabled_h2: (listener_http1 || listener_http2)
+                .then_some(listener_http2),
+            http1_enabled: (listener_http1 || listener_http2)
+                .then_some(listener_http1 || !listener_http2),
             ..Default::default()
         },
     );
@@ -1858,6 +1938,7 @@ mod tests {
             proxy_trust: ProxyTrustConfig::default(),
             cache_settings: None,
             response_replace: None,
+            ai_crawl: None,
         }
     }
 
@@ -3127,6 +3208,8 @@ mod tests {
             mtls_revoked_fingerprints: vec![],
             mtls_organization: String::new(),
             mtls_require_client_cert: Some(false),
+            http1_enabled: Some(true),
+            http2_enabled: Some(true),
         }
     }
 
@@ -3139,6 +3222,71 @@ mod tests {
         assert_eq!(cert.domains.as_deref(), Some("a.example.com"));
         assert_eq!(cert.dns_challenge, None);
         assert_eq!(cert.dns_provider, None);
+    }
+
+    #[test]
+    fn tls_listener_advertises_http2_when_a_site_enables_it() {
+        let mut site = site_rules("site1", "a.example.com");
+        site.upstreams = vec![pool("", vec![peer("10.0.0.1:8080")])];
+        let mut ssl = acme_ssl();
+        ssl.http1_enabled = Some(true);
+        ssl.http2_enabled = Some(true);
+        site.ssl_config = Some(ssl);
+
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+        let tls = config
+            .servers
+            .get("pingwaf_tls")
+            .expect("the 443 listener is always built");
+        // Without these the listener kept pingap's default (h2 off), which is
+        // why no site ever negotiated HTTP/2.
+        assert_eq!(tls.enabled_h2, Some(true));
+        assert_eq!(tls.http1_enabled, Some(true));
+    }
+
+    #[test]
+    fn tls_listener_leaves_protocols_unset_without_an_https_site() {
+        // No site_ssl row at all: the listener must not be pinned to
+        // h1=false/h2=false, which pingap-config rejects at startup.
+        let mut site = site_rules("site1", "a.example.com");
+        site.upstreams = vec![pool("", vec![peer("10.0.0.1:8080")])];
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+        let tls = config
+            .servers
+            .get("pingwaf_tls")
+            .expect("the 443 listener is always built");
+        assert_eq!(tls.enabled_h2, None);
+        assert_eq!(tls.http1_enabled, None);
+    }
+
+    #[test]
+    fn tls_listener_stays_http11_when_every_site_disables_http2() {
+        let mut site = site_rules("site1", "a.example.com");
+        site.upstreams = vec![pool("", vec![peer("10.0.0.1:8080")])];
+        let mut ssl = acme_ssl();
+        ssl.http1_enabled = Some(true);
+        ssl.http2_enabled = Some(false);
+        site.ssl_config = Some(ssl);
+
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+        let tls = config
+            .servers
+            .get("pingwaf_tls")
+            .expect("the 443 listener is always built");
+        assert_eq!(tls.enabled_h2, Some(false));
+        assert_eq!(tls.http1_enabled, Some(true));
     }
 
     #[test]

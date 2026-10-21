@@ -69,6 +69,8 @@ pub mod m20240101_000061_agent_metrics_desc_index;
 pub mod m20240101_000062_site_upstream_pool_address_unique;
 pub mod m20240101_000063_site_upstream_pool_address_family;
 pub mod m20240101_000064_agent_memory_split;
+pub mod m20240101_000065_site_ssl_protocols;
+pub mod m20240101_000066_site_ai_crawl;
 
 use sea_orm_migration::prelude::*;
 
@@ -153,6 +155,8 @@ impl MigratorTrait for Migrator {
                 m20240101_000063_site_upstream_pool_address_family::Migration,
             ),
             Box::new(m20240101_000064_agent_memory_split::Migration),
+            Box::new(m20240101_000065_site_ssl_protocols::Migration),
+            Box::new(m20240101_000066_site_ai_crawl::Migration),
         ]
     }
 }
@@ -164,7 +168,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 64);
+        assert_eq!(migrations.len(), 66);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

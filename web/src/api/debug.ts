@@ -4,7 +4,7 @@ import { apiClient } from './client'
  * System observability — `/api/v1/system/metrics` 与 `/api/v1/system/profile`（仅 Admin）。
  *
  * - metrics：进程/主机 CPU、内存占用（含容器 cgroup 数值，非容器环境为 null）。
- * - profile：按模块归因的 CPU/内存分布（固定 7 行）与热点方法（最多 40 行，按 cpu_ms 降序）。
+ * - profile：按模块归因的 CPU/内存分布与热点方法（最多 40 行，按 cpu_ms 降序）。
  */
 
 /** 进程/主机 CPU 快照。 */
@@ -85,7 +85,10 @@ export interface SystemMetrics {
   memory: SystemMemoryMetrics
 }
 
-/** 模块归因行 — 固定 7 行：proxy/waf/cache/plugin/db/control/other。 */
+/**
+ * 模块归因行 — proxy/waf 及其子模块（waf_normalize/waf_signature/waf_expression/
+ * waf_body）、cache/plugin/db/control/other、log/agent/http_client。
+ */
 export interface SystemProfileModule {
   module: string
   cpu_ms: number
@@ -94,10 +97,6 @@ export interface SystemProfileModule {
   mem_bytes: number
   /** 占总内存的比例（0.0-1.0）。 */
   mem_share: number
-  /** 模块缓存文件磁盘占用（字节）。 */
-  disk_bytes: number
-  /** 占总磁盘占用的比例（0.0-1.0）。 */
-  disk_share: number
   /** 墙钟耗时（毫秒）。⚠️ 口径为墙钟，非 CPU。 */
   elapsed_ms: number
   /** 墙钟耗时占比（0.0-1.0）。⚠️ 口径为墙钟，非 CPU。 */
@@ -111,9 +110,18 @@ export interface SystemProfileModule {
 export interface SystemProfileMethod {
   method: string
   cpu_ms: number
+  /** 占总 CPU 的比例（0.0-1.0）。 */
+  cpu_share: number
   /** 墙钟耗时（毫秒）。⚠️ 口径为墙钟，非 CPU。 */
   elapsed_ms: number
+  /** 墙钟耗时占比（0.0-1.0）。⚠️ 口径为墙钟，非 CPU。 */
+  elapsed_share: number
+  /** 该方法当前持有的内存字节。 */
+  mem_bytes: number
+  /** 占所属模块内存的比例（0.0-1.0）。 */
+  mem_share: number
   calls: number
+  /** 平均单次调用耗时（微秒）。 */
   avg_us: number
 }
 
@@ -121,6 +129,8 @@ export interface SystemProfileMethod {
 export interface SystemProfile {
   collected_at_ms: number
   total_cpu_ms: number
+  /** 采样窗口总墙钟耗时（毫秒）。 */
+  total_elapsed_ms: number
   modules: SystemProfileModule[]
   methods: SystemProfileMethod[]
 }

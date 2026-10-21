@@ -8,15 +8,25 @@ import type { SystemProfileModule } from '@/api/debug'
 const MODULE_TONES: Record<string, 'brand' | 'success' | 'warning' | 'danger' | 'neutral'> = {
   proxy: 'brand',
   waf: 'danger',
+  waf_normalize: 'warning',
+  waf_signature: 'danger',
+  waf_expression: 'brand',
+  waf_body: 'success',
   cache: 'success',
   plugin: 'warning',
   db: 'neutral',
   control: 'brand',
+  log: 'neutral',
+  agent: 'brand',
+  http_client: 'warning',
   other: 'neutral',
 }
 
+/** WAF 子模块在视觉上归入 waf 组（缩进 + 小标签），不影响排序逻辑。 */
+const WAF_SUBMODULES = new Set(['waf_normalize', 'waf_signature', 'waf_expression', 'waf_body'])
+
 /**
- * 模块归因表：固定 7 行（proxy/waf/cache/plugin/db/control/other）。
+ * 模块归因表：proxy/waf（含子模块）/cache/plugin/db/control/other/log/agent/http_client。
  * 「耗时占比」为墙钟耗时占比（elapsed_share），非 CPU。
  */
 export function ModuleTable({
@@ -34,11 +44,27 @@ export function ModuleTable({
         header: t('system.module'),
         accessor: (m) => m.module,
         sortable: true,
-        cell: (m) => (
-          <Badge tone={MODULE_TONES[m.module] ?? 'neutral'} className="pw-mono">
-            {m.module}
-          </Badge>
-        ),
+        cell: (m) => {
+          const isSub = WAF_SUBMODULES.has(m.module)
+          return (
+            <span
+              className={
+                isSub
+                  ? 'flex items-center gap-1.5 pl-3'
+                  : 'flex items-center gap-1.5'
+              }
+            >
+              <Badge tone={MODULE_TONES[m.module] ?? 'neutral'} className="pw-mono">
+                {m.module}
+              </Badge>
+              {isSub ? (
+                <span className="rounded bg-recessed px-1.5 py-0.5 text-[10px] font-medium text-fg-subtle">
+                  {t('system.wafSub')}
+                </span>
+              ) : null}
+            </span>
+          )
+        },
       },
       {
         key: 'elapsed_share',
@@ -65,26 +91,21 @@ export function ModuleTable({
         accessor: (m) => m.mem_bytes,
         align: 'right',
         sortable: true,
-        cell: (m) => <span className="tabular-nums">{formatSize(m.mem_bytes)}</span>,
-      },
-      {
-        key: 'disk_bytes',
-        header: t('system.disk'),
-        accessor: (m) => m.disk_bytes,
-        align: 'right',
-        sortable: true,
         cell: (m) => (
-          <div className="flex items-center justify-end gap-2">
+          <div
+            className="flex items-center justify-end gap-2"
+            title={m.mem_bytes === 0 ? t('system.notReported') : undefined}
+          >
             <div className="h-1.5 w-16 overflow-hidden rounded-full bg-recessed">
               <div
                 className="h-full rounded-full bg-success"
-                style={{ width: `${Math.min(100, (m.disk_share ?? 0) * 100)}%` }}
+                style={{ width: `${Math.min(100, m.mem_share * 100)}%` }}
               />
             </div>
             <span className="w-20 text-right tabular-nums">
-              {formatSize(m.disk_bytes)}
-              {m.disk_share > 0 ? (
-                <span className="ml-1 text-fg-subtle">{`${(m.disk_share * 100).toFixed(0)}%`}</span>
+              {formatSize(m.mem_bytes)}
+              {m.mem_share > 0 ? (
+                <span className="ml-1 text-fg-subtle">{`${(m.mem_share * 100).toFixed(0)}%`}</span>
               ) : null}
             </span>
           </div>
@@ -122,7 +143,6 @@ export function ModuleTable({
           <div className="py-10 text-center text-sm text-fg-subtle">{t('system.empty')}</div>
         }
       />
-      <p className="mt-2 text-xs text-fg-subtle">{t('system.diskHint')}</p>
     </div>
   )
 }

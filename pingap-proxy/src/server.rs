@@ -166,6 +166,8 @@ pub struct Server {
 
     /// Whether HTTP/2 protocol is enabled
     enabled_h2: bool,
+    /// Whether HTTP/1.1 stays advertised over TLS
+    http1_enabled: bool,
     /// Downstream HTTP/2 SETTINGS overrides, None = pingora's bounded defaults
     h2_max_concurrent_streams: Option<u32>,
     h2_max_header_list_size: Option<u32>,
@@ -499,6 +501,7 @@ impl Server {
             global_certificates: conf.global_certificates,
             client_ca_pem: conf.client_ca_pem.clone(),
             enabled_h2: conf.enabled_h2,
+            http1_enabled: conf.http1_enabled,
             h2_max_concurrent_streams: conf.h2_max_concurrent_streams,
             h2_max_header_list_size: conf.h2_max_header_list_size,
             h2_initial_window_size: conf.h2_initial_window_size,
@@ -620,6 +623,7 @@ impl Server {
         let is_tls = dynamic_cert.is_some();
 
         let enabled_h2 = self.enabled_h2;
+        let http1_enabled = self.http1_enabled;
         let threads = if let Some(threads) = self.threads {
             // use cpus when set threads:0
             let value = if threads == 0 {
@@ -692,6 +696,7 @@ impl Server {
                     .new_tls_settings(&TlsSettingParams {
                         server_name: name.clone(),
                         enabled_h2,
+                        http1_enabled,
                         cipher_list: cipher_list.clone(),
                         cipher_suites: cipher_suites.clone(),
                         tls_min_version: tls_min_version.clone(),

@@ -5,6 +5,8 @@
 //! `FILTER (WHERE …)` aggregates or `date_trunc` bucketing without giving up
 //! most of the readability.
 
+use std::collections::HashMap;
+
 use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::Json;
@@ -246,6 +248,148 @@ pub fn routes() -> Router<AppState> {
         .route("/analytics/top-paths", get(top_paths))
         .route("/analytics/status-codes", get(status_codes))
         .route("/analytics/sites", get(sites_overview))
+        .route("/analytics/ai-crawlers", get(ai_crawlers))
+}
+
+/// One AI crawler family in the traffic panel.
+#[derive(Debug, Serialize)]
+pub struct AiCrawlerRow {
+    pub bot_id: String,
+    pub name: String,
+    pub category: String,
+    pub requests: i64,
+    pub blocked: i64,
+    pub last_seen: Option<DateTime<Utc>>,
+}
+
+/// Response of `/analytics/ai-crawlers`.
+#[derive(Debug, Serialize)]
+pub struct AiCrawlerOverview {
+    pub requests: i64,
+    pub blocked: i64,
+    /// share = AI requests / all requests in the window, 0.0–1.0.
+    pub share: f64,
+    pub families: i64,
+    pub rows: Vec<AiCrawlerRow>,
+}
+
+/// `GET /api/v1/analytics/ai-crawlers`
+///
+/// Aggregates the AI crawler families the control plane knows by matching the
+/// raw user agent recorded in `access_logs`. The predicates are constants
+/// from the catalogue (never user input), and the site+time index still
+/// bounds the scan.
+async fn ai_crawlers(
+    State(state): State<AppState>,
+    current: AuthUser,
+    Query(query): Query<RangeQuery>,
+) -> Result<Json<AiCrawlerOverview>, ApiError> {
+    let resolved = resolve(&state, &current, &query).await?;
+
+    let (case_sql, filter_sql) = ai_crawler_predicates();
+    let (where_sql, mut values) = resolved.filter("access_logs");
+    let limit_placeholder = resolved.next_placeholder();
+    values.push(Value::from(resolved.limit));
+
+    let sql = format!(
+        "SELECT {case_sql} AS bot_id, \
+                COUNT(*) AS requests, \
+                MAX(timestamp) AS last_seen \
+         FROM access_logs WHERE {where_sql} AND ({filter_sql}) \
+         GROUP BY bot_id ORDER BY requests DESC LIMIT ${limit_placeholder}"
+    );
+    let rows = query_all(&state.db, &sql, values).await?;
+
+    // Blocked counts come from the AI bot events the data plane emits, not
+    // from every 403/429 an AI user agent happened to receive: an origin's
+    // own 403 is not our block, and counting it would inflate the panel.
+    let (event_where, event_values) = resolved.filter("security_events");
+    let blocked_sql = format!(
+        "SELECT rule_name, COUNT(*) AS blocked FROM security_events \
+         WHERE {event_where} AND event_type = 'ai_bot' GROUP BY rule_name"
+    );
+    let blocked_rows =
+        query_all(&state.db, &blocked_sql, event_values).await?;
+    let mut blocked_by_bot: HashMap<String, i64> = HashMap::new();
+    for row in &blocked_rows {
+        let rule_name = get_value::<String>(row, "rule_name");
+        // The data plane labels the event `AI crawler: <family id>`.
+        let bot_id = rule_name
+            .strip_prefix("AI crawler: ")
+            .unwrap_or(&rule_name)
+            .to_string();
+        let count = get_value::<i64>(row, "blocked");
+        *blocked_by_bot.entry(bot_id).or_insert(0) += count;
+    }
+
+    let mut total = 0i64;
+    let mut blocked = 0i64;
+    let mut by_family: Vec<AiCrawlerRow> = rows
+        .iter()
+        .map(|row| {
+            let bot_id = get_value::<String>(row, "bot_id");
+            let bot = crate::api::ai_crawl::find_bot(&bot_id);
+            let requests = get_value::<i64>(row, "requests");
+            let family_blocked =
+                blocked_by_bot.get(&bot_id).copied().unwrap_or(0);
+            total += requests;
+            blocked += family_blocked;
+            AiCrawlerRow {
+                name: bot.map_or_else(|| bot_id.clone(), |bot| bot.name.to_string()),
+                category: bot
+                    .map_or_else(|| "other".to_string(), |bot| bot.category.to_string()),
+                bot_id,
+                requests,
+                blocked: family_blocked,
+                last_seen: try_get::<DateTime<Utc>>(row, "last_seen"),
+            }
+        })
+        .collect();
+
+    // Share against every request in the same window, not just the matched
+    // rows: "AI crawlers are 3% of traffic" is the number an operator acts on.
+    let (all_where, all_values) = resolved.filter("access_logs");
+    let all_sql =
+        format!("SELECT COUNT(*) AS requests FROM access_logs WHERE {all_where}");
+    let all_rows = query_all(&state.db, &all_sql, all_values).await?;
+    let window_requests = all_rows
+        .first()
+        .map(|row| get_value::<i64>(row, "requests"))
+        .unwrap_or(0);
+
+    by_family.shrink_to_fit();
+    Ok(Json(AiCrawlerOverview {
+        requests: total,
+        blocked,
+        share: if window_requests == 0 {
+            0.0
+        } else {
+            total as f64 / window_requests as f64
+        },
+        families: by_family.len() as i64,
+        rows: by_family,
+    }))
+}
+
+/// Builds the `CASE` that names a family and the `WHERE` that restricts the
+/// scan to AI user agents.
+fn ai_crawler_predicates() -> (String, String) {
+    let mut case_sql = String::from("CASE");
+    let mut filter_sql = String::new();
+    for bot in crate::api::ai_crawl::AI_BOTS {
+        for pattern in bot.ua_substrings {
+            case_sql.push_str(&format!(
+                " WHEN user_agent ILIKE '%{pattern}%' THEN '{}'",
+                bot.id
+            ));
+            if !filter_sql.is_empty() {
+                filter_sql.push_str(" OR ");
+            }
+            filter_sql.push_str(&format!("user_agent ILIKE '%{pattern}%'"));
+        }
+    }
+    case_sql.push_str(" ELSE 'other' END");
+    (case_sql, filter_sql)
 }
 
 /// Validates the incoming range and resolves tenant visibility.

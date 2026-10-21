@@ -51,6 +51,7 @@ use pingap_util::{IpRules, base64_decode};
 use pingora::http::{ResponseHeader, Version};
 use pingora::proxy::Session;
 use pingwaf_agent::cache::{
+    AiCrawlConfig as CacheAiCrawlConfig,
     BasicAuthConfig as CacheBasicAuthConfig,
     BotProtectionConfig as CacheBotProtection, GeoConfig as CacheGeoConfig,
     IpAccessAction as CacheIpAccessAction, RateLimitRule as CacheRateLimitRule,
@@ -277,6 +278,9 @@ struct SiteContext {
     policy: AccessPolicy,
     /// Bot protection (UA classification); `None` when disabled.
     bot: Option<BotPolicy>,
+    /// AI crawler families with an explicit action; empty when the site has
+    /// no AI crawler policy.
+    ai_bots: Vec<AiBotRule>,
     /// Rate limit rules; `None` when the site has none that are enforceable.
     rate_limits: Option<RateLimitPolicy>,
     /// mTLS enforcement; `None` when the site does not use mTLS.
@@ -334,6 +338,7 @@ impl SiteContext {
                 .as_ref()
                 .filter(|cfg| cfg.enabled)
                 .map(BotPolicy::build),
+            ai_bots: ai_bot_rules(site_rules.ai_crawl.as_ref()),
             rate_limits: (!rate_limits.rules.is_empty()).then_some(rate_limits),
             mtls: MtlsPolicy::build(site_rules.ssl_config.as_ref()),
             basic_auth,
@@ -796,6 +801,78 @@ impl BotPolicy {
         };
         self.decide(self.denial(detail))
     }
+}
+
+/// What the site does with one AI crawler family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AiAction {
+    Allow,
+    Monitor,
+    Block,
+}
+
+/// One AI crawler family the site distinguishes: the user-agent patterns the
+/// control plane sent with the bundle, and the action to apply.
+struct AiBotRule {
+    id: String,
+    category: String,
+    patterns: Vec<String>,
+    action: AiAction,
+}
+
+impl AiBotRule {
+    fn matches(&self, user_agent: &str) -> bool {
+        self.patterns
+            .iter()
+            .any(|pattern| contains_ignore_case(user_agent, pattern))
+    }
+
+    fn denial(&self) -> Denial {
+        Denial {
+            rule_id: "ai_bot".to_string(),
+            rule_name: format!("AI crawler: {}", self.id),
+            detail: format!(
+                "AI crawler '{}' ({}) matched the site policy",
+                self.id, self.category
+            ),
+            challenge: false,
+            basic_auth: false,
+        }
+    }
+}
+
+/// Compiles the site's AI crawler policy. `enabled = false` (or no policy)
+/// yields no rules, so the feature costs nothing when it is off.
+fn ai_bot_rules(ai: Option<&CacheAiCrawlConfig>) -> Vec<AiBotRule> {
+    let Some(ai) = ai.filter(|cfg| cfg.enabled) else {
+        return Vec::new();
+    };
+    ai.policies
+        .iter()
+        .filter_map(|policy| {
+            let action = match policy.action.as_str() {
+                "allow" => AiAction::Allow,
+                "monitor" => AiAction::Monitor,
+                "block" => AiAction::Block,
+                _ => return None,
+            };
+            let patterns: Vec<String> = policy
+                .ua_substrings
+                .iter()
+                .map(|pattern| pattern.trim().to_lowercase())
+                .filter(|pattern| !pattern.is_empty())
+                .collect();
+            if patterns.is_empty() {
+                return None;
+            }
+            Some(AiBotRule {
+                id: policy.id.clone(),
+                category: policy.category.clone(),
+                patterns,
+                action,
+            })
+        })
+        .collect()
 }
 
 /// Loose fingerprint of a real browser user agent: browsers declare
@@ -1590,6 +1667,7 @@ impl LogBodyPrefix {
         if self.limit == 0 {
             return;
         }
+        let before = self.body.as_ref().map_or(0, Vec::len);
         let buf = self.body.get_or_insert_with(|| {
             Vec::with_capacity(chunk.len().min(self.limit))
         });
@@ -1598,16 +1676,54 @@ impl LogBodyPrefix {
         if buf.len() <= self.limit {
             buf.extend_from_slice(chunk);
         }
+        let after = self.body.as_ref().map_or(0, Vec::len);
+        if after > before {
+            pingwaf_profiler::add_memory(
+                pingwaf_profiler::Module::Log,
+                (after - before) as i64,
+            );
+        }
     }
 
     fn finish(mut self) -> (Option<Vec<u8>>, u64, bool) {
         if let Some(buf) = self.body.as_mut()
             && buf.len() > self.limit
         {
+            let removed = buf.len() - self.limit;
             buf.truncate(self.limit);
             self.truncated = true;
+            if removed > 0 {
+                pingwaf_profiler::add_memory(
+                    pingwaf_profiler::Module::Log,
+                    -(removed as i64),
+                );
+            }
         }
-        (self.body, self.size, self.truncated)
+        // The prefix leaves this struct for the log entry; release the
+        // module gauge before handing it over (`take` keeps the field so
+        // `Drop` still runs on the remaining value).
+        let held = self.body.as_ref().map_or(0, Vec::len);
+        if held > 0 {
+            pingwaf_profiler::add_memory(
+                pingwaf_profiler::Module::Log,
+                -(held as i64),
+            );
+        }
+        (self.body.take(), self.size, self.truncated)
+    }
+}
+
+impl Drop for LogBodyPrefix {
+    fn drop(&mut self) {
+        // A body abandoned mid-stream (client gone, upstream failed) still
+        // has to give its bytes back to the module gauge.
+        let held = self.body.as_ref().map_or(0, Vec::len);
+        if held > 0 {
+            pingwaf_profiler::add_memory(
+                pingwaf_profiler::Module::Log,
+                -(held as i64),
+            );
+        }
     }
 }
 
@@ -3208,6 +3324,65 @@ impl Plugin for WafPlugin {
 
         // ── Bot protection: UA classification runs after IP/geo and before
         // the engine, applying whether or not the WAF engine is enabled ──
+        // ── AI crawler control: per-family actions, independent of the
+        // traditional bot whitelist ──
+        if let Some(rules) = context.as_ref().map(|site| site.ai_bots.as_slice())
+            && let Some(rule) =
+                rules.iter().find(|rule| rule.matches(&user_agent))
+        {
+            let denial = rule.denial();
+            match rule.action {
+                AiAction::Allow => {},
+                AiAction::Monitor => {
+                    Self::log_observed(
+                        &site_id,
+                        &request_id,
+                        &host,
+                        &request_data,
+                        WafAction::Monitor,
+                        &denial.rule_id,
+                        &denial.detail,
+                        &denial.rule_name,
+                        "ai_bot",
+                    );
+                },
+                AiAction::Block => {
+                    // Observation mode must degrade every protection to
+                    // logging, including this one (2026-10 review).
+                    if observe {
+                        Self::log_observed(
+                            &site_id,
+                            &request_id,
+                            &host,
+                            &request_data,
+                            WafAction::Block,
+                            &denial.rule_id,
+                            &denial.detail,
+                            &denial.rule_name,
+                            "ai_bot",
+                        );
+                    } else {
+                        let original_url = if query.is_empty() {
+                            path.clone()
+                        } else {
+                            format!("{path}?{query}")
+                        };
+                        return Ok(Self::deny_request(
+                            agent.as_ref(),
+                            &site_id,
+                            &request_id,
+                            &host,
+                            &request_data,
+                            &denial,
+                            &original_url,
+                            self.pow_difficulty,
+                            "ai_bot",
+                        ));
+                    }
+                },
+            }
+        }
+
         if let Some(bot) = context.as_ref().and_then(|ctx| ctx.bot.as_ref()) {
             match bot.evaluate(client_addr, &user_agent).await {
                 BotDecision::Pass => {},
@@ -3496,6 +3671,17 @@ impl Plugin for WafPlugin {
         else {
             return Ok(None);
         };
+        // Body staging is the one WAF stage that can hold megabytes per
+        // in-flight request, so it gets its own module and method row.
+        let _body_timer = pingwaf_profiler::timed_method(
+            pingwaf_profiler::Method::WafBodyRead,
+        );
+        let staged_bytes = entry.buffer.len()
+            + body.as_ref().map_or(0, |chunk| chunk.len());
+        let _body_memory = pingwaf_profiler::track_method_memory(
+            pingwaf_profiler::Method::WafBodyRead,
+            staged_bytes as u64,
+        );
         // Fail-open deadline: while still withholding bytes, an entry past
         // its deadline releases everything buffered (plus the current
         // chunk) to the upstream un-inspected and the entry is dropped, so
@@ -4007,6 +4193,7 @@ ml_threshold = 0.75
                 trusted_ranges: Vec::new(),
             },
             response_replace: None,
+            ai_crawl: None,
         }
     }
 

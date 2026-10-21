@@ -34,6 +34,14 @@ updates:
       # than only majors, since 0.x minors would slip past update-types.
       # Lift this once pingora ships a newer sentry.
       - dependency-name: "sentry-core"
+      # tokio 1.54.0 added `assert!(capacity > 0)` to BufReader/BufStream
+      # `with_capacity`, which panics with pingora 0.9.0's hardcoded (0, 0)
+      # buffers (cloudflare/pingora#1059). The workspace pins "=1.53.3" in
+      # Cargo.toml, which already prevents any 1.54+ resolution — no
+      # `versions:` ignore is needed here, and leaving one would also hide
+      # future 1.54.x security patches. Lift the pin once pingora ships a
+      # release containing the fix; until then a 1.54.x advisory needs a
+      # manual assessment (patch pingora locally or vendor the fix).
 
   - package-ecosystem: npm
     directory: /web

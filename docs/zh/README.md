@@ -14,6 +14,7 @@
 | [user-guide.md](../user-guide.md) | 控制台使用：站点、规则、策略、IP 访问控制、限流 |
 | [http-lifecycle.md](./http-lifecycle.md) | 请求生命周期中各功能的作用阶段——WAF 检查顺序、缓存、错误页，以及如何据此排查问题 |
 | [api.md](../api.md) | REST API 参考（基址 `https://<host>:9080/api/v1`） |
+| [ai-crawl.md](./ai-crawl.md) | AI 爬虫控制——爬虫家族、站点级策略、生成的 robots.txt / llms.txt |
 | [profiling.md](./profiling.md) | 系统观测与归因：`/system/metrics` CPU/内存快照、`/system/profile` 模块/方法归因 |
 
 ## 🧭 项目与社区

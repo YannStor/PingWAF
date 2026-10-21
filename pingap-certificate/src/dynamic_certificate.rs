@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use pingap_config::CertificateConf;
 use pingap_config::Hashable;
 use pingora::listeners::tls::TlsSettings;
+use pingora::protocols::tls::ALPN;
 #[cfg(feature = "openssl")]
 use pingora::tls::ssl::{NameType, SslRef, SslVersion};
 use std::borrow::Cow;
@@ -125,6 +126,10 @@ pub fn parse_certificates(
 pub struct TlsSettingParams {
     pub server_name: String,
     pub enabled_h2: bool,            // Enable HTTP/2 support
+    /// Whether HTTP/1.1 stays available. `false` with `enabled_h2` true makes
+    /// the listener advertise h2 only, which is how a site that turned
+    /// HTTP/1.1 off is actually served.
+    pub http1_enabled: bool,
     pub cipher_list: Option<String>, // Legacy cipher list
     pub cipher_suites: Option<String>, // Modern cipher suites
     pub tls_min_version: Option<String>, // Minimum TLS version
@@ -132,6 +137,21 @@ pub struct TlsSettingParams {
     /// PEM bundle of CAs trusted for downstream client certificates. `None`
     /// leaves client certificate verification off.
     pub client_ca_pem: Option<String>,
+}
+
+/// The ALPN protocols the listener advertises for a pair of switches.
+///
+/// A site that speaks neither protocol is refused by the control plane, so
+/// the fallback here only guards a hand-written config.
+fn alpn_for(http1_enabled: bool, http2_enabled: bool) -> ALPN {
+    match (http1_enabled, http2_enabled) {
+        (true, true) => ALPN::H2H1,
+        (false, true) => ALPN::H2,
+        (true, false) => ALPN::H1,
+        // Never reachable through the API; keeping HTTP/1.1 on is the safer
+        // fallback for a configuration written by hand.
+        (false, false) => ALPN::H1,
+    }
 }
 
 /// The OpenSSL protocol version named by a `tls_min_version` /
@@ -224,9 +244,12 @@ impl GlobalCertificate {
         let mut tls_settings =
             TlsSettings::with_callbacks(Box::new(self.clone()))
                 .map_err(|e| invalid("new tls settings", &e))?;
-        if params.enabled_h2 {
-            tls_settings.enable_h2();
-        }
+        // `enable_h2()` is exactly `set_alpn(H2H1)`; spelling the pair out
+        // lets a site that turned HTTP/1.1 off advertise h2 alone.
+        tls_settings.set_alpn(alpn_for(
+            params.http1_enabled,
+            params.enabled_h2,
+        ));
         if let Some(cipher_list) = &params.cipher_list {
             tls_settings
                 .set_cipher_list(cipher_list)
@@ -338,9 +361,12 @@ impl GlobalCertificate {
                 message: e.to_string(),
             })?;
         tls_settings.set_cert_resolver(Arc::new(self.clone()));
-        if params.enabled_h2 {
-            tls_settings.enable_h2();
-        }
+        // `enable_h2()` is exactly `set_alpn(H2H1)`; spelling the pair out
+        // lets a site that turned HTTP/1.1 off advertise h2 alone.
+        tls_settings.set_alpn(alpn_for(
+            params.http1_enabled,
+            params.enabled_h2,
+        ));
         // pingora's rustls listener fixes TLS 1.2 + 1.3 with rustls' default
         // cipher suites; say so rather than silently dropping the settings.
         for (setting, value) in [

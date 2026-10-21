@@ -87,6 +87,10 @@ pub struct ServerConf {
     // Whether HTTP/2 protocol support is enabled for this server
     // The http protocol is using h2c
     pub enabled_h2: bool,
+    // Whether HTTP/1.1 stays advertised over TLS. Turning it off together
+    // with `enabled_h2` makes the listener ALPN h2-only; turning both off is
+    // rejected by `pingap-config`.
+    pub http1_enabled: bool,
     // Downstream HTTP/2 SETTINGS overrides. None keeps pingora's bounded
     // defaults (100 concurrent streams, 64 KiB header list, h2's own
     // 64 KiB windows) - see `Server::new_h2_options`.
@@ -294,6 +298,9 @@ pub fn parse_from_conf(conf: PingapConfig) -> Vec<ServerConf> {
             global_certificates: item.global_certificates.unwrap_or_default(),
             client_ca_pem: item.client_ca_pem.clone(),
             enabled_h2: item.enabled_h2.unwrap_or_default(),
+            // Serving HTTP/1.1 is the historical default, so an unset switch
+            // keeps it on.
+            http1_enabled: item.http1_enabled.unwrap_or(true),
             h2_max_concurrent_streams: item.h2_max_concurrent_streams,
             // Validated to fit u32 by pingap-config; the fallback only
             // guards the cast.

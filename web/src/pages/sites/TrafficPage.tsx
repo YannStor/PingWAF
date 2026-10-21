@@ -29,6 +29,7 @@ import {
   UploadSimple,
   Gauge,
   Lightning,
+  Robot,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { IpQuickActions } from '@/components/waf/IpQuickActions'
@@ -40,6 +41,7 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { SkeletonStat } from '@/components/ui/Skeleton'
 import { ErrorState } from '@/components/ErrorState'
 import { trafficApi, trafficKeys, RANGE_HOURS, TRAFFIC_STEP, groupStatusCodes } from '@/api/traffic'
+import { aiCrawlApi, aiCrawlKeys } from '@/api/aiCrawl'
 import { countryFlag, geoApi, geoKeys } from '@/api/geo'
 import { WorldMapChart } from '@/components/charts/WorldMapChart'
 import { cn } from '@/lib/utils'
@@ -52,7 +54,13 @@ import {
   formatPercent,
   formatSize,
 } from '@/lib/format'
-import { TRAFFIC_RANGES, type TopIp, type TopRule, type TrafficRange } from '@/api/types'
+import {
+  TRAFFIC_RANGES,
+  type AiCrawlerRow,
+  type TopIp,
+  type TopRule,
+  type TrafficRange,
+} from '@/api/types'
 
 const PIE_COLORS = ['#18794e', '#0051c3', '#ffb224', '#e54d2a']
 
@@ -626,9 +634,178 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
               </CardBody>
             </Card>
           </div>
+
+          {/* AI crawler traffic */}
+          <AiBotsPanel siteId={siteId} range={range} />
         </div>
       )}
     </>
+  )
+}
+
+const AI_CATEGORY_TONES: Record<string, 'brand' | 'info' | 'warning' | 'neutral'> = {
+  training: 'warning',
+  search: 'brand',
+  agent: 'info',
+  other: 'neutral',
+}
+
+/**
+ * AI crawler traffic panel — the `/analytics/ai-crawlers` overview plus the
+ * family ranking table. Scopes to one site when `siteId` is given; the
+ * aggregate endpoint spans every visible site otherwise. Follows the same
+ * time-range selector as the rest of the page (narrower presets widen to 24h,
+ * the smallest window the endpoint keeps).
+ */
+export function AiBotsPanel({
+  siteId,
+  range = '24h',
+}: {
+  siteId?: string
+  range?: TrafficRange
+}) {
+  const { t, i18n } = useTranslation()
+  const overviewQuery = useQuery({
+    queryKey: aiCrawlKeys.aiBots(siteId, range),
+    queryFn: () => aiCrawlApi.aiCrawlerOverview(siteId, range),
+    enabled: siteId === undefined || Boolean(siteId),
+    refetchInterval: 60_000,
+  })
+  const overview = overviewQuery.data
+  const rows = useMemo(
+    () => [...(overview?.rows ?? [])].sort((a, b) => b.requests - a.requests),
+    [overview],
+  )
+
+  const columns: Column<AiCrawlerRow>[] = [
+    {
+      key: 'name',
+      header: t('pages.traffic.aiBots.colBot'),
+      accessor: (r) => r.name,
+      cell: (r) => (
+        <div className="flex items-center gap-2">
+          <span className="text-[13px] font-medium text-fg-strong">{r.name}</span>
+          <Badge size="sm" tone={AI_CATEGORY_TONES[r.category] ?? 'neutral'}>
+            {t(`pages.bots.aiCrawl.category.${r.category}`, r.category)}
+          </Badge>
+        </div>
+      ),
+    },
+    {
+      key: 'requests',
+      header: t('pages.traffic.aiBots.colRequests'),
+      accessor: (r) => r.requests,
+      align: 'right',
+      sortable: true,
+      width: '1%',
+      cell: (r) => (
+        <span className="tabular-nums text-[13px] text-fg">{formatNumber(r.requests)}</span>
+      ),
+    },
+    {
+      key: 'blocked',
+      header: t('pages.traffic.aiBots.colBlocked'),
+      accessor: (r) => r.blocked,
+      align: 'right',
+      width: '1%',
+      cell: (r) =>
+        r.blocked > 0 ? (
+          <Badge tone="danger" size="sm">
+            {formatNumber(r.blocked)}
+          </Badge>
+        ) : (
+          <span className="text-[13px] text-fg-subtle">0</span>
+        ),
+    },
+    {
+      key: 'block_rate',
+      header: t('pages.traffic.aiBots.colBlockRate'),
+      accessor: (r) => (r.requests > 0 ? r.blocked / r.requests : 0),
+      align: 'right',
+      width: '1%',
+      cell: (r) => (
+        <span className="tabular-nums text-[13px] text-fg-subtle">
+          {formatPercent(r.requests > 0 ? r.blocked / r.requests : 0)}
+        </span>
+      ),
+    },
+    {
+      key: 'last_seen',
+      header: t('pages.traffic.aiBots.colLastSeen'),
+      accessor: (r) => r.last_seen ?? '',
+      align: 'right',
+      width: '1%',
+      cell: (r) =>
+        r.last_seen ? (
+          <span className="tabular-nums text-[13px] text-fg-subtle">
+            {new Date(r.last_seen).toLocaleString(i18n.language)}
+          </span>
+        ) : (
+          <span className="text-[13px] text-fg-subtle">—</span>
+        ),
+    },
+  ]
+
+  return (
+    <Card>
+      <CardHeader
+        title={t('pages.traffic.aiBots.title')}
+        description={t('pages.traffic.aiBots.description')}
+        action={<Robot weight="duotone" className="h-4 w-4 text-fg-subtle" />}
+      />
+      <CardBody className="flex flex-col gap-4">
+        {overviewQuery.isPending && !overview ? (
+          <div className="h-24 animate-pulse rounded-lg bg-recessed" />
+        ) : overviewQuery.isError ? (
+          <ErrorState
+            error={overviewQuery.error}
+            onRetry={() => overviewQuery.refetch()}
+            retrying={overviewQuery.isFetching}
+          />
+        ) : (
+          <>
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+              <SummaryCard
+                icon={<Robot weight="duotone" className="h-4 w-4" />}
+                label={t('pages.traffic.aiBots.requests')}
+                value={formatCompactNumber(overview?.requests ?? 0)}
+              />
+              <SummaryCard
+                icon={<ShieldSlash weight="duotone" className="h-4 w-4" />}
+                label={t('pages.traffic.aiBots.blocked')}
+                value={formatCompactNumber(overview?.blocked ?? 0)}
+                tone="danger"
+              />
+              <SummaryCard
+                icon={<ChartLine weight="duotone" className="h-4 w-4" />}
+                label={t('pages.traffic.aiBots.share')}
+                value={formatPercent(overview?.share ?? 0)}
+              />
+              <SummaryCard
+                icon={<Users weight="duotone" className="h-4 w-4" />}
+                label={t('pages.traffic.aiBots.families')}
+                value={formatNumber(overview?.families ?? 0)}
+              />
+            </div>
+            <CardBody className="p-0">
+              <Table
+                columns={columns}
+                data={rows}
+                rowKey={(r) => r.bot_id}
+                dense
+                empty={
+                  <EmptyState
+                    className="border-0 py-8"
+                    icon={<Robot weight="duotone" className="h-8 w-8" />}
+                    title={t('pages.traffic.aiBots.empty')}
+                  />
+                }
+              />
+            </CardBody>
+          </>
+        )}
+      </CardBody>
+    </Card>
   )
 }
 
