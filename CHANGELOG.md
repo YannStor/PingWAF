@@ -8,6 +8,46 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.29.3] — 2026-10-22
+
+### Fixed
+
+- **Changing the password no longer ends in a bogus error dialog.** The change
+  revokes every token for the account, but the console then re-read the profile
+  with the dead access token: the forced-change dialog and the profile page
+  turned the resulting `401` into an error message (or a silent sign-out) after
+  a change that had actually succeeded. Both now sign out, drop the cached
+  data and ask the operator to sign in again with the new password.
+- **Changing your own login name from the users table** bumps the token
+  version server-side; the page now signs out instead of letting the next
+  request drop the session without explanation.
+- **The display name can be cleared.** `PUT /auth/me` treats `null` as "leave
+  unchanged" and only an empty string clears it; the profile form sent `null`.
+- **`pingwaf user reset-password` revokes the account's sessions** by bumping
+  its token version, like `PUT /auth/password` and `PUT /users/{id}` already
+  did — a leaked refresh token used to survive the reset.
+- **The forced-change exemption table is derived from `API_PREFIX`** instead of
+  repeating `/api/v1`, so a prefix change cannot silently re-arm the lockout
+  the entry above describes.
+- **Documentation follows the code again.** The API reference no longer
+  advertises a `/auth/logout` endpoint that was never registered, `POST /users`
+  is described as creating accounts with `must_change_password: false`, `POST
+  /keys` explains that non-administrator permissions are narrowed to `read`,
+  the MCP section no longer claims a request-rate limit, and the error-code
+  table covers `token_expired`, `password_change_required`, `502`/`503` and the
+  envelope fallbacks.
+
+### Changed
+
+- **The dashboard build now requires Node 26.12.1.** CI, release workflows and
+  the Docker images are pinned to that exact patch release, `web/.npmrc` sets
+  `engine-strict=true`, and the `engines` field requires `>=26.12.1` — builds
+  on Node 22/24 now fail outright, so the local runtime must be upgraded.
+  26.12.1 ships the 2026-10-21 security release fixing 10 CVEs (including
+  CVE-2026-111497, an out-of-bounds write in the Brotli decoder that enables
+  remote code execution). `make build-web` accordingly switched from
+  `npm install` to `npm ci`.
+
 ## [PingWAF 0.29.2] — 2026-10-22
 
 ### Fixed
@@ -27,23 +67,6 @@ verbatim for reference and attribution, and is not maintained here.
   no longer rewrites the shared default to 20.
 - **Duration formatting edges**: `formatMicros(999.9)` prints `1.0 ms` (was
   `1000 µs`), and `formatLatency(0)` prints `0 ms` (was `0.0 ms`).
-- **Changing the password no longer ends in a bogus error dialog.** The change
-  revokes every token for the account, but the console then re-read the profile
-  with the dead access token: the forced-change dialog and the profile page
-  turned the resulting `401` into an error message (or a silent sign-out) after
-  a change that had actually succeeded. Both now sign out, drop the cached
-  data and ask the operator to sign in again with the new password.
-- **Changing your own login name from the users table** bumps the token
-  version server-side; the page now signs out instead of letting the next
-  request drop the session without explanation.
-- **The display name can be cleared.** `PUT /auth/me` treats `null` as "leave
-  unchanged" and only an empty string clears it; the profile form sent `null`.
-- **`pingwaf user reset-password` revokes the account's sessions** by bumping
-  its token version, like `PUT /auth/password` and `PUT /users/{id}` already
-  did — a leaked refresh token used to survive the reset.
-- **The forced-change exemption table is derived from `API_PREFIX`** instead of
-  repeating `/api/v1`, so a prefix change cannot silently re-arm the lockout
-  the entry above describes.
 
 ### Changed
 
@@ -54,14 +77,6 @@ verbatim for reference and attribution, and is not maintained here.
   (`mem_peak_bytes`); the duration share stays as text only.
 - **Durations scale with magnitude** everywhere in the console: `850 ms`,
   `3.2 s`, `5m 12s`, `3h 05m`, `2d 4h`.
-- **The dashboard build now requires Node 26.12.1.** CI, release workflows and
-  the Docker images are pinned to that exact patch release, `web/.npmrc` sets
-  `engine-strict=true`, and the `engines` field requires `>=26.12.1` — builds
-  on Node 22/24 now fail outright, so the local runtime must be upgraded.
-  26.12.1 ships the 2026-10-21 security release fixing 10 CVEs (including
-  CVE-2026-111497, an out-of-bounds write in the Brotli decoder that enables
-  remote code execution). `make build-web` accordingly switched from
-  `npm install` to `npm ci`.
 
 ### Added
 
