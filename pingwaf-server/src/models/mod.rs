@@ -36,6 +36,7 @@ pub mod log_retention;
 pub mod login_histories;
 pub mod mtls;
 pub mod notifications;
+pub mod oidc_providers;
 pub mod origin_settings;
 pub mod passkeys;
 pub mod rate_limit_stats;
@@ -78,6 +79,7 @@ pub use notifications::{
     channel_kind, event_type, notification_channels as notification_channel,
     notification_events as notification_event, severity,
 };
+pub use oidc_providers::oidc_providers as oidc_provider;
 pub use passkeys::{
     passkey_credentials as passkey_credential, passkey_states as passkey_state,
 };

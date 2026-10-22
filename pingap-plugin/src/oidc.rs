@@ -104,10 +104,149 @@ pub struct Oidc {
     /// The headers of `claims_to_headers`: what a client does not get to
     /// write, or to take away.
     own_headers: Vec<HeaderName>,
+    /// Whether a signed-in user may enter, and what that depends on.
+    access: AccessPolicy,
     client: reqwest::Client,
     provider: ArcSwapOption<Provider>,
     /// One discovery at a time, and when the last one was started.
     discovery_lock: tokio::sync::Mutex<Option<Instant>>,
+}
+
+/// Whether a signed-in user may enter, and what that depends on.
+///
+/// Authenticating proves *who* someone is; it does not say whether they may
+/// pass. This is the half that does, held against the validated ID token's
+/// claims at the point the session is read — the one place a request with a
+/// session can be refused, and therefore the only place the check cannot be
+/// walked around.
+#[derive(Debug, Clone, PartialEq)]
+enum AccessPolicy {
+    /// Every signed-in user is admitted. The default, and what the gate did
+    /// before access rules existed.
+    AllowAll,
+    /// Admitted when **any** rule matches.
+    RequireAny(Vec<AccessRule>),
+    /// Admitted only when **every** rule matches.
+    RequireAll(Vec<AccessRule>),
+}
+
+/// One access rule: a claim, how to hold it, and what to hold it against.
+#[derive(Debug, Clone, PartialEq)]
+struct AccessRule {
+    claim: String,
+    operator: Operator,
+    value: String,
+}
+
+/// How an [`AccessRule`] holds a claim against its value.
+///
+/// Closed on purpose: an operator this build does not know must not be read
+/// as a permission it never meant to grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Operator {
+    /// The claim equals `value`. A list claim matches when any element does.
+    Eq,
+    /// The claim differs from `value`. A list claim matches when no element
+    /// does — the reading "not in this group" is meant to have.
+    Ne,
+    /// The claim is a list containing `value`, or a string containing it.
+    Contains,
+    /// `value` is a comma-separated list and the claim matches one entry.
+    In,
+    /// The claim is present and not empty. `value` is unused.
+    Exists,
+}
+
+impl Operator {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "eq" => Some(Self::Eq),
+            "ne" => Some(Self::Ne),
+            "contains" => Some(Self::Contains),
+            "in" => Some(Self::In),
+            "exists" => Some(Self::Exists),
+            _ => None,
+        }
+    }
+
+    /// Whether this operator reads the rule's value. `exists` does not, so a
+    /// rule without one is well-formed for it alone.
+    fn uses_value(self) -> bool {
+        !matches!(self, Self::Exists)
+    }
+}
+
+impl AccessRule {
+    /// Whether the claims satisfy this rule.
+    ///
+    /// A claim that is absent matches nothing except `ne` (which is what "not
+    /// in this group" means for someone who has no group at all) — treating
+    /// an absent claim as an empty string would let `ne` on a claim the
+    /// provider never sends admit everyone, which is the opposite of what an
+    /// operator writing it intends.
+    fn matches(&self, claims: &ClaimMap) -> bool {
+        let claim = claims.get(&self.claim);
+        let text = |value: &serde_json::Value| -> Option<String> {
+            match value {
+                serde_json::Value::String(text) => Some(text.clone()),
+                serde_json::Value::Number(number) => Some(number.to_string()),
+                serde_json::Value::Bool(flag) => Some(flag.to_string()),
+                _ => None,
+            }
+        };
+        // Every scalar form of the claim: a list contributes its elements,
+        // anything else contributes itself.
+        let scalars: Vec<String> = match claim {
+            Some(serde_json::Value::Array(items)) => {
+                items.iter().filter_map(text).collect()
+            },
+            Some(other) => text(other).into_iter().collect(),
+            None => Vec::new(),
+        };
+        let present = claim.is_some_and(|value| match value {
+            serde_json::Value::Array(items) => !items.is_empty(),
+            serde_json::Value::String(text) => !text.is_empty(),
+            serde_json::Value::Null => false,
+            _ => true,
+        });
+
+        match self.operator {
+            Operator::Exists => present,
+            Operator::Eq => scalars.iter().any(|item| item == &self.value),
+            Operator::Ne => scalars.iter().all(|item| item != &self.value),
+            Operator::Contains => scalars.iter().any(|item| {
+                item == &self.value || item.contains(self.value.as_str())
+            }),
+            Operator::In => self
+                .value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .any(|entry| scalars.iter().any(|item| item == entry)),
+        }
+    }
+}
+
+impl AccessPolicy {
+    /// Whether these claims may enter.
+    ///
+    /// `RequireAny` over an empty list is `false` and `RequireAll` over an
+    /// empty list is `true` — the vacuous readings of "any" and "all". The
+    /// control plane refuses to ship an enforcing mode with no rules, so the
+    /// empty case is only reachable from a hand-written config; denying it
+    /// (`RequireAny`) is the safe direction, and `RequireAll` cannot arise
+    /// there because the same guard rejects it.
+    fn admits(&self, claims: &ClaimMap) -> bool {
+        match self {
+            Self::AllowAll => true,
+            Self::RequireAny(rules) => {
+                rules.iter().any(|rule| rule.matches(claims))
+            },
+            Self::RequireAll(rules) => {
+                rules.iter().all(|rule| rule.matches(claims))
+            },
+        }
+    }
 }
 
 /// What the provider says of itself, at
@@ -303,6 +442,7 @@ impl TryFrom<&PluginConf> for Oidc {
             .iter()
             .map(|(_, header)| header.clone())
             .collect();
+        let access = parse_access_policy(value, &invalid)?;
         // Made of the secret and of whom the sessions are from and for: a
         // second plugin with the same secret and another provider, or
         // another client of it, does not take them for its own.
@@ -336,11 +476,108 @@ impl TryFrom<&PluginConf> for Oidc {
             session_ttl,
             claims_to_headers,
             own_headers,
+            access,
             client,
             provider: ArcSwapOption::empty(),
             discovery_lock: tokio::sync::Mutex::new(None),
         })
     }
+}
+
+/// The `access_mode` / `access_rules` of a plugin.
+///
+/// Rules arrive as `claim:operator:value` (and `claim:operator` for
+/// `exists`). A rule this build cannot read is a configuration error rather
+/// than a silent `allow_all`: an operator who wrote a rule meant to restrict
+/// access, and quietly ignoring it would hand them an open site.
+fn parse_access_policy(
+    value: &PluginConf,
+    invalid: &dyn Fn(String) -> Error,
+) -> Result<AccessPolicy> {
+    let mode = get_str_conf(value, "access_mode");
+    let mode = mode.trim();
+    let entries = get_str_slice_conf(value, "access_rules");
+
+    // An absent mode means the pre-existing behaviour, and a plugin
+    // configured from a file that never mentions access is not an error.
+    let mode = if mode.is_empty() {
+        if entries.is_empty() {
+            return Ok(AccessPolicy::AllowAll);
+        }
+        "require_any"
+    } else {
+        mode
+    };
+
+    match mode {
+        "allow_all" => {
+            // Rules alongside `allow_all` are inert; saying so beats letting
+            // an operator believe they are enforced.
+            if !entries.is_empty() {
+                return Err(invalid(
+                    "access_rules are set but access_mode is allow_all, so \
+                     nothing is enforced; remove one of the two"
+                        .to_string(),
+                ));
+            }
+            Ok(AccessPolicy::AllowAll)
+        },
+        "require_any" | "require_all" => {
+            let mut rules = Vec::with_capacity(entries.len());
+            for entry in entries {
+                rules.push(parse_access_rule(&entry, invalid)?);
+            }
+            if rules.is_empty() {
+                return Err(invalid(format!(
+                    "access_mode is {mode} but no access_rules are set, which \
+                     would deny every visitor"
+                )));
+            }
+            if mode == "require_any" {
+                Ok(AccessPolicy::RequireAny(rules))
+            } else {
+                Ok(AccessPolicy::RequireAll(rules))
+            }
+        },
+        other => Err(invalid(format!(
+            "access_mode {other:?} is not allow_all, require_any or require_all"
+        ))),
+    }
+}
+
+/// One `claim:operator[:value]` rule.
+fn parse_access_rule(
+    entry: &str,
+    invalid: &dyn Fn(String) -> Error,
+) -> Result<AccessRule> {
+    // Split at the first two colons only: a value may legitimately contain
+    // one (`urn:oidc:group`), while a claim may not (the API refuses it).
+    let mut parts = entry.splitn(3, ':');
+    let claim = parts.next().unwrap_or_default().trim().to_string();
+    let operator = parts.next().unwrap_or_default().trim();
+    let value = parts.next().unwrap_or_default().trim().to_string();
+
+    if claim.is_empty() {
+        return Err(invalid(format!(
+            "access rule {entry:?} has no claim, as in groups:contains:admins"
+        )));
+    }
+    let operator = Operator::parse(operator).ok_or_else(|| {
+        invalid(format!(
+            "access rule {entry:?} has no operator this build knows; use eq, \
+             ne, contains, in or exists"
+        ))
+    })?;
+    if operator.uses_value() && value.is_empty() {
+        return Err(invalid(format!(
+            "access rule {entry:?} needs a value for its operator"
+        )));
+    }
+    Ok(AccessRule {
+        claim,
+        operator,
+        value,
+    })
 }
 
 /// Why a request that came back from the provider is not a login.
@@ -1121,6 +1358,32 @@ impl Plugin for Oidc {
             return Ok(RequestPluginResult::Respond(self.logout(ctx).await));
         }
         if let Some(data) = self.session(session, now_sec()) {
+            // The one place a request carrying a session can be refused, so
+            // the only place an access rule cannot be walked around: a
+            // signed-in visitor whose claims do not satisfy the site's rules
+            // is stopped here, before any claim header is written.
+            if !self.access.admits(&data.claims) {
+                warn!(
+                    category = CATEGORY,
+                    issuer = self.issuer,
+                    event_type = "oidc_access_denied",
+                    "oidc access denied"
+                );
+                self.report_security_event(
+                    session,
+                    ctx,
+                    "oidc_access_denied",
+                    StatusCode::FORBIDDEN.as_u16() as u32,
+                    "the signed-in user does not satisfy the site's access rules",
+                );
+                // The session stays: the user is authenticated, they simply
+                // may not enter. A 403 says that; a redirect to the provider
+                // would loop, because the same account comes back.
+                return Ok(RequestPluginResult::Respond(text(
+                    StatusCode::FORBIDDEN,
+                    "You are signed in, but this site is not open to your account.",
+                )));
+            }
             self.set_claim_headers(session, &data);
             return Ok(RequestPluginResult::Continue);
         }
@@ -2517,5 +2780,164 @@ Pz7glwkTfq+X/7U/TTdWanLivIQqzKjyNBu3kgzx7GeUYcjtuw4RKof6
             assert_eq!(expected.2, details, "{refusal:?}");
             assert_eq!(true, details.len() <= 200, "{refusal:?}");
         }
+    }
+
+    // ─── Access rules ──────────────────────────────────────────────────
+    //
+    // Authenticating proves who someone is; these decide whether they may
+    // enter. The check runs where the session is read, so a rule cannot be
+    // walked around by replaying a session that predates it.
+
+    fn claims(json: &str) -> ClaimMap {
+        serde_json::from_str(json).expect("a claim map")
+    }
+
+    fn policy(extra: &str) -> AccessPolicy {
+        new_plugin(extra).expect("the plugin builds").access
+    }
+
+    #[test]
+    fn no_access_configuration_admits_everyone() {
+        // The behaviour before access rules existed: an operator who never
+        // mentions access keeps their site working.
+        let policy = policy("");
+        assert_eq!(AccessPolicy::AllowAll, policy);
+        assert!(policy.admits(&claims("{}")));
+    }
+
+    #[test]
+    fn allow_all_rejects_rules_that_would_do_nothing() {
+        // Rules next to `allow_all` are inert; saying so beats letting an
+        // operator believe they are enforced.
+        let error = match new_plugin(
+            "access_mode = \"allow_all\"\naccess_rules = [\"groups:exists\"]\n",
+        ) {
+            Ok(_) => panic!("inert rules are refused"),
+            Err(error) => error,
+        };
+        assert!(format!("{error}").contains("nothing is enforced"));
+    }
+
+    #[test]
+    fn rules_without_a_mode_are_treated_as_require_any() {
+        // A file that lists rules but no mode plainly means to restrict.
+        let policy = policy("access_rules = [\"groups:contains:admins\"]\n");
+        assert!(matches!(policy, AccessPolicy::RequireAny(_)));
+        assert!(policy.admits(&claims(r#"{"groups":["admins"]}"#)));
+        assert!(!policy.admits(&claims(r#"{"groups":["users"]}"#)));
+    }
+
+    #[test]
+    fn an_enforcing_mode_without_rules_is_refused() {
+        // It would deny every visitor, the operator included.
+        let error = match new_plugin("access_mode = \"require_any\"\n") {
+            Ok(_) => panic!("an empty rule list is refused"),
+            Err(error) => error,
+        };
+        assert!(format!("{error}").contains("deny every visitor"));
+    }
+
+    #[test]
+    fn an_unknown_mode_or_operator_is_refused_not_ignored() {
+        // Reading an unknown mode as allow_all would hand an operator an open
+        // site when they wrote a restriction.
+        assert!(
+            new_plugin("access_mode = \"require_some\"\n").is_err(),
+            "an unknown mode must not silently admit everyone"
+        );
+        assert!(
+            new_plugin("access_rules = [\"groups:matches:admins\"]\n").is_err(),
+            "an unknown operator must not silently drop the rule"
+        );
+        assert!(
+            new_plugin("access_rules = [\"groups:eq\"]\n").is_err(),
+            "a value-taking operator without a value is refused"
+        );
+        assert!(
+            new_plugin("access_rules = [\":eq:x\"]\n").is_err(),
+            "a rule with no claim is refused"
+        );
+    }
+
+    #[test]
+    fn require_any_admits_when_one_rule_matches() {
+        let policy = policy(
+            "access_mode = \"require_any\"\n\
+             access_rules = [\"groups:contains:admins\", \"hd:exists\"]\n",
+        );
+        assert!(policy.admits(&claims(r#"{"groups":["admins"]}"#)));
+        assert!(policy.admits(&claims(r#"{"hd":"example.com"}"#)));
+        assert!(!policy.admits(&claims(r#"{"groups":["users"]}"#)));
+        assert!(!policy.admits(&claims("{}")));
+    }
+
+    #[test]
+    fn require_all_admits_only_when_every_rule_matches() {
+        let policy = policy(
+            "access_mode = \"require_all\"\n\
+             access_rules = [\"groups:contains:admins\", \"email_verified:eq:true\"]\n",
+        );
+        assert!(
+            policy.admits(&claims(
+                r#"{"groups":["admins"],"email_verified":true}"#
+            ))
+        );
+        assert!(!policy.admits(&claims(r#"{"groups":["admins"]}"#)));
+    }
+
+    #[test]
+    fn every_operator_reads_the_claim_it_names() {
+        let eq = policy("access_rules = [\"email:eq:a@b.test\"]\n");
+        assert!(eq.admits(&claims(r#"{"email":"a@b.test"}"#)));
+        assert!(!eq.admits(&claims(r#"{"email":"c@d.test"}"#)));
+
+        // `ne` on a list means "in none of it", and on an absent claim it
+        // matches — someone with no group is not in the group.
+        let ne = policy("access_rules = [\"groups:ne:banned\"]\n");
+        assert!(ne.admits(&claims(r#"{"groups":["admins"]}"#)));
+        assert!(!ne.admits(&claims(r#"{"groups":["banned"]}"#)));
+        assert!(ne.admits(&claims("{}")));
+
+        let contains = policy("access_rules = [\"groups:contains:adm\"]\n");
+        assert!(contains.admits(&claims(r#"{"groups":["admins"]}"#)));
+        assert!(!contains.admits(&claims(r#"{"groups":["users"]}"#)));
+
+        let in_list = policy("access_rules = [\"role:in:admin,owner\"]\n");
+        assert!(in_list.admits(&claims(r#"{"role":"admin"}"#)));
+        assert!(in_list.admits(&claims(r#"{"role":"owner"}"#)));
+        assert!(!in_list.admits(&claims(r#"{"role":"viewer"}"#)));
+
+        // `exists` cares only that the claim is there and not empty.
+        let exists = policy("access_rules = [\"hd:exists\"]\n");
+        assert!(exists.admits(&claims(r#"{"hd":"example.com"}"#)));
+        assert!(!exists.admits(&claims(r#"{"hd":""}"#)));
+        assert!(!exists.admits(&claims("{}")));
+    }
+
+    #[test]
+    fn a_value_may_contain_a_colon() {
+        // Split at the first two colons only: an OIDC group id is commonly a
+        // urn, and cutting it at the second colon would test a prefix of it.
+        let policy =
+            policy("access_rules = [\"groups:contains:urn:oidc:admins\"]\n");
+        assert!(policy.admits(&claims(r#"{"groups":["urn:oidc:admins"]}"#)));
+        assert!(!policy.admits(&claims(r#"{"groups":["urn:oidc:users"]}"#)));
+    }
+
+    #[test]
+    fn numeric_and_boolean_claims_compare_as_text() {
+        // An IdP may send `email_verified` as a boolean and `level` as a
+        // number; an operator writes both as text.
+        let policy = policy(
+            "access_mode = \"require_all\"\n\
+             access_rules = [\"email_verified:eq:true\", \"level:in:2,3\"]\n",
+        );
+        assert!(policy.admits(&claims(r#"{"email_verified":true,"level":2}"#)));
+        assert!(
+            !policy.admits(&claims(r#"{"email_verified":false,"level":2}"#))
+        );
+        assert!(
+            !policy.admits(&claims(r#"{"email_verified":true,"level":9}"#))
+        );
     }
 }

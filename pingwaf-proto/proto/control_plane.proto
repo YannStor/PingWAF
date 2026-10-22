@@ -502,6 +502,14 @@ message OidcConfig {
   uint32 session_ttl_seconds = 11;
   // Claims of the validated ID token to forward to the origin as headers.
   repeated OidcHeaderClaim claims_to_headers = 12;
+  // What the site does with a signed-in visitor. One of "allow_all"
+  // (default), "require_any", "require_all". Authenticating proves who
+  // someone is; this is the half that says whether they may enter.
+  string access_mode = 13;
+  // Rules `access_mode` applies. Empty with `require_any` or `require_all`
+  // denies everyone but the site's own operators, which is why the API
+  // refuses to store that combination.
+  repeated OidcAccessRule access_rules = 14;
 }
 
 // One `claim -> request header` rule of `OidcConfig`.
@@ -510,6 +518,17 @@ message OidcHeaderClaim {
   string claim = 1;
   // Request header forwarded to the origin, e.g. "X-Auth-Email".
   string header = 2;
+}
+
+// One access rule of `OidcConfig`: how a claim of the validated ID token is
+// held against `value`.
+message OidcAccessRule {
+  // Claim read from the ID token, e.g. "groups".
+  string claim = 1;
+  // One of "eq", "ne", "contains", "in", "exists".
+  string operator = 2;
+  // What to compare against. Unused by "exists".
+  string value = 3;
 }
 
 message WafConfig {

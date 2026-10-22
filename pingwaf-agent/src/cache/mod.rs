@@ -854,6 +854,15 @@ pub struct OidcConfig {
     /// Claims copied from the ID token into request headers.
     #[serde(default)]
     pub claims_to_headers: Vec<OidcHeaderClaim>,
+    /// What a signed-in visitor must satisfy: `allow_all` (default),
+    /// `require_any`, `require_all`. Authenticating proves who someone is;
+    /// this is the half that says whether they may enter.
+    #[serde(default)]
+    pub access_mode: String,
+    /// Rules [`Self::access_mode`] applies. Empty with an enforcing mode
+    /// denies everyone, which is why the control plane refuses to ship it.
+    #[serde(default)]
+    pub access_rules: Vec<OidcAccessRule>,
 }
 
 /// One claim-to-header mapping for [`OidcConfig`].
@@ -863,6 +872,19 @@ pub struct OidcHeaderClaim {
     pub claim: String,
     /// Header the claim value is copied into.
     pub header: String,
+}
+
+/// One access rule for [`OidcConfig`]: how a claim of the validated ID token
+/// is held against `value`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OidcAccessRule {
+    /// Claim name in the ID token, e.g. `groups`.
+    pub claim: String,
+    /// `eq` / `ne` / `contains` / `in` / `exists`.
+    pub operator: String,
+    /// What to compare against; unused by `exists`.
+    #[serde(default)]
+    pub value: String,
 }
 
 // ─── Rewrite ────────────────────────────────────────────────
@@ -2764,6 +2786,16 @@ impl RuleCache {
                     header: claim.header.clone(),
                 })
                 .collect(),
+            access_mode: c.access_mode.clone(),
+            access_rules: c
+                .access_rules
+                .iter()
+                .map(|rule| OidcAccessRule {
+                    claim: rule.claim.clone(),
+                    operator: rule.operator.clone(),
+                    value: rule.value.clone(),
+                })
+                .collect(),
         }
     }
 
@@ -3055,6 +3087,12 @@ mod tests {
                 claim: "email".to_string(),
                 header: "X-Oidc-Email".to_string(),
             }],
+            access_mode: "require_any".to_string(),
+            access_rules: vec![proto::OidcAccessRule {
+                claim: "groups".to_string(),
+                operator: "contains".to_string(),
+                value: "waf-admins".to_string(),
+            }],
         };
         let converted = RuleCache::convert_oidc(&proto_cfg);
         assert!(converted.enabled);
@@ -3074,6 +3112,11 @@ mod tests {
         assert_eq!(converted.claims_to_headers.len(), 1);
         assert_eq!(converted.claims_to_headers[0].claim, "email");
         assert_eq!(converted.claims_to_headers[0].header, "X-Oidc-Email");
+        assert_eq!(converted.access_mode, proto_cfg.access_mode);
+        assert_eq!(converted.access_rules.len(), 1);
+        assert_eq!(converted.access_rules[0].claim, "groups");
+        assert_eq!(converted.access_rules[0].operator, "contains");
+        assert_eq!(converted.access_rules[0].value, "waf-admins");
     }
 
     /// Copy-on-write snapshot economics: cloning a `CachedRules` — what

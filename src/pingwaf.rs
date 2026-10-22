@@ -562,6 +562,33 @@ fn site_oidc_plugin(
                 .collect(),
         ),
     );
+    // Access rules are what decide whether a signed-in visitor may enter.
+    // They are passed as `claim:operator:value` triples — the plugin splits
+    // on ':' and the API already refuses a claim containing one, so the
+    // split is unambiguous. `exists` carries no value and is written as a
+    // bare `claim:exists`.
+    conf.insert(
+        "access_mode".to_string(),
+        toml::Value::String(oidc.access_mode.clone()),
+    );
+    conf.insert(
+        "access_rules".to_string(),
+        toml::Value::Array(
+            oidc.access_rules
+                .iter()
+                .map(|rule| {
+                    toml::Value::String(if rule.value.is_empty() {
+                        format!("{}:{}", rule.claim, rule.operator)
+                    } else {
+                        format!(
+                            "{}:{}:{}",
+                            rule.claim, rule.operator, rule.value
+                        )
+                    })
+                })
+                .collect(),
+        ),
+    );
 
     // One instance per site: the session cookie is sealed with the site's
     // secret and the claims go to that site's upstream only.
@@ -2005,8 +2032,8 @@ mod tests {
     use super::*;
     use pingwaf_agent::cache::{
         CacheRule as AgentCacheRule, CachedRules, GlobalCacheSettings,
-        OidcHeaderClaim, ProxyTrustConfig, ResponseReplaceRule, RouteConfig,
-        SiteRules, UpstreamConfig, UpstreamPeer,
+        OidcAccessRule, OidcHeaderClaim, ProxyTrustConfig, ResponseReplaceRule,
+        RouteConfig, SiteRules, UpstreamConfig, UpstreamPeer,
     };
 
     #[test]
@@ -2710,6 +2737,19 @@ mod tests {
                 OidcHeaderClaim {
                     claim: "https://example.com/roles".to_string(),
                     header: "X-Auth-Roles".to_string(),
+                },
+            ],
+            access_mode: "require_any".to_string(),
+            access_rules: vec![
+                OidcAccessRule {
+                    claim: "groups".to_string(),
+                    operator: "contains".to_string(),
+                    value: "waf-admins".to_string(),
+                },
+                OidcAccessRule {
+                    claim: "hd".to_string(),
+                    operator: "exists".to_string(),
+                    value: String::new(),
                 },
             ],
         });

@@ -2433,7 +2433,43 @@ export interface AiCrawlerRow {
   last_seen: string | null
 }
 
-/* ── Per-site OIDC authentication ─────────────────────────────────── */
+/* ── OIDC: identity providers and per-site gates ──────────────────── */
+
+/**
+ * An identity provider — `/api/v1/oidc/providers`.
+ *
+ * Provider credentials belong to the deployment, not to a site: one Keycloak
+ * realm usually fronts several, so the client secret is stored once and sites
+ * reference it. Managed from the Account page.
+ */
+export interface OidcProvider {
+  id: string
+  /** Unique display name, shown in the site's provider picker. */
+  name: string
+  /** A disabled provider cannot be selected by a site. */
+  enabled: boolean
+  /** Absolute http(s) URL, no trailing slash. */
+  issuer: string
+  client_id: string
+  /** `'***'` when a secret is stored; `''` when none is. */
+  client_secret: string
+  scopes: string[]
+  /** Sites whose gate points here, so a delete can say what it would affect. */
+  site_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface CreateOidcProviderRequest {
+  name: string
+  enabled?: boolean
+  issuer: string
+  client_id: string
+  client_secret?: string
+  scopes?: string[]
+}
+
+export type UpdateOidcProviderRequest = Partial<CreateOidcProviderRequest>
 
 /** One ID-token claim forwarded to the origin as a request header. */
 export interface OidcHeaderClaim {
@@ -2441,16 +2477,49 @@ export interface OidcHeaderClaim {
   header: string
 }
 
-/** Per-site OpenID Connect sign-in — `/api/v1/sites/{siteId}/oidc`. */
+/** How an access rule holds a claim against a value. */
+export type OidcAccessOperator = 'eq' | 'ne' | 'contains' | 'in' | 'exists'
+
+/** Every operator, for the rule editor's picker. */
+export const OIDC_ACCESS_OPERATORS: OidcAccessOperator[] = [
+  'eq',
+  'ne',
+  'contains',
+  'in',
+  'exists',
+]
+
+/** One access rule: a claim, how to hold it, and what to hold it against. */
+export interface OidcAccessRule {
+  claim: string
+  operator: OidcAccessOperator
+  /** Unused by `exists`; the API stores it empty there. */
+  value: string
+}
+
+/** What a site does with a signed-in visitor who is not in the rules. */
+export type OidcAccessMode = 'allow_all' | 'require_any' | 'require_all'
+
+export const OIDC_ACCESS_MODES: OidcAccessMode[] = [
+  'allow_all',
+  'require_any',
+  'require_all',
+]
+
+/**
+ * Per-site OpenID Connect sign-in — `/api/v1/sites/{siteId}/oidc`.
+ *
+ * The provider's credentials are not here: a site points at one with
+ * `provider_id` and carries only what differs per site.
+ */
 export interface SiteOidc {
   id: string
   site_id: string
   enabled: boolean
-  /** Absolute http(s) URL, no trailing slash. */
-  issuer: string
-  client_id: string
-  /** `'***'` when a secret is stored; `''` when none is. */
-  client_secret: string
+  /** The provider this site authenticates against; `null` = not chosen. */
+  provider_id: string | null
+  /** Its display name, so the picker needs no second request. */
+  provider_name: string | null
   /** `'***'` when a secret is stored; `''` when none is. */
   cookie_secret: string
   redirect_path: string
@@ -2458,31 +2527,39 @@ export interface SiteOidc {
   logout_path: string
   /** `''` = derived from the request Host. */
   redirect_url: string
-  scopes: string[]
   cookie_name: string
   session_ttl_seconds: number
   claims_to_headers: OidcHeaderClaim[]
+  access_mode: OidcAccessMode
+  access_rules: OidcAccessRule[]
   created_at: string
   updated_at: string
 }
 
+/**
+ * The `PUT` payload.
+ *
+ * `provider_id` is `string | null` rather than optional-and-nullable because
+ * the two mean different things: omitting the key keeps the stored provider,
+ * `null` clears it. The API reads them apart.
+ */
 export type UpdateOidcRequest = Partial<
   Pick<
     SiteOidc,
     | 'enabled'
-    | 'issuer'
-    | 'client_id'
-    | 'client_secret'
     | 'cookie_secret'
     | 'redirect_path'
     | 'logout_path'
     | 'redirect_url'
-    | 'scopes'
     | 'cookie_name'
     | 'session_ttl_seconds'
     | 'claims_to_headers'
+    | 'access_mode'
+    | 'access_rules'
   >
->
+> & {
+  provider_id?: string | null
+}
 
 /** Secret sent back to keep the stored one unchanged. */
 export const OIDC_SECRET_MASK = '***'
@@ -2493,6 +2570,10 @@ export const OIDC_DEFAULT_SESSION_TTL_SECONDS = 43200
 export const OIDC_MIN_SESSION_TTL_SECONDS = 60
 export const OIDC_MAX_SESSION_TTL_SECONDS = 31536000
 export const OIDC_MIN_COOKIE_SECRET_LENGTH = 16
+export const OIDC_MAX_PROVIDER_NAME_LENGTH = 128
+export const OIDC_MAX_ACCESS_RULES = 32
+/** `scopes` always contains `openid`; the control plane adds it. */
+export const OIDC_ALWAYS_SCOPE = 'openid'
 
 /** `GET /analytics/ai-crawlers` — AI crawler traffic overview. */
 export interface AiCrawlerOverview {

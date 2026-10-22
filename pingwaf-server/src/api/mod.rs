@@ -31,6 +31,7 @@ pub mod logs;
 pub mod mcp;
 pub mod mtls;
 pub mod notifications;
+pub mod oidc_providers;
 pub mod origin_settings;
 pub mod passkeys;
 pub mod rate_limit;
@@ -126,6 +127,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(ai_crawl::routes())
         .merge(site_basic_auth::routes())
         .merge(site_oidc::routes())
+        .merge(oidc_providers::routes())
         .merge(keys::routes())
         .merge(users::routes())
         .merge(agents::routes())
