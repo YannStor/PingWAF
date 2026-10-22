@@ -373,6 +373,9 @@ pub struct UpdateSettingsRequest {
     /// Gates `site.upstream_offline` and `site.upstream_abnormal` together.
     pub notify_site_upstream: Option<bool>,
     pub notify_auth_login_anomaly: Option<bool>,
+    /// Deliver OIDC authentication alerts.
+    #[serde(default)]
+    pub notify_site_oidc_auth: Option<bool>,
     pub cert_expiry_warn_days: Option<u32>,
 }
 
@@ -428,6 +431,9 @@ async fn update_settings(
     }
     if let Some(value) = payload.notify_auth_login_anomaly {
         settings.notify_auth_login_anomaly = value;
+    }
+    if let Some(value) = payload.notify_site_oidc_auth {
+        settings.notify_site_oidc_auth = value;
     }
     if let Some(value) = payload.cert_expiry_warn_days {
         settings.cert_expiry_warn_days = value.clamp(1, 365);

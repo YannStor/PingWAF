@@ -46,8 +46,15 @@ pub mod event_type {
     /// An admin signed in from a country outside their recent-login
     /// baseline (see `crate::notify::login_anomaly`).
     pub const AUTH_LOGIN_ANOMALY: &str = "auth.login_anomaly";
+    /// A login on a site protected by OIDC could not be completed: a wrong
+    /// client secret, a replayed authorization code, a mismatched state.
+    pub const SITE_OIDC_LOGIN_FAILED: &str = "site.oidc_login_failed";
+    /// A site's OIDC provider could not be reached (discovery, JWKS or the
+    /// token endpoint), so nobody can complete a login and the protected part
+    /// of the site is unreachable.
+    pub const SITE_OIDC_IDP_UNAVAILABLE: &str = "site.oidc_idp_unavailable";
 
-    pub const ALL: [&str; 12] = [
+    pub const ALL: [&str; 14] = [
         AGENT_OFFLINE,
         AGENT_ONLINE,
         AGENT_RESOURCE,
@@ -60,6 +67,8 @@ pub mod event_type {
         SITE_UPSTREAM_OFFLINE,
         SITE_UPSTREAM_ABNORMAL,
         AUTH_LOGIN_ANOMALY,
+        SITE_OIDC_LOGIN_FAILED,
+        SITE_OIDC_IDP_UNAVAILABLE,
     ];
 }
 

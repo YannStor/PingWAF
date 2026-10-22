@@ -4371,6 +4371,7 @@ ml_threshold = 0.75
             },
             response_replace: None,
             ai_crawl: None,
+            oidc: None,
         }
     }
 

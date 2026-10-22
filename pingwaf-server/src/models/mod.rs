@@ -42,6 +42,7 @@ pub mod rewrite_rules;
 pub mod rules;
 pub mod security_events;
 pub mod site_basic_auth;
+pub mod site_oidc;
 pub mod sites;
 pub mod users;
 pub mod waf_settings;

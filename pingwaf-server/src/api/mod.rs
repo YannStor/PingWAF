@@ -41,6 +41,7 @@ pub mod self_protection;
 pub mod settings;
 pub mod site_basic_auth;
 pub mod site_failover;
+pub mod site_oidc;
 pub mod sites;
 pub mod ssl;
 pub mod state;
@@ -124,6 +125,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(sites::routes())
         .merge(ai_crawl::routes())
         .merge(site_basic_auth::routes())
+        .merge(site_oidc::routes())
         .merge(keys::routes())
         .merge(users::routes())
         .merge(agents::routes())

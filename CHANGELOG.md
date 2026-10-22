@@ -10,6 +10,38 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+### Added
+
+- **Site-level OIDC authentication** (ported from upstream pingap) plus its
+  control-plane integration. The data plane gains the `oidc` plugin — ported
+  verbatim from upstream `vicanso/pingap` (`pingap-plugin/src/oidc.rs`, commit
+  `77ba8bfebe658827a7bff92acfd05068eb8bb954`, 2026-10-09), which this fork had
+  been missing — providing browser login via the authorization code flow with
+  PKCE: an unauthenticated browser is 302-redirected to the identity provider,
+  the callback verifies PKCE `state`/`nonce` and the ID token against the
+  provider's JWKS, and the session lives in an AES-256-GCM-SIV-encrypted
+  cookie derived from `cookie_secret`, so nothing is stored server-side.
+  Configured ID-token claims can be injected into request headers, guarded
+  against client forgery and `Connection`-header smuggling. The shared
+  symbols the plugin depends on (`pingap-plugin/src/jwt.rs` claim/JWKS
+  helpers, `pingap-core` `protect_from_connection_header` and
+  `Features::original_uri`, `pingap-util` `seal`/`unseal`) were brought over
+  with it. Local adaptations: the constructor logs only `issuer`/`client_id`
+  (never the secrets), the plugin reports `site.oidc_login_failed` (warning)
+  and `site.oidc_idp_unavailable` (critical) security events — a capability
+  upstream does not have — and the control plane turns those events into
+  alerts gated by the new `notify_site_oidc_auth` notification switch (on by
+  default). The control plane adds `GET/PUT /api/v1/sites/{site_id}/oidc`
+  with masked secrets (a stored secret shows `***`, an unset one stays empty;
+  `***` on input keeps the stored value, `""` clears it) and a hard refusal —
+  not a silent downgrade — when enabling with missing required values. The
+  dashboard gains an **OIDC** tab next to IP restriction, geo restriction and
+  basic auth under a site's access control. Site cloning deliberately does
+  not copy the OIDC configuration (callback hostname binding, sibling-domain
+  session sharing, one IdP client per callback host). Docs:
+  [oidc plugin](./pingap-plugin/docs/oidc.md),
+  [API reference](./docs/api.md#oidc-authentication).
+
 ### Security
 
 - **rustls is pinned to the 0.23.46 floor and its feature set is explicit.**

@@ -1,15 +1,16 @@
 import { Navigate, useLocation, useParams, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { FunnelSimple, GlobeHemisphereWest, Key } from '@phosphor-icons/react'
+import { FunnelSimple, GlobeHemisphereWest, Key, ShieldCheck } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
 import { Tabs } from '@/components/ui/Tabs'
 import { IpRulesPanel } from './IpRulesPanel'
 import { GeoPanel } from './GeoPanel'
 import { BasicAuthPanel } from './BasicAuthPanel'
+import { OidcPanel } from './OidcPanel'
 
-type AccessTab = 'ip' | 'geo' | 'basic-auth'
+type AccessTab = 'ip' | 'geo' | 'basic-auth' | 'oidc'
 
-const ACCESS_TABS: AccessTab[] = ['ip', 'geo', 'basic-auth']
+const ACCESS_TABS: AccessTab[] = ['ip', 'geo', 'basic-auth', 'oidc']
 
 function parseTab(value: string | null): AccessTab {
   return ACCESS_TABS.includes(value as AccessTab) ? (value as AccessTab) : 'ip'
@@ -61,12 +62,18 @@ export function AccessControlPage() {
             label: t('pages.accessControl.tabBasicAuth'),
             icon: <Key weight="duotone" className="h-4 w-4" />,
           },
+          {
+            value: 'oidc',
+            label: t('pages.accessControl.tabOidc'),
+            icon: <ShieldCheck weight="duotone" className="h-4 w-4" />,
+          },
         ]}
       />
 
       {tab === 'ip' && <IpRulesPanel />}
       {tab === 'geo' && <GeoPanel />}
       {tab === 'basic-auth' && <BasicAuthPanel />}
+      {tab === 'oidc' && <OidcPanel />}
     </div>
   )
 }

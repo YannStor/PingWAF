@@ -1448,6 +1448,19 @@ async fn clone_site(
     clone_site_rows!(&txn, challenge_settings, source_id, new_id);
     clone_site_rows!(&txn, geo_rules, source_id, new_id);
     clone_site_rows!(&txn, bot_protection, source_id, new_id);
+    // `site_oidc` is deliberately not cloned (and needs this even more than
+    // basic auth):
+    // 1. `redirect_url` — or the callback derived from the Host header — is
+    //    bound to the source hostname. Copied to the new site, the IdP's
+    //    registered callback still points at the source domain, so the
+    //    provider redirects logins back to the source, not the clone.
+    // 2. Two sites sharing the same `cookie_secret` + `cookie_name` across
+    //    sibling subdomains covered by a wildcard `Domain` would share
+    //    sessions: a login on one site authenticates the other (session
+    //    cross-contamination).
+    // 3. One client registered against two callback hosts is rejected outright
+    //    by most identity providers.
+    // The operator registers a fresh client per site instead.
     // `site_basic_auth` is deliberately not cloned: the row stores credentials
     // (masked in the API, plaintext at rest) and reusing them on a new host
     // would turn "a and b share a password" into a way to reach the clone with

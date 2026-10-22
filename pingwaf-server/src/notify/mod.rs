@@ -142,6 +142,10 @@ pub struct NotificationSettings {
     /// Deliver anomalous-login alerts.
     #[serde(default = "default_true")]
     pub notify_auth_login_anomaly: bool,
+    /// Deliver OIDC authentication alerts (`site.oidc_login_failed` and
+    /// `site.oidc_idp_unavailable` share this switch, like the cert pair).
+    #[serde(default = "default_true")]
+    pub notify_site_oidc_auth: bool,
     /// Warn when a certificate expires within this many days.
     #[serde(default = "default_cert_expiry_warn_days")]
     pub cert_expiry_warn_days: u32,
@@ -173,6 +177,7 @@ impl Default for NotificationSettings {
             notify_site_failover_changed: true,
             notify_site_upstream: true,
             notify_auth_login_anomaly: true,
+            notify_site_oidc_auth: true,
             cert_expiry_warn_days: 30,
         }
     }
@@ -204,6 +209,10 @@ impl NotificationSettings {
             event_type::SITE_UPSTREAM_OFFLINE
             | event_type::SITE_UPSTREAM_ABNORMAL => self.notify_site_upstream,
             event_type::AUTH_LOGIN_ANOMALY => self.notify_auth_login_anomaly,
+            event_type::SITE_OIDC_LOGIN_FAILED
+            | event_type::SITE_OIDC_IDP_UNAVAILABLE => {
+                self.notify_site_oidc_auth
+            },
             // Unknown types (e.g. the test button) are always delivered.
             _ => true,
         }

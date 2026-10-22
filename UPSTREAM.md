@@ -29,6 +29,17 @@ PingWAF 是 [`vicanso/pingap`](https://github.com/vicanso/pingap) 的**硬分叉
 
 同步频率：无固定周期；遇到上游安全修复或本仓库依赖的上游缺陷被修复时执行。**不要**将 `upstream/master` 直接 merge 进 `main`——两个项目的产品语义（配置面、发布物、服务名）已经分叉。
 
+### 已移植：`oidc` 插件（2026-10）
+
+- **来源**：上游 `pingap-plugin/src/oidc.rs`，逐字搬自 commit
+  [`77ba8bfebe658827a7bff92acfd05068eb8bb954`](https://github.com/vicanso/pingap/commit/77ba8bfebe658827a7bff92acfd05068eb8bb954)（"feat: add DNS SRV discovery, RSA+ECDSA certificate pairs, OCSP stapling and the oidc plugin"，2026-10-09）。本仓库硬分叉此前缺失该插件——上游 `pingap-plugin/src/` 共 34 个文件，本地原有 31 个，缺 `oidc.rs` 与 `hmac_auth.rs`、`bandwidth_limit.rs`、`ja4_restriction.rs`、`maintenance.rs`、`mirror.rs`、`request_headers.rs`、`uri_block.rs`（其余 7 个尚未移植）。
+- **随之补齐的上游共享符号**：`pingap-plugin/src/jwt.rs` 的 `ClaimMap` / `claim_header_value` / `strip_claim_headers` / `parse_claims_to_headers` 与 `JwksSource::new` / `verify_with`；`pingap-core/src/http_header.rs` 的 `protect_from_connection_header`；`pingap-util/src/crypto.rs` 的 `seal` / `unseal`；`pingap-core/src/ctx.rs` 的 `Features::original_uri`（及 `pingap-proxy/src/server.rs` 的设置点——location 改写时保留浏览器原始路径，否则站点配 rewrite 后 OIDC 回调路径失配）。
+- **本地适配点（并非与上游完全一致）**：
+  1. `Oidc::new` 的日志不打印 params——上游用 `pingap_config::masked_toml` 脱敏，本地未移植其 420 行的 `secrets.rs`，改为只记 `issuer` / `client_id`（两个 secret 绝不写日志）。
+  2. 上游测试用 `JwksSource::with_ec_key`（本地无此方法），测试改为起本地 JWKS HTTP 服务、走真实 fetch 路径。
+  3. 上游的 `original_uri` 本地原先缺失，本次一并移植（见上）。
+  4. 新增上游没有的能力：登录失败与 IdP 不可达的**安全事件上报**（`site.oidc_login_failed` / `site.oidc_idp_unavailable`，经 `pingwaf-agent` 的 `SecurityEvent` 通道）及控制面告警桥接（通知开关 `notify_site_oidc_auth`）。
+
 ## 构建与发布中的边界
 
 - **对外发布物只有 `pingwaf`**：`release.yml` 构建 `--bin pingwaf`，`install.sh` 安装 `pingwaf` 二进制与 `pingwaf.service`，Docker 镜像为 `ghcr.io/shuaizend/pingwaf`。

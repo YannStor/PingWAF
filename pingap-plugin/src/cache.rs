@@ -1636,6 +1636,7 @@ purge_ip_list = ["192.168.1.1"]
             cache_settings: None,
             response_replace: None,
             ai_crawl: None,
+            oidc: None,
         }
     }
 

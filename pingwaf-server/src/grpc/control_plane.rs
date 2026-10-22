@@ -616,6 +616,42 @@ impl ControlPlaneTrait for ControlPlaneService {
                 event_batch.push(event);
             }
 
+            // Two OIDC failures are operational events, not traffic: a login
+            // that cannot be completed (a wrong client secret, a replayed code)
+            // and a provider that cannot be reached (which makes the protected
+            // part of the site unreachable). They are the only security events
+            // that also raise an alert — a generic bridge would turn every
+            // blocked request into a notification.
+            if let Some((event_type, severity)) =
+                oidc_alert_for(&message.waf_event_type)
+            {
+                crate::notify::emit(crate::notify::AlertEvent {
+                    event_type: event_type.to_string(),
+                    severity,
+                    title: oidc_alert_title(event_type, &message.host),
+                    message: oidc_alert_message(
+                        event_type,
+                        &message.host,
+                        &message.waf_details,
+                    ),
+                    details: Some(serde_json::json!({
+                        "site_id": message.site_id,
+                        "host": message.host,
+                        "path": message.path,
+                        "client_ip": message.client_ip,
+                        "reason": message.waf_details,
+                        "agent_id": message.agent_id,
+                    })),
+                    // Keyed on the site, not the client: an attacker cycling
+                    // through addresses must not be able to flood the channels,
+                    // and "this site's logins are all failing" is the useful
+                    // signal. The dedup window then collapses a burst into one
+                    // alert per channel.
+                    dedup_key: Some(message.site_id.clone()),
+                })
+                .await;
+            }
+
             // Mirror the entry into Elasticsearch for full-text search and long
             // retention. Both calls are non-blocking `try_send`s, so a slow or
             // down ES cluster can never apply back-pressure to the agent stream.
@@ -2064,6 +2100,58 @@ fn is_waf_event(entry: &LogEntry) -> bool {
         || !entry.waf_rule_id.trim().is_empty()
 }
 
+/// The alert an OIDC security event raises, if it raises one.
+///
+/// The data plane reports two kinds of OIDC failure and both are worth a
+/// notification; everything else it sends through the same channel (there is
+/// nothing else today) is not. Matching on the exact strings the `oidc` plugin
+/// writes is deliberate: a new event type has to be added here to alert, so a
+/// noisy one cannot slip into the alert stream by accident.
+fn oidc_alert_for(event_type: &str) -> Option<(&'static str, &'static str)> {
+    match event_type.trim() {
+        "oidc_login_failed" => Some((
+            crate::models::event_type::SITE_OIDC_LOGIN_FAILED,
+            crate::models::severity::WARNING,
+        )),
+        "oidc_idp_unavailable" => Some((
+            crate::models::event_type::SITE_OIDC_IDP_UNAVAILABLE,
+            crate::models::severity::CRITICAL,
+        )),
+        _ => None,
+    }
+}
+
+/// The subject line of an OIDC alert.
+fn oidc_alert_title(event_type: &str, host: &str) -> String {
+    let host = if host.trim().is_empty() { "?" } else { host };
+    if event_type == crate::models::event_type::SITE_OIDC_IDP_UNAVAILABLE {
+        format!("OIDC provider unreachable for site {host}")
+    } else {
+        format!("OIDC login failed for site {host}")
+    }
+}
+
+/// The body of an OIDC alert: what failed and where, without the query string
+/// (which carries the authorization code and the state).
+fn oidc_alert_message(event_type: &str, host: &str, details: &str) -> String {
+    let host = if host.trim().is_empty() { "?" } else { host };
+    let reason = details.trim();
+    let reason = if reason.is_empty() { "unknown" } else { reason };
+    if event_type == crate::models::event_type::SITE_OIDC_IDP_UNAVAILABLE {
+        format!(
+            "Site '{host}' could not reach its OIDC provider ({reason}). \
+             Unauthenticated visitors cannot complete the login flow, so the \
+             protected part of the site is unreachable."
+        )
+    } else {
+        format!(
+            "A login on site '{host}' could not be completed ({reason}). \
+             Repeated failures usually mean a wrong client secret or redirect \
+             URL, or a replayed authorization code."
+        )
+    }
+}
+
 /// Maps a shipped log entry onto a `security_events` row, or `None` when the
 /// request was clean and produced no WAF decision.
 fn security_event_row(
@@ -2410,6 +2498,24 @@ fn positive_i32(value: i64) -> Option<i32> {
 mod tests {
     use super::*;
 
+    /// The OIDC alerts are raised from inside the ingest loop, which drops any
+    /// entry stamped with a site the agent does not serve — an entry with an
+    /// empty stamp included. A plugin that reported an empty `site_id` would
+    /// therefore be silently discarded, and neither the `security_events` row
+    /// nor the alert would ever appear. The plugin resolves the real id from
+    /// the rule cache; this pins the ingest-side half of that contract.
+    #[test]
+    fn an_entry_without_a_visible_site_is_dropped_before_any_alert() {
+        let site = Uuid::new_v4();
+        assert!(site_stamp_is_visible(&site.to_string(), &[site]));
+        // The failure mode the OIDC plugin had: an empty stamp is not visible,
+        // so the entry never reaches `security_event_row` or the alert branch.
+        assert!(!site_stamp_is_visible("", &[site]));
+        assert!(!site_stamp_is_visible("   ", &[site]));
+        assert!(!site_stamp_is_visible("not-a-uuid", &[site]));
+        assert!(!site_stamp_is_visible(&Uuid::new_v4().to_string(), &[site]));
+    }
+
     /// D03: an `acme_failed` event from the edge turns the certificate row
     /// `failed` with the real reason, without touching anything else.
     #[test]
@@ -2670,6 +2776,74 @@ mod tests {
             ..Default::default()
         };
         assert!(is_waf_event(&monitored));
+    }
+
+    /// Only the two OIDC failures raise an alert. Everything else the data
+    /// plane sends — every blocked request — must not, or the notification
+    /// channels become a firehose.
+    #[test]
+    fn only_the_oidc_failures_raise_alerts() {
+        use crate::models::{event_type, severity};
+
+        assert_eq!(
+            oidc_alert_for("oidc_login_failed"),
+            Some((event_type::SITE_OIDC_LOGIN_FAILED, severity::WARNING))
+        );
+        assert_eq!(
+            oidc_alert_for("oidc_idp_unavailable"),
+            Some((event_type::SITE_OIDC_IDP_UNAVAILABLE, severity::CRITICAL))
+        );
+        // Padded values still match: the agent may trim or pad a string.
+        assert!(oidc_alert_for(" oidc_login_failed ").is_some());
+
+        for other in [
+            "",
+            "block",
+            "challenge",
+            "rate_limit",
+            "managed",
+            "waf",
+            "basic_auth",
+            // A prefix is not a match.
+            "oidc_login_failed_extra",
+        ] {
+            assert_eq!(None, oidc_alert_for(other), "{other} must not alert");
+        }
+    }
+
+    /// The alert body must never carry the query string: it holds the
+    /// authorization code and the state.
+    #[test]
+    fn oidc_alerts_name_the_site_and_never_the_query() {
+        use crate::models::event_type;
+
+        let failed = oidc_alert_message(
+            event_type::SITE_OIDC_LOGIN_FAILED,
+            "app.example.com",
+            "reason=token_exchange_failed",
+        );
+        assert!(failed.contains("app.example.com"));
+        assert!(failed.contains("token_exchange_failed"));
+
+        let unreachable = oidc_alert_message(
+            event_type::SITE_OIDC_IDP_UNAVAILABLE,
+            "app.example.com",
+            "endpoint=discovery status=timeout",
+        );
+        assert!(unreachable.contains("unreachable"));
+
+        // An absent host and reason still render something readable.
+        let bare =
+            oidc_alert_message(event_type::SITE_OIDC_LOGIN_FAILED, "", "");
+        assert!(bare.contains('?'));
+        assert!(bare.contains("unknown"));
+
+        assert!(
+            oidc_alert_title(event_type::SITE_OIDC_LOGIN_FAILED, "a.test")
+                .contains("a.test")
+        );
+        assert!(oidc_alert_title(event_type::SITE_OIDC_IDP_UNAVAILABLE, "")
+            .contains('?'));
     }
 
     #[test]

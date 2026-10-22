@@ -41,6 +41,8 @@ export interface NotificationSettings {
   /** Gates both site.upstream_offline and site.upstream_abnormal. */
   notify_site_upstream: boolean
   notify_auth_login_anomaly: boolean
+  /** Gates both site.oidc_login_failed and site.oidc_idp_unavailable. */
+  notify_site_oidc_auth: boolean
   cert_expiry_warn_days: number
 }
 
@@ -69,6 +71,8 @@ export const NOTIFICATION_EVENT_TYPES = [
   'site.upstream_offline',
   'site.upstream_abnormal',
   'auth.login_anomaly',
+  'site.oidc_login_failed',
+  'site.oidc_idp_unavailable',
 ] as const
 
 /** The placeholder the server substitutes for stored secrets. */
