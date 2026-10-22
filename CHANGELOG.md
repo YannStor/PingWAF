@@ -8,6 +8,30 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+### Security
+
+- **rustls is pinned to the 0.23.46 floor and its feature set is explicit.**
+  0.23.46 closes RUSTSEC-2026-0346/0347/0348/0349 (RUSTSEC-2026-0285 was
+  closed in 0.23.45). `Cargo.lock` already resolved it, so the binary is
+  unchanged; the manifest requirement was `0.23.40`, which any resolution that
+  ignores the lock file — a fresh checkout without one, a vendored tree, a
+  downstream build — could satisfy with 0.23.45 or older, i.e. inside the
+  affected range. The requirement now also spells out the feature set instead
+  of inheriting rustls' `default` list, so an upstream default change has to
+  be a deliberate edit here. rustls is not limited to the `tls-rustls` build:
+  the control plane terminates dashboard HTTPS with it, and `reqwest`,
+  `lettre`, `instant-acme` and `tonic` (used by the etcd client and the OTLP
+  exporter) all speak it outbound.
+- **Every cargo build in CI, the release workflow and the Docker build stages
+  now passes `--locked`.** A manifest that no longer agrees with the committed
+  `Cargo.lock` fails the build instead of silently resolving a different
+  dependency set — the failure mode that lets a security floor exist in the
+  manifest but not in what actually gets compiled. (`cargo fmt` and
+  `cargo audit` are unchanged: fmt does not resolve dependencies, and
+  `cargo audit` reads the committed lock file rather than re-resolving.)
+
 ## [PingWAF 0.29.3] — 2026-10-22
 
 ### Fixed

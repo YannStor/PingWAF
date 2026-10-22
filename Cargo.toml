@@ -416,7 +416,26 @@ reqwest = { version = "0.13.5", default-features = false, features = [
     "json",
     "default-tls",
 ] }
-rustls = "0.23.40"
+# The feature set is spelled out rather than left to rustls' `default` list,
+# which is what this requirement used to do. The resolved set is unchanged —
+# `default` is exactly these five — but a future upstream default change (a
+# new provider, a dropped `tls12`) now has to be a deliberate edit here
+# instead of silently reshaping this process's TLS stack.
+#
+# 0.23.46 is a floor, not a preference. It is the release that closes the
+# 2026-10 rustls advisories RUSTSEC-2026-0346/0347/0348/0349; RUSTSEC-2026-0285
+# was closed one release earlier, in 0.23.45. `Cargo.lock` already resolved
+# 0.23.46, so this changes nothing about the binary — it stops a *resolution*
+# that ignores the lock file (a fresh checkout without it, a vendored tree, a
+# downstream build) from selecting 0.23.45 or older, which the previous
+# `0.23.40` requirement allowed.
+rustls = { version = "0.23.46", default-features = false, features = [
+    "aws_lc_rs",
+    "logging",
+    "prefer-post-quantum",
+    "std",
+    "tls12",
+] }
 rustls-pemfile = "2.2.0"
 rustls-pki-types = "1.15.1"
 rustc_version_runtime = "0.3.0"

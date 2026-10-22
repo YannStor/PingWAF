@@ -142,14 +142,14 @@ jobs:
 
       - name: Clippy
         if: matrix.toolchain == 'stable'
-        run: cargo clippy --all-targets --features full -- -D warnings
+        run: cargo clippy --locked --all-targets --features full -- -D warnings
 
       - name: Test (workspace, nextest)
-        run: cargo nextest run --workspace --features full --no-fail-fast
+        run: cargo nextest run --locked --workspace --features full --no-fail-fast
 
       # nextest deliberately does not run doctests; cover them separately.
       - name: Test (workspace doc tests)
-        run: cargo test --workspace --features full --doc
+        run: cargo test --locked --workspace --features full --doc
 
       - name: Typos
         if: matrix.toolchain == 'stable' && always()
@@ -201,13 +201,13 @@ jobs:
           tool: nextest
 
       - name: Clippy (rustls backend)
-        run: cargo clippy --no-default-features --features=tls-rustls,full --all-targets --all -- --deny=warnings
+        run: cargo clippy --locked --no-default-features --features=tls-rustls,full --all-targets --all -- --deny=warnings
 
       - name: Test (workspace, nextest, rustls backend)
-        run: cargo nextest run --workspace --no-default-features --features=tls-rustls,full --no-fail-fast
+        run: cargo nextest run --locked --workspace --no-default-features --features=tls-rustls,full --no-fail-fast
 
       - name: Test (workspace doc tests, rustls backend)
-        run: cargo test --workspace --no-default-features --features=tls-rustls,full --doc
+        run: cargo test --locked --workspace --no-default-features --features=tls-rustls,full --doc
 
   web:
     name: Web (lint / build)
@@ -298,7 +298,7 @@ jobs:
           path: web/dist
 
       - name: Build (release, pingwaf, full)
-        run: cargo build --release --bin pingwaf --features full
+        run: cargo build --locked --release --bin pingwaf --features full
 
       - name: Upload release binary for :main image
         uses: actions/upload-artifact@v4

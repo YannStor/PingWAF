@@ -98,7 +98,7 @@ RUN mkdir -p src && echo "fn main() {}" > src/main.rs \
 
 # Dependency warm-up under the same profile, so the release-perf artifacts
 # (target/release-perf/) are what the cached layers carry.
-RUN cargo build --profile release-perf --features full || true; \
+RUN cargo build --locked --profile release-perf --features full || true; \
     ls target/release-perf/deps/*.rlib >/dev/null 2>&1 \
       || { echo "ERROR: dependency warm-up produced no rlib — check build log above" >&2; exit 1; }
 
@@ -137,7 +137,7 @@ COPY pingwaf-challenge/ pingwaf-challenge/
 COPY --from=frontend-builder /app/web/dist/ web/dist/
 
 RUN find . -path ./target -prune -o -name '*.rs' -print0 | xargs -0 --no-run-if-empty touch \
-    && cargo build --profile release-perf --bin pingwaf --features full
+    && cargo build --locked --profile release-perf --bin pingwaf --features full
 
 # ─── Stage 3: Runtime ────────────────────────────────────────────────────────
 # Same base and behavior contract as the regular image; only the binary

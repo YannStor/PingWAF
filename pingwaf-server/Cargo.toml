@@ -66,14 +66,12 @@ sha2 = { workspace = true }
 sysinfo = { workspace = true }
 time = { workspace = true }
 x509-parser = { workspace = true }
-# TLS termination for the dashboard listener. Same provider (`ring`) as the
-# pingora rustls backend, so the two never disagree about crypto.
-rustls = { version = "0.23", default-features = false, features = [
-    "ring",
-    "logging",
-    "std",
-    "tls12",
-] }
+# TLS termination for the dashboard listener. Inherits the workspace's rustls
+# requirement (security floor + explicit feature set) and adds `ring`, the
+# provider this crate pins for the dashboard listener and the pingora data
+# plane alike — see `pki::tls::crypto_provider`, which is what actually keeps
+# the process off `aws-lc-rs`'s default provider.
+rustls = { workspace = true, features = ["ring"] }
 rustls-pemfile = { workspace = true }
 tokio-rustls = { version = "0.26", default-features = false, features = [
     "ring",

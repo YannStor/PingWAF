@@ -349,7 +349,7 @@ Mark breaking changes with `!` after the scope or a `BREAKING CHANGE:` footer.
    [PR template](./.github/PULL_REQUEST_TEMPLATE.md): description, type of
    change, and the developer checklist (fmt, clippy, builds, CLA).
 6. **CI** must pass: fmt, clippy (`--deny warnings`), typos, the test suite
-   on three toolchains (1.96.0 / 1.97.0 / stable), and the rustls gate
+   on two toolchains (1.96.0 / stable), and the rustls gate
    (clippy + full tests). `cargo-machete` and `make msrv` are local hygiene
    checks, not CI gates.
 7. **Review**: at least one maintainer approval. Address comments with new

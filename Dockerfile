@@ -109,7 +109,7 @@ RUN mkdir -p src && echo "fn main() {}" > src/main.rs \
 # 2d. 依赖预热构建（修复：build.rs 与 proto/ 已前置 COPY，预热现在真正生效）
 #     编译产物留在镜像层中，供 CI type=gha/type=registry 缓存后端正确导出和恢复
 #     保留 `|| true` 因 dummy 源可能触发个别 crate 的编译错误
-RUN cargo build --release --features full || true; \
+RUN cargo build --locked --release --features full || true; \
     ls target/release/deps/*.rlib >/dev/null 2>&1 \
       || { echo "ERROR: dependency warm-up produced no rlib — check build log above" >&2; exit 1; }
 
@@ -153,7 +153,7 @@ COPY --from=frontend-builder /app/web/dist/ web/dist/
 #     触发 25 个 workspace crate 重编，而第三方 .rlib 从预热层继承、不受影响
 #     （Docker 层叠加：target/ 存在于 2d 预热层的文件系统中，后续 COPY 源码层不会覆盖它）
 RUN find . -path ./target -prune -o -name '*.rs' -print0 | xargs -0 --no-run-if-empty touch \
-    && cargo build --release --bin pingwaf --features full
+    && cargo build --locked --release --bin pingwaf --features full
 
 # ─── Stage 3: Runtime（行为契约保持不变）─────────────────────────────────────
 # Must use trixie (glibc 2.40) to match the builder's glibc.

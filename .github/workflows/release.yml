@@ -144,7 +144,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release --bin pingwaf ${{ matrix.features }} --target ${{ matrix.target }}
+          cargo build --locked --release --bin pingwaf ${{ matrix.features }} --target ${{ matrix.target }}
           ls -lh "target/${{ matrix.target }}/release/pingwaf"
 
           ASSET="pingwaf-${{ matrix.plat }}-${{ matrix.arch }}"
