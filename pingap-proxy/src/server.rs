@@ -1032,9 +1032,19 @@ impl Server {
             .features
             .as_mut()
             .and_then(|features| features.variables.take());
-        location.rewrite(session.req_header_mut(), &mut variables);
+        // The uri the client asked for, kept only when a rewrite is about to
+        // change it: plugins that send the client somewhere relative to where
+        // it is (the `oidc` callback path above all) must go by the browser's
+        // address, not the upstream's.
+        let original_uri = session.req_header().uri.clone();
+        let rewritten =
+            location.rewrite(session.req_header_mut(), &mut variables);
         if let Some(variables) = variables {
             ctx.extend_variables(variables);
+        }
+        if rewritten {
+            ctx.features.get_or_insert_default().original_uri =
+                Some(original_uri);
         }
 
         if self

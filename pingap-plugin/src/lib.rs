@@ -265,6 +265,7 @@ mod jwt;
 mod key_auth;
 mod limit;
 mod mock;
+mod oidc;
 mod ping;
 mod redirect;
 mod referer_restriction;

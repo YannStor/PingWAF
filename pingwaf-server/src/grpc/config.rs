@@ -14,10 +14,11 @@ use pingwaf_proto::control_plane::{
     AiBotPolicy, AiCrawlConfig, BasicAuthConfig, BasicAuthCredential,
     BotProtectionConfig, CacheRule, CacheTypeCategory, CacheTypePolicy,
     ChallengeConfig, CustomErrorPage, FailoverMode, GeoConfig,
-    GlobalCacheSettings, HealthCheckConfig, IpAccessRule, RateLimitRule,
-    ResponseReplaceConfig, ResponseReplaceRule, RewriteOperation, RewriteRule,
-    RouteConfig, RuleBundle, RuleOverride, Site, SiteCacheSettings, SiteConfig,
-    SitePolicy, SslConfig, UpstreamConfig, UpstreamPeer, WafConfig, WafRule,
+    GlobalCacheSettings, HealthCheckConfig, IpAccessRule, OidcConfig,
+    OidcHeaderClaim, RateLimitRule, ResponseReplaceConfig, ResponseReplaceRule,
+    RewriteOperation, RewriteRule, RouteConfig, RuleBundle, RuleOverride, Site,
+    SiteCacheSettings, SiteConfig, SitePolicy, SslConfig, UpstreamConfig,
+    UpstreamPeer, WafConfig, WafRule,
 };
 use prost::Message;
 use prost_types::Timestamp;
@@ -30,6 +31,7 @@ use uuid::Uuid;
 use crate::api::challenge::challenge_level;
 use crate::api::ip_rules::ip_action;
 use crate::api::site_basic_auth as site_basic_auth_api;
+use crate::api::site_oidc as site_oidc_api;
 use crate::api::waf_settings::{
     clamp_body_stage_timeout_secs, DEFAULT_BODY_STAGE_TIMEOUT_SECS,
     MAX_BODY_STAGE_TIMEOUT_SECS,
@@ -39,8 +41,9 @@ use crate::models::{
     characteristic, client_cert_status, defense_settings, error_pages,
     geo_rules, ip_access_rules, ip_group_sites, ip_groups, mode,
     mtls_client_certificate, rate_limit_rules, rewrite_rules, rule,
-    rule_groups, site, site_basic_auth, site_certificates, site_routes,
-    site_ssl, site_status, site_upstream_pools, site_upstreams, waf_settings,
+    rule_groups, site, site_basic_auth, site_certificates, site_oidc,
+    site_routes, site_ssl, site_status, site_upstream_pools, site_upstreams,
+    waf_settings,
 };
 use crate::pki::mtls::normalise_fingerprint;
 
@@ -354,6 +357,16 @@ async fn load_basic_auth(
 ) -> Result<Option<site_basic_auth::Model>, sea_orm::DbErr> {
     site_basic_auth::Entity::find()
         .filter(site_basic_auth::Column::SiteId.eq(site_id))
+        .one(db)
+        .await
+}
+
+async fn load_oidc(
+    db: &DatabaseConnection,
+    site_id: Uuid,
+) -> Result<Option<site_oidc::Model>, sea_orm::DbErr> {
+    site_oidc::Entity::find()
+        .filter(site_oidc::Column::SiteId.eq(site_id))
         .one(db)
         .await
 }
@@ -1034,6 +1047,98 @@ fn basic_auth_to_proto(
     })
 }
 
+/// Reads the site's OIDC settings into their protocol shape.
+///
+/// A site without a row ships `None` rather than a disabled `OidcConfig`: the
+/// bundle is fingerprinted over its own encoding, so emitting a defaulted
+/// message for every site would change the hash of every site that has never
+/// touched OIDC and push a full re-sync on upgrade. `enabled` is passed through
+/// as stored — the API refuses to enable a gate with missing credentials, so
+/// there is no second opinion to give here.
+///
+/// A row whose JSON columns cannot be decoded ships disabled with a warning,
+/// matching `basic_auth_to_proto`: unreadable settings must not fail the whole
+/// bundle and lock the site out.
+fn oidc_to_proto(row: Option<&site_oidc::Model>) -> Option<OidcConfig> {
+    let row = row?;
+    let scopes = match site_oidc_api::decode_scopes(&row.scopes) {
+        Ok(scopes) => scopes,
+        Err(error) => {
+            tracing::warn!(
+                site_id = %row.site_id,
+                error = %error,
+                "oidc scopes are unreadable; shipping the gate disabled"
+            );
+            return Some(OidcConfig {
+                enabled: false,
+                ..OidcConfig::default()
+            });
+        },
+    };
+    let claims_to_headers = match site_oidc_api::decode_claims(
+        &row.claims_to_headers,
+    ) {
+        Ok(claims) => claims,
+        Err(error) => {
+            tracing::warn!(
+                site_id = %row.site_id,
+                error = %error,
+                "oidc claims_to_headers are unreadable; shipping the gate disabled"
+            );
+            return Some(OidcConfig {
+                enabled: false,
+                ..OidcConfig::default()
+            });
+        },
+    };
+    // The API refuses to enable a gate without its required fields, but a row
+    // can also be written straight into the database (or predate a validation
+    // rule). An enabled gate that the plugin cannot build would leave the site
+    // with no authentication at all, which is worse than the outage it avoids,
+    // so the same fields are checked here and a broken row ships disabled —
+    // exactly what `basic_auth_to_proto` does with an undecodable credential
+    // list.
+    let usable = !row.issuer.trim().is_empty()
+        && !row.client_id.trim().is_empty()
+        && row.cookie_secret.chars().count()
+            >= site_oidc_api::MIN_COOKIE_SECRET_LEN;
+    if row.enabled && !usable {
+        tracing::warn!(
+            site_id = %row.site_id,
+            "oidc settings are incomplete; shipping the gate disabled"
+        );
+    }
+    Some(OidcConfig {
+        enabled: row.enabled && usable,
+        issuer: row.issuer.clone(),
+        client_id: row.client_id.clone(),
+        client_secret: row.client_secret.clone(),
+        cookie_secret: row.cookie_secret.clone(),
+        redirect_path: row.redirect_path.clone(),
+        logout_path: row.logout_path.clone(),
+        redirect_url: row.redirect_url.clone(),
+        scopes,
+        cookie_name: row.cookie_name.clone(),
+        // The plugin rejects a session TTL under a minute and would then fail to
+        // build, taking the whole gate down; a zero or negative stored value (only
+        // reachable by writing the row directly) falls back to the default instead.
+        session_ttl_seconds: if row.session_ttl_seconds
+            < site_oidc_api::MIN_SESSION_TTL_SECONDS
+        {
+            site_oidc_api::DEFAULT_SESSION_TTL_SECONDS as u32
+        } else {
+            row.session_ttl_seconds as u32
+        },
+        claims_to_headers: claims_to_headers
+            .into_iter()
+            .map(|claim| OidcHeaderClaim {
+                claim: claim.claim,
+                header: claim.header,
+            })
+            .collect(),
+    })
+}
+
 async fn load_bot_protection(
     db: &DatabaseConnection,
     site_id: Uuid,
@@ -1189,6 +1294,7 @@ pub async fn build_rule_bundle(
     let challenge = load_challenge_settings(db, site_row.id).await?;
     let waf_settings = load_waf_settings(db, site_row.id).await?;
     let basic_auth = load_basic_auth(db, site_row.id).await?;
+    let oidc = load_oidc(db, site_row.id).await?;
     let rewrites = load_rewrite_rules(db, site_row.id).await?;
     let err_pages = load_error_pages(db).await?;
     let certificates = load_certificates(db, site_row.id).await?;
@@ -1281,6 +1387,7 @@ pub async fn build_rule_bundle(
         origin_verify_cert,
         response_replace: response_replace_to_proto(site_row),
         ai_crawl,
+        oidc: oidc_to_proto(oidc.as_ref()),
     };
 
     bundle.config_hash = fingerprint(&bundle);

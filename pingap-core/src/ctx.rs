@@ -352,6 +352,14 @@ pub struct CacheInfo {
 pub struct Features {
     /// A map of custom variables for request processing.
     pub variables: Option<AHashMap<String, String>>,
+    /// The uri the client asked for, when the location has rewritten it.
+    ///
+    /// A plugin that sends the client somewhere relative to where it is (the
+    /// `directory` plugin adding the closing slash, the `oidc` plugin matching
+    /// its callback path) goes by this: the rewritten path is the upstream's,
+    /// not the browser's. `None` when the location rewrote nothing, so the
+    /// request's own uri is the client's.
+    pub original_uri: Option<http::Uri>,
     /// A list of plugin names and their processing times in milliseconds.
     pub plugin_processing_times: Option<Vec<(Arc<str>, u32)>>,
     /// Statistics about response compression.

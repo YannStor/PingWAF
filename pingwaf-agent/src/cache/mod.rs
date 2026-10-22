@@ -121,6 +121,9 @@ pub struct SiteRules {
     /// Site-wide basic auth gate; `None` when the site has none configured.
     #[serde(default)]
     pub basic_auth: Option<BasicAuthConfig>,
+    /// Site-level OIDC authentication; `None` when the site has none.
+    #[serde(default)]
+    pub oidc: Option<OidcConfig>,
     /// Observation mode: detections keep running but nothing is enforced —
     /// WAF, IP/geo rules, bot protection and rate limiting only record.
     #[serde(default)]
@@ -806,6 +809,60 @@ pub struct BasicAuthCredential {
     /// Base64 of `username:password`, the payload a client sends in the
     /// `Authorization: Basic …` header.
     pub authorization: String,
+}
+
+// ─── OIDC ───────────────────────────────────────────────────
+
+/// Site-level OIDC (OpenID Connect) authentication, enforced before the
+/// request reaches the origin. Mirrors `proto::OidcConfig` field-for-field.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OidcConfig {
+    /// Whether OIDC authentication is enforced.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Issuer URL; the well-known discovery document is read from
+    /// `<issuer>/.well-known/openid-configuration`.
+    #[serde(default)]
+    pub issuer: String,
+    /// OAuth2 client ID registered at the identity provider.
+    #[serde(default)]
+    pub client_id: String,
+    /// OAuth2 client secret.
+    #[serde(default)]
+    pub client_secret: String,
+    /// Secret used to encrypt the session cookie (e.g. base64 of 32 bytes).
+    #[serde(default)]
+    pub cookie_secret: String,
+    /// Path the provider redirects back to after login.
+    #[serde(default)]
+    pub redirect_path: String,
+    /// Path that clears the session and redirects to the provider's logout.
+    #[serde(default)]
+    pub logout_path: String,
+    /// Absolute callback URL registered at the identity provider.
+    #[serde(default)]
+    pub redirect_url: String,
+    /// Requested scopes, in addition to the defaults.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// Name of the session cookie.
+    #[serde(default)]
+    pub cookie_name: String,
+    /// Session lifetime in seconds.
+    #[serde(default)]
+    pub session_ttl_seconds: u32,
+    /// Claims copied from the ID token into request headers.
+    #[serde(default)]
+    pub claims_to_headers: Vec<OidcHeaderClaim>,
+}
+
+/// One claim-to-header mapping for [`OidcConfig`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OidcHeaderClaim {
+    /// Claim name in the ID token.
+    pub claim: String,
+    /// Header the claim value is copied into.
+    pub header: String,
 }
 
 // ─── Rewrite ────────────────────────────────────────────────
@@ -2483,6 +2540,7 @@ impl RuleCache {
                 .as_ref()
                 .map(Self::convert_response_replace),
             ai_crawl: bundle.ai_crawl.as_ref().map(Self::convert_ai_crawl),
+            oidc: bundle.oidc.as_ref().map(Self::convert_oidc),
         }
     }
 
@@ -2682,6 +2740,30 @@ impl RuleCache {
                 .collect(),
             delay_seconds: b.delay_seconds,
             hide_credentials: b.hide_credentials,
+        }
+    }
+
+    fn convert_oidc(c: &proto::OidcConfig) -> OidcConfig {
+        OidcConfig {
+            enabled: c.enabled,
+            issuer: c.issuer.clone(),
+            client_id: c.client_id.clone(),
+            client_secret: c.client_secret.clone(),
+            cookie_secret: c.cookie_secret.clone(),
+            redirect_path: c.redirect_path.clone(),
+            logout_path: c.logout_path.clone(),
+            redirect_url: c.redirect_url.clone(),
+            scopes: c.scopes.clone(),
+            cookie_name: c.cookie_name.clone(),
+            session_ttl_seconds: c.session_ttl_seconds,
+            claims_to_headers: c
+                .claims_to_headers
+                .iter()
+                .map(|claim| OidcHeaderClaim {
+                    claim: claim.claim.clone(),
+                    header: claim.header.clone(),
+                })
+                .collect(),
         }
     }
 
@@ -2920,6 +3002,78 @@ mod tests {
         // Same for the response replacement policy: a snapshot written
         // before it existed must load as "replace nothing", not fail.
         assert!(site.response_replace.is_none());
+    }
+
+    /// A `sites.json` written before site-level OIDC existed has no `oidc`
+    /// key; the `#[serde(default)]` `Option` must load it as `None` instead
+    /// of failing (which would force a full cold-start refetch from the
+    /// control plane). This is why `CACHE_FORMAT_VERSION` is not bumped.
+    #[test]
+    fn oidc_absent_in_old_snapshot_defaults_to_none() {
+        let old = serde_json::json!({
+            "sites": {
+                "site-1": {
+                    "site_id": "site-1",
+                    "domain": "example.com",
+                    "alternate_domains": [],
+                    "rate_limit_rules": [],
+                    "ip_access_rules": [],
+                    "cache_rules": [],
+                    "rewrite_rules": [],
+                    "error_pages": [],
+                    "upstreams": [],
+                    "basic_auth": null
+                }
+            },
+            "domain_index": {"example.com": "site-1"},
+            "updated_at": "2026-01-01T00:00:00Z",
+            "config_hash": "abc"
+        });
+        let cached: CachedRules = serde_json::from_str(&old.to_string())
+            .expect("old snapshot without oidc loads");
+        let site = cached.sites.get("site-1").expect("site present");
+        assert!(site.oidc.is_none());
+    }
+
+    /// `convert_oidc` must carry every proto field over unchanged — a
+    /// dropped field would silently change the edge's OIDC behaviour.
+    #[test]
+    fn convert_oidc_round_trips_every_field() {
+        let proto_cfg = proto::OidcConfig {
+            enabled: true,
+            issuer: "https://idp.example.com".to_string(),
+            client_id: "client-1".to_string(),
+            client_secret: "secret".to_string(),
+            cookie_secret: "cookie-secret".to_string(),
+            redirect_path: "/_oidc/callback".to_string(),
+            logout_path: "/logout".to_string(),
+            redirect_url: "https://example.com/_oidc/callback".to_string(),
+            scopes: vec!["openid".to_string(), "email".to_string()],
+            cookie_name: "pw_oidc".to_string(),
+            session_ttl_seconds: 3600,
+            claims_to_headers: vec![proto::OidcHeaderClaim {
+                claim: "email".to_string(),
+                header: "X-Oidc-Email".to_string(),
+            }],
+        };
+        let converted = RuleCache::convert_oidc(&proto_cfg);
+        assert!(converted.enabled);
+        assert_eq!(converted.issuer, proto_cfg.issuer);
+        assert_eq!(converted.client_id, proto_cfg.client_id);
+        assert_eq!(converted.client_secret, proto_cfg.client_secret);
+        assert_eq!(converted.cookie_secret, proto_cfg.cookie_secret);
+        assert_eq!(converted.redirect_path, proto_cfg.redirect_path);
+        assert_eq!(converted.logout_path, proto_cfg.logout_path);
+        assert_eq!(converted.redirect_url, proto_cfg.redirect_url);
+        assert_eq!(converted.scopes, proto_cfg.scopes);
+        assert_eq!(converted.cookie_name, proto_cfg.cookie_name);
+        assert_eq!(
+            converted.session_ttl_seconds,
+            proto_cfg.session_ttl_seconds
+        );
+        assert_eq!(converted.claims_to_headers.len(), 1);
+        assert_eq!(converted.claims_to_headers[0].claim, "email");
+        assert_eq!(converted.claims_to_headers[0].header, "X-Oidc-Email");
     }
 
     /// Copy-on-write snapshot economics: cloning a `CachedRules` — what
@@ -3428,6 +3582,7 @@ mod tests {
                     rewrite_rules: Vec::new(),
                     error_pages: Vec::new(),
                     basic_auth: None,
+                    oidc: None,
                     observation_mode: false,
                     proxy_trust: ProxyTrustConfig::default(),
                     cache_settings: None,
@@ -3608,6 +3763,7 @@ mod tests {
                 routes: Vec::new(),
                 bot_protection: None,
                 basic_auth: None,
+                oidc: None,
                 observation_mode: false,
                 proxy_trust: ProxyTrustConfig::default(),
                 cache_settings: None,

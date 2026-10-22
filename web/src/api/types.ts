@@ -2433,6 +2433,67 @@ export interface AiCrawlerRow {
   last_seen: string | null
 }
 
+/* ── Per-site OIDC authentication ─────────────────────────────────── */
+
+/** One ID-token claim forwarded to the origin as a request header. */
+export interface OidcHeaderClaim {
+  claim: string
+  header: string
+}
+
+/** Per-site OpenID Connect sign-in — `/api/v1/sites/{siteId}/oidc`. */
+export interface SiteOidc {
+  id: string
+  site_id: string
+  enabled: boolean
+  /** Absolute http(s) URL, no trailing slash. */
+  issuer: string
+  client_id: string
+  /** `'***'` when a secret is stored; `''` when none is. */
+  client_secret: string
+  /** `'***'` when a secret is stored; `''` when none is. */
+  cookie_secret: string
+  redirect_path: string
+  /** `''` = no logout endpoint. */
+  logout_path: string
+  /** `''` = derived from the request Host. */
+  redirect_url: string
+  scopes: string[]
+  cookie_name: string
+  session_ttl_seconds: number
+  claims_to_headers: OidcHeaderClaim[]
+  created_at: string
+  updated_at: string
+}
+
+export type UpdateOidcRequest = Partial<
+  Pick<
+    SiteOidc,
+    | 'enabled'
+    | 'issuer'
+    | 'client_id'
+    | 'client_secret'
+    | 'cookie_secret'
+    | 'redirect_path'
+    | 'logout_path'
+    | 'redirect_url'
+    | 'scopes'
+    | 'cookie_name'
+    | 'session_ttl_seconds'
+    | 'claims_to_headers'
+  >
+>
+
+/** Secret sent back to keep the stored one unchanged. */
+export const OIDC_SECRET_MASK = '***'
+/** Defaults and bounds mirrored from the control plane. */
+export const OIDC_DEFAULT_REDIRECT_PATH = '/oauth2/callback'
+export const OIDC_DEFAULT_COOKIE_NAME = 'pingap_oidc'
+export const OIDC_DEFAULT_SESSION_TTL_SECONDS = 43200
+export const OIDC_MIN_SESSION_TTL_SECONDS = 60
+export const OIDC_MAX_SESSION_TTL_SECONDS = 31536000
+export const OIDC_MIN_COOKIE_SECRET_LENGTH = 16
+
 /** `GET /analytics/ai-crawlers` — AI crawler traffic overview. */
 export interface AiCrawlerOverview {
   requests: number
