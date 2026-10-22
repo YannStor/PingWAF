@@ -198,6 +198,23 @@ pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// The retention boundary and the console window are both constants, so their
+/// relationship is checked at compile time rather than in a test that could
+/// only ever pass. `const { … }` is what clippy's `assertions_on_constants`
+/// asks for: the assertions run during compilation, and an edit that made the
+/// window exceed what is retained fails the build instead of a test run.
+const _: () = {
+    // `offset(MAX_BOOT_ROWS - 1)` reads the last row kept (0-indexed), and
+    // everything older is deleted — so the subtraction must not underflow.
+    assert!(MAX_BOOT_ROWS >= 1);
+
+    // The console's five must sit inside the retained window, or a restart
+    // loop could push the visible rows out of the table before anyone reads
+    // them.
+    assert!(BOOTS_SHOWN > 0);
+    assert!(BOOTS_SHOWN < MAX_BOOT_ROWS);
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,24 +253,5 @@ mod tests {
         assert_eq!("fresh", BootReason::Fresh.as_str());
         assert_eq!("after_stop", BootReason::AfterStop.as_str());
         assert_eq!("unclean", BootReason::Unclean.as_str());
-    }
-
-    /// The sweep keeps the newest `MAX_BOOT_ROWS` rows, so the row it selects
-    /// as the boundary must be the last one kept — an off-by-one would either
-    /// delete a row it should keep or keep one it should delete.
-    #[test]
-    fn the_sweep_boundary_is_the_last_row_kept() {
-        // `offset(MAX_BOOT_ROWS - 1)` reads the 100th row (0-indexed 99) and
-        // deletes what is *older* than it, leaving exactly 100.
-        assert_eq!(99, MAX_BOOT_ROWS - 1);
-    }
-
-    /// The console's five must sit inside the retained window, or a restart
-    /// loop could push the visible rows out of the table before anyone reads
-    /// them.
-    #[test]
-    fn the_console_window_fits_inside_the_retained_window() {
-        assert!(BOOTS_SHOWN > 0);
-        assert!(BOOTS_SHOWN < MAX_BOOT_ROWS);
     }
 }
