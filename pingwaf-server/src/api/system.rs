@@ -35,7 +35,7 @@ use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::auth::AdminUser;
 use crate::grpc::registry::{AgentRegistry, HeartbeatMetrics};
-use crate::models::{agent, api_key, site};
+use crate::models::{agent, api_key, control_plane_boot, site};
 
 /// `GET /api/v1/system/metrics` — process/host CPU and memory snapshots.
 #[derive(Debug, Serialize)]
@@ -84,6 +84,38 @@ pub struct NodesView {
     /// Registered agents, ordered by hostname so the table does not reshuffle
     /// between polls.
     pub agents: Vec<AgentNode>,
+    /// The newest control-plane starts, newest first. One row per restart:
+    /// the gap between two is the previous process's uptime, which is how a
+    /// container killed in a loop (an OOM kill, a crash) is told from a
+    /// planned redeploy.
+    pub boots: Vec<ControlPlaneBoot>,
+}
+
+/// One recorded control-plane start.
+#[derive(Debug, Serialize)]
+pub struct ControlPlaneBoot {
+    /// Server time of the start.
+    pub booted_at: DateTime<Utc>,
+    /// `fresh` (no previous boot), `after_stop` (the previous process lived
+    /// long enough for a planned stop) or `unclean` (it did not).
+    pub reason: String,
+    /// The version that came up.
+    pub version: String,
+    /// The machine it came up on.
+    pub hostname: String,
+    /// Seconds the previous process lived, when that could be told. `None`
+    /// for the first boot and when the clock moved backwards between starts.
+    pub previous_uptime_seconds: Option<i64>,
+}
+
+fn boot_view(row: &control_plane_boot::Model) -> ControlPlaneBoot {
+    ControlPlaneBoot {
+        booted_at: row.booted_at,
+        reason: row.reason.clone(),
+        version: row.version.clone(),
+        hostname: row.hostname.clone(),
+        previous_uptime_seconds: row.previous_uptime_seconds,
+    }
 }
 
 /// Resource counters of the control-plane process itself.
@@ -188,9 +220,25 @@ async fn nodes(
     .await
     .map_err(|err| ApiError::Internal(err.to_string()))?;
     let profile = pingwaf_profiler::ProfileSnapshot::collect();
+    // A failed read must not take the whole node view down: the control card
+    // and the agent table are still worth showing, so the history degrades to
+    // empty and the reason is logged.
+    let boots = match crate::boot_history::recent_boots(
+        &state.db,
+        crate::boot_history::BOOTS_SHOWN,
+    )
+    .await
+    {
+        Ok(rows) => rows.iter().map(boot_view).collect(),
+        Err(err) => {
+            tracing::warn!(error = %err, "could not read the control plane boot history");
+            Vec::new()
+        },
+    };
     Ok(Json(NodesView {
         control: control_node(&cpu, &memory, &profile),
         agents: agent_nodes(&state.db, &state.agents).await?,
+        boots,
     }))
 }
 
@@ -658,10 +706,52 @@ mod tests {
                 &pingwaf_profiler::ProfileSnapshot::collect(),
             ),
             agents: Vec::new(),
+            boots: Vec::new(),
         };
         let json = serde_json::to_value(&view).expect("serialises");
         assert_eq!(json["agents"], serde_json::json!([]));
         assert!(json["control"].is_object());
+        assert_eq!(json["boots"], serde_json::json!([]));
+    }
+
+    /// The boot history is a list the console renders newest-first, and its
+    /// fields keep their names on the wire.
+    #[test]
+    fn boot_view_carries_the_recorded_fields() {
+        let booted_at = Utc::now();
+        let row = control_plane_boot::Model {
+            id: Uuid::new_v4(),
+            booted_at,
+            reason: "unclean".to_string(),
+            version: "0.29.3".to_string(),
+            hostname: "waf-1".to_string(),
+            previous_uptime_seconds: Some(12),
+            created_at: booted_at,
+        };
+        let json = serde_json::to_value(boot_view(&row)).expect("serialises");
+        assert_eq!(json["reason"], "unclean");
+        assert_eq!(json["version"], "0.29.3");
+        assert_eq!(json["hostname"], "waf-1");
+        assert_eq!(json["previous_uptime_seconds"], 12);
+        assert!(json["booted_at"].is_string());
+    }
+
+    /// A first boot has no uptime to report: the field is null, not 0, so the
+    /// console cannot render "lived 0 seconds" for a process that never had a
+    /// predecessor.
+    #[test]
+    fn a_first_boot_reports_no_previous_uptime() {
+        let row = control_plane_boot::Model {
+            id: Uuid::new_v4(),
+            booted_at: Utc::now(),
+            reason: "fresh".to_string(),
+            version: "0.29.3".to_string(),
+            hostname: "waf-1".to_string(),
+            previous_uptime_seconds: None,
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_value(boot_view(&row)).expect("serialises");
+        assert_eq!(json["previous_uptime_seconds"], serde_json::Value::Null);
     }
 
     /// The control block is a real reading, never a negative one, and its

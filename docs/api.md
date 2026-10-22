@@ -3617,8 +3617,8 @@ platform and in every build, and have no enable switch.
 ### GET /system/nodes
 
 The fleet view in one request: the control-plane process's own counters plus
-one row per registered agent — what the dashboard's node table renders. It is
-the only endpoint that answers "how loaded is the fleet" in one call.
+one row per registered agent. It is the only endpoint that answers "how loaded
+is the fleet" in one call.
 
 **Response (200):**
 
@@ -3644,6 +3644,22 @@ the only endpoint that answers "how loaded is the fleet" in one call.
       "rps": null,
       "sites": 1,
       "last_seen": "2024-01-01T12:00:00Z"
+    }
+  ],
+  "boots": [
+    {
+      "booted_at": "2026-10-22T12:31:05Z",
+      "reason": "unclean",
+      "version": "0.29.3",
+      "hostname": "waf-1",
+      "previous_uptime_seconds": 12
+    },
+    {
+      "booted_at": "2026-10-22T12:30:53Z",
+      "reason": "fresh",
+      "version": "0.29.3",
+      "hostname": "waf-1",
+      "previous_uptime_seconds": null
     }
   ]
 }
@@ -3685,6 +3701,32 @@ table does not reshuffle between polls:
 Fields the control plane does not know yet are `null` rather than `0`: a
 node that has never heartbeated reporting "0 %" would read as an idle node
 instead of an unknown one.
+
+**`boots[]`** — the newest control-plane starts, newest first (at most five),
+written by `control_plane_boots` (migration `000068`). One row per start; the
+gap between two rows is how long the previous process lived.
+
+| Field | Meaning |
+|-------|---------|
+| `booted_at` | When the process started, server time |
+| `reason` | `fresh` (no previous boot on record), `after_stop` (the previous process lived at least 60 s, so a planned stop fits), `unclean` (it lived less — the previous process was almost certainly killed without shutting down) |
+| `version` | The control plane's version at that start |
+| `hostname` | The machine it came up on |
+| `previous_uptime_seconds` | How long the previous process lived, in seconds; `null` for the first boot, and when the clock moved backwards between the two starts |
+
+**Why a start is recorded rather than a stop.** A process killed by the OOM
+killer (or `SIGKILL`, or a crash) runs no code, so it cannot write a "stopped"
+row. A start is the one moment it can speak, which is why the history is built
+from starts. The practical reading: **several boots minutes apart means the
+container is being killed in a loop**, whereas one boot a week ago means a
+normal deploy.
+
+**Replicas.** Several control-plane replicas may share one database; the table
+is shared, so `reason` and `previous_uptime_seconds` are always computed
+against the previous boot **of the same `hostname`** — another replica starting
+seconds later is never mistaken for this process's predecessor. The list itself
+is not host-scoped: it shows the newest starts across the fleet, which is what
+makes a rolling restart readable. The table keeps its newest 100 rows overall.
 
 Known caveats, unchanged behaviour the numbers must be read with:
 

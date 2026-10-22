@@ -150,6 +150,13 @@ async fn health_monitor_loop(
         {
             tracing::warn!(error = %err, "health monitor check failed");
         }
+
+        // The boot history is append-only and grows by one row per restart, so
+        // a container in a restart loop would otherwise fill it. Same loop,
+        // because it is already periodic and already holds the database.
+        if let Err(err) = crate::boot_history::sweep_boots(&db).await {
+            tracing::warn!(error = %err, "boot history sweep failed");
+        }
     }
 }
 

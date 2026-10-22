@@ -10,6 +10,26 @@ verbatim for reference and attribution, and is not maintained here.
 
 ## [Unreleased]
 
+### Added
+
+- **Control-plane restart history on `/system`.** The observation page shows
+  the newest five control-plane starts in place of the agent-node table
+  (agents keep their own page; the card was answering a different question
+  than the rest of the page). Each row carries the start time, version,
+  hostname and how long the *previous* process lived, plus a reason badge:
+  `fresh` (no previous boot), `after_stop` (it lived at least 60 s, so a
+  planned stop fits) or `unclean` (it did not). Several boots minutes apart
+  is what an OOM kill or a crash loop looks like from the outside.
+  `GET /api/v1/system/nodes` gained a `boots[]` array; the rows live in a new
+  `control_plane_boots` table (migration `000068`), swept to the newest 100.
+
+  A start is recorded rather than a stop because a process killed by the OOM
+  killer runs no code and cannot write anything — startup is the only moment
+  it can speak, so the gap between two starts is the previous process's
+  uptime. Two adjacent rows are only compared within one `hostname`, so a
+  second replica starting seconds later is never read as this process's
+  predecessor.
+
 ### Security
 
 - **rustls is pinned to the 0.23.46 floor and its feature set is explicit.**

@@ -1,18 +1,19 @@
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/Badge'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
-import { Table, type Column } from '@/components/ui/Table'
 import { ErrorState } from '@/components/ErrorState'
-import { formatLatency, formatRelative, formatSize } from '@/lib/format'
+import { formatDateTime, formatLatency, formatSize } from '@/lib/format'
 import { normaliseUsagePercent } from '@/api/debug'
-import type { SystemAgentNode, SystemControlNode } from '@/api/debug'
+import type { SystemControlNode, SystemControlPlaneBoot } from '@/api/debug'
 
 /**
- * `/system` 节点区：控制面单卡 + agent 表格。
+ * `/system` 控制面区：本进程资源卡 + 最近 5 次启动记录。
  *
  * 数据来自 `GET /api/v1/system/nodes`（Admin），由父级以 15s 轮询。
- * agent 的 `cpu_percent`/`memory_bytes`/`connections`/`rps`/`last_seen`
- * 缺失时后端给 null —— 一律渲染 `—`，禁止当 0 显示（0 会读成"空闲"）。
+ *
+ * 为什么是"启动"而不是"离线"：控制平面被 OOM kill 或崩溃时不会执行任何代码，
+ * 死亡瞬间无法写记录；它唯一能说话的时刻是**启动**。所以每行是一次启动，相邻
+ * 两行的间隔就是上一个进程的存活时长 —— 几分钟内出现多次启动，就是重启循环。
  */
 export function NodeSection({
   nodes,
@@ -20,7 +21,9 @@ export function NodeSection({
   loading,
   onRetry,
 }: {
-  nodes: { control: SystemControlNode; agents: SystemAgentNode[] } | undefined
+  nodes:
+    | { control: SystemControlNode; boots: SystemControlPlaneBoot[] }
+    | undefined
   error: unknown
   loading: boolean
   onRetry: () => void
@@ -50,9 +53,12 @@ export function NodeSection({
             </Card>
           )}
           <Card className={nodes?.control ? '' : 'xl:col-span-2'}>
-            <CardHeader title={t('system.nodes.agents')} />
+            <CardHeader
+              title={t('system.nodes.boots')}
+              description={t('system.nodes.bootsHint')}
+            />
             <CardBody>
-              <AgentTable agents={nodes?.agents} loading={loading} />
+              <BootHistory boots={nodes?.boots} loading={loading} />
             </CardBody>
           </Card>
         </div>
@@ -61,14 +67,8 @@ export function NodeSection({
   )
 }
 
-/** 单值行：label + 右对齐值；null/undefined 渲染 `—`。 */
-function Metric({
-  label,
-  value,
-}: {
-  label: string
-  value: string
-}) {
+/** 单值行：label + 右对齐值。 */
+function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-baseline justify-between gap-3 py-1">
       <span className="text-[13px] text-fg-subtle">{label}</span>
@@ -118,135 +118,72 @@ export function ControlNodeCard({ control }: { control: SystemControlNode }) {
   )
 }
 
-const STATUS_TONE: Record<string, 'success' | 'danger' | 'warning' | 'neutral'> = {
-  online: 'success',
-  offline: 'danger',
-  degraded: 'warning',
+/** 启动原因 → Badge 色调：`unclean` 是唯一需要警惕的状态。 */
+const REASON_TONE: Record<string, 'success' | 'danger' | 'neutral'> = {
+  fresh: 'neutral',
+  after_stop: 'success',
+  unclean: 'danger',
 }
 
-const NULL_CELL = <span className="text-fg-subtle">—</span>
+/**
+ * 存活时长的可读形式。
+ *
+ * 秒级（重启循环）是这里最要紧的读数，所以短时长保留秒；超过一天才换算成天，
+ * 避免 "172800s" 这种读不出量级的数字。
+ */
+function formatUptime(seconds: number | null): string {
+  if (seconds === null || !Number.isFinite(seconds) || seconds < 0) return '—'
+  if (seconds < 60) return `${seconds}s`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
+  if (seconds < 86_400) return `${(seconds / 3600).toFixed(1)}h`
+  return `${(seconds / 86_400).toFixed(1)}d`
+}
 
-function AgentTable({
-  agents,
+function BootHistory({
+  boots,
   loading,
 }: {
-  agents: SystemAgentNode[] | undefined
+  boots: SystemControlPlaneBoot[] | undefined
   loading: boolean
 }) {
   const { t } = useTranslation()
-  const columns = [
-    {
-      key: 'name',
-      header: t('system.nodes.name'),
-      accessor: (a: SystemAgentNode) => a.name,
-      sortable: true,
-      cell: (a: SystemAgentNode) => (
-        <span className="pw-mono text-[13px] text-fg">{a.name}</span>
-      ),
-    },
-    {
-      key: 'status',
-      header: t('system.nodes.status'),
-      accessor: (a: SystemAgentNode) => a.status,
-      width: '1%',
-      cell: (a: SystemAgentNode) => (
-        <Badge tone={STATUS_TONE[a.status] ?? 'neutral'}>{a.status}</Badge>
-      ),
-    },
-    {
-      key: 'cpu_percent',
-      header: t('system.nodes.cpu'),
-      align: 'right',
-      accessor: (a: SystemAgentNode) => a.cpu_percent ?? -1,
-      sortable: true,
-      cell: (a: SystemAgentNode) =>
-        a.cpu_percent === null || !Number.isFinite(a.cpu_percent) ? (
-          NULL_CELL
-        ) : (
-          <span className="tabular-nums">{`${a.cpu_percent.toFixed(1)}%`}</span>
-        ),
-    },
-    {
-      key: 'memory_bytes',
-      header: t('system.nodes.memoryUsed'),
-      align: 'right',
-      accessor: (a: SystemAgentNode) => a.used_memory_bytes ?? a.memory_bytes ?? -1,
-      cell: (a: SystemAgentNode) => {
-        const used = a.used_memory_bytes ?? a.memory_bytes
-        if (used === null || !Number.isFinite(used)) return NULL_CELL
-        const total = a.total_memory_bytes
-        return (
-          <span
-            className="tabular-nums"
-            title={
-              total != null && Number.isFinite(total)
-                ? `${t('system.nodes.memoryTotal')}: ${formatSize(total)}`
-                : undefined
-            }
-          >
-            {formatSize(used)}
-          </span>
-        )
-      },
-    },
-    {
-      key: 'connections',
-      header: t('system.nodes.connections'),
-      align: 'right',
-      accessor: (a: SystemAgentNode) => a.connections ?? -1,
-      cell: (a: SystemAgentNode) =>
-        a.connections === null || !Number.isFinite(a.connections) ? (
-          NULL_CELL
-        ) : (
-          <span className="tabular-nums">{a.connections.toLocaleString()}</span>
-        ),
-    },
-    {
-      key: 'rps',
-      header: t('system.nodes.rps'),
-      align: 'right',
-      accessor: (a: SystemAgentNode) => a.rps ?? -1,
-      cell: (a: SystemAgentNode) =>
-        a.rps === null || !Number.isFinite(a.rps) ? (
-          NULL_CELL
-        ) : (
-          <span className="tabular-nums">{a.rps.toFixed(0)}</span>
-        ),
-    },
-    {
-      key: 'sites',
-      header: t('system.nodes.sites'),
-      align: 'right',
-      accessor: (a: SystemAgentNode) => a.sites,
-      cell: (a: SystemAgentNode) => (
-        <span className="tabular-nums">{a.sites.toLocaleString()}</span>
-      ),
-    },
-    {
-      key: 'last_seen',
-      header: t('system.nodes.lastSeen'),
-      accessor: (a: SystemAgentNode) => a.last_seen ?? '',
-      cell: (a: SystemAgentNode) =>
-        a.last_seen ? (
-          <span className="text-[13px] text-fg-subtle">{formatRelative(a.last_seen)}</span>
-        ) : (
-          NULL_CELL
-        ),
-    },
-  ] satisfies Column<SystemAgentNode>[]
+
+  if (!boots || boots.length === 0) {
+    return (
+      <div className="py-10 text-center text-sm text-fg-subtle">
+        {loading ? t('system.nodes.loading') : t('system.nodes.bootsEmpty')}
+      </div>
+    )
+  }
 
   return (
-    <Table
-      columns={columns}
-      data={agents ?? []}
-      rowKey={(a) => a.id}
-      loading={loading}
-      dense
-      empty={
-        <div className="py-10 text-center text-sm text-fg-subtle">
-          {t('system.nodes.empty')}
-        </div>
-      }
-    />
+    <ul className="flex flex-col">
+      {boots.map((boot, index) => (
+        <li
+          key={`${boot.booted_at}-${index}`}
+          className="flex items-center justify-between gap-3 border-b border-border py-2 last:border-b-0"
+        >
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <span className="pw-mono text-[13px] tabular-nums text-fg-strong">
+              {formatDateTime(boot.booted_at)}
+            </span>
+            <span className="truncate text-xs text-fg-subtle">
+              {boot.hostname} · v{boot.version}
+            </span>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <span
+              className="text-[13px] tabular-nums text-fg-subtle"
+              title={t('system.nodes.uptimeHint')}
+            >
+              {formatUptime(boot.previous_uptime_seconds)}
+            </span>
+            <Badge tone={REASON_TONE[boot.reason] ?? 'neutral'}>
+              {t(`system.nodes.reason.${boot.reason}`, boot.reason)}
+            </Badge>
+          </div>
+        </li>
+      ))}
+    </ul>
   )
 }

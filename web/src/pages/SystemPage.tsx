@@ -114,7 +114,11 @@ export function SystemPage() {
       )}
 
       <NodeSection
-        nodes={nodes.data}
+        nodes={
+          nodes.data
+            ? { control: nodes.data.control, boots: nodes.data.boots }
+            : undefined
+        }
         error={nodes.isError ? nodes.error : null}
         loading={nodes.isFetching}
         onRetry={() => void nodes.refetch()}
