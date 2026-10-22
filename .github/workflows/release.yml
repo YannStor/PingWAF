@@ -186,6 +186,12 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           generate_release_notes: true
+          # A `-rc.1` / `-beta.2` tag is a test build: mark it a pre-release
+          # so GitHub's `/releases/latest` keeps pointing at the newest
+          # stable one. `install.sh` resolves its version from that endpoint,
+          # so a pre-release that took the flag would be installed by anyone
+          # running the installer without asking for a specific version.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             pingwaf-${{ matrix.plat }}-${{ matrix.arch }}.tar.xz
             pingwaf-${{ matrix.plat }}-${{ matrix.arch }}.tar.xz.sha256
@@ -285,6 +291,26 @@ jobs:
           IMAGE="ghcr.io/shuaizend/pingwaf"
           # Derive major.minor from version (e.g. 0.14.3 -> 0.14)
           MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1,2)
+
+          # A pre-release (`-rc.1`, `-beta.2`, …) gets its own immutable tag
+          # and nothing else. `latest` and `0.30` must keep pointing at the
+          # newest *stable* release: a test build that moved them would hand
+          # `docker compose pull` and `install.sh` an unreleased binary with
+          # no way for the operator to tell. The per-arch tags it is built
+          # from are already version-pinned and safe to share.
+          #
+          # `[[` and `${VERSION%%-*}` are bash; the step's shell is bash by
+          # default on ubuntu runners, and the alternation stays portable
+          # rather than reaching for grep -E.
+          if [[ "$VERSION" == *-* ]]; then
+            echo "::notice::pre-release $VERSION: publishing :$VERSION only"
+            docker manifest create "${IMAGE}:${VERSION}" \
+              "${IMAGE}:${VERSION}-amd64" \
+              "${IMAGE}:${VERSION}-arm64" \
+              --amend
+            docker manifest push "${IMAGE}:${VERSION}"
+            exit 0
+          fi
 
           for tag in "$VERSION" "$MAJOR_MINOR" "latest"; do
             docker manifest create "${IMAGE}:${tag}" \

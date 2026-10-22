@@ -8,7 +8,14 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
-## [Unreleased]
+## [PingWAF 0.30.0-rc.1] — 2026-10-22
+
+> **Pre-release.** A test build of the control-plane restart history on
+> `/system`, published so it can run against a real deployment before it
+> reaches a stable version. It publishes `:0.30.0-rc.1` only — `:latest` and
+> `:0.30` keep pointing at the newest stable release, and GitHub marks it a
+> pre-release so `install.sh` (which resolves `/releases/latest`) is
+> unaffected. Pin it explicitly to use it: `PINGWAF_TAG=0.30.0-rc.1`.
 
 ### Added
 
@@ -29,6 +36,8 @@ verbatim for reference and attribution, and is not maintained here.
   uptime. Two adjacent rows are only compared within one `hostname`, so a
   second replica starting seconds later is never read as this process's
   predecessor.
+
+## [Unreleased]
 
 ### Security
 
