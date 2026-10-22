@@ -14,12 +14,14 @@
 # library images): GitHub Actions runners share IP ranges and hit Docker
 # Hub's anonymous pull limit (HTTP 429) intermittently, which fails the
 # image resolve step before any layer cache can help.
-FROM mirror.gcr.io/library/node:26-alpine AS frontend-builder
+# Node version is pinned in lockstep with ci.yml / release.yml; bump this
+# patch version when a Node security release ships.
+FROM mirror.gcr.io/library/node:26.12.1-alpine AS frontend-builder
 
 WORKDIR /app/web
 
 # 1a. 先拷 manifest，最大化层缓存命中（源码变化不会让此层失效）
-COPY web/package.json web/package-lock.json ./
+COPY web/package.json web/package-lock.json web/.npmrc ./
 
 # 1b. npm ci 挂载 npm 缓存目录，消除重复下载（改进：原无 cache mount，每次全量下载）
 RUN --mount=type=cache,target=/root/.npm \

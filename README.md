@@ -196,7 +196,7 @@ everything else redirects to `https://`).
 | Tool | Version | Notes |
 | --- | --- | --- |
 | Rust | 1.96+ (MSRV) | CI tracks stable; the Docker image and release binaries build with 1.98.1 |
-| Node.js | 22 | Required to build the dashboard |
+| Node.js | 26.12.1+ | Required to build the dashboard — lower versions fail `npm ci` (`engine-strict` pins the 2026-10 security fixes) |
 | `protoc` | any recent | **Required** — gRPC code generation |
 | `cmake` | any recent | Required to build the TLS backend (OpenSSL) |
 | PostgreSQL | 14+ (16 recommended) | Control-plane datastore |

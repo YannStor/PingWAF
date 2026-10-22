@@ -16,7 +16,7 @@ protect your first website.
 > | Path | Best for | Time | Requires |
 > | --- | --- | --- | --- |
 > | [1. Docker Compose](#path-1-docker-compose-recommended) | Trying PingWAF, local dev, single host | ~10 min (first build longer) | Docker Engine 24+ with Compose v2 |
-> | [2. Build from source](#path-2-build-from-source) | Contributors, custom builds, no Docker | ~20 min | Rust 1.96+, Node 22, protoc, cmake, clang |
+> | [2. Build from source](#path-2-build-from-source) | Contributors, custom builds, no Docker | ~20 min | Rust 1.96+, Node 26.12.1+, protoc, cmake, clang |
 > | [3. Binary + systemd](#path-3-binary--systemd-production) | Production Linux servers | ~10 min | Prebuilt binary (see note) |
 >
 > `install.sh` works on **Linux** (amd64/arm64) with prebuilt binaries from
@@ -87,7 +87,7 @@ Port summary:
 | Component | Minimum | Notes |
 | --- | --- | --- |
 | Rust | **1.96** (MSRV) | CI tracks stable; the Docker image and the release binaries build with 1.98.1 |
-| Node.js | **22** | Only needed to build the dashboard frontend |
+| Node.js | **26.12.1** | Only needed to build the dashboard frontend — lower versions fail `npm ci` (`engine-strict`, ships the 2026-10 security fixes) |
 | PostgreSQL | **14+** | 16 recommended; Docker Compose ships `postgres:16-alpine` |
 | Docker Engine | 24+ | With Compose v2 (`docker compose`, not `docker-compose`) |
 | protoc | Any recent release | **Required.** See the warning below |
@@ -200,7 +200,7 @@ By default Compose pulls the pre-built image
 `ghcr.io/shuaizend/pingwaf:latest`. To build from source instead, uncomment the
 `build:` section in [`docker-compose.yml`](../docker-compose.yml) and run
 `docker compose up -d --build` — the multi-stage [`Dockerfile`](../Dockerfile)
-(Node 22 frontend build → Rust 1.98 builder with protoc/cmake/nasm → minimal
+(Node 26.12.1 frontend build → Rust 1.98 builder with protoc/cmake/nasm → minimal
 runtime) compiles the whole Rust workspace, so the **first** source build can
 take 10–20 minutes; later builds reuse the layer cache.
 
@@ -289,7 +289,7 @@ docker compose down -v     # stop AND delete volumes (full factory reset)
 xcode-select --install                        # clang / libclang
 brew install rustup-init protobuf cmake pkg-config openssl nasm
 rustup-init -y && source "$HOME/.cargo/env"
-brew install node@22                          # Node 22 for the frontend
+brew install node@26                          # Node 26 for the frontend (node -v must be ≥ 26.12.1)
 ```
 
 **Debian / Ubuntu:**
@@ -303,8 +303,8 @@ sudo apt install -y build-essential pkg-config libssl-dev \
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
 
-# Node 22
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+# Node 26.12.1+
+curl -fsSL https://deb.nodesource.com/setup_26.x | sudo -E bash -
 sudo apt install -y nodejs
 ```
 
@@ -313,7 +313,7 @@ Confirm everything is present **before** building:
 ```bash
 rustc --version      # >= 1.96
 cargo --version
-node --version       # v22.x
+node --version       # >= v26.12.1
 npm --version
 protoc --version     # MUST succeed — see the protoc warning above
 cmake --version
@@ -338,6 +338,11 @@ npm run build      # runs `tsc -b && vite build`, output in web/dist
 cd ..
 ```
 
+> `web/.npmrc` sets `engine-strict=true`, so an older runtime fails `npm ci`
+> with `EBADENGINE` instead of silently building a bundle with a Node release
+> that predates the 2026-10 security fixes. Upgrade with NodeSource (`setup_26.x`)
+> or `brew install node@26`.
+>
 > Rebuild the Rust binary whenever you rebuild the frontend — the assets are
 > baked into the executable, not read from disk at runtime.
 

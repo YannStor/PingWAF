@@ -70,7 +70,7 @@ Abre el panel:
 
 ### Opción B — Compilar desde el código fuente
 
-En macOS (o si prefieres compilar) se requieren **Rust 1.96+**, **Node.js 22**, `protoc` y `cmake`:
+En macOS (o si prefieres compilar) se requieren **Rust 1.96+**, **Node.js 26.12.1+**, `protoc` y `cmake`:
 
 ```bash
 git clone https://github.com/shuaiZend/PingWAF.git

@@ -54,7 +54,7 @@ make sweep-dry           # report what would be removed
 make sweep               # drop incremental caches + stale intermediates
 
 # Web admin assets (rust-embed'd into the binary at build time)
-make build-web           # cd web && npm install && npm run build, then cp dist ../
+make build-web           # cd web && npm ci && npm run build, then cp dist ../
 
 # Pre-commit hook (runs `make lint`)
 make hooks               # cp hooks/* .git/hooks/

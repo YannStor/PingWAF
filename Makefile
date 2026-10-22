@@ -92,7 +92,7 @@ clean:
 build-web:
 	rm -rf dist \
 	&& cd web \
-	&& npm install && npm run  build \
+	&& npm ci && npm run build \
 	&& cp -rf dist ../
 
 

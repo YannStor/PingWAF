@@ -81,7 +81,7 @@ disclosure process in [`SECURITY.md`](./SECURITY.md).
 | Tool | Version | Needed for |
 | --- | --- | --- |
 | Rust | **1.96+** (MSRV; CI also runs 1.97 and stable) | Everything |
-| Node.js | **22** | Building/linting the dashboard |
+| Node.js | **26.12.1+** | Building/linting the dashboard — lower versions fail `npm ci` (`engine-strict`) |
 | protoc | any recent release | Generating `pingwaf-proto` gRPC stubs |
 | cmake, clang/libclang | — | Native dependencies (e.g. TLS/ML crates) |
 | pkg-config, OpenSSL dev headers | — | The default `openssl` TLS backend |
@@ -92,7 +92,8 @@ disclosure process in [`SECURITY.md`](./SECURITY.md).
 ```bash
 # macOS
 xcode-select --install
-brew install rustup-init protobuf cmake pkg-config openssl nasm node@22
+brew install rustup-init protobuf cmake pkg-config openssl nasm node@26
+node -v            # must be >= 26.12.1, otherwise `npm ci` fails on engines
 rustup-init -y && source "$HOME/.cargo/env"
 
 # Debian / Ubuntu
@@ -101,7 +102,7 @@ sudo apt install -y build-essential pkg-config libssl-dev \
     cmake clang libclang-dev protobuf-compiler nasm curl git
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+curl -fsSL https://deb.nodesource.com/setup_26.x | sudo -E bash -
 sudo apt install -y nodejs
 
 # Optional CI-equivalent tooling
@@ -393,7 +394,7 @@ the standard Apache-2.0 header used throughout the workspace.
 
 欢迎贡献 PingWAF！
 
-1. **环境**：Rust ≥ 1.96、Node 22、`protoc`（**必装**，缺失会静默生成占位文件导致
+1. **环境**：Rust ≥ 1.96、Node 26.12.1+、`protoc`（**必装**，缺失会静默生成占位文件导致
    `pingwaf-server` / `pingwaf-agent` 编译失败，需 `cargo clean -p pingwaf-proto`
    重新生成）、cmake、clang、pkg-config、libssl-dev、nasm、PostgreSQL ≥ 14。
 2. **构建**：先 `cd web && npm ci && npm run build`（前端资源在编译期通过

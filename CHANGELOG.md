@@ -54,6 +54,14 @@ verbatim for reference and attribution, and is not maintained here.
   (`mem_peak_bytes`); the duration share stays as text only.
 - **Durations scale with magnitude** everywhere in the console: `850 ms`,
   `3.2 s`, `5m 12s`, `3h 05m`, `2d 4h`.
+- **The dashboard build now requires Node 26.12.1.** CI, release workflows and
+  the Docker images are pinned to that exact patch release, `web/.npmrc` sets
+  `engine-strict=true`, and the `engines` field requires `>=26.12.1` — builds
+  on Node 22/24 now fail outright, so the local runtime must be upgraded.
+  26.12.1 ships the 2026-10-21 security release fixing 10 CVEs (including
+  CVE-2026-111497, an out-of-bounds write in the Brotli decoder that enables
+  remote code execution). `make build-web` accordingly switched from
+  `npm install` to `npm ci`.
 
 ### Added
 

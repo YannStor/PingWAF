@@ -15,11 +15,13 @@
 # cargo profile (and the resulting target path) differ.
 
 # ─── Stage 1: Frontend ───────────────────────────────────────────────────────
-FROM mirror.gcr.io/library/node:26-alpine AS frontend-builder
+# Node version is pinned in lockstep with ci.yml / release.yml; bump this
+# patch version when a Node security release ships.
+FROM mirror.gcr.io/library/node:26.12.1-alpine AS frontend-builder
 
 WORKDIR /app/web
 
-COPY web/package.json web/package-lock.json ./
+COPY web/package.json web/package-lock.json web/.npmrc ./
 
 RUN --mount=type=cache,target=/root/.npm \
     npm ci --ignore-scripts

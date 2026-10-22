@@ -194,7 +194,7 @@ docker compose up -d
 | 工具 | 版本 | 说明 |
 | --- | --- | --- |
 | Rust | 1.96+（MSRV） | CI 跟随 stable；Docker 镜像与发布二进制使用 1.98.1 构建 |
-| Node.js | 22 | 构建控制台所需 |
+| Node.js | 26.12.1+ | 构建控制台所需——低于该版本 `npm ci` 会因 `engine-strict` 直接失败（该补丁包含 2026-10 安全修复） |
 | `protoc` | 任意较新版本 | **必需**——用于 gRPC 代码生成 |
 | `cmake` | 任意较新版本 | 构建 TLS 后端（OpenSSL）所需 |
 | PostgreSQL | 14+（推荐 16） | 控制面数据存储 |
