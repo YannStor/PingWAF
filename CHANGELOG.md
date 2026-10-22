@@ -8,6 +8,46 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.30.0-rc.2] — 2026-10-23
+
+> **Pre-release.** The second release candidate: the boot history from rc.1
+> plus OIDC. Published so it can run against a real deployment before it
+> reaches a stable version. It publishes `:0.30.0-rc.2` only — `:latest` and
+> `:0.30` keep pointing at the newest stable release, and GitHub marks it a
+> pre-release so `install.sh` (which resolves `/releases/latest`) is
+> unaffected. Pin it explicitly: `PINGWAF_TAG=0.30.0-rc.2`.
+
+### Added
+
+- **Site-level OIDC authentication, with providers configured once.** An
+  identity provider — issuer, client credentials, scopes — is a property of
+  the deployment rather than of a site, since one Keycloak realm usually
+  fronts several; storing its client secret once means rotating it is one
+  edit. Providers are managed on the console's **Account** page
+  (`/api/v1/oidc/providers`) and a site references one, keeping only what
+  differs per site: the callback paths, the session cookie name and TTL, the
+  session key, the claim-to-header map, and the access rules.
+- **Access rules: who may enter, once they are signed in.** Authenticating
+  proves *who* a visitor is; `access_mode` (`allow_all`, the default and the
+  previous behaviour, or `require_any` / `require_all`) holds the ID token's
+  claims against rules of `claim:operator:value` with `eq`, `ne`, `contains`,
+  `in` and `exists`. A denied visitor gets a `403` — they are authenticated,
+  they simply may not enter, and redirecting them back to the provider would
+  loop because the same account returns. The check runs where the session is
+  read, the one place a request carrying a session can be refused, so it
+  cannot be walked around by replaying an older session.
+- **Migration 069** (`oidc_providers`) and **070** (`site_oidc` gains
+  `provider_id`, `access_mode`, `access_rules`; loses the credential columns).
+  Deleting a provider is refused while sites still point at it, and the
+  foreign key is `ON DELETE SET NULL` so a delete that did happen would leave
+  a site visibly unconfigured rather than silently taking its rules.
+
+### Fixed
+
+- **The OIDC work was never on a release.** It lived on `feature/oidc` and
+  was not merged, so `0.30.0-rc.1` answered `404` for
+  `/api/v1/sites/{id}/oidc`. It is on this branch now.
+
 ## [PingWAF 0.30.0-rc.1] — 2026-10-22
 
 > **Pre-release.** A test build of the control-plane restart history on
