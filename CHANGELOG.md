@@ -8,6 +8,42 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.30.0-rc.12] — 2026-10-23
+
+> **Pre-release.** Twelfth candidate: rc.11 without the diagnostics it left
+> behind, plus two build-hygiene guards. Publishes `:0.30.0-rc.12` only —
+> `:latest` and `:0.30` keep pointing at the newest stable release, and GitHub
+> marks it a pre-release so `install.sh` (which resolves `/releases/latest`) is
+> unaffected. Pin it explicitly: `PINGWAF_TAG=0.30.0-rc.12`.
+
+### Fixed
+
+- **The rc.10 diagnostics are gone.** rc.10 added four `tracing::warn!` lines
+  to trace the authenticated identity through the access-log path. rc.11 fixed
+  the bug they found and removed the two in `waf.rs`, but two stayed behind in
+  `oidc.rs` — so the rc.11 image logs a warning on every authenticated request.
+  The fix they led to is unchanged; only the logging is removed.
+
+### Added
+
+- **A ceiling on `target/`.** `Cargo.toml` already pins the debug-info profiles
+  and disables incremental for `test`, but it leaves `dev` incremental ON for
+  `make dev` (bacon). Measured on 2026-10-23 that left 37 GB in
+  `target/debug/incremental` and 76 GB in `target/`: `Makefile`'s
+  `check-target` guard sweeps past `TARGET_MAX_GB`, but it only runs under
+  `make`, and a bare `cargo build` / `cargo test` / `cargo clippy` walks
+  straight past it. `.cargo/config.toml` now applies to every cargo invocation;
+  an edit loop that wants the cache back sets `CARGO_INCREMENTAL=1` for that
+  shell.
+- **`scripts/sweep-host-storage.sh`**, for a host that runs PingWAF from images
+  rather than building it. It reclaims stopped containers, dangling images,
+  unused volumes, images older than a given age that no running container uses,
+  journal size and stale `/tmp` entries — driving podman's own commands, never
+  the storage tree. That last part is the point: a 2026-10-23 cleanup that
+  removed "orphan" overlay directories by hand took a running container's
+  writable layer with it, because the layers `layers.json` does not list are
+  not garbage — a container's own layer is not in that file either.
+
 ## [PingWAF 0.30.0-rc.11] — 2026-10-23
 
 > **Pre-release.** Eleventh candidate: the fix for the identity being dropped
