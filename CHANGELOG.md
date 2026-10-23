@@ -8,6 +8,26 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.30.0-rc.15] — 2026-10-24
+
+> **Pre-release.** Fifteenth candidate: rc.14 plus a fix the end-to-end run
+> found in the site lookup. Publishes `:0.30.0-rc.15` only — `:latest` and
+> `:0.30` keep pointing at the newest stable release, and GitHub marks it a
+> pre-release so `install.sh` (which resolves `/releases/latest`) is
+> unaffected. Pin it explicitly: `PINGWAF_TAG=0.30.0-rc.15`.
+
+### Fixed
+
+- **Every visitor-auth call failed with a database error.** The site lookup
+  matched a request's host against `alternate_domains` with a raw
+  `? = ANY(...)` expression, which the Postgres driver rejected when
+  parameterised — so the login page answered `502` and no visitor could sign
+  in. The match now runs in Rust over the sites one agent serves, where the set
+  is a handful of rows and the comparison cannot be got wrong by a dialect
+  detail. No compile step or unit test of the surrounding logic could see the
+  original: the expression is a string, and the failure was the database's
+  opinion of it.
+
 ## [PingWAF 0.30.0-rc.14] — 2026-10-24
 
 > **Pre-release.** Fourteenth candidate: rc.13 plus one fix found by the
