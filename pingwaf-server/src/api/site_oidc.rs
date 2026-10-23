@@ -701,34 +701,52 @@ async fn guard_enabled(
     if !resolved.enabled {
         return Ok(());
     }
-    let Some(provider_id) = resolved.provider_id else {
-        return Err(ApiError::BadRequest(
-            "provider_id is required while oidc is enabled".to_string(),
-        ));
-    };
-    // The provider must exist *and* be enabled: pointing an enforcing gate at
-    // a provider an operator has switched off would leave the site either
-    // open or broken, and neither is what "enabled" was meant to say.
-    let provider = oidc_provider::Entity::find_by_id(provider_id)
-        .one(&state.db)
-        .await?
-        .ok_or_else(|| {
-            ApiError::BadRequest(
-                "provider_id does not match a configured provider".to_string(),
-            )
-        })?;
-    if !provider.enabled {
-        return Err(ApiError::BadRequest(
-            "the selected provider is disabled; enable it first".to_string(),
-        ));
-    }
-    // A provider row can be written straight into the database, so the fields
-    // the plugin needs are checked here too rather than trusted.
-    if provider.issuer.trim().is_empty() || provider.client_id.trim().is_empty()
-    {
-        return Err(ApiError::BadRequest(
-            "the selected provider has no issuer or client_id".to_string(),
-        ));
+    // The provider is only required by the modes that use it. A `local` site
+    // signs visitors in against an account on this deployment, so requiring one
+    // would make the mode impossible to enable — which is exactly the bug the
+    // end-to-end test caught: the plugin and the data-plane wiring both handled
+    // `local` without a provider, but this guard still demanded one.
+    let auth_mode = AuthMode::parse(&resolved.auth_mode).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "auth_mode must be one of {}",
+            AuthMode::ALL.join(", ")
+        ))
+    })?;
+    if auth_mode.allows_oidc() {
+        let Some(provider_id) = resolved.provider_id else {
+            return Err(ApiError::BadRequest(
+                "provider_id is required while the provider is used"
+                    .to_string(),
+            ));
+        };
+        // The provider must exist *and* be enabled: pointing an enforcing gate
+        // at a provider an operator has switched off would leave the site
+        // either open or broken, and neither is what "enabled" was meant to
+        // say.
+        let provider = oidc_provider::Entity::find_by_id(provider_id)
+            .one(&state.db)
+            .await?
+            .ok_or_else(|| {
+                ApiError::BadRequest(
+                    "provider_id does not match a configured provider"
+                        .to_string(),
+                )
+            })?;
+        if !provider.enabled {
+            return Err(ApiError::BadRequest(
+                "the selected provider is disabled; enable it first"
+                    .to_string(),
+            ));
+        }
+        // A provider row can be written straight into the database, so the
+        // fields the plugin needs are checked here too rather than trusted.
+        if provider.issuer.trim().is_empty()
+            || provider.client_id.trim().is_empty()
+        {
+            return Err(ApiError::BadRequest(
+                "the selected provider has no issuer or client_id".to_string(),
+            ));
+        }
     }
     if resolved.cookie_secret.is_empty() {
         return Err(ApiError::BadRequest(
@@ -1110,6 +1128,37 @@ mod tests {
             value.access_rules = vec![rule("groups", "contains", "admins")];
         });
         assert_eq!(1, with_rules.access_rules.len());
+    }
+
+    /// The provider is only required by the modes that use it.
+    ///
+    /// Regression guard: the enabled guard demanded a `provider_id`
+    /// unconditionally, so a `local` site — which has no provider by
+    /// definition — could never be enabled. The end-to-end test caught it; this
+    /// keeps it caught.
+    #[test]
+    fn only_the_provider_modes_need_a_provider() {
+        for mode in AuthMode::ALL {
+            let parsed =
+                AuthMode::parse(mode).expect("every listed value parses");
+            let needs_provider = parsed.allows_oidc();
+            assert_eq!(
+                mode != AuthMode::LOCAL,
+                needs_provider,
+                "auth_mode {mode} must {} a provider",
+                if mode == AuthMode::LOCAL {
+                    "not need"
+                } else {
+                    "need"
+                }
+            );
+        }
+        // The default keeps the old behaviour, where a provider was always
+        // required because it was the only way in.
+        assert!(
+            AuthMode::parse("").is_none(),
+            "an empty value is not a mode"
+        );
     }
 
     /// A first read of an unconfigured site describes the defaults without
