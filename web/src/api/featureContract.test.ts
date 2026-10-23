@@ -166,10 +166,22 @@ describe('profile module memory column contract', () => {
 /** response_replace 提交体契约：rules 为空 → null。 */
 describe('site response_replace submit contract', () => {
   it('ResponseReplaceCard sends response_replace via sitesApi.update and nulls an empty rule list', () => {
-    const src = read('src/pages/sites/basic/ResponseReplaceCard.tsx')
+    const src = read('src/pages/sites/ResponseReplaceCard.tsx')
     expect(src).toContain('sitesApi.update(site.id')
     expect(src).toContain("save.mutate({ response_replace })")
     expect(src).toMatch(/rules\.length === 0\s*\?\s*null/)
+  })
+
+  it('the card lives on the rewrite page, not in the basic tab', () => {
+    // 2026-10-23：响应体替换从站点基础设置移到「重写规则」页，两类"改写"同页。
+    const rewrite = read('src/pages/sites/RewritePage.tsx')
+    expect(rewrite).toContain("from './ResponseReplaceCard'")
+    expect(rewrite).toMatch(/<ResponseReplaceCard\b/)
+    const basic = read('src/pages/sites/basic/BasicPage.tsx')
+    expect(basic).not.toMatch(/<ResponseReplaceCard\b/)
+    expect(basic).not.toMatch(/import\s+\{\s*ResponseReplaceCard\s*\}/)
+    // 旧位置的文件必须真的没了：留着的话没人 import，编译照样过，回归也就无声。
+    expect(() => read('src/pages/sites/basic/ResponseReplaceCard.tsx')).toThrow()
   })
 
   it('locales keep responseReplace and routes.upstreamHost keys in every language', () => {

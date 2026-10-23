@@ -397,9 +397,9 @@ Examples:
 ### Response Body Replacement
 
 Beyond headers, a site can rewrite strings inside response bodies. Configure
-it on the site (via the dashboard's site settings or
-`PUT /api/v1/sites/{site_id}` with a `response_replace` object — see the
-[API docs](api.md#put-sitessite_id) for the full field list):
+it from the site's **Rewrite Rules** page (the card sits under the rule list)
+or via `PUT /api/v1/sites/{site_id}` with a `response_replace` object — see
+the [API docs](api.md#put-sitessite_id) for the full field list:
 
 ```json
 {

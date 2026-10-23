@@ -8,6 +8,23 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.30.0-rc.9] — 2026-10-23
+
+> **Pre-release.** Ninth candidate: rc.8 plus the identity write on the path
+> that actually carries a streamed response. Publishes `:0.30.0-rc.9` only.
+
+### Fixed
+
+- **The identity is written when the entry is held for the body phase, not
+  only when the response finishes at the header phase.** rc.8 read the
+  context in the two places that ship an entry directly, but a response with
+  a body is *held* first — the facts are stashed and the entry is completed
+  later, in the body phase. A body that never reaches its end-of-stream (the
+  client vanished, the upstream died mid-body) is then shipped by the sweep,
+  which has no request context, so the identity was lost exactly there. It is
+  now written when the entry is held, which covers every path the entry can
+  take afterwards.
+
 ## [PingWAF 0.30.0-rc.8] — 2026-10-23
 
 > **Pre-release.** Eighth candidate: rc.7 plus a second path for the

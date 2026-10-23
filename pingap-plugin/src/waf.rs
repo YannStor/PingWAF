@@ -1793,10 +1793,20 @@ fn amend_pending_access_body(
 /// not depend on it.
 pub fn amend_pending_access_identity(request_id: &str, identity: &str) {
     if identity.is_empty() {
+        tracing::warn!("DIAG amend: empty identity");
         return;
     }
-    if let Some(mut entry) = PENDING_ACCESS.get_mut(request_id) {
-        entry.user_identity = identity.to_string();
+    match PENDING_ACCESS.get_mut(request_id) {
+        Some(mut entry) => {
+            entry.user_identity = identity.to_string();
+            tracing::warn!(request_id, identity, "DIAG amend OK");
+        },
+        None => tracing::warn!(
+            request_id,
+            identity,
+            len = PENDING_ACCESS.len(),
+            "DIAG amend MISS"
+        ),
     }
 }
 
@@ -1981,6 +1991,12 @@ pub fn sweep_stale_access(ttl: Duration) -> usize {
             continue;
         };
         swept += 1;
+        tracing::warn!(
+            request_id,
+            identity = pending.user_identity,
+            path = pending.path,
+            "DIAG sweep"
+        );
         let Some(agent) = agent.as_ref() else {
             continue;
         };
@@ -4187,6 +4203,17 @@ impl Plugin for WafPlugin {
                     cache_status,
                 })
             } else {
+                // The entry is held for the body phase, which counts the
+                // streamed bytes before shipping it. The identity is written
+                // now rather than there: a response whose body never reaches
+                // its end-of-stream — the client vanished, the upstream died
+                // mid-body — is shipped by the sweep instead, and the sweep
+                // has no request context to read it from. Writing it here
+                // means it survives whichever path the entry takes.
+                entry.user_identity = identity_from(
+                    ctx,
+                    std::mem::take(&mut entry.user_identity),
+                );
                 entry.response = Some(ResponseFacts {
                     status_code: status as u32,
                     upstream_addr: ctx.upstream.address.clone(),
