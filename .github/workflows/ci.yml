@@ -250,6 +250,56 @@ jobs:
           path: web/dist
           retention-days: 1
 
+  # Nothing else builds the source `Dockerfile`: CI and the release pipeline
+  # build `Dockerfile.runtime` from a prebuilt binary, and `Dockerfile.perf`
+  # only on a manual dispatch of release-perf.yml. A broken COPY or a bumped
+  # base image in `Dockerfile` therefore reached `main` unverified. This builds
+  # only the `frontend-builder` stage — the part that is cheap and that catches
+  # exactly those mistakes (the `.npmrc` COPY, the pinned Node tag, `npm ci`
+  # under `engine-strict`) — instead of the full Rust build, which the rust
+  # job and release.yml already cover. `Dockerfile.perf` shares the same stage
+  # byte for byte, so one build covers both.
+  dockerfile:
+    name: Dockerfile (source build, frontend stage)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          # Same reason as the docker job below: a flaky Docker Hub pull of
+          # buildkit; mirror.gcr.io serves the identical image anonymously.
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+
+      - name: Build the frontend stage
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: frontend-builder
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=dockerfile-frontend
+          cache-to: type=gha,scope=dockerfile-frontend,mode=max
+
+      # `Dockerfile.perf` must stay in lockstep with `Dockerfile` (only the
+      # cargo profile differs). Building its frontend stage catches the drift
+      # that a comment cannot.
+      - name: Build the frontend stage of Dockerfile.perf
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.perf
+          target: frontend-builder
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=dockerfile-frontend
+
   # Packs the release binary for the :main Docker image (Dockerfile.runtime,
   # same pattern as release.yml) instead of rebuilding everything from source
   # in-container. Runs on main pushes only: a PR run would burn a lot of

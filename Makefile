@@ -176,8 +176,34 @@ publish:
 hooks:
 	cp hooks/* .git/hooks/
 
+# CHANGELOG.md is written by hand, one section per release, in the same style
+# as the ones above it: a short "why" per entry, not the commit subjects. It is
+# deliberately NOT generated from the commit log — the notes explain what was
+# wrong and what changed for an operator, which a subject line does not. See
+# CONTRIBUTING.md ("Release notes").
+#
+# `version` therefore only reports what a release still owes, and fails when the
+# section for $(VERSION) is missing, so a bump cannot land a version whose notes
+# were never written. Nothing here edits CHANGELOG.md.
 version:
-	git cliff --unreleased --tag v$(VERSION) --prepend CHANGELOG.md
+	@set -e; \
+	v="$(VERSION)"; \
+	[ -n "$$v" ] || { echo "Cargo.toml has no [workspace.package] version" >&2; exit 1; }; \
+	if grep -q "^## \[PingWAF $$v\]" CHANGELOG.md; then \
+	  echo "CHANGELOG.md has a section for $$v"; \
+	else \
+	  echo "CHANGELOG.md has no '## [PingWAF $$v]' section — write it before tagging." >&2; \
+	  exit 1; \
+	fi; \
+	if command -v git-cliff >/dev/null 2>&1; then \
+	  echo "--- commit subjects since the last tag (for reference only) ---"; \
+	  git cliff --unreleased --tag "v$$v" --prepend /dev/stdout 2>/dev/null || true; \
+	else \
+	  echo "--- commit subjects since the last tag (for reference only) ---"; \
+	  git log --oneline "$$(git describe --tags --abbrev=0 2>/dev/null || echo HEAD)..HEAD" 2>/dev/null || true; \
+	fi
+
+.PHONY: version
 
 # Bump both places the version lives: [workspace.package] and the per-member
 # requirements in [workspace.dependencies]. `make bump V=1.2.3` sets it outright.

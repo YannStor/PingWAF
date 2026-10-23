@@ -81,4 +81,4 @@ cargo update --workspace --quiet
 count="$(grep -cE '^pingap-[a-z0-9]+ = \{ version = ' "$MANIFEST" | tr -d ' ')"
 echo "$CURRENT -> $NEW"
 echo "  [workspace.package] and $count dependency requirement(s) updated"
-echo "next: make version   # regenerate CHANGELOG.md for v$NEW"
+echo "next: write the CHANGELOG.md section for v$NEW, then make version V=$NEW"

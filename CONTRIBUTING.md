@@ -292,9 +292,18 @@ tokens; state via Zustand, data fetching via TanStack Query.
 
 ## Commit Conventions
 
-We use [Conventional Commits](https://www.conventionalcommits.org/); the
-changelog is generated from them by `git-cliff` ([`cliff.toml`](./cliff.toml)).
-Non-conventional commits are filtered out of the changelog, so please conform.
+We use [Conventional Commits](https://www.conventionalcommits.org/). The types
+drive the review and the release notes: `feat`/`fix`/`perf` are what an
+operator reads about, `chore`/`ci`/`style` are not.
+
+`CHANGELOG.md` is **written by hand**, one section per release, in the same
+style as the sections above it — a short "why" per entry, not the commit
+subject. It is deliberately not generated from the commit log: a subject says
+what moved, and the notes have to say what was wrong and what it means for
+someone running the thing. `cliff.toml` is kept as a reference for grouping
+commits and can print the subjects since the last tag (`make version V=x.y.z`
+does that after checking that the section exists), but it never writes
+`CHANGELOG.md`.
 
 ```
 <type>(<scope>): <subject>
@@ -329,6 +338,34 @@ docs(proxy): move the error template placeholders into a code block
 ```
 
 Mark breaking changes with `!` after the scope or a `BREAKING CHANGE:` footer.
+
+## Release notes
+
+A release is three steps, and the middle one is the one that must not be
+skipped:
+
+1. `make bump-minor` (or `bump-patch` / `make bump V=1.2.3`) — moves the version
+   in `[workspace.package]`, in every `pingap-*` requirement and in
+   `Cargo.lock`.
+2. **Write the `CHANGELOG.md` section for that version, by hand.** Copy the
+   shape of the section above it: a `## [PingWAF <version>] — <date>` heading,
+   then `### Added` / `### Changed` / `### Fixed` / `### Security` as they
+   apply, each entry a short paragraph that says what was wrong or what is new
+   and what it means for someone running it. A pre-release gets the
+   `> **Pre-release.** …` note the `-rc.*` sections carry, saying which tags it
+   moves and which it leaves alone.
+3. `make version` — reads the version from `Cargo.toml`, checks that step 2
+   happened (it fails when the section is missing) and prints the commit
+   subjects since the last tag, so nothing is forgotten. It never writes to
+   `CHANGELOG.md`.
+
+Then commit, tag `v<version>`, and push the commit and the tag. The tag is what
+triggers `release.yml`; pushing `main` alone publishes nothing.
+
+The notes are the only place a user of a previous version finds out what
+changed between the release they are on and this one, which is why they are
+written rather than generated. `cliff.toml` stays for grouping commits, and
+`make version` uses `git-cliff` when it happens to be installed.
 
 ## Branch and Pull Request Workflow
 
@@ -408,7 +445,7 @@ the standard Apache-2.0 header used throughout the workspace.
 4. **提交前**：`make fmt`、`make lint`、`make test`，前端 `npm run lint`。
    `clippy::unwrap_used` 全局 deny，请勿在请求路径中 panic。
 5. **提交信息**：遵循 Conventional Commits（`feat/fix/perf/refactor/docs/test/chore`），
-   scope 用 crate 或领域名，例如 `fix(waf): …`；changelog 由 git-cliff 自动生成。
+   scope 用 crate 或领域名，例如 `fix(waf): …`；`CHANGELOG.md` 为**手写**，每个版本一段，写法与上方既有段落一致（讲清「原来错在哪、对运维意味着什么」，而不是照抄 commit 标题）。
 6. **PR**：fork → 从 `main` 建分支 → 填写 PR 模板并勾选 CLA（见 [CLA.md](./CLA.md)）→ CI 全绿。
    新特性请先开 Issue 讨论；不要提交纯拼写/格式修正的 PR。
 7. **安全漏洞**：请勿公开提 Issue，按 [SECURITY.md](./SECURITY.md) 私密披露。
