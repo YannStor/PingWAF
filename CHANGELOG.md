@@ -8,6 +8,58 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.30.0-rc.5] — 2026-10-23
+
+> **Pre-release.** Fifth candidate: rc.4 plus the provider card's i18n fix.
+> Publishes `:0.30.0-rc.5` only; `:latest` and `:0.30` keep pointing at the
+> newest stable release. Pin it with `PINGWAF_TAG=0.30.0-rc.5`.
+
+### Fixed
+
+- **The site's provider card rendered its own i18n key.** The card asks for
+  `pages.oidc.providerHint`, which an earlier locale pass removed as an orphan
+  while the card still read it, so the explanation line showed the literal
+  string `pages.oidc.providerHint`. All three languages have it back, and a
+  test now extracts every `pages.oidc.*` / `pages.account.*` key the panel and
+  the account card ask for — including the ones built from the access-mode and
+  operator enums — and fails if any is missing from any locale.
+
+## [PingWAF 0.30.0-rc.4] — 2026-10-23
+
+> **Pre-release.** Fourth candidate: rc.3 plus the access-rule session fix.
+> Publishes `:0.30.0-rc.4` only.
+
+### Fixed
+
+- **A rule's claim was not kept in the session, so no rule could ever match.**
+  Access rules run on every request against the session, because the ID token
+  is only in hand during the callback. The callback kept `sub` and the
+  claim-to-header claims, but not the claims the rules read — so
+  `require_any` / `require_all` denied every visitor, including the ones the
+  rules were written to admit, and a site behind the gate was unreachable for
+  everybody. `AccessPolicy::claims` now reports every claim the rules name
+  (deduplicated, since one claim may appear in several rules) and the callback
+  keeps those too. `allow_all` reads nothing, so its session is unchanged.
+
+## [PingWAF 0.30.0-rc.3] — 2026-10-23
+
+> **Pre-release.** Third candidate: rc.2 plus the callback cookie fix.
+> Publishes `:0.30.0-rc.3` only.
+
+### Fixed
+
+- **A callback's session cookie reached the browser only if it was the last
+  one.** An OIDC callback sets two cookies — the session, and the login cookie
+  it clears — and only the second survived to the wire, so a successful login
+  redirected back to the site and then bounced straight to the provider again:
+  an infinite loop with a valid session nobody ever received. The cause was in
+  the response builder, not the plugin: `new_response_header` added every
+  custom header with pingora's `insert_header`, which *replaces* all headers
+  under the same name (the crate documents it as the difference from
+  `append_header`). `Set-Cookie` is now appended while every other header
+  keeps replacing, so a response cannot grow two `Content-Type`s from a plugin
+  and the builder. Two regression tests pin it.
+
 ## [PingWAF 0.30.0-rc.2] — 2026-10-23
 
 > **Pre-release.** The second release candidate: the boot history from rc.1
