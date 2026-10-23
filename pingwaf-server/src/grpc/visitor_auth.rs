@@ -42,11 +42,9 @@ use pingwaf_proto::control_plane::{
     VisitorPasskeyOptionsResponse, VisitorSetVisibleRequest,
     VisitorSetVisibleResponse, VisitorValidateRequest, VisitorValidateResponse,
 };
-use sea_orm::sea_query::Expr;
 use sea_orm::DatabaseConnection;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, QueryFilter,
-    QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set,
 };
 use tonic::{Request, Response, Status};
 use tracing::debug;
@@ -144,16 +142,26 @@ async fn resolve_site(
     if allowed.is_empty() {
         return Err(Status::permission_denied("agent does not serve any site"));
     }
-    let row = site::Entity::find()
+    // The match runs in Rust rather than in SQL. `alternate_domains` is a text
+    // array, and expressing membership portably means either a raw `ANY`/`@>`
+    // expression — which the driver rejected when parameterised — or a
+    // database-specific construct. The set here is one agent's sites, which is a
+    // handful of rows, so fetching them and comparing costs nothing and cannot be
+    // got wrong by a dialect detail.
+    let rows = site::Entity::find()
         .filter(site::Column::Id.is_in(allowed))
-        .filter(
-            Condition::any().add(site::Column::Domain.eq(host)).add(
-                Expr::cust_with_values("? = ANY(alternate_domains)", [host]),
-            ),
-        )
-        .one(&service.db)
+        .all(&service.db)
         .await
-        .map_err(db_status)?
+        .map_err(db_status)?;
+    let row = rows
+        .into_iter()
+        .find(|row| {
+            row.domain == host
+                || row
+                    .alternate_domains
+                    .iter()
+                    .any(|alternate| alternate == host)
+        })
         .ok_or_else(|| {
             Status::permission_denied("agent is not allowed to serve this site")
         })?;
@@ -1284,6 +1292,36 @@ fn db_status(err: sea_orm::DbErr) -> Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A host matches a site's primary domain or any of its alternates.
+    ///
+    /// The comparison runs in Rust rather than in SQL, so it is worth pinning:
+    /// the previous version expressed it as a raw `? = ANY(alternate_domains)`
+    /// expression, which the Postgres driver rejected at runtime — a failure no
+    /// compile step and no unit test of the surrounding logic could see. It
+    /// took a deployed end-to-end run to surface.
+    #[test]
+    fn a_host_matches_the_domain_or_an_alternate() {
+        let matches = |domain: &str, alternates: &[&str], host: &str| {
+            domain == host || alternates.contains(&host)
+        };
+        assert!(matches("example.com", &[], "example.com"));
+        assert!(matches(
+            "example.com",
+            &["www.example.com"],
+            "www.example.com"
+        ));
+        assert!(
+            matches("example.com", &["a.test", "b.test"], "b.test"),
+            "any alternate matches, not just the first"
+        );
+        assert!(!matches("example.com", &["www.example.com"], "other.test"));
+        assert!(
+            !matches("example.com", &[], "EXAMPLE.COM"),
+            "hosts are compared as they arrive; a case difference is a \
+             different host here, which is what the routing table assumes"
+        );
+    }
 
     /// The email normalisation is what makes one account reachable by either
     /// spelling; a change here silently splits accounts in two.
