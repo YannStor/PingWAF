@@ -8,6 +8,25 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.30.0-rc.8] — 2026-10-23
+
+> **Pre-release.** Eighth candidate: rc.7 plus a second path for the
+> authenticated identity, which still reached the access log empty on a live
+> deployment. Publishes `:0.30.0-rc.8` only.
+
+### Fixed
+
+- **The identity is read from the request context as well as the pending
+  entry.** rc.7 fixed the request id being replaced mid-chain, which was one
+  way the entry's amendment could be orphaned; on a live deployment the
+  access log was still empty while `security_events.user_identity` was
+  populated. The two paths differ: an event reads `ctx.state` directly, while
+  the access entry is amended in the request phase and read back in the
+  response phase — more moving parts, and the one that broke. The response
+  phase now consults `ctx.state` again before shipping and lets it win, so
+  the identity is logged even when the amendment did not land. `ctx.state` is
+  what the event path already proves works.
+
 ## [PingWAF 0.30.0-rc.7] — 2026-10-23
 
 > **Pre-release.** Seventh candidate: rc.6 plus the fix for the access-log

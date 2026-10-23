@@ -1800,6 +1800,22 @@ pub fn amend_pending_access_identity(request_id: &str, identity: &str) {
     }
 }
 
+/// The identity to log, preferring what the context holds.
+///
+/// The pending entry is written by the OIDC plugin in the *request* phase and
+/// read back here in the *response* phase, which makes it the more fragile of
+/// the two paths — anything that changes the request id in between orphans the
+/// write (the entry is keyed on it). The context is the same value the
+/// security-event path already reads successfully, so it is consulted again
+/// here and wins when it has something to say: the identity is then logged
+/// even if the amendment never landed.
+fn identity_from(ctx: &Ctx, amended: String) -> String {
+    match ctx.state.user_identity.clone() {
+        Some(identity) if !identity.is_empty() => identity,
+        _ => amended,
+    }
+}
+
 /// What a completed (or capped) body inspection concluded, shared by the
 /// request phase and the request-body filter.
 enum VerdictOutcome {
@@ -4187,9 +4203,11 @@ impl Plugin for WafPlugin {
             }
         };
         if let HeaderOutcome::Immediate(facts) = outcome {
-            let Some((_, pending)) = PENDING_ACCESS.remove(&request_id) else {
+            let Some((_, mut pending)) = PENDING_ACCESS.remove(&request_id)
+            else {
                 return Ok(ResponsePluginResult::Unchanged);
             };
+            pending.user_identity = identity_from(ctx, pending.user_identity);
             emit_access(&agent, &request_id, pending, facts);
         }
         Ok(ResponsePluginResult::Unchanged)
@@ -4211,6 +4229,7 @@ impl Plugin for WafPlugin {
             else {
                 return Ok(ResponseBodyPluginResult::Unchanged);
             };
+            pending.user_identity = identity_from(ctx, pending.user_identity);
             let Some(agent) = PingWafAgent::instance() else {
                 return Ok(ResponseBodyPluginResult::Unchanged);
             };
