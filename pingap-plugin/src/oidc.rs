@@ -1479,11 +1479,6 @@ impl Plugin for Oidc {
             // so a refusal is traceable to the account that was refused — the
             // one case where knowing who asked matters most.
             ctx.state.user_identity = Some(data.identity());
-            tracing::warn!(
-                request_id = ?ctx.state.request_id,
-                identity = data.identity(),
-                "DIAG oidc session ok"
-            );
             // The access entry was created by the WAF, which runs before this
             // plugin, so it is amended rather than built with the identity.
             if let Some(request_id) = ctx.state.request_id.as_deref() {
@@ -1491,8 +1486,6 @@ impl Plugin for Oidc {
                     request_id,
                     &data.identity(),
                 );
-            } else {
-                tracing::warn!("DIAG oidc: no request_id in ctx");
             }
             // The one place a request carrying a session can be refused, so
             // the only place an access rule cannot be walked around: a

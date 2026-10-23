@@ -1,0 +1,23 @@
+# One setting, and it is the one that was missing.
+#
+# `Cargo.toml` already pins the debug-info profiles: `[profile.dev]` and
+# `[profile.test]` keep line tables for workspace members and none for
+# dependencies, and `[profile.test]` disables incremental. It deliberately
+# leaves `dev` incremental ON for `make dev` (bacon), which is the right call
+# for an edit loop and the wrong one for a checkout built by CI-shaped
+# commands.
+#
+# The result, measured on 2026-10-23: `target/debug/incremental` held 37 GB
+# and `target/` totalled 76 GB. `Makefile`'s `check-target` guard sweeps past
+# `TARGET_MAX_GB`, but it only runs under `make` — a bare `cargo build`,
+# `cargo test` or `cargo clippy` walks straight past it, which is how the tree
+# got there. This file applies to *every* cargo invocation.
+#
+# `build.incremental` is the default that profiles may override. `Cargo.toml`
+# sets it for `test` and not for `dev`, so `dev` is what this reaches — and
+# `dev` is where the directory grew. An edit loop that wants the cache back
+# sets `CARGO_INCREMENTAL=1` for that shell, which the environment overrides
+# this with; the default is the safe direction for a tree that is swept by CI
+# more often than it is stepped through.
+[build]
+incremental = false
