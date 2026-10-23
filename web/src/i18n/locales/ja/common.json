@@ -1724,6 +1724,7 @@
     "oidc": {
       "saved": "OIDC 設定を保存しました",
       "provider": "プロバイダー",
+      "providerHint": "訪問者がサイトに到達する前にサインインする OpenID Connect プロバイダー。",
       "cookieSecret": "Cookie シークレット",
       "cookieSecretHint": "セッション Cookie の署名に使います。16 文字以上。",
       "cookieSecretRequired": "16 文字以上",

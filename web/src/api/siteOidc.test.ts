@@ -263,6 +263,41 @@ describe('site OIDC locale contract', () => {
     }
   })
 
+  /**
+   * Every key the panel and the account card ask for must exist, or the UI
+   * renders the key itself. This is the check that caught `providerHint`
+   * being removed as an "orphan" while a card still read it.
+   */
+  it('every key the two components ask for is defined in all three locales', () => {
+    const sources = [
+      read('src/pages/sites/OidcPanel.tsx'),
+      read('src/components/account/OidcProvidersCard.tsx'),
+    ].join('\n')
+    const asked = new Set<string>()
+    for (const match of sources.matchAll(/t\('(pages\.(?:oidc|account)\.[A-Za-z_]+)'\)/g)) {
+      asked.add(match[1]!)
+    }
+    // The dynamic keys: built from the enums rather than written literally.
+    for (const mode of OIDC_ACCESS_MODES) {
+      asked.add(`pages.oidc.accessMode_${mode}`)
+      asked.add(`pages.oidc.accessModeHint_${mode}`)
+    }
+    for (const operator of OIDC_ACCESS_OPERATORS) {
+      asked.add(`pages.oidc.operator_${operator}`)
+    }
+    expect(asked.size).toBeGreaterThan(40)
+
+    for (const lang of ['en', 'zh', 'ja']) {
+      const parsed = JSON.parse(read(`src/i18n/locales/${lang}/common.json`)) as {
+        pages: { oidc: Record<string, string>; account: Record<string, string> }
+      }
+      for (const key of asked) {
+        const [, section, name] = key.split('.') as [string, 'oidc' | 'account', string]
+        expect(parsed.pages[section][name], `${lang}:${key}`).toBeTruthy()
+      }
+    }
+  })
+
   /** The provider's fields left the site panel; their keys must not linger. */
   it('the site panel keeps no keys for credentials it no longer sets', () => {
     for (const lang of ['en', 'zh', 'ja']) {

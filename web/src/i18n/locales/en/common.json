@@ -1724,6 +1724,7 @@
     "oidc": {
       "saved": "OIDC settings saved",
       "provider": "Provider",
+      "providerHint": "The OpenID Connect provider visitors sign in with before reaching the site.",
       "cookieSecret": "Cookie secret",
       "cookieSecretHint": "Signs the session cookie; at least 16 characters.",
       "cookieSecretRequired": "At least 16 characters",

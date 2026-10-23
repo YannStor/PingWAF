@@ -1724,6 +1724,7 @@
     "oidc": {
       "saved": "OIDC 设置已保存",
       "provider": "提供方",
+      "providerHint": "访客在进入站点前用于登录的 OpenID Connect 身份源。",
       "cookieSecret": "Cookie 密钥",
       "cookieSecretHint": "用于签名会话 Cookie，至少 16 个字符。",
       "cookieSecretRequired": "至少 16 个字符",
