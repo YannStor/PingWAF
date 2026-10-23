@@ -8,6 +8,67 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.30.0-rc.13] — 2026-10-24
+
+> **Pre-release.** Thirteenth candidate: a protected site can sign visitors in
+> with an account held by this deployment, and the CPU card reports a number
+> that means what it says. Publishes `:0.30.0-rc.13` only — `:latest` and
+> `:0.30` keep pointing at the newest stable release, and GitHub marks it a
+> pre-release so `install.sh` (which resolves `/releases/latest`) is
+> unaffected. Pin it explicitly: `PINGWAF_TAG=0.30.0-rc.13`.
+
+### Fixed
+
+- **The control-plane CPU card showed values like `500%`.** The card
+  multiplied an already-percent figure by 100 a second time, so a process using
+  5% of the machine rendered as `500.0%` beside a machine-wide figure in the
+  low tens. The backend now puts sysinfo's per-core reading on the
+  whole-machine scale (divided by the core count, clamped to 0-100) and the
+  front end only formats it, so the two readings finally share one unit. A
+  contract test now guards against the double conversion returning.
+
+### Added
+
+- **Local visitor sign-in for protected sites.** A gated site had exactly one
+  way in: the provider's authorization-code flow. `site_oidc.auth_mode` adds
+  the other half — an account held by this deployment, signed in at the site's
+  own login page — and lets a site offer both. The default is `oidc`, so every
+  existing site keeps doing exactly what it did.
+  - **Visitor accounts** (`site_visitors`, migration 072) are global rather
+    than per-site, so one person may be granted several; `visitor_site_grants`
+    (073) carries the grants and the portal's per-site visibility switch.
+    Managed on the console's Account page, and distinct from `users` — the two
+    credential stores rotate independently.
+  - **The login page** is rendered by the data plane, with the WAF challenge's
+    own proof of work (`POW_JS`) rather than a copy: the control plane verifies
+    with the same `verify_proof_of_work`, and two implementations that drifted
+    would fail every login.
+  - **The credential check runs in the control plane**, over eleven new gRPC
+    calls. The challenge is stored in `visitor_auth_states` (075) rather than a
+    process-local map, so a login works across several data-plane instances —
+    the instance that renders the form and the one that receives the POST are
+    routinely different.
+  - **The visitor portal** (`/_pingwaf/portal`) lists the granted sites with a
+    per-site switch, changes the password, and enrols passkeys (074) through
+    the same `passkey-server` the console uses.
+
+### Security
+
+- **A `local` site had no gate.** Only the OIDC plugin enforced a session, and
+  a `local` site does not register it, so the site's own content was served to
+  anyone. The visitor plugin now enforces the gate on every path it does not
+  own.
+- **A password change did not end the sessions it should.** The session cookie
+  carried a `token_version` that nothing compared, so a stolen cookie stayed
+  usable until it expired. `VisitorValidateSession` now checks the version, the
+  account's state and the grant, cached for a minute so a page view still costs
+  no round trip; an unreachable control plane keeps the session rather than
+  tearing down every visitor on a blip.
+- Expired challenges and ceremonies are swept by the monitor loop — they are
+  written by anonymous page loads, so they previously grew without bound.
+- The passkey list and registration are scoped to a granted site, and the
+  portal's visibility switch addresses the site by id rather than by hostname.
+
 ## [PingWAF 0.30.0-rc.12] — 2026-10-23
 
 > **Pre-release.** Twelfth candidate: rc.11 without the diagnostics it left
