@@ -1094,10 +1094,29 @@ fn oidc_to_proto(
             ..OidcConfig::default()
         })
     };
-    // The gate is only as complete as its provider: a site whose provider was
-    // never chosen, or was deleted (the foreign key is `SET NULL`), has no
-    // issuer to authenticate against.
-    let Some(provider) = provider else {
+    // Which ways in the site offers. An unknown value is a row a newer build
+    // wrote; refusing to guess is the safe reading, and it ships disabled.
+    let auth_mode = match site_oidc_model::AuthMode::parse(&row.auth_mode) {
+        Some(mode) => mode,
+        None => {
+            tracing::warn!(
+                site_id = %row.site_id,
+                auth_mode = %row.auth_mode,
+                "oidc auth_mode is unknown; shipping the gate disabled"
+            );
+            return disabled();
+        },
+    };
+    // The provider is only required by the modes that use it. A `local` site
+    // signs visitors in against an account on this deployment, so a missing
+    // provider is not an incomplete configuration there — and requiring one
+    // would make the mode unusable.
+    //
+    // A missing provider that the mode *does* need means the site cannot
+    // authenticate anyone at all (the row predates the choice, or the foreign
+    // key was `SET NULL` by a delete), so the gate ships disabled rather than
+    // half-built.
+    if auth_mode.allows_oidc() && provider.is_none() {
         if row.enabled {
             tracing::warn!(
                 site_id = %row.site_id,
@@ -1105,19 +1124,45 @@ fn oidc_to_proto(
             );
         }
         return disabled();
-    };
-    let scopes = match site_oidc_api::decode_scopes(&provider.scopes) {
-        Ok(scopes) => scopes,
-        Err(error) => {
-            tracing::warn!(
-                site_id = %row.site_id,
-                provider_id = %provider.id,
-                error = %error,
-                "oidc scopes are unreadable; shipping the gate disabled"
-            );
-            return disabled();
-        },
-    };
+    }
+    // The fields the provider contributes, empty when there is no provider —
+    // the plugin only reads them on the flows that have one.
+    let (scopes, provider_usable, issuer, client_id, client_secret) =
+        match provider {
+            Some(provider) => {
+                let scopes = match site_oidc_api::decode_scopes(
+                    &provider.scopes,
+                ) {
+                    Ok(scopes) => scopes,
+                    Err(error) => {
+                        tracing::warn!(
+                            site_id = %row.site_id,
+                            provider_id = %provider.id,
+                            error = %error,
+                            "oidc scopes are unreadable; shipping the gate disabled"
+                        );
+                        return disabled();
+                    },
+                };
+                let usable = provider.enabled
+                    && !provider.issuer.trim().is_empty()
+                    && !provider.client_id.trim().is_empty();
+                (
+                    scopes,
+                    usable,
+                    provider.issuer.clone(),
+                    provider.client_id.clone(),
+                    provider.client_secret.clone(),
+                )
+            },
+            None => (
+                Vec::new(),
+                true,
+                String::new(),
+                String::new(),
+                String::new(),
+            ),
+        };
     let claims_to_headers = match site_oidc_api::decode_claims(
         &row.claims_to_headers,
     ) {
@@ -1151,11 +1196,11 @@ fn oidc_to_proto(
     // so the same fields are checked here and a broken row ships disabled —
     // exactly what `basic_auth_to_proto` does with an undecodable credential
     // list.
-    let usable = provider.enabled
-        && !provider.issuer.trim().is_empty()
-        && !provider.client_id.trim().is_empty()
-        && row.cookie_secret.chars().count()
-            >= site_oidc_api::MIN_COOKIE_SECRET_LEN;
+    let cookie_secret_ok = row.cookie_secret.chars().count()
+        >= site_oidc_api::MIN_COOKIE_SECRET_LEN;
+    // The session key is needed by both flows (each seals its own session with
+    // it), so it is required regardless of the mode.
+    let usable = cookie_secret_ok && provider_usable;
     // An enforcing mode with no rules denies everyone; the API refuses to
     // store it, so reaching here means the row was written directly. Shipping
     // it would lock the site out with no way back through the dashboard.
@@ -1177,15 +1222,14 @@ fn oidc_to_proto(
     if row.enabled && !(usable && mode_is_usable) {
         tracing::warn!(
             site_id = %row.site_id,
-            provider_id = %provider.id,
             "oidc settings are incomplete; shipping the gate disabled"
         );
     }
     Some(OidcConfig {
         enabled: row.enabled && usable && mode_is_usable,
-        issuer: provider.issuer.clone(),
-        client_id: provider.client_id.clone(),
-        client_secret: provider.client_secret.clone(),
+        issuer,
+        client_id,
+        client_secret,
         cookie_secret: row.cookie_secret.clone(),
         redirect_path: row.redirect_path.clone(),
         logout_path: row.logout_path.clone(),
@@ -1218,6 +1262,7 @@ fn oidc_to_proto(
                 value: rule.value,
             })
             .collect(),
+        auth_mode: row.auth_mode.clone(),
     })
 }
 

@@ -1,10 +1,13 @@
 import { apiClient } from './client'
 import type {
   CreateOidcProviderRequest,
+  CreateVisitorRequest,
   OidcProvider,
   SiteOidc,
   UpdateOidcProviderRequest,
   UpdateOidcRequest,
+  UpdateVisitorRequest,
+  Visitor,
 } from './types'
 import {
   OIDC_DEFAULT_COOKIE_NAME,
@@ -80,6 +83,7 @@ export function defaultSiteOidc(siteId: string): SiteOidc {
     cookie_name: OIDC_DEFAULT_COOKIE_NAME,
     session_ttl_seconds: OIDC_DEFAULT_SESSION_TTL_SECONDS,
     claims_to_headers: [],
+    auth_mode: 'oidc',
     access_mode: 'allow_all',
     access_rules: [],
     created_at: now,
@@ -88,3 +92,31 @@ export function defaultSiteOidc(siteId: string): SiteOidc {
 }
 
 export default siteOidcApi
+/**
+ * Visitor accounts — `/api/v1/visitors`.
+ *
+ * The people a protected site admits. They sign in at the site's own login
+ * page (rendered by the data plane) and never reach this console, so the
+ * console only creates and grants them. No read path returns a password: there
+ * is no "keep the stored value" case, because the console is not the party that
+ * signs in with it.
+ */
+export const visitorApi = {
+  list: () => apiClient.get<Visitor[]>('/visitors'),
+
+  get: (visitorId: string) => apiClient.get<Visitor>(`/visitors/${visitorId}`),
+
+  create: (data: CreateVisitorRequest) =>
+    apiClient.post<Visitor>('/visitors', data),
+
+  update: (visitorId: string, data: UpdateVisitorRequest) =>
+    apiClient.put<Visitor>(`/visitors/${visitorId}`, data),
+
+  remove: (visitorId: string) =>
+    apiClient.delete<{ deleted: boolean }>(`/visitors/${visitorId}`),
+}
+
+export const visitorKeys = {
+  all: ['visitors'] as const,
+  detail: (visitorId: string) => [...visitorKeys.all, visitorId] as const,
+}

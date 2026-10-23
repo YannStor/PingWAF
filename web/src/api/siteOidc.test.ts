@@ -119,6 +119,10 @@ describe('site OIDC API contract', () => {
       cookie_name: OIDC_DEFAULT_COOKIE_NAME,
       session_ttl_seconds: OIDC_DEFAULT_SESSION_TTL_SECONDS,
       claims_to_headers: [],
+      // The default is the provider flow, which is what a site did before
+      // local accounts existed — so a site that never touches this field
+      // keeps working exactly as it did.
+      auth_mode: 'oidc',
       // The default admits every signed-in user, which is what the gate did
       // before access rules existed.
       access_mode: 'allow_all',

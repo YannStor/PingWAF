@@ -13,6 +13,11 @@ pingwaf-proto = { path = "../pingwaf-proto" }
 pingwaf-waf = { path = "../pingwaf-waf" }
 pingwaf-system = { path = "../pingwaf-system" }
 pingwaf-profiler = { path = "../pingwaf-profiler" }
+# The visitor login challenge is verified with the same proof-of-work the WAF
+# challenge uses. Sharing the function rather than reimplementing it is a
+# correctness requirement, not tidiness: two implementations that drift by one
+# bit would fail every login with no error to explain it.
+pingwaf-challenge = { path = "../pingwaf-challenge" }
 anyhow = { workspace = true }
 # Lock-free policy swap for the control plane's self-protection middlewares,
 # which reload their settings without blocking the request path.

@@ -45,8 +45,12 @@ pub mod rules;
 pub mod security_events;
 pub mod site_basic_auth;
 pub mod site_oidc;
+pub mod site_visitors;
 pub mod sites;
 pub mod users;
+pub mod visitor_auth_states;
+pub mod visitor_passkeys;
+pub mod visitor_site_grants;
 pub mod waf_settings;
 
 pub use agent_blocked_ips::agent_blocked_ips as agent_blocked_ip;
@@ -90,12 +94,19 @@ pub use rules::{
 pub use security_events::{
     access_logs as access_log, security_events as security_event,
 };
+pub use site_visitors::site_visitors as site_visitor;
 pub use sites::{
     acme_challenge, route_match_type, site_routes, site_ssl, site_status,
     site_upstream_pools, site_upstreams, sites as site, tls_version,
     trusted_header, ResponseReplaceConfig, ResponseReplaceRule,
 };
 pub use users::{api_keys as api_key, permission, role, users as user};
+pub use visitor_auth_states::visitor_auth_states as visitor_auth_state;
+pub use visitor_passkeys::{
+    visitor_passkey_states as visitor_passkey_state,
+    visitor_passkeys as visitor_passkey,
+};
+pub use visitor_site_grants::visitor_site_grants as visitor_site_grant;
 
 /// Convenience alias used across the API and gRPC layers.
 pub type DbErr = sea_orm::DbErr;

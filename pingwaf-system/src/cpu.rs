@@ -24,8 +24,15 @@ const SNAPSHOT_TTL: Duration = Duration::from_secs(1);
 /// Point-in-time CPU usage of this process and the machine.
 #[derive(Debug, Clone, Serialize)]
 pub struct CpuLiveStats {
-    /// This process's CPU usage in percent of one core (multi-threaded work
-    /// can exceed 100), as sysinfo reports it.
+    /// This process's CPU usage as a share of the whole machine, in percent.
+    ///
+    /// `sysinfo::Process::cpu_usage` reports *per core*, so a multi-threaded
+    /// process on an eight-core box reads up to 800. Every consumer of this
+    /// value displays it as a percentage next to the machine-wide
+    /// [`Self::host_cpu_percent`], so the two are put on the same scale here
+    /// — divided by the core count and clamped to 0-100 — rather than left
+    /// for each caller to reinterpret. The dashboard showing "500%" beside
+    /// "12%" was exactly that mistake.
     pub process_cpu_percent: f32,
     /// Average CPU usage across all machine cores, in percent.
     pub host_cpu_percent: f32,
@@ -60,6 +67,24 @@ static LAST_REFRESH: LazyLock<Mutex<Instant>> =
 /// CPU_SAMPLER → LAST_SNAPSHOT, never the other way round.
 static LAST_SNAPSHOT: Mutex<Option<(CpuLiveStats, Instant)>> = Mutex::new(None);
 
+/// A per-core CPU reading as a share of the whole machine, in percent.
+///
+/// `sysinfo::Process::cpu_usage` counts one core as 100, so a process using
+/// four cores reports 400. Dividing by the core count puts it on the same
+/// scale as `System::global_cpu_usage`, which is what every caller displays
+/// it beside. Clamped at both ends: a process pinned across every core can
+/// round past 100, and a counter that moved backwards can go negative.
+fn whole_machine_percent(per_core: f32, cores: usize) -> f32 {
+    let share = if cores > 0 {
+        per_core / cores as f32
+    } else {
+        // No cores reported: the reading cannot be rescaled, so pass it
+        // through and let the clamp below bound it.
+        per_core
+    };
+    share.clamp(0.0, 100.0)
+}
+
 /// Collects a [`CpuLiveStats`] snapshot. Callers inside async handlers
 /// should keep this off the executor thread (the lock sleeps).
 pub fn cpu_snapshot() -> CpuLiveStats {
@@ -83,14 +108,18 @@ pub fn cpu_snapshot() -> CpuLiveStats {
         false,
         ProcessRefreshKind::everything(),
     );
+    let cores = sys.cpus().len();
     let process_cpu_percent = sys
         .process(pid)
-        .map(|process| process.cpu_usage())
+        .map(|process| whole_machine_percent(process.cpu_usage(), cores))
         .unwrap_or_default();
     let stats = CpuLiveStats {
         process_cpu_percent,
-        host_cpu_percent: sys.global_cpu_usage(),
-        cores: sys.cpus().len(),
+        // Already machine-wide: `global_cpu_usage` averages the cores. Only
+        // the clamp is wanted here, which `whole_machine_percent` applies
+        // with `cores = 1` (no division).
+        host_cpu_percent: whole_machine_percent(sys.global_cpu_usage(), 1),
+        cores,
         collected_at_ms: now_ms(),
     };
     mark_refreshed();
@@ -137,6 +166,45 @@ mod tests {
         assert!(stats.cores > 0);
         assert!(stats.process_cpu_percent >= 0.0);
         assert!(stats.host_cpu_percent >= 0.0);
+    }
+
+    /// The two CPU readings share one scale, and neither can read past 100.
+    ///
+    /// This is the regression guard for the dashboard showing "500%": the
+    /// process figure used to be per core and unbounded, so a busy
+    /// multi-threaded process rendered as several hundred percent next to a
+    /// machine-wide figure in the low tens.
+    #[test]
+    fn both_cpu_readings_are_a_share_of_the_whole_machine() {
+        let stats = cpu_snapshot();
+        assert!(
+            stats.process_cpu_percent <= 100.0,
+            "process CPU must be a whole-machine share, got {}",
+            stats.process_cpu_percent
+        );
+        assert!(
+            stats.host_cpu_percent <= 100.0,
+            "host CPU must not exceed 100%, got {}",
+            stats.host_cpu_percent
+        );
+    }
+
+    /// A per-core reading is divided by the core count, and a process spread
+    /// across every core lands at 100 rather than several hundred.
+    #[test]
+    fn per_core_usage_is_scaled_and_clamped() {
+        // Four cores busy to the limit: 400 per core → 100 machine-wide.
+        assert_eq!(100.0, whole_machine_percent(400.0, 4));
+        // Half of one core out of four: 50 per core → 12.5 machine-wide.
+        assert_eq!(12.5, whole_machine_percent(50.0, 4));
+        // Idle stays idle.
+        assert_eq!(0.0, whole_machine_percent(0.0, 8));
+        // A rounding overshoot on every core still reads 100, not 100.4.
+        assert_eq!(100.0, whole_machine_percent(100.4, 1));
+        // A machine that reports no cores must not divide by zero.
+        assert_eq!(42.0, whole_machine_percent(42.0, 0));
+        // A negative reading (a counter that moved backwards) floors at 0.
+        assert_eq!(0.0, whole_machine_percent(-5.0, 4));
     }
 
     /// Back-to-back calls inside the reuse window share one reading, which

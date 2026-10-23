@@ -50,6 +50,7 @@ pub mod system;
 pub mod system_tls;
 pub mod users;
 pub(crate) mod validation;
+pub mod visitors;
 pub mod waf_settings;
 
 use crate::frontend::serve_frontend;
@@ -130,6 +131,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(oidc_providers::routes())
         .merge(keys::routes())
         .merge(users::routes())
+        .merge(visitors::routes())
         .merge(agents::routes())
         .merge(rules::routes())
         .merge(rate_limiting::routes())

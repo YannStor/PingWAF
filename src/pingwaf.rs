@@ -498,6 +498,37 @@ fn site_oidc_plugin(
         return Vec::new();
     };
 
+    // Which ways in this site offers. The control plane parses and validates
+    // it; an unreadable value here means a row written directly, and the safe
+    // reading is the pre-local-accounts one.
+    let auth_mode = oidc.auth_mode.trim();
+    let allows_local = matches!(auth_mode, "local" | "both");
+    let allows_oidc = !matches!(auth_mode, "local");
+
+    let mut names = Vec::new();
+    // A `local` site signs visitors in at its own login page; the provider's
+    // plugin would only sit unused in the chain, and building it would demand
+    // credentials the site does not have.
+    if allows_local {
+        let mut visitor = PluginConf::new();
+        visitor.insert(
+            "category".to_string(),
+            toml::Value::String("visitor_auth".to_string()),
+        );
+        // The same secret the OIDC session uses: one secret per site to
+        // rotate, with a domain separator keeping the two keys distinct.
+        visitor.insert(
+            "cookie_secret".to_string(),
+            toml::Value::String(oidc.cookie_secret.clone()),
+        );
+        let name = format!("{site_id}_visitor_auth");
+        plugins.insert(name.clone(), visitor);
+        names.push(name);
+    }
+    if !allows_oidc {
+        return names;
+    }
+
     let mut conf = PluginConf::new();
     conf.insert(
         "category".to_string(),
@@ -571,6 +602,13 @@ fn site_oidc_plugin(
         "access_mode".to_string(),
         toml::Value::String(oidc.access_mode.clone()),
     );
+    // Which ways in the site offers. Passed through verbatim: an empty value
+    // (a config written before the field existed) is read by the plugin as
+    // `oidc`, which is the behaviour those sites already had.
+    conf.insert(
+        "auth_mode".to_string(),
+        toml::Value::String(oidc.auth_mode.clone()),
+    );
     conf.insert(
         "access_rules".to_string(),
         toml::Value::Array(
@@ -594,7 +632,8 @@ fn site_oidc_plugin(
     // secret and the claims go to that site's upstream only.
     let name = format!("{site_id}_oidc");
     plugins.insert(name.clone(), conf);
-    vec![name]
+    names.push(name);
+    names
 }
 
 /// Synthesizes the data-plane health check URL from the control plane's
@@ -2752,6 +2791,7 @@ mod tests {
                     value: String::new(),
                 },
             ],
+            auth_mode: "both".to_string(),
         });
 
         let config = cached_rules_to_pingap_config(

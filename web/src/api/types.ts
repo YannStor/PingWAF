@@ -2510,6 +2510,17 @@ export interface OidcAccessRule {
 }
 
 /** What a site does with a signed-in visitor who is not in the rules. */
+/**
+ * How a visitor signs in at a site.
+ *
+ * `access_mode` decides who may enter once signed in; this decides how they
+ * sign in at all. `oidc` is the default and the pre-local-accounts behaviour,
+ * so a site that never touches this keeps working as it did.
+ */
+export type OidcAuthMode = 'oidc' | 'local' | 'both'
+
+export const OIDC_AUTH_MODES: OidcAuthMode[] = ['oidc', 'local', 'both']
+
 export type OidcAccessMode = 'allow_all' | 'require_any' | 'require_all'
 
 export const OIDC_ACCESS_MODES: OidcAccessMode[] = [
@@ -2542,6 +2553,7 @@ export interface SiteOidc {
   cookie_name: string
   session_ttl_seconds: number
   claims_to_headers: OidcHeaderClaim[]
+  auth_mode: OidcAuthMode
   access_mode: OidcAccessMode
   access_rules: OidcAccessRule[]
   created_at: string
@@ -2566,6 +2578,7 @@ export type UpdateOidcRequest = Partial<
     | 'cookie_name'
     | 'session_ttl_seconds'
     | 'claims_to_headers'
+    | 'auth_mode'
     | 'access_mode'
     | 'access_rules'
   >
@@ -2598,3 +2611,39 @@ export interface AiCrawlerOverview {
 }
 
 
+
+/* ── Visitor accounts ─────────────────────────────────────────────── */
+
+/**
+ * A person a protected site admits — `/api/v1/visitors`.
+ *
+ * Distinct from a console operator: a visitor signs in at the site's own login
+ * page and never reaches this console. `site_ids` is the set of sites they may
+ * enter; only granted sites are reachable after signing in.
+ */
+export interface Visitor {
+  id: string
+  email: string
+  name: string
+  disabled: boolean
+  site_ids: string[]
+  created_at: string
+  updated_at: string
+}
+
+export interface CreateVisitorRequest {
+  email: string
+  password: string
+  name?: string
+  disabled?: boolean
+  site_ids?: string[]
+}
+
+export interface UpdateVisitorRequest {
+  name?: string
+  disabled?: boolean
+  /** Absent leaves the stored password. */
+  password?: string
+  /** Replaces the whole grant list when present. */
+  site_ids?: string[]
+}

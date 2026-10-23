@@ -106,10 +106,60 @@ pub struct Oidc {
     own_headers: Vec<HeaderName>,
     /// Whether a signed-in user may enter, and what that depends on.
     access: AccessPolicy,
+    /// How a visitor signs in at this site: only the provider, only a local
+    /// account, or both. `access` decides who may enter *after* signing in;
+    /// this decides how they sign in at all.
+    auth_mode: AuthMode,
     client: reqwest::Client,
     provider: ArcSwapOption<Provider>,
     /// One discovery at a time, and when the last one was started.
     discovery_lock: tokio::sync::Mutex<Option<Instant>>,
+}
+
+/// How a visitor signs in at this site.
+///
+/// The counterpart to [`AccessPolicy`]: that one decides who may enter once
+/// they are signed in, this one decides how they sign in at all. The default
+/// is [`AuthMode::Oidc`], which is what every site did before local accounts
+/// existed — so a config that never mentions the field keeps its behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthMode {
+    /// Only the provider's authorization-code flow.
+    Oidc,
+    /// Only a local account, signed in through this plugin's own login page.
+    Local,
+    /// Both: the login page offers the local form and links to the provider.
+    Both,
+}
+
+impl AuthMode {
+    /// Parses the configured value.
+    ///
+    /// An absent value means `oidc`: a config written before this field
+    /// existed, or one assembled by an older control plane, must keep doing
+    /// what it did. An *unknown* value is a different matter — that is a
+    /// configuration error, and reading it as `oidc` would silently ignore
+    /// what an operator wrote.
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.trim() {
+            "" | "oidc" => Ok(Self::Oidc),
+            "local" => Ok(Self::Local),
+            "both" => Ok(Self::Both),
+            other => {
+                Err(format!("auth_mode {other:?} is not oidc, local or both"))
+            },
+        }
+    }
+
+    /// Whether the local login page is reachable at all.
+    fn allows_local(self) -> bool {
+        matches!(self, Self::Local | Self::Both)
+    }
+
+    /// Whether the provider's flow is reachable at all.
+    fn allows_oidc(self) -> bool {
+        matches!(self, Self::Oidc | Self::Both)
+    }
 }
 
 /// Whether a signed-in user may enter, and what that depends on.
@@ -405,18 +455,25 @@ impl TryFrom<&PluginConf> for Oidc {
                 "oidc plugin should be executed at request step".to_string(),
             ));
         }
+        // Which ways in this site offers. Parsed first because the modes that do
+        // not use the provider must not be asked for its credentials.
+        let auth_mode = AuthMode::parse(&get_str_conf(value, "auth_mode"))
+            .map_err(invalid)?;
+        // The provider's own settings are only required by the modes that use
+        // it. A `local` site signs visitors in against an account held by the
+        // control plane, so demanding an issuer would make the mode unusable.
         let issuer = get_str_conf(value, "issuer")
             .trim()
             .trim_end_matches('/')
             .to_string();
-        if !is_http_url(&issuer) {
+        if auth_mode.allows_oidc() && !is_http_url(&issuer) {
             return Err(invalid(
                 "issuer is required: the url of the provider, http or https"
                     .to_string(),
             ));
         }
         let client_id = get_str_conf(value, "client_id").trim().to_string();
-        if client_id.is_empty() {
+        if auth_mode.allows_oidc() && client_id.is_empty() {
             return Err(invalid("client_id is required".to_string()));
         }
         let client_secret = get_str_conf(value, "client_secret");
@@ -540,6 +597,7 @@ impl TryFrom<&PluginConf> for Oidc {
             claims_to_headers,
             own_headers,
             access,
+            auth_mode,
             client,
             provider: ArcSwapOption::empty(),
             discovery_lock: tokio::sync::Mutex::new(None),
@@ -1392,7 +1450,12 @@ fn text(status: StatusCode, message: &str) -> HttpResponse {
 /// Whether a request is a browser going to a page: that can be sent on
 /// to the provider. A script that fetches, or a form that is posted, can
 /// not follow there and is told that it has no session.
-fn is_navigation(session: &Session) -> bool {
+///
+/// `pub(crate)` because the visitor-auth gate makes the same split — a browser
+/// is redirected to a login page, anything else is told 401 — and two
+/// implementations of "is this a browser" would eventually disagree about some
+/// client.
+pub(crate) fn is_navigation(session: &Session) -> bool {
     let header = session.req_header();
     if header.method != Method::GET {
         return false;
@@ -1518,6 +1581,37 @@ impl Plugin for Oidc {
         }
         // Not what a client without a session gets to say of itself.
         strip_claim_headers(session.req_header_mut(), &self.own_headers);
+        // A site that signs visitors in locally sends the browser to its own
+        // login page rather than to the provider. The check runs before the
+        // navigation test so a script still gets a 401: a page redirect is
+        // only useful to something that can follow one.
+        if self.auth_mode.allows_local() {
+            if !is_navigation(session) {
+                return Ok(RequestPluginResult::Respond(text(
+                    StatusCode::UNAUTHORIZED,
+                    "Login required",
+                )));
+            }
+            let target = request_uri(session, ctx).path_and_query();
+            let next = target.map(|value| value.as_str()).unwrap_or("/");
+            // The visitor-auth plugin owns this path; if it is not on this
+            // location the redirect would loop, so the login page is reached
+            // directly instead.
+            let location = format!(
+                "{}?next={}",
+                crate::visitor_auth::LOGIN_PATH,
+                urlencoding::encode(next),
+            );
+            return Ok(RequestPluginResult::Respond(
+                HttpResponse::redirect(&location).map_err(|error| {
+                    pingora::Error::because(
+                        pingora::ErrorType::InternalError,
+                        "visitor login redirect",
+                        error,
+                    )
+                })?,
+            ));
+        }
         if !is_navigation(session) {
             return Ok(RequestPluginResult::Respond(text(
                 StatusCode::UNAUTHORIZED,
@@ -2961,6 +3055,87 @@ Pz7glwkTfq+X/7U/TTdWanLivIQqzKjyNBu3kgzx7GeUYcjtuw4RKof6
         let policy = policy("");
         assert_eq!(AccessPolicy::AllowAll, policy);
         assert!(policy.admits(&claims("{}")));
+    }
+
+    // ─── Auth mode ─────────────────────────────────────────────────────
+    //
+    // How a visitor signs in. The default matters most: a config written
+    // before local accounts existed must keep behaving as it did.
+
+    fn auth_mode_of(extra: &str) -> AuthMode {
+        new_plugin(extra).expect("the plugin builds").auth_mode
+    }
+
+    #[test]
+    fn an_absent_auth_mode_is_oidc() {
+        // The pre-local-accounts behaviour, and what an older control plane
+        // ships. Both must keep working unchanged.
+        assert_eq!(AuthMode::Oidc, auth_mode_of(""));
+    }
+
+    #[test]
+    fn each_auth_mode_parses_and_names_the_flows_it_allows() {
+        assert_eq!(AuthMode::Oidc, auth_mode_of("auth_mode = \"oidc\"\n"));
+        assert_eq!(AuthMode::Local, auth_mode_of("auth_mode = \"local\"\n"));
+        assert_eq!(AuthMode::Both, auth_mode_of("auth_mode = \"both\"\n"));
+
+        assert!(AuthMode::Oidc.allows_oidc() && !AuthMode::Oidc.allows_local());
+        assert!(
+            !AuthMode::Local.allows_oidc() && AuthMode::Local.allows_local()
+        );
+        assert!(AuthMode::Both.allows_oidc() && AuthMode::Both.allows_local());
+    }
+
+    /// Builds a plugin from a config written from scratch, so a field can be
+    /// *absent* rather than overridden. `new_plugin` appends to `BASE`, and
+    /// TOML rejects a repeated key, so a test that needs to leave the issuer
+    /// out cannot go through it.
+    fn plugin_from(conf: &str) -> Result<Oidc> {
+        let mut plugin =
+            Oidc::new(&toml::from_str::<PluginConf>(conf).unwrap())?;
+        plugin.client = test_client();
+        Ok(plugin)
+    }
+
+    /// A `local` site has no provider, so demanding its credentials would
+    /// make the mode impossible to configure.
+    #[test]
+    fn a_local_site_needs_no_provider_credentials() {
+        let plugin = plugin_from(
+            "auth_mode = \"local\"\ncookie_secret = \"0123456789abcdef0123456789abcdef\"\n",
+        )
+        .expect("a local site builds without an issuer or client id");
+        assert_eq!(AuthMode::Local, plugin.auth_mode);
+        assert!(plugin.issuer.is_empty());
+    }
+
+    /// The modes that do use the provider still require it: an OIDC flow
+    /// without an issuer could not redirect anywhere.
+    #[test]
+    fn the_modes_that_use_the_provider_still_require_it() {
+        let secret = "cookie_secret = \"0123456789abcdef0123456789abcdef\"\n";
+        assert!(
+            plugin_from(&format!("auth_mode = \"oidc\"\n{secret}")).is_err(),
+            "an oidc site needs an issuer"
+        );
+        assert!(
+            plugin_from(&format!(
+                "auth_mode = \"both\"\nissuer = \"https://idp.test\"\n{secret}"
+            ))
+            .is_err(),
+            "a both site needs a client id"
+        );
+    }
+
+    /// An unknown mode is a configuration error, not a silent fallback: an
+    /// operator who wrote a restriction meant it.
+    #[test]
+    fn an_unknown_auth_mode_is_refused() {
+        let error = match new_plugin("auth_mode = \"saml\"\n") {
+            Ok(_) => panic!("an unknown auth_mode is refused"),
+            Err(error) => error,
+        };
+        assert!(format!("{error}").contains("auth_mode"));
     }
 
     #[test]

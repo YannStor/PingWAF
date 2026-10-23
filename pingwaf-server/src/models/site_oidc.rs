@@ -68,6 +68,64 @@ impl AccessMode {
     }
 }
 
+/// How a protected site signs its visitors in.
+///
+/// The counterpart to [`AccessMode`]: that one decides who may enter once they
+/// are signed in, this one decides how they sign in at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMode {
+    /// Only the provider's authorization-code flow. The default, and what the
+    /// gate did before local accounts existed — so an upgrade changes nothing
+    /// for a site that was already configured.
+    Oidc,
+    /// Only a local account on this deployment, with a proof-of-work
+    /// challenge.
+    Local,
+    /// Both: the login page offers the local form and links to the provider.
+    Both,
+}
+
+impl AuthMode {
+    pub const OIDC: &'static str = "oidc";
+    pub const LOCAL: &'static str = "local";
+    pub const BOTH: &'static str = "both";
+
+    /// Every value the column may hold, for the API's validation and the
+    /// dashboard's picker.
+    pub const ALL: [&'static str; 3] = [Self::OIDC, Self::LOCAL, Self::BOTH];
+
+    /// Parses the stored value. `None` for anything else, so a row a newer
+    /// build wrote is not read as a mode it never meant — the data plane
+    /// treats that as a configuration error rather than guessing at one.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            Self::OIDC => Some(Self::Oidc),
+            Self::LOCAL => Some(Self::Local),
+            Self::BOTH => Some(Self::Both),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Oidc => Self::OIDC,
+            Self::Local => Self::LOCAL,
+            Self::Both => Self::BOTH,
+        }
+    }
+
+    /// Whether the local login page is reachable at all.
+    pub fn allows_local(self) -> bool {
+        matches!(self, Self::Local | Self::Both)
+    }
+
+    /// Whether the provider's flow is reachable at all.
+    pub fn allows_oidc(self) -> bool {
+        matches!(self, Self::Oidc | Self::Both)
+    }
+}
+
 #[derive(
     Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize,
 )]
@@ -92,6 +150,8 @@ pub struct Model {
     /// JSON array of `{claim, header}` objects.
     #[sea_orm(column_type = "JsonBinary")]
     pub claims_to_headers: Json,
+    /// One of [`AuthMode::ALL`].
+    pub auth_mode: String,
     /// One of [`AccessMode::ALL`].
     pub access_mode: String,
     /// JSON array of `{claim, operator, value}` objects.
@@ -127,5 +187,35 @@ mod tests {
         assert_eq!(None, AccessMode::parse("require_some"));
         assert_eq!(None, AccessMode::parse(""));
         assert_eq!(None, AccessMode::parse("ALLOW_ALL"));
+    }
+
+    #[test]
+    fn auth_modes_round_trip() {
+        for value in AuthMode::ALL {
+            let parsed =
+                AuthMode::parse(value).expect("every listed value parses");
+            assert_eq!(value, parsed.as_str());
+        }
+    }
+
+    /// An unknown mode is not read as one this build knows, for the same
+    /// reason an unknown access mode is not: guessing would be guessing at a
+    /// way in.
+    #[test]
+    fn an_unknown_auth_mode_is_not_a_mode() {
+        assert_eq!(None, AuthMode::parse("saml"));
+        assert_eq!(None, AuthMode::parse(""));
+        assert_eq!(None, AuthMode::parse("OIDC"));
+    }
+
+    /// The two predicates the data plane branches on, spelled out so a new
+    /// variant cannot silently become "neither".
+    #[test]
+    fn each_mode_names_the_flows_it_allows() {
+        assert!(AuthMode::Oidc.allows_oidc() && !AuthMode::Oidc.allows_local());
+        assert!(
+            !AuthMode::Local.allows_oidc() && AuthMode::Local.allows_local()
+        );
+        assert!(AuthMode::Both.allows_oidc() && AuthMode::Both.allows_local());
     }
 }

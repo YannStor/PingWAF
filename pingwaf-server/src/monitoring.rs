@@ -20,7 +20,9 @@ use serde::Serialize;
 
 use crate::config::ServerConfig;
 use crate::grpc::AgentRegistry;
-use crate::models::{agent, agent_status};
+use crate::models::{
+    agent, agent_status, visitor_auth_state, visitor_passkey_state,
+};
 
 /// Payload sent to the webhook URL when an agent goes offline.
 #[derive(Debug, Clone, Serialize)]
@@ -157,7 +159,40 @@ async fn health_monitor_loop(
         if let Err(err) = crate::boot_history::sweep_boots(&db).await {
             tracing::warn!(error = %err, "boot history sweep failed");
         }
+
+        // Visitor login challenges and passkey ceremonies are written by
+        // anonymous requests — anyone who loads a login page creates one — so
+        // without this they accumulate forever. Expired rows are useless by
+        // definition: a challenge past its expiry cannot be answered, and a
+        // ceremony past its expiry cannot be finished.
+        if let Err(err) = sweep_visitor_states(&db).await {
+            tracing::warn!(error = %err, "visitor state sweep failed");
+        }
     }
+}
+
+/// Drops expired visitor login challenges and passkey ceremony state.
+///
+/// Both tables are keyed by a random id and read once, so an expired row is
+/// dead weight the moment it expires. They are swept here rather than by a
+/// `cascade` because nothing owns them: a challenge belongs to no account
+/// until it is answered.
+async fn sweep_visitor_states(
+    db: &DatabaseConnection,
+) -> Result<u64, sea_orm::DbErr> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let now = chrono::Utc::now();
+    let challenges = visitor_auth_state::Entity::delete_many()
+        .filter(visitor_auth_state::Column::ExpiresAt.lt(now))
+        .exec(db)
+        .await?
+        .rows_affected;
+    let ceremonies = visitor_passkey_state::Entity::delete_many()
+        .filter(visitor_passkey_state::Column::ExpiresAt.lt(now))
+        .exec(db)
+        .await?
+        .rows_affected;
+    Ok(challenges + ceremonies)
 }
 
 /// Scans all agents marked as online and demotes those with stale heartbeats.

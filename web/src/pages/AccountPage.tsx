@@ -3,6 +3,7 @@ import { PageHeader } from '@/components/PageHeader'
 import { UsersAdminCard } from '@/components/account/UsersAdminCard'
 import { ApiKeysCard } from '@/components/account/ApiKeysCard'
 import { OidcProvidersCard } from '@/components/account/OidcProvidersCard'
+import { VisitorsCard } from '@/components/account/VisitorsCard'
 import { useAuthStore } from '@/stores/authStore'
 import { useCanWrite } from '@/hooks'
 
@@ -30,6 +31,7 @@ export function AccountPage() {
       <div className="flex max-w-4xl flex-col gap-4">
         <ApiKeysCard canWrite={canWrite} />
         {isAdmin && <OidcProvidersCard canWrite={canWrite} />}
+        {isAdmin && <VisitorsCard canWrite={canWrite} />}
         {isAdmin && <UsersAdminCard />}
       </div>
     </div>

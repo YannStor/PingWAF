@@ -859,6 +859,12 @@ pub struct OidcConfig {
     /// this is the half that says whether they may enter.
     #[serde(default)]
     pub access_mode: String,
+    /// How a visitor signs in: `oidc` (default), `local` or `both`.
+    /// `access_mode` decides who may enter once signed in; this decides how
+    /// they sign in at all. Empty on a config written before the field
+    /// existed, which the plugin reads as `oidc`.
+    #[serde(default)]
+    pub auth_mode: String,
     /// Rules [`Self::access_mode`] applies. Empty with an enforcing mode
     /// denies everyone, which is why the control plane refuses to ship it.
     #[serde(default)]
@@ -2796,6 +2802,7 @@ impl RuleCache {
                     value: rule.value.clone(),
                 })
                 .collect(),
+            auth_mode: c.auth_mode.clone(),
         }
     }
 
@@ -3093,6 +3100,7 @@ mod tests {
                 operator: "contains".to_string(),
                 value: "waf-admins".to_string(),
             }],
+            auth_mode: "both".to_string(),
         };
         let converted = RuleCache::convert_oidc(&proto_cfg);
         assert!(converted.enabled);
@@ -3117,6 +3125,7 @@ mod tests {
         assert_eq!(converted.access_rules[0].claim, "groups");
         assert_eq!(converted.access_rules[0].operator, "contains");
         assert_eq!(converted.access_rules[0].value, "waf-admins");
+        assert_eq!(converted.auth_mode, proto_cfg.auth_mode);
     }
 
     /// Copy-on-write snapshot economics: cloning a `CachedRules` — what

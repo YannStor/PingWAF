@@ -121,7 +121,8 @@ fn boot_view(row: &control_plane_boot::Model) -> ControlPlaneBoot {
 /// Resource counters of the control-plane process itself.
 #[derive(Debug, Serialize)]
 pub struct ControlNode {
-    /// CPU used by this process, in percent of one core (can exceed 100).
+    /// CPU used by this process, as a share of the whole machine in percent
+    /// (0-100), the same scale as [`Self::host_cpu_percent`].
     pub process_cpu_percent: f32,
     /// Machine-wide CPU usage, in percent.
     pub host_cpu_percent: f32,

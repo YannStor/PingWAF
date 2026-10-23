@@ -32,6 +32,7 @@ import { useCanWrite } from '@/hooks'
 import {
   OIDC_ACCESS_MODES,
   OIDC_ACCESS_OPERATORS,
+  OIDC_AUTH_MODES,
   OIDC_MAX_ACCESS_RULES,
   OIDC_MAX_SESSION_TTL_SECONDS,
   OIDC_MIN_COOKIE_SECRET_LENGTH,
@@ -40,6 +41,7 @@ import {
   type OidcAccessMode,
   type OidcAccessOperator,
   type OidcAccessRule,
+  type OidcAuthMode,
   type OidcHeaderClaim,
   type SiteOidc,
 } from '@/api/types'
@@ -251,7 +253,9 @@ export function OidcPanel() {
       (rule.operator === 'exists' || rule.value.trim() !== ''),
   ).length
   const blockedReason = config?.enabled
-    ? config.provider_id === null
+    ? // A `local` site has no provider, so requiring one would make the mode
+      // impossible to save.
+      config.auth_mode !== 'local' && config.provider_id === null
       ? t('pages.oidc.providerRequired')
       : // No client_secret requirement: a public client (PKCE only) has
         // none, and the control plane accepts that.
@@ -330,9 +334,31 @@ export function OidcPanel() {
                   label={t('pages.oidc.enabled')}
                   description={t('pages.oidc.enabledHint')}
                 />
+                {/* How visitors sign in. `oidc` is the default and the
+                    pre-local-accounts behaviour, so leaving it alone keeps a
+                    site working exactly as before. */}
+                <Select
+                  label={t('pages.oidc.authMode')}
+                  hint={t('pages.oidc.authModeHint')}
+                  value={config.auth_mode}
+                  disabled={!canWrite}
+                  onChange={(event) =>
+                    patch({ auth_mode: event.target.value as OidcAuthMode })
+                  }
+                  options={OIDC_AUTH_MODES.map((mode) => ({
+                    value: mode,
+                    label: t(`pages.oidc.authMode_${mode}`),
+                  }))}
+                />
+                <p className="-mt-2 text-xs text-fg-subtle">
+                  {t(`pages.oidc.authModeDetail_${config.auth_mode}`)}
+                </p>
                 {/* The issuer and client credentials live on the Account
                     page: they belong to the provider, which several sites
-                    share. This panel picks one and adds what is per-site. */}
+                    share. This panel picks one and adds what is per-site.
+                    A `local` site has no provider, so the picker is hidden
+                    rather than shown as a required field it is not. */}
+                {config.auth_mode !== 'local' && (
                 <Select
                   label={t('pages.oidc.provider')}
                   hint={t('pages.oidc.providerPickerHint')}
@@ -360,6 +386,7 @@ export function OidcPanel() {
                       })),
                   ]}
                 />
+                )}
                 <Input
                   label={t('pages.oidc.cookieSecret')}
                   type={revealed.cookie ? 'text' : 'password'}

@@ -27,6 +27,64 @@ service ControlPlane {
 
   // Configuration sync (agent pulls full site config)
   rpc GetSiteConfig(GetSiteConfigRequest) returns (SiteConfig);
+
+  // Visitor authentication.
+  //
+  // A protected site's visitors are signed in by the data plane, but their
+  // accounts live in the control plane's database — the data plane has no
+  // database of its own and must not be given one. These RPCs are the
+  // bridge, and they are the reason a local login works on a deployment with
+  // several data-plane instances behind a load balancer: the challenge is
+  // created and consumed in one shared place rather than in whichever
+  // process happened to receive the two requests.
+  //
+  // All of them authenticate with the agent token, like every other RPC
+  // here. The data plane treats an unreachable control plane as a refusal,
+  // never as a pass: a login that cannot be checked is not a login.
+  rpc VisitorLoginChallenge(VisitorChallengeRequest) returns (VisitorChallengeResponse);
+  rpc VisitorLogin(VisitorLoginRequest) returns (VisitorLoginResponse);
+  rpc VisitorLogout(VisitorLogoutRequest) returns (VisitorLogoutResponse);
+  rpc VisitorChangePassword(VisitorChangePasswordRequest) returns (VisitorChangePasswordResponse);
+  rpc VisitorGrants(VisitorGrantsRequest) returns (VisitorGrantsResponse);
+  rpc VisitorSetSiteVisible(VisitorSetVisibleRequest) returns (VisitorSetVisibleResponse);
+
+  // Passkeys. The ceremony runs in the control plane (it holds the credential
+  // store and the `passkey-server` crate); the data plane only relays the two
+  // halves, so a visitor's authenticator is enrolled against the same
+  // implementation the console uses.
+  rpc VisitorPasskeyRegisterBegin(VisitorPasskeyBeginRequest) returns (VisitorPasskeyOptionsResponse);
+  rpc VisitorPasskeyRegisterFinish(VisitorPasskeyFinishRequest) returns (VisitorPasskeyFinishResponse);
+  rpc VisitorPasskeyLoginBegin(VisitorPasskeyBeginRequest) returns (VisitorPasskeyOptionsResponse);
+  rpc VisitorPasskeyLoginFinish(VisitorPasskeyFinishRequest) returns (VisitorLoginResponse);
+  rpc VisitorPasskeyList(VisitorGrantsRequest) returns (VisitorPasskeyListResponse);
+
+  // Checks that a session is still valid.
+  //
+  // The session cookie is self-contained — the data plane verifies its
+  // signature locally, so a page view costs no round trip — but a signature
+  // says nothing about whether the account still exists, was disabled, or had
+  // its password changed since. That is what this answers, and the data plane
+  // caches the answer briefly rather than asking on every request.
+  rpc VisitorValidateSession(VisitorValidateRequest) returns (VisitorValidateResponse);
+}
+
+// A session as the data plane holds it.
+message VisitorValidateRequest {
+  string agent_id = 1;
+  string agent_token = 2;
+  string site_id = 3;
+  string visitor_id = 4;
+  // The version the session was issued with. A mismatch means a password
+  // change (or an operator's reset) happened after it was minted.
+  int64 token_version = 5;
+}
+
+message VisitorValidateResponse {
+  // False when the account is gone, disabled, or its version moved on. The
+  // data plane clears the cookie and sends the visitor back to the login page.
+  bool valid = 1;
+  // Why, for the log: "disabled", "version_changed", "unknown".
+  string reason = 2;
 }
 
 // ============================================================
@@ -510,6 +568,11 @@ message OidcConfig {
   // denies everyone but the site's own operators, which is why the API
   // refuses to store that combination.
   repeated OidcAccessRule access_rules = 14;
+  // How a visitor signs in. One of "oidc" (default — the authorization-code
+  // flow, the behaviour before local accounts existed), "local" (a local
+  // account with a proof-of-work challenge) or "both". `access_mode` decides
+  // who may enter *after* signing in; this decides how they sign in at all.
+  string auth_mode = 15;
 }
 
 // One `claim -> request header` rule of `OidcConfig`.
@@ -1044,4 +1107,185 @@ enum MetricType {
 message MetricAck {
   uint64 received_count = 1;
   bool success = 2;
+}
+
+// ============================================================
+// Visitor authentication
+// ============================================================
+
+// Asks for a proof-of-work challenge to put in the login form.
+//
+// The reply carries the nonce and the difficulty; the browser hashes until it
+// finds an answer, and the answer is presented back with the credentials. The
+// challenge row is written by the control plane so the instance that receives
+// the POST can verify what another instance handed out.
+message VisitorChallengeRequest {
+  string agent_id = 1;
+  string agent_token = 2;
+  // The host the login was started from. A challenge is only answerable at
+  // the site it was issued for, so a nonce cannot be replayed elsewhere.
+  string site_id = 3;
+}
+
+message VisitorChallengeResponse {
+  // Empty on refusal; `error` then says why.
+  string challenge_id = 1;
+  string nonce = 2;
+  uint32 difficulty = 3;
+  // Seconds the challenge stays answerable.
+  uint32 ttl_seconds = 4;
+  string error = 5;
+}
+
+// Exchanges a proof-of-work answer and credentials for a session.
+message VisitorLoginRequest {
+  string agent_id = 1;
+  string agent_token = 2;
+  string site_id = 3;
+  // The id from `VisitorChallengeResponse`; consumed by this call.
+  string challenge_id = 4;
+  // The proof-of-work counter, hex, as the page computes it.
+  string solution = 5;
+  // Unix seconds the browser submitted at, checked against the challenge TTL.
+  int64 timestamp = 6;
+  string email = 7;
+  // Never logged, never echoed.
+  string password = 8;
+}
+
+message VisitorLoginResponse {
+  bool ok = 1;
+  // Set on success. The data plane seals these into its session cookie; the
+  // password and the hash never leave the control plane.
+  string visitor_id = 2;
+  string email = 3;
+  string name = 4;
+  // Bumped on a password change; the session carries it so a change can
+  // invalidate sessions minted before it.
+  int64 token_version = 5;
+  // A refusal reason the login page can show. Deliberately coarse: "email or
+  // password is wrong" rather than which of the two, so the form cannot be
+  // used to enumerate accounts.
+  string error = 6;
+  // A stable code for the data plane to branch on, e.g. "invalid_credentials",
+  // "challenge_expired", "disabled", "control_plane_unavailable".
+  string error_code = 7;
+}
+
+message VisitorLogoutRequest {
+  string agent_id = 1;
+  string agent_token = 2;
+  string visitor_id = 3;
+  string site_id = 4;
+}
+
+message VisitorLogoutResponse {
+  bool ok = 1;
+}
+
+message VisitorChangePasswordRequest {
+  string agent_id = 1;
+  string agent_token = 2;
+  string visitor_id = 3;
+  string current_password = 4;
+  string new_password = 5;
+}
+
+message VisitorChangePasswordResponse {
+  bool ok = 1;
+  // The new version, so the caller can re-issue its session instead of
+  // logging the visitor out of the tab they just changed it in.
+  int64 token_version = 2;
+  string error = 3;
+  string error_code = 4;
+}
+
+// The sites a visitor may enter, for the portal.
+message VisitorGrantsRequest {
+  string agent_id = 1;
+  string agent_token = 2;
+  string visitor_id = 3;
+  // The host the caller is acting for. Used to scope the answer to a site the
+  // agent serves, and to check the visitor's grant to it.
+  string site_id = 4;
+}
+
+message VisitorGrantsResponse {
+  repeated VisitorGrant grants = 1;
+  string error = 2;
+}
+
+message VisitorGrant {
+  string site_id = 1;
+  string name = 2;
+  string domain = 3;
+  // The portal's per-site "show this here" switch. Hiding a site tidies the
+  // portal; it does not revoke access.
+  bool visible = 4;
+  // How this site signs visitors in ("oidc" / "local" / "both"), so the
+  // portal can link to the right entry.
+  string auth_mode = 5;
+}
+
+message VisitorSetVisibleRequest {
+  string agent_id = 1;
+  string agent_token = 2;
+  string visitor_id = 3;
+  string site_id = 4;
+  bool visible = 5;
+}
+
+message VisitorSetVisibleResponse {
+  bool ok = 1;
+  string error = 2;
+}
+
+// Starts a passkey ceremony. `site_id` is the host the ceremony runs at, so
+// the relying-party id matches the origin the browser sees.
+message VisitorPasskeyBeginRequest {
+  string agent_id = 1;
+  string agent_token = 2;
+  // Set for a registration (the visitor is signed in); empty for a login
+  // (they are not, and the credential identifies the account).
+  string visitor_id = 3;
+  string site_id = 4;
+}
+
+// The options the browser hands to `navigator.credentials`. Serialised as the
+// crate produced them: the shape is the WebAuthn JSON, and re-encoding it
+// field by field would be a second implementation to keep in step.
+message VisitorPasskeyOptionsResponse {
+  string options_json = 1;
+  // `register:<id>` or `login:<challenge>`, echoed back on finish.
+  string ceremony_id = 2;
+  string error = 3;
+}
+
+message VisitorPasskeyFinishRequest {
+  string agent_id = 1;
+  string agent_token = 2;
+  string site_id = 3;
+  string ceremony_id = 4;
+  // The credential the authenticator produced, as the browser serialised it.
+  string credential_json = 5;
+  // Optional label for a registration.
+  string name = 6;
+}
+
+message VisitorPasskeyFinishResponse {
+  bool ok = 1;
+  string error = 2;
+  string error_code = 3;
+}
+
+message VisitorPasskeyListResponse {
+  repeated VisitorPasskey passkeys = 1;
+  string error = 2;
+}
+
+message VisitorPasskey {
+  string cred_id = 1;
+  string name = 2;
+  string created_at = 3;
+  string last_used_at = 4;
 }

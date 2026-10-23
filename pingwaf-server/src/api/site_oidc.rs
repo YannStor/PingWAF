@@ -34,7 +34,7 @@ use crate::api::sites::touch_site;
 use crate::api::state::AppState;
 use crate::auth::AuthUser;
 use crate::grpc::notify_config_changed;
-use crate::models::site_oidc::AccessMode;
+use crate::models::site_oidc::{AccessMode, AuthMode};
 use crate::models::{oidc_provider, site_oidc as site_oidc_model};
 
 /// Substituted for a stored secret in responses. A `PUT` that sends it back
@@ -193,6 +193,9 @@ pub struct OidcView {
     pub cookie_name: String,
     pub session_ttl_seconds: i32,
     pub claims_to_headers: Vec<OidcClaimToHeader>,
+    /// How a visitor signs in: one of [`AuthMode::ALL`]. Decides *how* they
+    /// sign in; `access_mode` decides whether they may enter once they have.
+    pub auth_mode: String,
     /// One of [`AccessMode::ALL`].
     pub access_mode: String,
     pub access_rules: Vec<OidcAccessRule>,
@@ -223,6 +226,8 @@ pub struct UpdateOidcRequest {
     /// Replaces the whole list when present.
     #[serde(default)]
     pub claims_to_headers: Option<Vec<OidcClaimToHeader>>,
+    #[serde(default)]
+    pub auth_mode: Option<String>,
     #[serde(default)]
     pub access_mode: Option<String>,
     /// Replaces the whole list when present.
@@ -258,6 +263,7 @@ struct ResolvedOidc {
     cookie_name: String,
     session_ttl_seconds: i32,
     claims_to_headers: Vec<OidcClaimToHeader>,
+    auth_mode: String,
     access_mode: String,
     access_rules: Vec<OidcAccessRule>,
 }
@@ -312,6 +318,7 @@ async fn update(
         cookie_name: row.cookie_name.clone(),
         session_ttl_seconds: row.session_ttl_seconds,
         claims_to_headers: stored_claims,
+        auth_mode: row.auth_mode.clone(),
         access_mode: row.access_mode.clone(),
         access_rules: stored_rules,
     };
@@ -354,6 +361,9 @@ async fn update(
     if let Some(claims) = payload.claims_to_headers {
         resolved.claims_to_headers = validate_claims(claims)?;
     }
+    if let Some(mode) = payload.auth_mode {
+        resolved.auth_mode = validate_auth_mode(&mode)?;
+    }
     if let Some(mode) = payload.access_mode {
         resolved.access_mode = validate_access_mode(&mode)?;
     }
@@ -391,6 +401,7 @@ async fn update(
     .map_err(|err| {
         ApiError::Internal(format!("failed to encode claims_to_headers: {err}"))
     })?);
+    active.auth_mode = Set(resolved.auth_mode);
     active.access_mode = Set(resolved.access_mode);
     active.access_rules = Set(serde_json::to_value(&resolved.access_rules)
         .map_err(|err| {
@@ -585,6 +596,20 @@ fn validate_claims(
         validated.push(OidcClaimToHeader { claim, header });
     }
     Ok(validated)
+}
+
+/// The `auth_mode` of a site. An unknown value is refused rather than stored:
+/// the data plane treats one as a configuration error, so accepting it here
+/// would leave a site that cannot sign anyone in.
+fn validate_auth_mode(mode: &str) -> Result<String, ApiError> {
+    let mode = mode.trim();
+    if AuthMode::parse(mode).is_none() {
+        return Err(ApiError::BadRequest(format!(
+            "auth_mode must be one of {}",
+            AuthMode::ALL.join(", ")
+        )));
+    }
+    Ok(mode.to_string())
 }
 
 fn validate_access_mode(mode: &str) -> Result<String, ApiError> {
@@ -785,6 +810,7 @@ async fn to_view(
         cookie_name: row.cookie_name.clone(),
         session_ttl_seconds: row.session_ttl_seconds,
         claims_to_headers: decode_claims(&row.claims_to_headers)?,
+        auth_mode: row.auth_mode.clone(),
         access_mode: row.access_mode.clone(),
         access_rules: decode_access_rules(&row.access_rules)?,
         created_at: row.created_at,
@@ -811,6 +837,9 @@ fn default_row(site_id: Uuid) -> site_oidc_model::Model {
         cookie_name: DEFAULT_COOKIE_NAME.to_string(),
         session_ttl_seconds: DEFAULT_SESSION_TTL_SECONDS,
         claims_to_headers: serde_json::json!([]),
+        // `oidc` is the pre-local-accounts behaviour, so a site that never
+        // touches this field keeps signing visitors in exactly as before.
+        auth_mode: AuthMode::OIDC.to_string(),
         access_mode: AccessMode::ALLOW_ALL.to_string(),
         access_rules: serde_json::json!([]),
         created_at: now,
@@ -846,6 +875,7 @@ async fn find_or_create(
         cookie_name: Set(row.cookie_name),
         session_ttl_seconds: Set(row.session_ttl_seconds),
         claims_to_headers: Set(row.claims_to_headers),
+        auth_mode: Set(row.auth_mode),
         access_mode: Set(row.access_mode),
         access_rules: Set(row.access_rules),
         created_at: Set(row.created_at),
@@ -873,6 +903,7 @@ mod tests {
             cookie_name: DEFAULT_COOKIE_NAME.to_string(),
             session_ttl_seconds: DEFAULT_SESSION_TTL_SECONDS,
             claims_to_headers: Vec::new(),
+            auth_mode: AuthMode::OIDC.to_string(),
             access_mode: AccessMode::ALLOW_ALL.to_string(),
             access_rules: Vec::new(),
         };

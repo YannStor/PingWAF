@@ -186,6 +186,23 @@ impl PingWafAgent {
         Ok(agent)
     }
 
+    /// This agent's id, as the control plane knows it.
+    ///
+    /// The visitor-auth RPCs carry it alongside the token; it is derived the
+    /// same way the connection loop derives it, so the two cannot disagree.
+    pub fn agent_id(&self) -> String {
+        self.config.resolved_agent_id()
+    }
+
+    /// The visitor-authentication client, for the data plane's login page.
+    ///
+    /// Returns `None` in standalone mode (no agent), where there is no control
+    /// plane to ask and therefore no way to sign a visitor in. The caller must
+    /// treat that as a refusal.
+    pub fn visitor_auth(&self) -> &Arc<ControlPlaneClient> {
+        &self.client
+    }
+
     /// Get the global agent instance (if started).
     pub fn instance() -> Option<Arc<Self>> {
         AGENT_INSTANCE.load_full()

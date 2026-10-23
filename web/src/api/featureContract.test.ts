@@ -125,9 +125,22 @@ describe('GET /api/v1/system/nodes contract', () => {
     }
   })
 
-  it('CPU bar uses host_cpu_percent only (process_cpu can exceed 100)', () => {
+  /**
+   * 两个 CPU 字段现在同量纲（后端把单核值除以核数，0-100），所以文本只做
+   * 格式化、不做换算，进度条两者都可画。
+   *
+   * 历史缺陷：`process_cpu_percent` 曾是单核口径（可到 400），卡片对它又乘
+   * 一次 100，把 5% 显示成 "500.0%"。这条契约守住修复：格式化走
+   * `formatCpuPercent`（不换算），条走 `cpuBar`（钳制）。
+   */
+  it('CPU text is formatted without rescaling, and both readings may draw a bar', () => {
     const src = read('src/components/system/NodeSection.tsx')
-    expect(src).not.toContain('processBar')
+    // 文本必须走只格式化的那条路径，不能再出现 `v * 100` 这类换算。
+    expect(src).toContain('formatCpuPercent(control.process_cpu_percent)')
+    expect(src).toContain('formatCpuPercent(control.host_cpu_percent)')
+    expect(src).not.toMatch(/toFixed\(1\)%\s*`?.*\*\s*100/)
+    // 两个字段同量纲，都可以画条。
+    expect(src).toContain('cpuBar(control.process_cpu_percent)')
     expect(src).toContain('cpuBar(control.host_cpu_percent)')
   })
 })

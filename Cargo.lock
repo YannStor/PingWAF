@@ -5482,6 +5482,7 @@ dependencies = [
  "lettre",
  "maxminddb",
  "passkey-server",
+ "pingwaf-challenge",
  "pingwaf-profiler",
  "pingwaf-proto",
  "pingwaf-system",

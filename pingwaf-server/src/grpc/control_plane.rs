@@ -15,7 +15,15 @@ use pingwaf_proto::control_plane::{
     BlockedIp, CertEventAck, CertEventEntry, GetSiteConfigRequest, HostSample,
     LogAck, LogEntry, Metric, MetricAck, MetricBatch, RegisterAgentRequest,
     RegisterAgentResponse, RuleBundle, ServerCommand, SiteConfig, SiteStatus,
-    SyncRulesRequest, UpstreamHealth,
+    SyncRulesRequest, UpstreamHealth, VisitorChallengeRequest,
+    VisitorChallengeResponse, VisitorChangePasswordRequest,
+    VisitorChangePasswordResponse, VisitorGrantsRequest, VisitorGrantsResponse,
+    VisitorLoginRequest, VisitorLoginResponse, VisitorLogoutRequest,
+    VisitorLogoutResponse, VisitorPasskeyBeginRequest,
+    VisitorPasskeyFinishRequest, VisitorPasskeyFinishResponse,
+    VisitorPasskeyListResponse, VisitorPasskeyOptionsResponse,
+    VisitorSetVisibleRequest, VisitorSetVisibleResponse,
+    VisitorValidateRequest, VisitorValidateResponse,
 };
 use sea_orm::sea_query::Expr;
 use sea_orm::{
@@ -115,7 +123,9 @@ static LAST_METRIC_SWEEP: AtomicI64 = AtomicI64::new(0);
 
 /// The gRPC control plane service.
 pub struct ControlPlaneService {
-    db: DatabaseConnection,
+    /// `pub(crate)` so the visitor-auth RPCs in `grpc/visitor_auth.rs` can
+    /// reach the same connection; everything else stays private to this file.
+    pub(crate) db: DatabaseConnection,
     config: Arc<ServerConfig>,
     agents: AgentRegistry,
     /// Optional Elasticsearch shipper. When present, every streamed log entry is
@@ -145,7 +155,13 @@ impl ControlPlaneService {
     }
 
     /// Verifies an agent token and returns the matching row.
-    async fn authorize(&self, token: &str) -> Result<agent::Model, Status> {
+    ///
+    /// `pub(crate)` because the visitor-auth RPCs in `grpc/visitor_auth.rs`
+    /// authenticate the same way.
+    pub(crate) async fn authorize(
+        &self,
+        token: &str,
+    ) -> Result<agent::Model, Status> {
         if token.trim().is_empty() {
             return Err(Status::unauthenticated(INVALID_CREDENTIALS));
         }
@@ -178,7 +194,10 @@ impl ControlPlaneService {
 
     /// Sites this agent is allowed to see: its own binding, or every site owned
     /// by the user that issued its API key.
-    async fn visible_sites(
+    ///
+    /// `pub(crate)` because the visitor-auth RPCs in `grpc/visitor_auth.rs`
+    /// scope their answers by the same set.
+    pub(crate) async fn visible_sites(
         &self,
         row: &agent::Model,
     ) -> Result<Vec<site::Model>, Status> {
@@ -963,6 +982,102 @@ impl ControlPlaneTrait for ControlPlaneService {
         }
 
         Ok(Response::new(config))
+    }
+
+    // ── Visitor authentication ─────────────────────────────────────────
+    //
+    // The bodies live in `grpc/visitor_auth.rs`; the trait requires them
+    // here. Each is a thin forward so the implementation stays in one file
+    // with its tests, while the service keeps one `impl` block per trait.
+
+    async fn visitor_login_challenge(
+        &self,
+        request: Request<VisitorChallengeRequest>,
+    ) -> Result<Response<VisitorChallengeResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_login_challenge(self, request).await
+    }
+
+    async fn visitor_login(
+        &self,
+        request: Request<VisitorLoginRequest>,
+    ) -> Result<Response<VisitorLoginResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_login(self, request).await
+    }
+
+    async fn visitor_logout(
+        &self,
+        request: Request<VisitorLogoutRequest>,
+    ) -> Result<Response<VisitorLogoutResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_logout(self, request).await
+    }
+
+    async fn visitor_change_password(
+        &self,
+        request: Request<VisitorChangePasswordRequest>,
+    ) -> Result<Response<VisitorChangePasswordResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_change_password(self, request).await
+    }
+
+    async fn visitor_grants(
+        &self,
+        request: Request<VisitorGrantsRequest>,
+    ) -> Result<Response<VisitorGrantsResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_grants(self, request).await
+    }
+
+    async fn visitor_set_site_visible(
+        &self,
+        request: Request<VisitorSetVisibleRequest>,
+    ) -> Result<Response<VisitorSetVisibleResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_set_site_visible(self, request).await
+    }
+
+    async fn visitor_passkey_register_begin(
+        &self,
+        request: Request<VisitorPasskeyBeginRequest>,
+    ) -> Result<Response<VisitorPasskeyOptionsResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_passkey_begin(self, request, false)
+            .await
+    }
+
+    async fn visitor_passkey_register_finish(
+        &self,
+        request: Request<VisitorPasskeyFinishRequest>,
+    ) -> Result<Response<VisitorPasskeyFinishResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_passkey_register_finish(
+            self, request,
+        )
+        .await
+    }
+
+    async fn visitor_passkey_login_begin(
+        &self,
+        request: Request<VisitorPasskeyBeginRequest>,
+    ) -> Result<Response<VisitorPasskeyOptionsResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_passkey_begin(self, request, true)
+            .await
+    }
+
+    async fn visitor_passkey_login_finish(
+        &self,
+        request: Request<VisitorPasskeyFinishRequest>,
+    ) -> Result<Response<VisitorLoginResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_passkey_login_finish(self, request)
+            .await
+    }
+
+    async fn visitor_passkey_list(
+        &self,
+        request: Request<VisitorGrantsRequest>,
+    ) -> Result<Response<VisitorPasskeyListResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_passkey_list(self, request).await
+    }
+
+    async fn visitor_validate_session(
+        &self,
+        request: Request<VisitorValidateRequest>,
+    ) -> Result<Response<VisitorValidateResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_validate_session(self, request).await
     }
 }
 

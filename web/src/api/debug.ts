@@ -155,7 +155,12 @@ export function fetchSystemProfile(): Promise<SystemProfile> {
 
 /** `GET /api/v1/system/nodes` 控制面节点 — 服务请求的本进程。 */
 export interface SystemControlNode {
-  /** 本进程 CPU 使用率（单核百分比，可超 100）。 */
+  /**
+   * 本进程 CPU 使用率（占整机百分比，0-100）。
+   *
+   * 后端已把 sysinfo 的单核口径（一核 = 100，多线程可到 400+）除以核数，
+   * 与 `host_cpu_percent` 同量纲，消费端只做格式化，不要再做换算。
+   */
   process_cpu_percent: number
   /** 整机 CPU 使用率（百分比）。 */
   host_cpu_percent: number

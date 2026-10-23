@@ -275,6 +275,7 @@ mod rewrite;
 mod sub_filter;
 mod traffic_splitting;
 mod ua_restriction;
+mod visitor_auth;
 pub(crate) mod waf;
 
 mod plugin;
