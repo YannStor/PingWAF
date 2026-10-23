@@ -33,7 +33,7 @@ import {
   Desktop,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
-import { IpQuickActions } from '@/components/waf/IpQuickActions'
+import { TopIpsTable, TopRulesTable } from '@/components/waf/TopRankingTables'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
@@ -45,8 +45,9 @@ import { trafficApi, trafficKeys, RANGE_HOURS, TRAFFIC_STEP, groupStatusCodes } 
 import { aiCrawlApi, aiCrawlKeys } from '@/api/aiCrawl'
 import { analyticsApi, analyticsKeys } from '@/api/analytics'
 import { DonutChart } from '@/components/charts/DonutChart'
-import { countryFlag, geoApi, geoKeys } from '@/api/geo'
+import { geoApi, geoKeys } from '@/api/geo'
 import { WorldMapChart } from '@/components/charts/WorldMapChart'
+import { buildLogsDrillDownUrl } from '@/lib/logDrillDown'
 import { cn } from '@/lib/utils'
 import {
   formatBitrate,
@@ -61,21 +62,10 @@ import {
 import {
   TRAFFIC_RANGES,
   type AiCrawlerRow,
-  type TopIp,
-  type TopRule,
   type TrafficRange,
 } from '@/api/types'
 
 const PIE_COLORS = ['#18794e', '#0051c3', '#ffb224', '#e54d2a']
-
-/** Traffic range → logs page `preset` (hours). */
-const LOGS_PRESET: Record<TrafficRange, string> = {
-  '1h': '1',
-  '6h': '6',
-  '24h': '24',
-  '7d': '168',
-  '30d': '720',
-}
 
 const tooltipStyle = {
   background: 'var(--color-bg-elevated)',
@@ -100,10 +90,16 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
   const scoped = siteId !== undefined
 
   // Top IPs and top rules double as entry points into the matching log rows.
+  // The window travels with the link — see `buildLogsDrillDownUrl`.
   const drillDown = (tab: 'access' | 'security', q: string) => {
-    const params = new URLSearchParams({ tab, q, preset: LOGS_PRESET[range] })
-    if (siteId) params.set('site_id', siteId)
-    navigate(`/logs?${params.toString()}`)
+    navigate(
+      buildLogsDrillDownUrl({
+        tab,
+        q,
+        hours: RANGE_HOURS[range],
+        siteId: siteId || null,
+      }),
+    )
   }
 
   const overviewQuery = useQuery({
@@ -186,104 +182,6 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
   const summary = data?.summary
   const blockRate =
     summary && summary.requests > 0 ? summary.blocked_requests / summary.requests : 0
-
-  const ipColumns: Column<TopIp>[] = [
-    {
-      key: 'client_ip',
-      header: t('pages.traffic.clientIp'),
-      accessor: (r) => r.client_ip,
-      cell: (r) => (
-        <div className="flex items-center gap-2">
-          <span className="text-base leading-none">{countryFlag(r.country_code ?? '')}</span>
-          <span className="pw-mono text-[13px] text-fg-strong">{r.client_ip}</span>
-        </div>
-      ),
-    },
-    {
-      key: 'requests',
-      header: t('pages.traffic.requests'),
-      accessor: (r) => r.requests,
-      align: 'right',
-      sortable: true,
-      width: '1%',
-      cell: (r) => (
-        <span className="tabular-nums text-[13px] text-fg">{formatNumber(r.requests)}</span>
-      ),
-    },
-    {
-      key: 'blocked',
-      header: t('pages.traffic.blocked'),
-      accessor: (r) => r.blocked,
-      align: 'right',
-      width: '1%',
-      cell: (r) =>
-        r.blocked > 0 ? (
-          <Badge tone="danger" size="sm">
-            {formatNumber(r.blocked)}
-          </Badge>
-        ) : (
-          <span className="text-[13px] text-fg-subtle">0</span>
-        ),
-    },
-    {
-      key: 'actions',
-      header: t('pages.dashboard.quickActions'),
-      align: 'right',
-      // Fixed width for two icon buttons: '1%' let the cells shrink-wrap their
-      // content, which widened the column and forced horizontal scrolling on
-      // mobile once the labels were removed (2026-10-19 E2E).
-      width: '96px',
-      cell: (r) => <IpQuickActions ip={r.client_ip} siteId={siteId} />,
-    },
-  ]
-
-  const ruleColumns: Column<TopRule>[] = [
-    {
-      key: 'rule_name',
-      header: t('pages.traffic.rule'),
-      // Older events carry only the rule id — show it rather than a blank cell.
-      accessor: (r) => r.rule_name || r.rule_id,
-      cell: (r) => (
-        <span className="text-[13px] font-medium text-fg-strong">
-          {r.rule_name || r.rule_id}
-        </span>
-      ),
-    },
-    {
-      key: 'action',
-      header: t('pages.waf.action'),
-      accessor: (r) => r.action,
-      width: '1%',
-      cell: (r) => (
-        <Badge tone={r.action === 'block' ? 'danger' : 'warning'} size="sm">
-          {t(`actions.${r.action}`, r.action)}
-        </Badge>
-      ),
-    },
-    {
-      key: 'hits',
-      header: t('pages.traffic.hits'),
-      accessor: (r) => r.hits,
-      align: 'right',
-      sortable: true,
-      width: '1%',
-      cell: (r) => (
-        <span className="tabular-nums text-[13px] text-fg">{formatNumber(r.hits)}</span>
-      ),
-    },
-    {
-      key: 'unique_ips',
-      header: t('pages.traffic.uniqueIps'),
-      accessor: (r) => r.unique_ips,
-      align: 'right',
-      width: '1%',
-      cell: (r) => (
-        <span className="tabular-nums text-[13px] text-fg-subtle">
-          {formatNumber(r.unique_ips)}
-        </span>
-      ),
-    },
-  ]
 
   return (
     <>
@@ -720,20 +618,27 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
           </Card>
 
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-            {/* Top IPs */}
+            {/* Top IPs — the same table the dashboard renders, see TopRankingTables. */}
             <Card>
               <CardHeader
                 title={t('pages.traffic.topIps')}
                 action={<Globe weight="duotone" className="h-4 w-4 text-fg-subtle" />}
               />
               <CardBody className="p-0">
-                <Table
-                  columns={ipColumns}
-                  data={data?.topIps ?? []}
-                  rowKey={(r) => r.client_ip}
-                  dense
+                <TopIpsTable
+                  rows={data?.topIps}
+                  // `!data` rather than `isPending`: the card renders before the
+                  // first response arrives, so it must show the skeleton then and
+                  // keep the rows on every later background refetch.
+                  loading={!data}
+                  error={overviewQuery.error}
+                  onRetry={() => void overviewQuery.refetch()}
+                  // The fleet view has no site of its own, so fall back to the
+                  // site the IP most recently hit — otherwise every quick action
+                  // would be disabled on `/traffic`.
+                  siteIdFor={(r) => siteId || r.top_site_id || null}
                   onRowClick={(r) => drillDown('access', `client_ip:${r.client_ip}`)}
-                  empty={<div className="py-8 text-center text-sm text-fg-subtle">{t('common.noData')}</div>}
+                  emptyTitle={t('common.noData')}
                 />
               </CardBody>
             </Card>
@@ -742,13 +647,13 @@ export function TrafficPanels({ siteId }: { siteId?: string }) {
             <Card>
               <CardHeader title={t('pages.traffic.topRules')} />
               <CardBody className="p-0">
-                <Table
-                  columns={ruleColumns}
-                  data={data?.topRules ?? []}
-                  rowKey={(r) => r.rule_id}
-                  dense
+                <TopRulesTable
+                  rows={data?.topRules}
+                  loading={!data}
+                  error={overviewQuery.error}
+                  onRetry={() => void overviewQuery.refetch()}
                   onRowClick={(r) => drillDown('security', `rule:${r.rule_id}`)}
-                  empty={<div className="py-8 text-center text-sm text-fg-subtle">{t('common.noData')}</div>}
+                  emptyTitle={t('common.noData')}
                 />
               </CardBody>
             </Card>

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import {
   AreaChart,
   Area,
@@ -30,7 +30,7 @@ import {
   Users,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
-import { IpQuickActions } from '@/components/waf/IpQuickActions'
+import { TopIpsTable, TopRulesTable } from '@/components/waf/TopRankingTables'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
@@ -45,6 +45,7 @@ import { agentsApi, agentKeys } from '@/api/agents'
 import { fetchSystemMetrics, debugKeys } from '@/api/debug'
 import { useAuthStore } from '@/stores/authStore'
 import { useSitesList } from '@/hooks'
+import { buildLogsDrillDownUrl } from '@/lib/logDrillDown'
 import { cn } from '@/lib/utils'
 import {
   formatBitrate,
@@ -55,7 +56,7 @@ import {
   formatPercent,
   formatSize,
 } from '@/lib/format'
-import type { RangeQuery, TopIp, TopPath, TopRule, TrafficRange } from '@/api/types'
+import type { RangeQuery, TopPath, TrafficRange } from '@/api/types'
 
 /** Preset windows, in hours. The API caps a single range at 31 days. */
 const RANGE_OPTIONS = [
@@ -124,11 +125,27 @@ function trafficRangeFor(hours: number): TrafficRange {
 
 export function DashboardPage() {
   const { t } = useTranslation()
+  const navigate = useNavigate()
   const [hours, setHours] = useState(24)
   const [siteId, setSiteId] = useState<string>('')
   const isAdmin = useAuthStore((s) => s.user?.role) === 'admin'
 
   const { data: sites } = useSitesList()
+
+  /**
+   * Opens the matching log rows for a ranking row — the same drill-down the
+   * site traffic page offers, so both tables behave identically. The selected
+   * window travels with the link (`buildLogsDrillDownUrl`), otherwise a 30-day
+   * ranking would land on a 24-hour query.
+   *
+   * The site filter is only applied when the dashboard itself is scoped: a
+   * cross-site threat IP is ranked across every site, and narrowing the logs to
+   * the site it happened to hit last would show a fraction of the rows the
+   * ranking counted.
+   */
+  const drillDown = (tab: 'access' | 'security', q: string) => {
+    navigate(buildLogsDrillDownUrl({ tab, q, hours, siteId: siteId || null }))
+  }
 
   // Recomputed only when the window or the site filter changes, so the 30s
   // refetch keeps a stable query key and does not invalidate the cache each tick.
@@ -357,95 +374,6 @@ export function DashboardPage() {
         : undefined,
       icon: Gauge,
       tone: 'text-fg bg-recessed',
-    },
-  ]
-
-  const ipColumns: Column<TopIp>[] = [
-    {
-      key: 'client_ip',
-      header: t('pages.logs.clientIp'),
-      accessor: (r) => r.client_ip,
-      cell: (r) => <span className="pw-mono text-[13px] text-fg">{r.client_ip}</span>,
-    },
-    {
-      key: 'country',
-      header: t('pages.dashboard.country'),
-      accessor: (r) => r.country_code ?? '',
-      cell: (r) =>
-        r.country_code ? (
-          <span className="text-[13px] text-fg-subtle">{r.country_code.toUpperCase()}</span>
-        ) : (
-          <span className="text-fg-subtle">—</span>
-        ),
-    },
-    {
-      key: 'requests',
-      header: t('pages.dashboard.hits'),
-      accessor: (r) => r.requests,
-      align: 'right',
-      sortable: true,
-      cell: (r) => <span className="tabular-nums">{formatNumber(r.requests)}</span>,
-    },
-    {
-      key: 'blocked',
-      header: t('pages.dashboard.blocked'),
-      accessor: (r) => r.blocked,
-      align: 'right',
-      sortable: true,
-      cell: (r) => (
-        <span className={cn('tabular-nums', r.blocked > 0 && 'font-medium text-fg-danger')}>
-          {formatNumber(r.blocked)}
-        </span>
-      ),
-    },
-    {
-      key: 'actions',
-      header: t('pages.dashboard.quickActions'),
-      align: 'right',
-      // Fixed width for two icon buttons: '1%' let the cells shrink-wrap their
-      // content, which widened the column and forced horizontal scrolling on
-      // mobile once the labels were removed (2026-10-19 E2E).
-      width: '96px',
-      cell: (r) => <IpQuickActions ip={r.client_ip} siteId={r.top_site_id ?? null} />,
-    },
-  ]
-
-  const ruleColumns: Column<TopRule>[] = [
-    {
-      key: 'rule_name',
-      header: t('common.name'),
-      accessor: (r) => r.rule_name,
-      cell: (r) => (
-        <div className="min-w-0">
-          <p className="truncate text-[13px] font-medium text-fg">{r.rule_name || r.rule_id}</p>
-          <p className="pw-mono truncate text-xs text-fg-subtle">{r.rule_id}</p>
-        </div>
-      ),
-    },
-    {
-      key: 'action',
-      header: t('pages.waf.action'),
-      accessor: (r) => r.action,
-      cell: (r) => (
-        <Badge tone={r.action === 'block' ? 'danger' : r.action === 'log' ? 'info' : 'warning'}>
-          {t(`actions.${r.action}`, r.action)}
-        </Badge>
-      ),
-    },
-    {
-      key: 'hits',
-      header: t('pages.dashboard.hits'),
-      accessor: (r) => r.hits,
-      align: 'right',
-      sortable: true,
-      cell: (r) => <span className="tabular-nums">{formatNumber(r.hits)}</span>,
-    },
-    {
-      key: 'unique_ips',
-      header: t('pages.dashboard.uniqueIpsShort'),
-      accessor: (r) => r.unique_ips,
-      align: 'right',
-      cell: (r) => <span className="tabular-nums">{formatNumber(r.unique_ips)}</span>,
     },
   ]
 
@@ -848,8 +776,8 @@ export function DashboardPage() {
         </Card>
       )}
 
-      <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
-        {/* Top threat IPs */}
+      <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+        {/* Top threat IPs — the same table the site traffic page renders. */}
         <Card>
           <CardHeader
             title={t('pages.dashboard.topThreatIps')}
@@ -863,22 +791,16 @@ export function DashboardPage() {
             }
           />
           <CardBody className="px-0 py-0">
-            {topIps.isPending ? (
-              <SkeletonRows rows={5} columns={4} />
-            ) : topIps.isError ? (
-              <div className="p-4">
-                <ErrorState variant="inline" error={topIps.error} onRetry={() => topIps.refetch()} />
-              </div>
-            ) : (topIps.data ?? []).length === 0 ? (
-              <EmptyState
-                className="py-10"
-                icon={<ShieldSlash weight="duotone" className="h-7 w-7" />}
-                title={t('pages.dashboard.noThreats')}
-                description={t('pages.dashboard.noThreatsDescription')}
-              />
-            ) : (
-              <Table columns={ipColumns} data={topIps.data ?? []} rowKey={(r) => r.client_ip} dense />
-            )}
+            <TopIpsTable
+              rows={topIps.data}
+              loading={topIps.isPending}
+              error={topIps.error}
+              onRetry={() => void topIps.refetch()}
+              siteIdFor={(r) => r.top_site_id ?? null}
+              onRowClick={(r) => drillDown('access', `client_ip:${r.client_ip}`)}
+              emptyTitle={t('pages.dashboard.noThreats')}
+              emptyDescription={t('pages.dashboard.noThreatsDescription')}
+            />
           </CardBody>
         </Card>
 
@@ -889,22 +811,15 @@ export function DashboardPage() {
             description={t('pages.dashboard.topRulesDescription')}
           />
           <CardBody className="px-0 py-0">
-            {topRules.isPending ? (
-              <SkeletonRows rows={5} columns={4} />
-            ) : topRules.isError ? (
-              <div className="p-4">
-                <ErrorState variant="inline" error={topRules.error} onRetry={() => topRules.refetch()} />
-              </div>
-            ) : (topRules.data ?? []).length === 0 ? (
-              <EmptyState
-                className="py-10"
-                icon={<Lightning weight="duotone" className="h-7 w-7" />}
-                title={t('pages.dashboard.noRulesTriggered')}
-                description={t('pages.dashboard.noRulesTriggeredDescription')}
-              />
-            ) : (
-              <Table columns={ruleColumns} data={topRules.data ?? []} rowKey={(r) => r.rule_id} dense />
-            )}
+            <TopRulesTable
+              rows={topRules.data}
+              loading={topRules.isPending}
+              error={topRules.error}
+              onRetry={() => void topRules.refetch()}
+              onRowClick={(r) => drillDown('security', `rule:${r.rule_id}`)}
+              emptyTitle={t('pages.dashboard.noRulesTriggered')}
+              emptyDescription={t('pages.dashboard.noRulesTriggeredDescription')}
+            />
           </CardBody>
         </Card>
       </div>

@@ -105,11 +105,11 @@ describe('system API contract', () => {
     // 后端（pingwaf-system/src/memory.rs）按 0-100、1 位小数上报。
     expect(METRICS.memory.memory_used_percent).toBe(56.3)
     expect(METRICS.memory.memory_used_percent).toBeLessThanOrEqual(100)
-    // 量纲断言：消费端（MemoryDetail / MetricCards）只允许经
+    // 量纲断言：消费端（MetricCards / NodeSection）只允许经
     // normaliseUsagePercent 归一，禁止残留 `* 100` 或裸 `Math.min(1, …)` 钳制。
     const consumers = [
-      'src/components/system/MemoryDetail.tsx',
       'src/components/system/MetricCards.tsx',
+      'src/components/system/NodeSection.tsx',
     ].map((p) => readFileSync(resolve(process.cwd(), p), 'utf8'))
     for (const src of consumers) {
       expect(src).not.toMatch(/memory_used_percent\s*\*\s*100/)
@@ -124,6 +124,27 @@ describe('system API contract', () => {
     // 越界钳制，不产生 >1 或 <0。
     expect(normaliseUsagePercent(150)).toBe(1)
     expect(normaliseUsagePercent(-5)).toBe(0)
+  })
+
+  it('the memory-detail card is gone and left no orphan keys or imports', () => {
+    // 2026-10-23：概览卡与胶囊条已覆盖 RSS/峰值/可用/使用率，「内存明细」是
+    // 同一批数字的第二份渲染，整卡移除。
+    expect(() => readFileSync(resolve(process.cwd(), 'src/components/system/MemoryDetail.tsx'), 'utf8')).toThrow()
+    const page = readFileSync(resolve(process.cwd(), 'src/pages/SystemPage.tsx'), 'utf8')
+    expect(page).not.toContain('MemoryDetail')
+    // 只有该卡使用的键必须一起消失，否则三语里会留下永不显示的孤儿文案。
+    for (const lang of ['en', 'zh', 'ja']) {
+      const parsed = JSON.parse(
+        readFileSync(resolve(process.cwd(), `src/i18n/locales/${lang}/common.json`), 'utf8'),
+      ) as { system: Record<string, unknown> }
+      for (const gone of ['memoryDetail', 'virtual', 'swap', 'pageFaults', 'cached', 'buffers']) {
+        expect(parsed.system[gone], `${lang}.system.${gone}`).toBeUndefined()
+      }
+      // 概览卡/胶囊条仍在用的键不能被顺手删掉。
+      for (const kept of ['rss', 'rssPeak', 'available', 'usagePercent']) {
+        expect(parsed.system[kept], `${lang}.system.${kept}`).toBeTruthy()
+      }
+    }
   })
 
   it('non-prefix routes always submit strip_prefix: false', () => {

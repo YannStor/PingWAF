@@ -741,10 +741,12 @@ cache. This affects every configuration that never set the key:
   [Profiling](profiling.md#memory-vs-disk-in-the-cache-module).
 
 The System observation UI moved: the card on the settings page is gone, and
-the full view (overview, memory detail, module attribution, top methods)
-now lives on the dedicated `/system` page — admin-only, reachable from the
-account dropdown in the top-right corner ("System observation"). The
-underlying endpoints (`GET /api/v1/system/metrics`,
+the full view (overview, module attribution, top methods) now lives on the
+dedicated `/system` page — admin-only, reachable from the account dropdown in
+the top-right corner ("System observation"). The standalone memory-detail card
+was removed afterwards: the overview cards and pills already carry RSS / peak /
+available / usage, so the per-field breakdown was a second copy of the same
+numbers. The underlying endpoints (`GET /api/v1/system/metrics`,
 `GET /api/v1/system/profile`) are unchanged.
 
 ### Rolling Upgrade (Distributed)

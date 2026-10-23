@@ -29,7 +29,8 @@ import { SkeletonRows } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/Toast'
 import { ErrorState } from '@/components/ErrorState'
 import { rewriteApi, rewriteKeys } from '@/api/rewrite'
-import { useCanWrite } from '@/hooks'
+import { useCanWrite, useSiteDetail } from '@/hooks'
+import { ResponseReplaceCard } from './ResponseReplaceCard'
 import {
   EXPRESSION_FIELDS,
   EXPRESSION_OPERATORS,
@@ -121,6 +122,10 @@ export function RewritePage() {
   const queryClient = useQueryClient()
   const canWrite = useCanWrite()
   const { siteId = '' } = useParams<{ siteId: string }>()
+
+  // 响应体替换策略挂在站点记录上（`sites.response_replace`），这里与规则列表
+  // 一起读取 —— 同一页展示两类"改写"，站点详情页则不再重复拉取。
+  const siteQuery = useSiteDetail(siteId)
 
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<RewriteRule | null>(null)
@@ -443,6 +448,33 @@ export function RewritePage() {
             )}
           </CardBody>
         </Card>
+      )}
+
+      {/* 响应体替换（`sites.response_replace`）：与规则列表同属"改写"，
+          原来在站点基础设置里，2026-10-23 移到本页。
+
+          `key` 带上服务端已保存的策略：卡片把表单存进本地 state，保存后
+          invalidate 会换回新的 `site` 对象；不重挂载的话本地 state 仍是提交前的
+          值，服务端一旦做过规范化（例如把空 path 补成 `^/.*`）就会永久显示为
+          "有未保存修改"。策略一变就重挂载，本地状态回到服务端的真值。 */}
+      {siteQuery.data && (
+        <div className="mt-6">
+          <ResponseReplaceCard
+            key={`${siteQuery.data.site.id}:${JSON.stringify(siteQuery.data.site.response_replace ?? null)}`}
+            site={siteQuery.data.site}
+          />
+        </div>
+      )}
+
+      {siteQuery.isError && (
+        <div className="mt-6">
+          <ErrorState
+            variant="inline"
+            error={siteQuery.error}
+            onRetry={() => void siteQuery.refetch()}
+            retrying={siteQuery.isFetching}
+          />
+        </div>
       )}
 
       <Dialog
