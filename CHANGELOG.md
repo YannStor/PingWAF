@@ -8,6 +8,24 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.30.0-rc.11] — 2026-10-23
+
+> **Pre-release.** Eleventh candidate: the fix for the identity being dropped
+> in the agent's conversion, plus the removal of rc.10's diagnostics.
+> Publishes `:0.30.0-rc.11` only.
+
+### Fixed
+
+- **The agent dropped the authenticated identity when converting an access
+  entry.** The WAF put the value on its `AccessLogEntry` and the control
+  plane knew how to store it, but `PingWafAgent::log_access` built the
+  shipped `LogEntry` with a hardcoded empty string — so the column was NULL
+  on every deployment while `security_events`, which goes through a different
+  conversion, carried the account. Found with the temporary diagnostics from
+  rc.10: the data plane logged the correct identity at every point, which
+  narrowed it to the one hop in between. A regression test now walks the same
+  path and asserts on the value the agent would send.
+
 ## [PingWAF 0.30.0-rc.10] — 2026-10-23
 
 > **Pre-release.** Tenth candidate: rc.9 with diagnostic logging on the

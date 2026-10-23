@@ -337,9 +337,11 @@ impl PingWafAgent {
             waf_event_type: String::new(),
             waf_details: String::new(),
             waf_matched_tags: Vec::new(),
-            // An access log entry carries no authenticated identity of its
-            // own: the WAF sets it when a session named the caller.
-            user_identity: String::new(),
+            // Who the request was made by, when the WAF learned it from an
+            // OIDC session. Carried through from the entry the plugin built;
+            // dropping it here is what kept the column empty on every
+            // deployment that tried it.
+            user_identity: entry.user_identity,
             total_latency_ms: entry.total_latency_ms,
             cache_status: entry.cache_status,
             tls_version: entry.tls_version,

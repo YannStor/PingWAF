@@ -1793,20 +1793,10 @@ fn amend_pending_access_body(
 /// not depend on it.
 pub fn amend_pending_access_identity(request_id: &str, identity: &str) {
     if identity.is_empty() {
-        tracing::warn!("DIAG amend: empty identity");
         return;
     }
-    match PENDING_ACCESS.get_mut(request_id) {
-        Some(mut entry) => {
-            entry.user_identity = identity.to_string();
-            tracing::warn!(request_id, identity, "DIAG amend OK");
-        },
-        None => tracing::warn!(
-            request_id,
-            identity,
-            len = PENDING_ACCESS.len(),
-            "DIAG amend MISS"
-        ),
+    if let Some(mut entry) = PENDING_ACCESS.get_mut(request_id) {
+        entry.user_identity = identity.to_string();
     }
 }
 
@@ -1991,12 +1981,6 @@ pub fn sweep_stale_access(ttl: Duration) -> usize {
             continue;
         };
         swept += 1;
-        tracing::warn!(
-            request_id,
-            identity = pending.user_identity,
-            path = pending.path,
-            "DIAG sweep"
-        );
         let Some(agent) = agent.as_ref() else {
             continue;
         };
@@ -2022,13 +2006,6 @@ fn emit_access(
     pending: PendingAccess,
     response: ResponseFacts,
 ) {
-    tracing::warn!(
-        request_id,
-        identity = pending.user_identity,
-        path = pending.path,
-        abandoned = response.abandoned,
-        "DIAG emit_access"
-    );
     let total_latency_ms = pending.start.elapsed().as_millis() as u64;
     let response_body_truncated = response.truncated();
     // Streaming counts the real bytes; the announced content length only
@@ -4217,12 +4194,6 @@ impl Plugin for WafPlugin {
                 // mid-body — is shipped by the sweep instead, and the sweep
                 // has no request context to read it from. Writing it here
                 // means it survives whichever path the entry takes.
-                tracing::warn!(
-                    request_id,
-                    from_ctx = ?ctx.state.user_identity,
-                    amended = entry.user_identity,
-                    "DIAG held branch"
-                );
                 entry.user_identity = identity_from(
                     ctx,
                     std::mem::take(&mut entry.user_identity),
@@ -6665,6 +6636,58 @@ inspect_body = true"###,
         assert_eq!(Some(b"page one".to_vec()), entry.response_body);
         // Consumed exactly once.
         assert!(agent.client.pop_log().await.is_none());
+    }
+
+    /// The authenticated identity survives every hop from the plugin to the
+    /// control plane.
+    ///
+    /// Regression: the WAF put it on `AccessLogEntry`, but the agent's
+    /// `log_access` built the shipped `LogEntry` with a hardcoded empty
+    /// string, so the column was NULL on every deployment — while
+    /// `security_events` (a different conversion) carried the account. This
+    /// walks the same path the plugin does and asserts on the value the agent
+    /// would send.
+    #[tokio::test]
+    async fn test_access_log_carries_the_authenticated_identity() {
+        let (_guard, agent, _dir) = install_test_agent().await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        let input_header = "GET /whoami HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let mut ctx = Ctx::default();
+        ctx.conn.client_ip = Some("203.0.113.44".to_string());
+        plugin
+            .handle_request(PluginStep::EarlyRequest, &mut session, &mut ctx)
+            .await
+            .unwrap();
+
+        // What the OIDC plugin does once it validates a session, in the
+        // request phase — before the response phase completes the entry.
+        ctx.state.user_identity = Some("user-42".to_string());
+        let request_id = ctx.state.request_id.clone().unwrap();
+        amend_pending_access_identity(&request_id, "user-42");
+
+        let mut resp = ResponseHeader::build(200, None).unwrap();
+        plugin
+            .handle_response(&mut session, &mut ctx, &mut resp)
+            .await
+            .unwrap();
+        plugin
+            .handle_response_body(&mut session, &mut ctx, &mut None, true)
+            .unwrap();
+
+        let entry = agent.client.pop_log().await.unwrap();
+        assert_eq!(request_id, entry.request_id);
+        assert_eq!(
+            "user-42", entry.user_identity,
+            "the identity must reach the shipped entry, not be dropped in the \
+             agent's conversion"
+        );
     }
 
     #[test]
