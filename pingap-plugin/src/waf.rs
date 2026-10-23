@@ -2022,6 +2022,13 @@ fn emit_access(
     pending: PendingAccess,
     response: ResponseFacts,
 ) {
+    tracing::warn!(
+        request_id,
+        identity = pending.user_identity,
+        path = pending.path,
+        abandoned = response.abandoned,
+        "DIAG emit_access"
+    );
     let total_latency_ms = pending.start.elapsed().as_millis() as u64;
     let response_body_truncated = response.truncated();
     // Streaming counts the real bytes; the announced content length only
@@ -4210,6 +4217,12 @@ impl Plugin for WafPlugin {
                 // mid-body — is shipped by the sweep instead, and the sweep
                 // has no request context to read it from. Writing it here
                 // means it survives whichever path the entry takes.
+                tracing::warn!(
+                    request_id,
+                    from_ctx = ?ctx.state.user_identity,
+                    amended = entry.user_identity,
+                    "DIAG held branch"
+                );
                 entry.user_identity = identity_from(
                     ctx,
                     std::mem::take(&mut entry.user_identity),

@@ -8,6 +8,24 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.30.0-rc.10] — 2026-10-23
+
+> **Pre-release.** Tenth candidate: rc.9 with diagnostic logging on the
+> response path, published so the remaining question about the access-log
+> identity can be answered from a live container log rather than by
+> inference. Publishes `:0.30.0-rc.10` only.
+
+### Changed
+
+- **Temporary diagnostic logging on the access-log path.** The identity
+  reached `security_events` but not `access_logs`, and the two paths differ
+  in ways the unit tests do not exercise: an event reads the request context
+  directly, while the access entry is amended during the request phase and
+  completed during the response phase, and a response with a body is held
+  rather than shipped inline. The log lines print the identity at each of
+  those points, so the next run says which one drops it. They are removed
+  once the answer is in — this is not meant to ship.
+
 ## [PingWAF 0.30.0-rc.9] — 2026-10-23
 
 > **Pre-release.** Ninth candidate: rc.8 plus the identity write on the path
