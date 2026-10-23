@@ -135,6 +135,11 @@ pub struct SecurityEventDocument {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
+    /// Who the request was made by, when the site authenticated them: the
+    /// OIDC session's `sub`. Absent for anonymous traffic, which is most of
+    /// it, and for documents indexed before the field existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_identity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub country_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

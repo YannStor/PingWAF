@@ -75,6 +75,11 @@ const MAX_COUNTRY: usize = 2;
 const MAX_CACHE_STATUS: usize = 20;
 const MAX_TLS_VERSION: usize = 10;
 const MAX_UPSTREAM: usize = 255;
+/// Matches the `user_identity` column (migration 000071). The agent is a
+/// separate process and an OIDC `sub` is provider-defined, so an oversized
+/// one has to be cut here: a value longer than the column would fail the
+/// whole batch insert and cost the log entries either side of it.
+const MAX_USER_IDENTITY: usize = 255;
 const MAX_METRIC_NAME: usize = 200;
 
 /// Probe samples are kept for a day: at a 5-second cadence a single agent
@@ -2065,6 +2070,10 @@ fn access_log_row(
         referer: Set(optional(&entry.referer)),
         country_code: Set(truncate(&entry.country_code, MAX_COUNTRY)),
         tls_version: Set(truncate(&entry.tls_version, MAX_TLS_VERSION)),
+        // Who made the request, when the site authenticated them. `optional`
+        // maps an empty string to NULL: the column means "no identity", and a
+        // stored `""` would read as an identified caller with no name.
+        user_identity: Set(truncate(&entry.user_identity, MAX_USER_IDENTITY)),
         request_headers: Set(headers_json(&entry.request_headers)),
         request_body: Set(body_text(&entry.request_body)),
         request_body_size: Set(positive_i64(entry.request_body_size as i64)),
@@ -2200,6 +2209,10 @@ fn security_event_row(
         waf_details: Set(optional(&entry.waf_details)),
         country_code: Set(truncate(&entry.country_code, MAX_COUNTRY)),
         user_agent: Set(optional(&entry.user_agent)),
+        // Who made the request, when the site authenticated them. `optional`
+        // maps an empty string to NULL: the column means "no identity", and a
+        // stored `""` would read as an identified caller with no name.
+        user_identity: Set(truncate(&entry.user_identity, MAX_USER_IDENTITY)),
         created_at: Set(Utc::now()),
         ..Default::default()
     })
@@ -2318,6 +2331,7 @@ fn security_event_document(
         severity: None,
 
         user_agent: optional(&entry.user_agent),
+        user_identity: optional(&entry.user_identity),
         country_code: optional(&entry.country_code),
         asn: positive_u32(entry.asn),
 
@@ -2749,6 +2763,55 @@ mod tests {
             .expect("event");
         assert!(event.action.is_set());
         assert_eq!(event.score.unwrap(), Some(42));
+    }
+
+    /// The identity is stored on both tables, an absent one stays NULL, and an
+    /// oversized one is cut rather than allowed to fail the batch insert.
+    #[test]
+    fn the_user_identity_is_stored_and_bounded() {
+        let mut entry = LogEntry {
+            client_ip: "10.0.0.1".into(),
+            method: "GET".into(),
+            host: "example.com".into(),
+            path: "/".into(),
+            waf_action: action::BLOCK.into(),
+            waf_rule_id: "sqli-942100".into(),
+            user_identity: "user-1234".into(),
+            ..Default::default()
+        };
+
+        let event = security_event_row(&entry, None, None, Utc::now())
+            .expect("a blocked request produces an event");
+        assert_eq!(event.user_identity.unwrap(), Some("user-1234".into()));
+        assert_eq!(
+            access_log_row(&entry, None, None, Utc::now())
+                .user_identity
+                .unwrap(),
+            Some("user-1234".into())
+        );
+
+        // Anonymous traffic stores NULL, not "": the column means "no
+        // identity", and a stored empty string would read as an identified
+        // caller with no name.
+        entry.user_identity = String::new();
+        assert_eq!(
+            security_event_row(&entry, None, None, Utc::now())
+                .unwrap()
+                .user_identity
+                .unwrap(),
+            None
+        );
+
+        // An OIDC `sub` is provider-defined, and the agent is a separate
+        // process: a value longer than the column must be cut here or the
+        // whole batch insert fails and takes the surrounding entries with it.
+        entry.user_identity = "x".repeat(MAX_USER_IDENTITY + 50);
+        let stored = security_event_row(&entry, None, None, Utc::now())
+            .unwrap()
+            .user_identity
+            .unwrap()
+            .expect("a truncated value is still stored");
+        assert_eq!(MAX_USER_IDENTITY, stored.chars().count());
     }
 
     #[test]

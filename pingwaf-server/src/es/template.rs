@@ -214,6 +214,14 @@ fn geo_props() -> serde_json::Value {
 fn client_props() -> serde_json::Value {
     let mut map = serde_json::Map::new();
     map.insert("user_agent".to_string(), keyword_text());
+    // The authenticated caller, when there is one. A keyword so it can be
+    // filtered and aggregated exactly ("everything this account did") rather
+    // than tokenised, and capped like the column it mirrors so one oversized
+    // `sub` cannot bloat the index.
+    map.insert(
+        "user_identity".to_string(),
+        serde_json::json!({ "type": "keyword", "ignore_above": 256 }),
+    );
     map.insert(
         "referer".to_string(),
         serde_json::json!({ "type": "keyword", "ignore_above": 2048 }),

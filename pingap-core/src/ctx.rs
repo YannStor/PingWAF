@@ -322,6 +322,19 @@ pub struct RequestState {
     pub location_processing_count: i32,
     /// The total number of requests accepted for this location.
     pub location_accepted_count: u64,
+    /// Who the request was made by, when a plugin authenticated them.
+    ///
+    /// Set by the OIDC plugin once it has validated a session, and read by
+    /// whoever writes a log or an event, so an entry can be traced back to an
+    /// account rather than only to an address. The value is the provider's
+    /// `sub` — an identifier it issued, never a secret — and `None` means the
+    /// request was anonymous, which is the ordinary case.
+    ///
+    /// The plugin chain runs WAF before OIDC (an unauthenticated attacker is
+    /// stopped without being sent to a provider), so an event raised during
+    /// the request phase is anonymous by construction; the access log, written
+    /// on the response, sees the identity.
+    pub user_identity: Option<String>,
 }
 
 /// All cache-related configuration and statistics for a request.

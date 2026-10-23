@@ -967,6 +967,12 @@ message LogEntry {
   // detection signature for compatibility. Empty when no single rule
   // enforced the verdict (anomaly-score gate, stage-1 critical fast path).
   string waf_enforced_rule_id = 57;
+  // Who the request was made by, when the site authenticated them: the OIDC
+  // `sub` of the session. Empty for an anonymous request, which is the case
+  // for most traffic. It is an identifier the provider issued — not a name,
+  // an email, or a token — so it is safe to store and to search on, and it
+  // is what makes an event traceable to an account after the fact.
+  string user_identity = 58;
 
   // Performance
   uint64 total_latency_ms = 60;

@@ -60,6 +60,13 @@ pub struct SecurityEvent {
     pub user_agent: String,
     pub country_code: String,
     pub matched_tags: Vec<String>,
+    /// Who the request was made by, when the site authenticated them: the
+    /// OIDC session's `sub`. Empty for an anonymous request.
+    ///
+    /// An identifier the provider issued, never a secret or a token, so it is
+    /// safe to store and to search on — and it is what makes an event
+    /// traceable back to an account after the fact.
+    pub user_identity: String,
 }
 
 /// An access log entry for a proxied request.
@@ -86,6 +93,10 @@ pub struct AccessLogEntry {
     pub referer: String,
     pub tls_version: String,
     pub country_code: String,
+    /// Who the request was made by, when the site authenticated them (the
+    /// OIDC session's `sub`). Empty for an anonymous request, which is the
+    /// ordinary case. An identifier the provider issued, never a secret.
+    pub user_identity: String,
     pub request_headers: Vec<(String, String)>,
     pub request_body: Option<Vec<u8>>,
     pub request_body_size: u64,
@@ -279,6 +290,7 @@ impl PingWafAgent {
             waf_event_type: event.event_type,
             waf_details: event.details,
             waf_matched_tags: event.matched_tags,
+            user_identity: event.user_identity,
             total_latency_ms: 0,
             cache_status: String::new(),
             tls_version: String::new(),
@@ -325,6 +337,9 @@ impl PingWafAgent {
             waf_event_type: String::new(),
             waf_details: String::new(),
             waf_matched_tags: Vec::new(),
+            // An access log entry carries no authenticated identity of its
+            // own: the WAF sets it when a session named the caller.
+            user_identity: String::new(),
             total_latency_ms: entry.total_latency_ms,
             cache_status: entry.cache_status,
             tls_version: entry.tls_version,

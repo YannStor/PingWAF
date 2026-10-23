@@ -8,6 +8,68 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [Unreleased]
+
+### Added
+
+- **Log entries say *who* made a request, not only where it came from.** A
+  site behind an OIDC gate now records the authenticated caller's `sub` on
+  both the access log and the security event (`user_identity`, migration
+  `000071`, indexed on both tables and mapped as a `keyword` in the
+  Elasticsearch template so "everything this account did" is an exact
+  filter). It is the identifier the provider issued — stable for the
+  account, not a secret, and deliberately not the email or the name, which
+  are personal data that change. `NULL` means anonymous, which is most
+  traffic and every row written before this migration: an empty string would
+  claim the caller was identified and turned out to be nobody.
+
+  The value is set by the OIDC plugin once it validates a session, and
+  recorded *before* the access-rule check, so a refusal is traceable to the
+  account that was refused. The WAF runs ahead of OIDC in the chain (an
+  unauthenticated attacker is stopped without being sent to a provider), so
+  an event it raises during the request phase is anonymous by construction;
+  the access log, written on the response, carries the identity.
+
+### Changed
+
+- **The response-body replacement policy moved to the site's Rewrite Rules
+  page.** It sat in the site's basic settings while the rewrite rules — the
+  other way to modify what a site returns — were on a page of their own, so
+  "change what comes back" was split across two tabs. The card now renders
+  under the rule list, where both halves of rewriting are visible together.
+  Nothing about the policy itself changed: it is still
+  `sites.response_replace` behind `PUT /api/v1/sites/{site_id}`.
+- **The dashboard's "Top threat IPs" and "Top triggered rules" now match the
+  site traffic page.** The two pages had grown separate copies of the same two
+  tables and drifted apart: the dashboard showed a country *code* where the
+  traffic page showed a flag, rendered a blocked count as red text instead of
+  a badge, listed a rule's raw id as a second line, and gave neither table a
+  drill-down. Both pages now render one shared pair of tables, which also
+  brings loading skeletons, the empty state and the inline error to the
+  traffic page — it previously rendered an empty table while the query was
+  still in flight. The dashboard's tables gained the traffic page's
+  click-through into the matching log rows (carrying the selected window and
+  the row's site), and the two cards now sit in the same two-column grid.
+- **The standalone "Memory detail" card is gone from System observation.** The
+  overview cards and pills already report RSS, RSS peak, available memory and
+  usage, so the card was a second copy of the same numbers plus swap, page
+  faults and buffers that nothing acted on. The metrics endpoint is unchanged
+  — only the redundant rendering was removed.
+
+### Fixed
+
+- **A site behind a TLS-terminating proxy derives its scheme from
+  `X-Forwarded-Proto`.** The data plane only sees the last hop, so a CDN or
+  a load balancer made `ctx.conn.tls_version` `None` on a site that is only
+  reachable over `https://`. The OIDC `redirect_uri` was then built as
+  `http://…` and the session cookie was set without `Secure`, which the
+  browser refuses or drops. The header is now read under the same trust the
+  client IP already uses — the direct peer must be inside the site's
+  configured `trusted_proxy_ranges` — so an untrusted client cannot talk the
+  site into a weaker scheme, and an unusable value falls back to the
+  connection's own TLS state. Logout clears the cookie with the same flag it
+  was set with, which it previously could not.
+
 ## [PingWAF 0.30.0-rc.5] — 2026-10-23
 
 > **Pre-release.** Fifth candidate: rc.4 plus the provider card's i18n fix.

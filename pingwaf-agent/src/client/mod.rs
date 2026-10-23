@@ -55,6 +55,10 @@ pub struct LogEntry {
     pub waf_event_type: String,
     pub waf_details: String,
     pub waf_matched_tags: Vec<String>,
+    /// Who the request was made by, when the site authenticated them: the
+    /// OIDC session's `sub`. Empty for an anonymous request. An identifier
+    /// the provider issued, never a secret, so it is safe to store.
+    pub user_identity: String,
     pub total_latency_ms: u64,
     pub cache_status: String,
     pub tls_version: String,
@@ -1110,6 +1114,7 @@ impl ControlPlaneClient {
             waf_event_type: entry.waf_event_type.clone(),
             waf_details: entry.waf_details.clone(),
             waf_matched_tags: entry.waf_matched_tags.clone(),
+            user_identity: entry.user_identity.clone(),
             total_latency_ms: entry.total_latency_ms,
             cache_status: entry.cache_status.clone(),
             tls_version: entry.tls_version.clone(),

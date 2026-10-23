@@ -1512,6 +1512,14 @@ struct PendingAccess {
     referer: String,
     tls_version: String,
     country_code: String,
+    /// Who the request was made by, backfilled by the OIDC plugin once it has
+    /// validated a session. Empty while the request is anonymous, and also
+    /// when the site has no gate at all.
+    ///
+    /// The entry is created during the request phase, which runs *before* the
+    /// OIDC plugin (an unauthenticated attacker is stopped without being sent
+    /// to a provider), so this cannot be filled in at creation time.
+    user_identity: String,
     request_headers: Vec<(String, String)>,
     request_body: Option<Vec<u8>>,
     request_body_size: u64,
@@ -1777,6 +1785,21 @@ fn amend_pending_access_body(
     }
 }
 
+/// Records who the request is from on the pending access entry.
+///
+/// Called by the OIDC plugin once a session has been validated, which happens
+/// after this entry was created: the WAF runs first in the chain. A no-op when
+/// the entry is gone (already answered or swept), which is why the caller does
+/// not depend on it.
+pub fn amend_pending_access_identity(request_id: &str, identity: &str) {
+    if identity.is_empty() {
+        return;
+    }
+    if let Some(mut entry) = PENDING_ACCESS.get_mut(request_id) {
+        entry.user_identity = identity.to_string();
+    }
+}
+
 /// What a completed (or capped) body inspection concluded, shared by the
 /// request phase and the request-body filter.
 enum VerdictOutcome {
@@ -1996,6 +2019,7 @@ fn emit_access(
         referer: pending.referer,
         tls_version: pending.tls_version,
         country_code: pending.country_code,
+        user_identity: pending.user_identity,
         request_headers: pending.request_headers,
         request_body: pending.request_body,
         request_body_size: pending.request_body_size,
@@ -2110,6 +2134,9 @@ pub(crate) fn emit_challenge_access(
             .unwrap_or_default()
             .to_string(),
         country_code: String::new(),
+        // Filled in by the OIDC plugin when a session names the caller; this
+        // response is generated before that plugin runs.
+        user_identity: String::new(),
         request_headers: cap_headers(
             headers
                 .iter()
@@ -2603,6 +2630,11 @@ impl WafPlugin {
             user_agent,
             country_code: request_data.country_code.clone().unwrap_or_default(),
             matched_tags: verdict.matched_rules.clone(),
+            // The WAF runs before the OIDC plugin, so no session has
+            // named the caller yet: an event raised here is anonymous by
+            // construction. The access log, written on the response, is
+            // where the identity appears.
+            user_identity: String::new(),
         });
     }
 
@@ -2696,6 +2728,11 @@ impl WafPlugin {
                 .unwrap_or_default(),
             country_code: request_data.country_code.clone().unwrap_or_default(),
             matched_tags: Vec::new(),
+            // The WAF runs before the OIDC plugin, so no session has
+            // named the caller yet: an event raised here is anonymous by
+            // construction. The access log, written on the response, is
+            // where the identity appears.
+            user_identity: String::new(),
         });
     }
 
@@ -2738,6 +2775,11 @@ impl WafPlugin {
                 .unwrap_or_default(),
             country_code: request_data.country_code.clone().unwrap_or_default(),
             matched_tags: Vec::new(),
+            // The WAF runs before the OIDC plugin, so no session has
+            // named the caller yet: an event raised here is anonymous by
+            // construction. The access log, written on the response, is
+            // where the identity appears.
+            user_identity: String::new(),
         });
     }
 
@@ -3287,6 +3329,11 @@ impl Plugin for WafPlugin {
                         .unwrap_or_default()
                         .to_string(),
                     country_code: country.clone().unwrap_or_default(),
+                    // Backfilled by the OIDC plugin
+                    // (`amend_pending_access_identity`) once it has validated
+                    // a session: this entry is built during the request phase,
+                    // which runs before that plugin.
+                    user_identity: String::new(),
                     request_headers: log_headers,
                     // The body prefix is backfilled by the request-body
                     // filter (`amend_pending_access_body`) once the bytes
@@ -3907,6 +3954,11 @@ impl Plugin for WafPlugin {
                         .clone()
                         .unwrap_or_default(),
                     matched_tags: Vec::new(),
+                    // The WAF runs before the OIDC plugin, so no session has
+                    // named the caller yet: an event raised here is anonymous by
+                    // construction. The access log, written on the response, is
+                    // where the identity appears.
+                    user_identity: String::new(),
                 });
             }
             let (log_body, log_body_size, log_truncated) =

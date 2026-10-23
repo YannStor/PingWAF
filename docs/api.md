@@ -1871,6 +1871,7 @@ List security events, newest first.
 | `host` | string | Request host (`*` wildcards allowed) |
 | `path` | string | Substring match on the request path |
 | `country_code` | string | ISO country code, upper-cased server side |
+| `user_identity` | string | The authenticated caller's OIDC `sub` (exact match) |
 | `request_id` | string | Exact request id, e.g. from an `X-Request-ID` header |
 | `q` | string | Free text; matches the path or the host |
 
@@ -1952,6 +1953,7 @@ List access logs, newest first.
 | `path` | string | Substring match on the request path |
 | `cache_status` | string | `hit`, `miss`, … (lower-cased, `a,b` for a list) |
 | `country_code` | string | ISO country code, upper-cased server side |
+| `user_identity` | string | The authenticated caller's OIDC `sub` (exact match) |
 | `min_latency_ms` | int | Only rows at or above this total latency |
 | `request_id` | string | Exact request id |
 | `q` | string | Free text; matches the path or the host |

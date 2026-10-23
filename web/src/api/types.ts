@@ -806,6 +806,12 @@ export interface SecurityEvent {
   waf_details: string | null
   country_code: string | null
   user_agent: string | null
+  /**
+   * Who made the request, when the site authenticated them: the OIDC
+   * session's `sub`. `null` for anonymous traffic and for rows written
+   * before the column existed.
+   */
+  user_identity: string | null
   created_at: string
 }
 
@@ -831,6 +837,8 @@ export interface AccessLogSummary {
   referer: string | null
   country_code: string | null
   tls_version: string | null
+  /** The authenticated caller's OIDC `sub`; `null` when anonymous. */
+  user_identity: string | null
   request_body_size: number | null
   request_body_truncated: boolean | null
   scheme: string | null
@@ -866,6 +874,8 @@ export interface SecurityLogQuery extends PaginationQuery {
   host?: string
   path?: string
   country_code?: string
+  /** The authenticated caller's OIDC `sub` (exact match). */
+  user_identity?: string
   request_id?: string
   q?: string
 }
@@ -883,6 +893,8 @@ export interface AccessLogQuery extends PaginationQuery {
   path?: string
   cache_status?: string
   country_code?: string
+  /** The authenticated caller's OIDC `sub` (exact match). */
+  user_identity?: string
   min_latency_ms?: number
   request_id?: string
   /** Matches only rows with no owning site (no `Host` header on the wire). */

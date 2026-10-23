@@ -75,6 +75,7 @@ pub mod m20240101_000067_site_oidc;
 pub mod m20240101_000068_control_plane_boots;
 pub mod m20240101_000069_oidc_providers;
 pub mod m20240101_000070_site_oidc_access;
+pub mod m20240101_000071_log_user_identity;
 
 use sea_orm_migration::prelude::*;
 
@@ -165,6 +166,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000068_control_plane_boots::Migration),
             Box::new(m20240101_000069_oidc_providers::Migration),
             Box::new(m20240101_000070_site_oidc_access::Migration),
+            Box::new(m20240101_000071_log_user_identity::Migration),
         ]
     }
 }
@@ -176,7 +178,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 70);
+        assert_eq!(migrations.len(), 71);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

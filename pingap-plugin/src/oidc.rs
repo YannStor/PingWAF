@@ -30,9 +30,9 @@ use http::{HeaderName, HeaderValue, Method, StatusCode};
 use jsonwebtoken::{Algorithm, Validation};
 use pingap_config::PluginConf;
 use pingap_core::{
-    Ctx, HttpResponse, Plugin, PluginStep, RequestPluginResult,
+    Ctx, HttpResponse, Plugin, PluginStep, ProxyTrust, RequestPluginResult,
     constant_time_eq, get_cookie_value, now_sec,
-    protect_from_connection_header,
+    protect_from_connection_header, resolve_scheme_with_trust,
 };
 use pingora::proxy::Session;
 use pingwaf_agent::{PingWafAgent, SecurityEvent};
@@ -310,6 +310,30 @@ struct SessionData {
     claims: ClaimMap,
 }
 
+impl SessionData {
+    /// Who the session belongs to: the provider's `sub`.
+    ///
+    /// `sub` is the one claim every ID token must carry and the only one the
+    /// provider guarantees is stable for an account, which is what makes it
+    /// the right value to record. It is an identifier, not a secret, so it
+    /// can be logged and searched. A session without one (only reachable by
+    /// sealing a cookie outside this plugin) reports `unknown` rather than
+    /// dropping the field: an entry that says "we do not know who" is more
+    /// useful than one that looks anonymous.
+    fn identity(&self) -> String {
+        match self.claims.get("sub") {
+            Some(serde_json::Value::String(sub)) if !sub.is_empty() => {
+                sub.clone()
+            },
+            // A `sub` that is present but empty is not an identity, and a
+            // non-string one is a shape this build does not expect: both
+            // report "unknown" rather than an empty or stringified value that
+            // would look like a real account in the log.
+            _ => "unknown".to_string(),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct TokenResponse {
     id_token: Option<String>,
@@ -336,6 +360,27 @@ fn local_path(value: &str) -> &str {
 fn is_http_url(value: &str) -> bool {
     url::Url::parse(value)
         .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+}
+
+/// The site's proxy trust for the request's host, from the agent cache.
+///
+/// `None` when the site is not behind a trusted proxy (or the host is not one
+/// this agent serves), in which case the connection's own TLS state decides
+/// the scheme. Same source as the client-IP resolution the WAF uses, so a
+/// deployment names its proxy once and both agree.
+fn site_proxy_trust(session: &Session) -> Option<ProxyTrust> {
+    let host = pingap_core::get_host(session.req_header())?;
+    let agent = PingWafAgent::instance()?;
+    let site_rules = agent.get_rules_for_domain(&host)?;
+    let trust = &site_rules.proxy_trust;
+    trust.enabled.then(|| {
+        ProxyTrust::new(
+            trust.enabled,
+            trust.effective_header(),
+            trust.last_hop_only,
+            &trust.trusted_ranges,
+        )
+    })
 }
 
 fn is_cookie_name(value: &str) -> bool {
@@ -747,11 +792,33 @@ impl Oidc {
         .map(|value| (SET_COOKIE, value))
     }
 
+    /// The scheme the browser used, honouring a trusted proxy.
+    ///
+    /// A site behind a CDN or a TLS-terminating load balancer is reached over
+    /// plain HTTP on the last hop, so `ctx.conn.tls_version` is `None` even
+    /// though the browser used HTTPS. Deriving the callback URL or the
+    /// cookie's `Secure` flag from the connection alone would then produce an
+    /// `http://` URL for an `https://`-only site, and the login would fail or
+    /// the session cookie would not stick. When the operator has named the
+    /// proxy in the site's trusted ranges, `X-Forwarded-Proto` is believed —
+    /// the same trust the client IP already uses, so an untrusted peer cannot
+    /// talk the site into a weaker scheme.
+    fn scheme(&self, session: &Session, ctx: &Ctx) -> &'static str {
+        match site_proxy_trust(session) {
+            Some(trust) => resolve_scheme_with_trust(session, ctx, &trust),
+            None => {
+                resolve_scheme_with_trust(session, ctx, &ProxyTrust::default())
+            },
+        }
+    }
+
     /// Whether the cookies are for a site that is reached over TLS.
-    fn is_secure(&self, ctx: &Ctx) -> bool {
+    fn is_secure(&self, session: &Session, ctx: &Ctx) -> bool {
         match &self.redirect_url {
+            // An explicit callback URL is the operator's statement about how
+            // the site is reached, and outranks anything inferred.
             Some(url) => url.starts_with("https://"),
-            None => ctx.conn.tls_version.is_some(),
+            None => self.scheme(session, ctx) == "https",
         }
     }
 
@@ -766,12 +833,11 @@ impl Oidc {
             .authority()
             .map(|authority| authority.as_str())
             .or_else(|| header.headers.get(HOST)?.to_str().ok())?;
-        let scheme = if ctx.conn.tls_version.is_some() {
-            "https"
-        } else {
-            "http"
-        };
-        Some(format!("{scheme}://{host}{}", self.redirect_path))
+        Some(format!(
+            "{}://{host}{}",
+            self.scheme(session, ctx),
+            self.redirect_path
+        ))
     }
 
     async fn discover(&self) -> std::result::Result<Provider, String> {
@@ -910,7 +976,7 @@ impl Oidc {
             &sealed,
             &self.redirect_path,
             LOGIN_TTL.as_secs(),
-            self.is_secure(ctx),
+            self.is_secure(session, ctx),
         )?;
         let mut response = HttpResponse::redirect(&location).ok()?;
         response.headers.get_or_insert_default().push(cookie);
@@ -1105,7 +1171,7 @@ impl Oidc {
             exp: now_sec() + self.session_ttl.as_secs(),
             claims: kept,
         };
-        let secure = self.is_secure(ctx);
+        let secure = self.is_secure(session, ctx);
         let too_large = || {
             Refusal::Provider("the session does not fit a cookie".to_string())
         };
@@ -1156,7 +1222,12 @@ impl Oidc {
 
     /// Ends the session: the cookie goes, and the browser is sent to
     /// where the provider ends its own, when it has such a place.
-    async fn logout(&self, ctx: &Ctx) -> HttpResponse {
+    ///
+    /// `session` is needed to clear the cookie with the same `Secure` flag it
+    /// was set with: a site behind a trusted TLS-terminating proxy has no
+    /// connection TLS, and clearing without `Secure` would leave the browser
+    /// holding the original cookie.
+    async fn logout(&self, session: &Session, ctx: &Ctx) -> HttpResponse {
         let end_session = self
             .provider()
             .await
@@ -1175,9 +1246,13 @@ impl Oidc {
                     .body("Logged out")
                     .finish()
             });
-        if let Some(cookie) =
-            self.cookie(&self.cookie_name, "", "/", 0, self.is_secure(ctx))
-        {
+        if let Some(cookie) = self.cookie(
+            &self.cookie_name,
+            "",
+            "/",
+            0,
+            self.is_secure(session, ctx),
+        ) {
             response.headers.get_or_insert_default().push(cookie);
         }
         no_store(response)
@@ -1239,13 +1314,15 @@ impl Oidc {
             .get_rules_for_domain(&host)
             .map(|rules| rules.site_id.clone())
             .unwrap_or_default();
-        let secure = ctx.conn.tls_version.is_some();
+        // The scheme the browser used, not the last hop's: an event recorded
+        // for a site behind a TLS-terminating proxy should not claim http.
+        let scheme = self.scheme(session, ctx);
         agent.log_security_event(SecurityEvent {
             site_id,
             request_id: ctx.state.request_id.clone().unwrap_or_default(),
             client_ip: ctx.conn.client_ip.clone().unwrap_or_default(),
             method: header.method.as_str().to_string(),
-            scheme: if secure { "https" } else { "http" }.to_string(),
+            scheme: scheme.to_string(),
             protocol: String::new(),
             host: header
                 .headers
@@ -1272,6 +1349,12 @@ impl Oidc {
                 .to_string(),
             country_code: String::new(),
             matched_tags: Vec::new(),
+            // Whoever the session named, when there was one. Set by the
+            // session check earlier in this request; empty for a failure that
+            // happened before any session existed (a bad code, an
+            // unreachable provider), which is exactly the distinction an
+            // operator needs when reading the log.
+            user_identity: ctx.state.user_identity.clone().unwrap_or_default(),
         });
     }
 }
@@ -1386,9 +1469,24 @@ impl Plugin for Oidc {
             return Ok(RequestPluginResult::Respond(response));
         }
         if self.logout_path.as_deref() == Some(path.as_str()) {
-            return Ok(RequestPluginResult::Respond(self.logout(ctx).await));
+            return Ok(RequestPluginResult::Respond(
+                self.logout(session, ctx).await,
+            ));
         }
         if let Some(data) = self.session(session, now_sec()) {
+            // Who this request is from, for the access log and any event
+            // written after this point. Recorded before the access-rule check
+            // so a refusal is traceable to the account that was refused — the
+            // one case where knowing who asked matters most.
+            ctx.state.user_identity = Some(data.identity());
+            // The access entry was created by the WAF, which runs before this
+            // plugin, so it is amended rather than built with the identity.
+            if let Some(request_id) = ctx.state.request_id.as_deref() {
+                crate::waf::amend_pending_access_identity(
+                    request_id,
+                    &data.identity(),
+                );
+            }
             // The one place a request carrying a session can be refused, so
             // the only place an access rule cannot be walked around: a
             // signed-in visitor whose claims do not satisfy the site's rules
@@ -2818,6 +2916,35 @@ Pz7glwkTfq+X/7U/TTdWanLivIQqzKjyNBu3kgzx7GeUYcjtuw4RKof6
     // Authenticating proves who someone is; these decide whether they may
     // enter. The check runs where the session is read, so a rule cannot be
     // walked around by replaying a session that predates it.
+
+    /// The identity recorded on an event or an access entry is the provider's
+    /// `sub` — stable for the account, an identifier rather than a secret, and
+    /// therefore safe to log and to search on.
+    #[test]
+    fn a_session_reports_the_subject_as_its_identity() {
+        let data = SessionData {
+            exp: 0,
+            claims: claims(r#"{"sub":"user-1234","email":"a@b.test"}"#),
+        };
+        assert_eq!("user-1234", data.identity());
+
+        // `sub` is required by the spec and validated on the way in, so a session
+        // without one is only reachable by sealing a cookie outside this plugin.
+        // Saying "unknown" beats reporting nothing: the entry then reads as "we
+        // have a session and cannot name it", not as anonymous traffic.
+        let nameless = SessionData {
+            exp: 0,
+            claims: claims(r#"{"email":"a@b.test"}"#),
+        };
+        assert_eq!("unknown", nameless.identity());
+
+        // An empty `sub` is not an identity either.
+        let empty = SessionData {
+            exp: 0,
+            claims: claims(r#"{"sub":""}"#),
+        };
+        assert_eq!("unknown", empty.identity());
+    }
 
     fn claims(json: &str) -> ClaimMap {
         serde_json::from_str(json).expect("a claim map")
