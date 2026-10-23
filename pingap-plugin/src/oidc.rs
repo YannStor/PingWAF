@@ -247,6 +247,24 @@ impl AccessPolicy {
             },
         }
     }
+
+    /// Every claim the rules read, so the callback can keep them in the
+    /// session. The rules run on later requests, when the ID token is long
+    /// gone and only what the session carries is available.
+    fn claims(&self) -> Vec<String> {
+        match self {
+            Self::AllowAll => Vec::new(),
+            Self::RequireAny(rules) | Self::RequireAll(rules) => {
+                let mut names: Vec<String> = Vec::new();
+                for rule in rules {
+                    if !names.contains(&rule.claim) {
+                        names.push(rule.claim.clone());
+                    }
+                }
+                names
+            },
+        }
+    }
 }
 
 /// What the provider says of itself, at
@@ -1062,13 +1080,23 @@ impl Oidc {
             .await
             .map_err(Refusal::Provider)?;
 
-        // What is kept of the user: who it is, and what goes upstream.
+        // What is kept of the user: who it is, what goes upstream, and — this
+        // is the part that is easy to forget — the claims the access rules
+        // read. The rules run on every request against the *session*, not
+        // against the ID token, which is only in hand during the callback.
+        // Leaving a rule's claim out of here means the rule can never match,
+        // so a site with `require_any` denies everyone including the users it
+        // meant to admit.
         let mut kept = ClaimMap::new();
-        for name in std::iter::once("sub").chain(
-            self.claims_to_headers
-                .iter()
-                .map(|(claim, _)| claim.as_str()),
-        ) {
+        let rule_claims = self.access.claims();
+        for name in std::iter::once("sub")
+            .chain(
+                self.claims_to_headers
+                    .iter()
+                    .map(|(claim, _)| claim.as_str()),
+            )
+            .chain(rule_claims.iter().map(String::as_str))
+        {
             if let Some(value) = claims.get(name) {
                 kept.insert(name.to_string(), value.clone());
             }
@@ -2925,6 +2953,25 @@ Pz7glwkTfq+X/7U/TTdWanLivIQqzKjyNBu3kgzx7GeUYcjtuw4RKof6
             policy("access_rules = [\"groups:contains:urn:oidc:admins\"]\n");
         assert!(policy.admits(&claims(r#"{"groups":["urn:oidc:admins"]}"#)));
         assert!(!policy.admits(&claims(r#"{"groups":["urn:oidc:users"]}"#)));
+    }
+
+    /// A rule reads its claim from the *session*, which the callback builds from
+    /// the ID token. A claim the session does not carry can never match, so a site
+    /// with `require_any` would deny everyone — including the users it meant to
+    /// admit. This is the list the callback consults.
+    #[test]
+    fn a_policy_reports_every_claim_its_rules_read() {
+        let policy = policy(
+            "access_mode = \"require_all\"\n\
+         access_rules = [\"groups:contains:admins\", \"hd:exists\", \"groups:ne:banned\"]\n",
+        );
+        let mut claims = policy.claims();
+        claims.sort();
+        // Deduplicated: `groups` appears in two rules and must be kept once.
+        assert_eq!(vec!["groups".to_string(), "hd".to_string()], claims);
+
+        // The permissive mode reads nothing, so nothing extra is kept.
+        assert!(AccessPolicy::AllowAll.claims().is_empty());
     }
 
     #[test]
