@@ -8,6 +8,30 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.30.0-rc.7] — 2026-10-23
+
+> **Pre-release.** Seventh candidate: rc.6 plus the fix for the access-log
+> columns that stayed empty. Publishes `:0.30.0-rc.7` only; `:latest` and
+> `:0.30` keep pointing at the newest stable release.
+
+### Fixed
+
+- **The authenticated identity and the request body reached the access log
+  empty.** `pingap:requestId` runs *after* `pingwaf:waf` in the chain and
+  replaced `ctx.state.request_id` unconditionally. The WAF keys its pending
+  access entry on the id it minted, so every later amendment — the identity
+  from rc.6, the request-body facts — was written against an id nothing would
+  read: the entry under the WAF's id was completed and shipped with an empty
+  identity, and the entry under the new id was never created. An id another
+  plugin already minted now wins.
+
+  This was invisible in the unit tests and in the gate: the access log still
+  shipped for every request, and only a live login showed
+  `security_events.user_identity` populated while the matching `access_logs`
+  row stayed `NULL` — the events path reads the context directly, the access
+  path goes through the pending entry, and the difference is what pointed at
+  the lookup.
+
 ## [PingWAF 0.30.0-rc.6] — 2026-10-23
 
 > **Pre-release.** Sixth candidate: rc.5 plus the authenticated-identity
