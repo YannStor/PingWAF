@@ -1097,6 +1097,9 @@ impl Oidc {
             .ok_or_else(too_large)?;
         let mut response = HttpResponse::redirect(local_path(&login.url))
             .map_err(|e| Refusal::Provider(e.to_string()))?;
+        // Two cookies are set here (the session and the cleared login), so the
+        // response builder must append rather than replace `Set-Cookie` — see
+        // `HttpResponse::new_response_header`.
         let headers = response.headers.get_or_insert_default();
         headers.push(session_cookie);
         // The login is done with: its cookie goes, and with it those of

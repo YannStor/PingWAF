@@ -271,9 +271,20 @@ impl HttpResponse {
         let mut resp = ResponseHeader::build(self.status, Some(3 + custom))?;
 
         // A local helper closure to simplify adding headers and handling potential errors.
+        //
+        // `insert_header` replaces every header under the same name, which is
+        // right for the singletons below and wrong for `Set-Cookie`: a
+        // response that sets two cookies — the session and the cleared login
+        // cookie of an OIDC callback, for instance — would reach the client
+        // with only the last one, and the session would silently not stick.
+        // `append_header` is the multi-value form, so the two are split here.
         let mut add_header =
             |name: &HeaderName, value: &HeaderValue| -> pingora::Result<()> {
-                resp.insert_header(name, value)?;
+                if name == header::SET_COOKIE {
+                    resp.append_header(name, value)?;
+                } else {
+                    resp.insert_header(name, value)?;
+                }
                 Ok(())
             };
 
@@ -317,6 +328,66 @@ impl HttpResponse {
         // Finalize the response stream.
         session.finish_body().await?;
         Ok(size)
+    }
+}
+
+#[cfg(test)]
+mod set_cookie_tests {
+    use super::*;
+
+    /// Two `Set-Cookie` headers must survive the trip to the wire.
+    ///
+    /// Regression: `new_response_header` used `insert_header` for every custom
+    /// header, and that call replaces all headers under the same name. An OIDC
+    /// callback sets the session cookie *and* clears the login cookie, so only
+    /// the last one reached the browser — the login redirected correctly and
+    /// then looped, because the session it had just minted was never sent.
+    #[test]
+    fn two_set_cookie_headers_both_reach_the_wire() {
+        let response = HttpResponse::builder(StatusCode::TEMPORARY_REDIRECT)
+            .header((
+                header::SET_COOKIE,
+                HeaderValue::from_static("session=abc; Path=/"),
+            ))
+            .header((
+                header::SET_COOKIE,
+                HeaderValue::from_static(
+                    "login=; Path=/oauth2/callback; Max-Age=0",
+                ),
+            ))
+            .finish();
+
+        let header = response.new_response_header().expect("builds");
+        let cookies: Vec<&str> = header
+            .headers
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .collect();
+        assert_eq!(
+            2,
+            cookies.len(),
+            "both cookies must be present, got {cookies:?}"
+        );
+        assert!(cookies[0].starts_with("session="));
+        assert!(cookies[1].starts_with("login="));
+    }
+
+    /// A header that is not `Set-Cookie` still replaces, so a response cannot
+    /// end up with two `Content-Type`s from a plugin and the builder.
+    #[test]
+    fn a_singleton_header_still_replaces() {
+        let response = HttpResponse::builder(StatusCode::OK)
+            .header((
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            ))
+            .finish();
+        let header = response.new_response_header().expect("builds");
+        assert_eq!(
+            1,
+            header.headers.get_all(header::CONTENT_TYPE).iter().count()
+        );
     }
 }
 
