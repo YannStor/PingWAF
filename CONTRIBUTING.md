@@ -301,9 +301,9 @@ style as the sections above it — a short "why" per entry, not the commit
 subject. It is deliberately not generated from the commit log: a subject says
 what moved, and the notes have to say what was wrong and what it means for
 someone running the thing. `cliff.toml` is kept as a reference for grouping
-commits and can print the subjects since the last tag (`make version V=x.y.z`
-does that after checking that the section exists), but it never writes
-`CHANGELOG.md`.
+commits, but nothing here runs it against `CHANGELOG.md`: `make version` checks
+that the section for the version in `Cargo.toml` exists and prints the commit
+subjects since the last tag for reference. It never writes the file.
 
 ```
 <type>(<scope>): <subject>
@@ -360,12 +360,20 @@ skipped:
    `CHANGELOG.md`.
 
 Then commit, tag `v<version>`, and push the commit and the tag. The tag is what
-triggers `release.yml`; pushing `main` alone publishes nothing.
+triggers `release.yml`; pushing `main` alone publishes nothing. `release.yml`
+re-checks the section and refuses to publish without it, but it can only do that
+*after* the tag exists — so run `make version` before tagging, or a bad tag has
+to be deleted and pushed again.
 
 The notes are the only place a user of a previous version finds out what
 changed between the release they are on and this one, which is why they are
-written rather than generated. `cliff.toml` stays for grouping commits, and
-`make version` uses `git-cliff` when it happens to be installed.
+written rather than generated. `cliff.toml` is kept as the grouping reference
+and is never run against `CHANGELOG.md` (its own header says so).
+
+`web/package.json` pins `packageManager: npm@11.20.0`, which is the npm the
+Node 26.12.1 image ships, so CI and the Docker build use it as-is. A local Node
+of a different patch will make corepack fetch that npm on the first `npm ci` —
+expected, not an error.
 
 ## Branch and Pull Request Workflow
 

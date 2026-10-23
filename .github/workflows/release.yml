@@ -72,7 +72,9 @@ jobs:
             echo "CHANGELOG.md has no section for ${VERSION}; write it before tagging." >&2
             exit 1
           fi
-          if [ ! -s /tmp/notes.md ]; then
+          # `-s` alone would accept a section that holds only whitespace: a
+          # heading followed immediately by the next `## ` leaves a newline.
+          if [ -z "$(tr -d '[:space:]' < /tmp/notes.md)" ]; then
             echo "the CHANGELOG section for ${VERSION} is empty" >&2
             exit 1
           fi

@@ -184,23 +184,29 @@ hooks:
 #
 # `version` therefore only reports what a release still owes, and fails when the
 # section for $(VERSION) is missing, so a bump cannot land a version whose notes
-# were never written. Nothing here edits CHANGELOG.md.
+# were never written. Nothing here edits CHANGELOG.md, and git-cliff is not
+# invoked even when installed (it would print its own template, not the file).
+# The commit list is best-effort: it says so when it cannot be produced, rather
+# than printing nothing and looking like "no commits were missed".
 version:
 	@set -e; \
 	v="$(VERSION)"; \
 	[ -n "$$v" ] || { echo "Cargo.toml has no [workspace.package] version" >&2; exit 1; }; \
+	[ -f CHANGELOG.md ] || { echo "CHANGELOG.md is missing" >&2; exit 1; }; \
 	if grep -q "^## \[PingWAF $$v\]" CHANGELOG.md; then \
 	  echo "CHANGELOG.md has a section for $$v"; \
 	else \
 	  echo "CHANGELOG.md has no '## [PingWAF $$v]' section — write it before tagging." >&2; \
 	  exit 1; \
 	fi; \
-	if command -v git-cliff >/dev/null 2>&1; then \
-	  echo "--- commit subjects since the last tag (for reference only) ---"; \
-	  git cliff --unreleased --tag "v$$v" --prepend /dev/stdout 2>/dev/null || true; \
+	last="$$(git describe --tags --abbrev=0 2>/dev/null || echo '')"; \
+	echo "--- commit subjects since $$last (for reference only) ---"; \
+	if [ -z "$$last" ]; then \
+	  git log --oneline 2>/dev/null || echo "(could not read the commit log)"; \
+	elif [ "$$(git rev-parse HEAD)" = "$$(git rev-parse "$$last^{commit}" 2>/dev/null)" ]; then \
+	  echo "(HEAD is $$last itself; nothing committed since that tag)"; \
 	else \
-	  echo "--- commit subjects since the last tag (for reference only) ---"; \
-	  git log --oneline "$$(git describe --tags --abbrev=0 2>/dev/null || echo HEAD)..HEAD" 2>/dev/null || true; \
+	  git log --oneline "$$last..HEAD" 2>/dev/null || echo "(could not read the commit log)"; \
 	fi
 
 .PHONY: version
