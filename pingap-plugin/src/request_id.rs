@@ -207,7 +207,17 @@ impl Plugin for RequestId {
         // Store the generated ID in both context and request headers
         // Context storage makes it available to other parts of the application
         // Header insertion ensures it's forwarded to upstream services
-        ctx.state.request_id = Some(id.clone());
+        //
+        // An id another plugin already minted wins. This plugin sits *after*
+        // `pingwaf:waf` in the chain, and the WAF keys its pending access
+        // entry — the record the response phase completes — on the id it
+        // generated. Overwriting it here orphaned that entry: the access log
+        // still shipped, but every amendment made in between (the
+        // authenticated identity, the request body) was written against an id
+        // nothing would ever read.
+        if ctx.state.request_id.is_none() {
+            ctx.state.request_id = Some(id.clone());
+        }
         let _ = session.req_header_mut().insert_header(key, &id);
         Ok(RequestPluginResult::Continue)
     }
@@ -317,5 +327,41 @@ size = 10
             .unwrap();
         assert_eq!(true, result == RequestPluginResult::Continue);
         assert_eq!(10, state.state.request_id.unwrap_or_default().len());
+    }
+
+    /// An id another plugin already minted is kept, not replaced.
+    ///
+    /// This plugin runs *after* `pingwaf:waf`, which keys its pending access
+    /// entry on the id it generated. Overwriting the context id here orphaned
+    /// that entry: the access log still shipped, but anything amended in
+    /// between — the authenticated identity, the request body — was written
+    /// against an id nothing would read, so those columns stayed empty.
+    #[tokio::test]
+    async fn test_request_id_keeps_the_one_already_in_the_context() {
+        let id = RequestId::new(
+            &toml::from_str::<PluginConf>(
+                r###"
+algorithm = "nanoid"
+size = 10
+"###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let headers = ["Accept-Encoding: gzip"].join("\r\n");
+        let input_header =
+            format!("GET /vicanso/pingap?size=1 HTTP/1.1\r\n{headers}\r\n\r\n");
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+
+        // What the WAF left behind before this plugin ran.
+        let mut state = Ctx::default();
+        state.state.request_id = Some("waf-minted-id".to_string());
+        id.handle_request(PluginStep::Request, &mut session, &mut state)
+            .await
+            .unwrap();
+        assert_eq!("waf-minted-id", state.state.request_id.unwrap_or_default());
     }
 }
