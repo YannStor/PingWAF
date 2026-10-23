@@ -8,6 +8,26 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.30.0-rc.14] — 2026-10-24
+
+> **Pre-release.** Fourteenth candidate: rc.13 plus one fix found by the
+> end-to-end run. Publishes `:0.30.0-rc.14` only — `:latest` and `:0.30` keep
+> pointing at the newest stable release, and GitHub marks it a pre-release so
+> `install.sh` (which resolves `/releases/latest`) is unaffected. Pin it
+> explicitly: `PINGWAF_TAG=0.30.0-rc.14`.
+
+### Fixed
+
+- **A `local` site could not be enabled.** The `enabled` guard demanded a
+  `provider_id` unconditionally, but a site in `local` mode has no provider by
+  definition — it signs visitors in against an account on this deployment — so
+  the one call that makes the feature reachable answered `400`. The plugin and
+  the data-plane wiring both handled the case; only the guard did not. Found by
+  the end-to-end run against the deployed build, which is the only place it
+  could appear: the unit tests cover the plugin's parsing and the API's
+  per-field validation, and neither goes through the merged guard. A test now
+  pins the relationship the guard depends on.
+
 ## [PingWAF 0.30.0-rc.13] — 2026-10-24
 
 > **Pre-release.** Thirteenth candidate: a protected site can sign visitors in
