@@ -8,6 +8,27 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.30.0-rc.19] — 2026-10-24
+
+> **Pre-release.** Nineteenth candidate: rc.18 plus the provider link in `both`
+> mode, which pointed at the callback rather than at a login. Publishes
+> `:0.30.0-rc.19` only — `:latest` and `:0.30` keep pointing at the newest
+> stable release, and GitHub marks it a pre-release so `install.sh` (which
+> resolves `/releases/latest`) is unaffected. Pin it explicitly:
+> `PINGWAF_TAG=0.30.0-rc.19`.
+
+### Fixed
+
+- **A `both`-mode site had no working way to reach the provider.** The OIDC
+  plugin sends every session-less navigation to the local login page, and that
+  page's "continue with the provider" link pointed at the callback path — which
+  is where the provider *returns to*, not where a login starts — so clicking it
+  landed on a callback with no code. Pointing it at the site root would have
+  bounced straight back. The link now targets `/_pingwaf/oidc`, a path the
+  visitor plugin delegates to the OIDC plugin, and the one session-less
+  navigation the OIDC plugin treats as belonging to the provider rather than
+  the local form.
+
 ## [PingWAF 0.30.0-rc.18] — 2026-10-24
 
 > **Pre-release.** Eighteenth candidate: rc.17 plus a session that outlived the
