@@ -8,6 +8,44 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.30.0-rc.20] — 2026-10-24
+
+> **Pre-release.** Twentieth candidate: the pre-merge review's findings, chief
+> among them `both` mode being unable to use the provider at all. Publishes
+> `:0.30.0-rc.20` only — `:latest` and `:0.30` keep pointing at the newest
+> stable release, and GitHub marks it a pre-release so `install.sh` (which
+> resolves `/releases/latest`) is unaffected. Pin it explicitly:
+> `PINGWAF_TAG=0.30.0-rc.20`.
+
+### Fixed
+
+- **A `both` site could not sign anyone in through the provider.** Two gates
+  run on such a site and `visitor_auth` is first, but it gated every path it
+  did not own — including the provider's callback. The browser arriving with a
+  code was answered with a redirect to the local login page, so the code was
+  never exchanged; and a visitor who had signed in through the provider was
+  sent back to the local form on every request, because this plugin recognised
+  only its own cookie. It now hands the configured paths (the callback is
+  per-site) to the OIDC plugin and recognises the other session by its cookie
+  name, reading only its presence — the signature belongs to the plugin that
+  runs next. Confirmed against the deployed build before fixing: the callback
+  answered `307 → /_pingwaf/login?next=/oauth2/callback?code=…`.
+- **A password change could be driven from any site's agent.** It checked that
+  the agent served *something*, not that the account was granted the site it
+  was acting for, so a compromised edge node could guess passwords against
+  every account in the deployment.
+- **Disabling an account did not end its sessions**, only the next sign-in. It
+  bumps the token version now, which is what the session check compares.
+- **The session cookie's `Secure` flag was inferred three different ways**, and
+  the plugin's way ignored the site's proxy trust, so a site behind a
+  TLS-terminating proxy got a cookie without it.
+- **`no_store` was a function that returned its argument**, leaving the
+  sign-in redirect — which carries `Set-Cookie` — cacheable.
+- **The visibility switch reported success on a refusal**, because the control
+  plane answers a revoked grant with `ok: false` rather than an error.
+- **Two lists were N+1**: visitor grants and provider site counts are each one
+  query now.
+
 ## [PingWAF 0.30.0-rc.19] — 2026-10-24
 
 > **Pre-release.** Nineteenth candidate: rc.18 plus the provider link in `both`
