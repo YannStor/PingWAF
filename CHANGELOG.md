@@ -8,6 +8,28 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.30.0-rc.17] — 2026-10-24
+
+> **Pre-release.** Seventeenth candidate: rc.16 plus two portal actions that
+> were broken by a form parser that did not know the field names its own HTML
+> sends. Publishes `:0.30.0-rc.17` only — `:latest` and `:0.30` keep pointing
+> at the newest stable release, and GitHub marks it a pre-release so
+> `install.sh` (which resolves `/releases/latest`) is unaffected. Pin it
+> explicitly: `PINGWAF_TAG=0.30.0-rc.17`.
+
+### Fixed
+
+- **Changing a password answered `400`.** The portal's password form posts
+  `new_password`, and the parser knew only `password`, so the new value parsed
+  as empty and the "passwords do not match" check fired on a form where they
+  matched. The name is now read into the field the handler already uses.
+- **The site visibility switch could only ever be turned off.** The switch
+  posts `visible` and the parser knew only `next`, so the value was always
+  empty and the site was always set to hidden — a visitor could hide a site
+  and then not unhide it. Both directions now work, and a test asserts on the
+  field names as literals, because the point is to notice when the HTML
+  changes under them.
+
 ## [PingWAF 0.30.0-rc.16] — 2026-10-24
 
 > **Pre-release.** Sixteenth candidate: rc.15 plus three fixes the end-to-end
