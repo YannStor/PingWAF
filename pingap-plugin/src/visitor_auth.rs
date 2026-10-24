@@ -64,6 +64,14 @@ const CATEGORY: &str = "visitor_auth";
 /// Where the login form lives. Absolute so a rewrite cannot move it out from
 /// under the plugin, the same reason the OIDC callback path is checked against
 /// the original URI.
+/// Everything this plugin serves lives under here.
+///
+/// One prefix rather than a list of the paths, because the WAF (which runs
+/// before this plugin) needs to recognise the whole surface to step aside for
+/// it: a rule that matched the login page would answer it with a block page and
+/// leave a visitor no way in.
+pub(crate) const PATH_PREFIX: &str = "/_pingwaf/";
+
 pub(crate) const LOGIN_PATH: &str = "/_pingwaf/login";
 
 /// Ends the session and returns to the login page.

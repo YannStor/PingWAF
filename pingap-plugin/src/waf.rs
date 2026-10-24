@@ -3175,6 +3175,25 @@ impl Plugin for WafPlugin {
         {
             return Ok(RequestPluginResult::Skipped);
         }
+        // The visitor-auth pages are the site's own front door, and they run
+        // *after* this plugin in the chain — so a rule that matched them would
+        // answer the login page with a block page, and the visitor would have
+        // no way in at all. Found by driving the flow: a burst of sign-ins
+        // tripped a rule and every subsequent visit to `/_pingwaf/login`
+        // returned 403 "Request Blocked" until the IP was unblocked by hand.
+        //
+        // Skipped rather than exempted by rule, because no rule an operator
+        // writes should be able to lock them out of the way back in. The
+        // endpoints do their own protection: a proof-of-work challenge gates
+        // every sign-in, and the control plane rate-limits the rest.
+        if session
+            .req_header()
+            .uri
+            .path()
+            .starts_with(crate::visitor_auth::PATH_PREFIX)
+        {
+            return Ok(RequestPluginResult::Skipped);
+        }
         // Method attribution (see pingwaf-profiler): the timer books the
         // `waf` module row as well, so there is no second timer to keep in
         // sync.
@@ -4940,6 +4959,68 @@ inspect_body = true"###,
             .await
             .unwrap();
         assert!(result == RequestPluginResult::Skipped);
+    }
+
+    /// The visitor-auth pages are skipped by the WAF, whatever any rule says.
+    ///
+    /// Regression: the visitor plugin runs *after* this one, so a rule that
+    /// matched `/_pingwaf/login` answered the site's own front door with a
+    /// block page. Found by driving the flow against a live deployment — a
+    /// burst of sign-ins tripped a rule and every later visit to the login
+    /// page returned 403 until the IP was unblocked by hand, which is a
+    /// lockout with no way back in from the site itself.
+    #[tokio::test]
+    async fn test_visitor_auth_paths_are_skipped() {
+        let _agent_lock = lock_agent().await;
+        PingWafAgent::set_agent_instance(None);
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        for path in [
+            crate::visitor_auth::LOGIN_PATH,
+            crate::visitor_auth::LOGOUT_PATH,
+            crate::visitor_auth::PORTAL_PATH,
+            crate::visitor_auth::PASSKEY_LOGIN_PATH,
+        ] {
+            let input_header =
+                format!("GET {path} HTTP/1.1\r\nHost: example.com\r\n\r\n");
+            let mock_io = Builder::new().read(input_header.as_bytes()).build();
+            let mut session = Session::new_h1(Box::new(mock_io));
+            session.read_request().await.unwrap();
+            let result = plugin
+                .handle_request(
+                    PluginStep::EarlyRequest,
+                    &mut session,
+                    &mut Ctx::default(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                result == RequestPluginResult::Skipped,
+                "{path} must be skipped, or a rule can lock a visitor out"
+            );
+        }
+
+        // The site's own content is still evaluated — the skip is the auth
+        // surface, not everything.
+        let input_header = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let result = plugin
+            .handle_request(
+                PluginStep::EarlyRequest,
+                &mut session,
+                &mut Ctx::default(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            result != RequestPluginResult::Skipped,
+            "the site's own content must still be evaluated"
+        );
     }
 
     /// An entry whose fail-open deadline has passed releases the staged

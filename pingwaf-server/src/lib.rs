@@ -86,6 +86,9 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
     // code), so each start writes a row and the gap to the previous row is the
     // previous process's uptime. Best-effort: a control plane that cannot
     // record its own boot still has to serve traffic.
+    // Kept for the stop row written at shutdown: the uptime it reports is the
+    // gap between this timestamp and the moment the process is asked to leave.
+    let started_at = chrono::Utc::now();
     match boot_history::record_boot(&db, boot_history::version(), &hostname())
         .await
     {
@@ -398,6 +401,18 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
                 tracing::error!(error = %err, "gRPC server error");
             }
         }
+    }
+
+    // ── 10a. Record the clean stop ──────────────────────────────────────────
+    // Written *before* the rest of the shutdown so a slow Elasticsearch flush
+    // cannot cost the row. This is what tells the next start that this process
+    // was asked to stop rather than killed: the gap between two boots cannot
+    // say, because a redeploy and a crash are both followed by a start seconds
+    // later. Best-effort — a control plane that cannot write it still exits.
+    if let Err(err) =
+        boot_history::record_stop(&db, &hostname(), started_at).await
+    {
+        tracing::warn!(error = %err, "could not record the clean shutdown");
     }
 
     // ── 11. Graceful Elasticsearch shutdown ─────────────────────────────────

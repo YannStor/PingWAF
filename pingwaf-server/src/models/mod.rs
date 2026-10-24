@@ -23,6 +23,7 @@ pub mod certificates;
 pub mod challenge_settings;
 pub mod config_versions;
 pub mod control_plane_boots;
+pub mod control_plane_stops;
 pub mod control_plane_tls;
 pub mod defense_settings;
 pub mod error_pages;
@@ -68,6 +69,7 @@ pub use api_protection::{
 pub use certificates::site_certificates;
 pub use config_versions as config_version;
 pub use control_plane_boots::control_plane_boots as control_plane_boot;
+pub use control_plane_stops::control_plane_stops as control_plane_stop;
 pub use control_plane_tls::{
     control_plane_certificates as control_plane_certificate,
     source as tls_source,
