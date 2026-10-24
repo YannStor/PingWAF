@@ -8,6 +8,36 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.30.0-rc.16] — 2026-10-24
+
+> **Pre-release.** Sixteenth candidate: rc.15 plus three fixes the end-to-end
+> run found in the visitor surface. Publishes `:0.30.0-rc.16` only — `:latest`
+> and `:0.30` keep pointing at the newest stable release, and GitHub marks it a
+> pre-release so `install.sh` (which resolves `/releases/latest`) is
+> unaffected. Pin it explicitly: `PINGWAF_TAG=0.30.0-rc.16`.
+
+### Fixed
+
+- **A refused grant left the visitor account behind.** Creating a visitor wrote
+  the account and then validated the site grants, so a grant naming an unknown
+  site answered `400` — and left the account in the table, which is a visitor
+  the operator was told was not created. Updating had the same shape. Both now
+  run in one transaction, as the rest of the API does for a write that spans
+  tables.
+- **A sign-in redirected with `307`, replaying the password.** `307` preserves
+  the method and the body, so a browser following the redirect re-sends the
+  POST — and the body of the login form carries the visitor's password. The
+  visitor flow now answers `303 See Other`, which is the status that means
+  "ask for it with `GET`". The shared redirect helper is left alone: the WAF
+  challenge page depends on its `307`.
+- **The visitor portal did not render the passkey section.** The gRPC calls,
+  the credential store and the ceremony were all in place and the page showed
+  only the site list and the password form, so a visitor could not bind a
+  passkey at all — most of why the feature exists. The portal now lists bound
+  passkeys and offers a binding button, and the login page gains the matching
+  sign-in button plus a provider link in `both` mode, where the site offers two
+  ways in.
+
 ## [PingWAF 0.30.0-rc.15] — 2026-10-24
 
 > **Pre-release.** Fifteenth candidate: rc.14 plus a fix the end-to-end run
