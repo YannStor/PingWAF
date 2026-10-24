@@ -2203,6 +2203,35 @@ mod tests {
         assert!(VisitorAuth::new(&conf).is_err());
     }
 
+    /// The paths a `both` site hands to the OIDC plugin.
+    ///
+    /// Regression: this plugin is first in the chain and gated everything it
+    /// did not own, including the provider's callback — so the browser
+    /// arriving with a code was answered with a redirect to the local login
+    /// page and the code was never exchanged. `both` mode could not use the
+    /// provider at all.
+    #[test]
+    fn the_providers_paths_are_handed_over() {
+        let delegated =
+            vec!["/oauth2/callback".to_string(), "/oauth2/logout".to_string()];
+
+        // The provider's own paths belong to the OIDC plugin.
+        assert!(is_delegated("/oauth2/callback", &delegated));
+        assert!(is_delegated("/oauth2/logout", &delegated));
+        // The entry the login page links to, always.
+        assert!(is_delegated(crate::oidc::PROVIDER_ENTRY_PATH, &delegated));
+        // Everything else is this plugin's to gate — the site's content above
+        // all, which is the whole reason the gate exists.
+        assert!(!is_delegated("/", &delegated));
+        assert!(!is_delegated("/dashboard", &delegated));
+        assert!(!is_delegated(LOGIN_PATH, &delegated));
+
+        // A `local` site delegates nothing but the entry, which it does not
+        // register a plugin for either.
+        assert!(is_delegated(crate::oidc::PROVIDER_ENTRY_PATH, &[]));
+        assert!(!is_delegated("/oauth2/callback", &[]));
+    }
+
     /// `next` may only ever name a path of this site: `//evil.test` and
     /// `/\evil.test` are other sites to a browser, so accepting one would turn
     /// the login page into an open redirect.
