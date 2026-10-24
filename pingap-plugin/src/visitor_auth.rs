@@ -64,14 +64,6 @@ const CATEGORY: &str = "visitor_auth";
 /// Where the login form lives. Absolute so a rewrite cannot move it out from
 /// under the plugin, the same reason the OIDC callback path is checked against
 /// the original URI.
-/// Everything this plugin serves lives under here.
-///
-/// One prefix rather than a list of the paths, because the WAF (which runs
-/// before this plugin) needs to recognise the whole surface to step aside for
-/// it: a rule that matched the login page would answer it with a block page and
-/// leave a visitor no way in.
-pub(crate) const PATH_PREFIX: &str = "/_pingwaf/";
-
 pub(crate) const LOGIN_PATH: &str = "/_pingwaf/login";
 
 /// Ends the session and returns to the login page.
@@ -108,6 +100,16 @@ pub(crate) fn owns_path(path: &str) -> bool {
             | PASSKEY_REGISTER_PATH
             | PASSKEY_LOGIN_PATH
     )
+}
+
+/// The endpoints this plugin serves, for a caller that has to recognise them
+/// without being able to construct the plugin.
+///
+/// The WAF needs this: it runs first in the chain and must step aside for the
+/// login page, but only for the endpoints themselves — a prefix test would hand
+/// `/_pingwaf/<anything>`, `..` included, to the upstream unevaluated.
+pub(crate) fn is_owned_path(path: &str) -> bool {
+    owns_path(path)
 }
 
 /// Paths this plugin must leave to the OIDC plugin.
@@ -2380,6 +2382,39 @@ mod tests {
     /// one parsed as empty) and the switch could only ever be turned off. The
     /// names are asserted here as literals rather than derived, because the
     /// point is to notice when the HTML changes under them.
+    #[test]
+    fn only_the_endpoints_are_owned() {
+        // The WAF steps aside for exactly these paths, so a path that is not
+        // one of them must not be reported as owned — `/_pingwaf/anything`
+        // reaching the origin unevaluated is a way around the WAF.
+        for path in [
+            LOGIN_PATH,
+            LOGOUT_PATH,
+            PORTAL_PATH,
+            VISIBILITY_PATH,
+            PASSWORD_PATH,
+            PASSKEY_REGISTER_PATH,
+            PASSKEY_LOGIN_PATH,
+        ] {
+            assert!(is_owned_path(path), "{path} is an endpoint");
+            assert!(
+                path.starts_with("/_pingwaf/"),
+                "{path} must sit under the reserved prefix, or the WAF's \
+                 step-aside covers a path someone else serves"
+            );
+        }
+        for path in [
+            "/_pingwaf",
+            "/_pingwaf/",
+            "/_pingwaf/anything",
+            "/_pingwaf/../admin",
+            "/_pingwaf/login/extra",
+            "/",
+        ] {
+            assert!(!is_owned_path(path), "{path} is not an endpoint");
+        }
+    }
+
     #[test]
     fn the_parser_reads_every_field_the_portal_posts() {
         // The password form.

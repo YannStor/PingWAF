@@ -138,13 +138,19 @@ pub async fn record_boot(
     });
 
     // Was that process seen to stop? A stop row written *after* the previous
-    // boot and *before* now belongs to it. Compared against the boot's own
-    // timestamp rather than merely "is there any stop row", so a stop left over
-    // from two restarts ago cannot make a crash look planned.
+    // boot and *before* now belongs to it.
+    //
+    // Both bounds matter. The lower one keeps a stop from two restarts ago from
+    // being read as this one's; the upper one keeps a row written *later* —
+    // by a second process sharing this hostname, by a restored dump, by a
+    // clock that ran fast — from certifying a boot it never described. Without
+    // it, a crash could be labelled a planned stop, which is the one direction
+    // this whole mechanism must not fail in.
     let previous_stopped = match previous.as_ref() {
         Some(row) => control_plane_stop::Entity::find()
             .filter(control_plane_stop::Column::Hostname.eq(hostname))
             .filter(control_plane_stop::Column::StoppedAt.gte(row.booted_at))
+            .filter(control_plane_stop::Column::StoppedAt.lte(now))
             .order_by_desc(control_plane_stop::Column::StoppedAt)
             .one(db)
             .await?

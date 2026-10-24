@@ -258,6 +258,33 @@ impl BasicAuthGate {
     }
 }
 
+/// Whether this site's chain carries a plugin that serves `/_pingwaf/*`.
+///
+/// `visitor_auth` is registered only for `local` and `both` sites (the OIDC
+/// plugin covers the rest), so on any other site those paths are not an
+/// endpoint — they are just a path. Skipping rule evaluation for a path that
+/// nothing serves would leave a way around the WAF, which is why the check is
+/// here rather than in the path test alone.
+fn site_serves_a_login_page(session: &Session) -> bool {
+    let Some(agent) = PingWafAgent::instance() else {
+        // Standalone mode has no rule cache to consult. The plugin is
+        // configured by hand there, so a login page means the operator also
+        // wired `visitor_auth`; skipping is the behaviour they expect.
+        return true;
+    };
+    let Some(host) = get_host(session.req_header()) else {
+        return false;
+    };
+    let Some(rules) = agent.get_rules_for_domain(&host) else {
+        // Unknown domain: this agent does not serve it, and the request will
+        // be refused downstream. Evaluating rules is the safe default.
+        return false;
+    };
+    rules.oidc.as_ref().is_some_and(|oidc| {
+        oidc.auth_mode == "local" || oidc.auth_mode == "both"
+    })
+}
+
 /// Whether any enabled access rule asks for the basic auth gate.
 fn access_rules_require_basic_auth(site_rules: &CacheSiteRules) -> bool {
     let ip_rule = site_rules.ip_access_rules.iter().any(|rule| {
@@ -3175,22 +3202,26 @@ impl Plugin for WafPlugin {
         {
             return Ok(RequestPluginResult::Skipped);
         }
-        // The visitor-auth pages are the site's own front door, and they run
+        // The visitor-auth endpoints are the site's own front door, and they run
         // *after* this plugin in the chain — so a rule that matched them would
         // answer the login page with a block page, and the visitor would have
         // no way in at all. Found by driving the flow: a burst of sign-ins
         // tripped a rule and every subsequent visit to `/_pingwaf/login`
         // returned 403 "Request Blocked" until the IP was unblocked by hand.
         //
-        // Skipped rather than exempted by rule, because no rule an operator
-        // writes should be able to lock them out of the way back in. The
-        // endpoints do their own protection: a proof-of-work challenge gates
-        // every sign-in, and the control plane rate-limits the rest.
-        if session
-            .req_header()
-            .uri
-            .path()
-            .starts_with(crate::visitor_auth::PATH_PREFIX)
+        // Only the endpoints themselves are skipped, and only when the chain
+        // actually carries the plugin that serves them. A prefix test would
+        // hand `/_pingwaf/<anything>` — including `/_pingwaf/../admin`, which
+        // most origins normalise back — to the upstream with no rule
+        // evaluation at all, on every site, whether or not it has a login page.
+        // That is a way *around* the WAF, which is the opposite of what a
+        // front door should be.
+        //
+        // The site check matters for the same reason: on a site with no login
+        // page these paths are not an endpoint at all, they are just a path,
+        // and a path that skips every rule is a hole.
+        if crate::visitor_auth::is_owned_path(session.req_header().uri.path())
+            && site_serves_a_login_page(session)
         {
             return Ok(RequestPluginResult::Skipped);
         }
@@ -5000,6 +5031,37 @@ inspect_body = true"###,
             assert!(
                 result == RequestPluginResult::Skipped,
                 "{path} must be skipped, or a rule can lock a visitor out"
+            );
+        }
+
+        // Nothing else under the prefix is skipped. A prefix test would hand
+        // `/_pingwaf/anything` — and `/_pingwaf/../admin`, which most origins
+        // normalise back — to the upstream with no rule evaluation, on every
+        // site. Found by driving the login flow against a live deployment: on a
+        // site with no login page, `/_pingwaf/anything` reached the origin
+        // while `/.env` was still blocked.
+        for path in [
+            "/_pingwaf/anything",
+            "/_pingwaf/../admin",
+            "/_pingwaf/",
+            "/_pingwaf",
+        ] {
+            let input_header =
+                format!("GET {path} HTTP/1.1\r\nHost: example.com\r\n\r\n");
+            let mock_io = Builder::new().read(input_header.as_bytes()).build();
+            let mut session = Session::new_h1(Box::new(mock_io));
+            session.read_request().await.unwrap();
+            let result = plugin
+                .handle_request(
+                    PluginStep::EarlyRequest,
+                    &mut session,
+                    &mut Ctx::default(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                result != RequestPluginResult::Skipped,
+                "{path} must still be evaluated: it is not an endpoint"
             );
         }
 
