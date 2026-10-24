@@ -8,6 +8,27 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.30.0-rc.18] — 2026-10-24
+
+> **Pre-release.** Eighteenth candidate: rc.17 plus a session that outlived the
+> password change meant to end it. Publishes `:0.30.0-rc.18` only — `:latest`
+> and `:0.30` keep pointing at the newest stable release, and GitHub marks it a
+> pre-release so `install.sh` (which resolves `/releases/latest`) is
+> unaffected. Pin it explicitly: `PINGWAF_TAG=0.30.0-rc.18`.
+
+### Security
+
+- **A password change did not end the sessions it should, for up to a
+  minute.** The session check caches its verdict so a page view costs no round
+  trip, keyed by site, visitor and token version. That covers the ordinary case
+  — a new session is a new key — but not the one the version check exists for:
+  the entry written under the *old* version still read as valid for the rest of
+  its minute, so a pre-change cookie kept working. The control plane answered
+  correctly (`version_changed`); it was never asked, because the cache spoke
+  first. A password change now drops this process's cached verdicts for the
+  visitor before re-issuing its own session. Found by driving the flow end to
+  end rather than by any unit test, which is what the whole run is for.
+
 ## [PingWAF 0.30.0-rc.17] — 2026-10-24
 
 > **Pre-release.** Seventeenth candidate: rc.16 plus two portal actions that
