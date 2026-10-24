@@ -39,8 +39,8 @@ use http::header::SET_COOKIE;
 use http::{HeaderName, HeaderValue, StatusCode};
 use pingap_config::PluginConf;
 use pingap_core::{
-    Ctx, HTTP_HEADER_CONTENT_HTML, HttpResponse, Plugin, PluginStep,
-    RequestPluginResult, get_cookie_value, get_host,
+    Ctx, HTTP_HEADER_CONTENT_HTML, HTTP_HEADER_NO_CACHE, HttpResponse, Plugin,
+    PluginStep, RequestPluginResult, get_cookie_value, get_host,
 };
 use pingora::proxy::Session;
 use pingwaf_agent::PingWafAgent;
@@ -308,7 +308,7 @@ impl VisitorAuth {
             );
         };
         let cookie = session_cookie(&value, SESSION_TTL_SECONDS, secure);
-        let mut response = match HttpResponse::redirect(PORTAL_PATH) {
+        let mut response = match see_other(PORTAL_PATH) {
             Ok(response) => response,
             Err(error) => {
                 warn!(error = %error, "visitor: could not build the redirect");
@@ -326,7 +326,7 @@ impl VisitorAuth {
     /// Clears the session cookie.
     fn signed_out_response(&self, secure: bool) -> HttpResponse {
         let cookie = session_cookie("", 0, secure);
-        let mut response = match HttpResponse::redirect(LOGIN_PATH) {
+        let mut response = match see_other(LOGIN_PATH) {
             Ok(response) => response,
             Err(_) => {
                 return error_page(
@@ -427,6 +427,7 @@ impl VisitorAuth {
     </div>
     <button type="submit" id="submit" disabled>Sign in</button>
   </form>
+  {alternatives}
 </div>
 <script>
 var CONFIG = {{ nonce: "{nonce}", difficulty: {difficulty} }};
@@ -464,6 +465,7 @@ var wait = setInterval(function () {{
             nonce = escape_html(&nonce),
             difficulty = difficulty,
             pow = pow_script(),
+            alternatives = self.login_alternatives(site_host),
         );
         HttpResponse::builder(StatusCode::OK)
             .body(page_shell("Sign in", &body))
@@ -648,6 +650,7 @@ var wait = setInterval(function () {{
             ),
         };
 
+        let passkey_rows = self.passkey_rows(session_data).await;
         let mut rows = String::new();
         for grant in &grants {
             let entry = format!("https://{}", grant.domain);
@@ -728,17 +731,128 @@ var wait = setInterval(function () {{
       <button type="submit">Update password</button>
     </form>
   </div>
-</div>"#,
+  <div class="section">
+    <h2>Passkeys</h2>
+    <p class="muted">A passkey signs you in without a password. It stays on
+       this device.</p>
+    {passkey_rows}
+    <div class="field">
+      <label for="passkey-name">Name this passkey</label>
+      <input id="passkey-name" placeholder="e.g. this laptop">
+    </div>
+    <button type="button" id="passkey-add">Bind a passkey</button>
+    <div class="alert" id="passkey-alert" role="alert" style="display:none"></div>
+  </div>
+</div>
+<script>
+{passkey_js}
+</script>"#,
             logout = LOGOUT_PATH,
             alert = alert,
             rows = rows,
             password = PASSWORD_PATH,
+            passkey_rows = passkey_rows,
+            passkey_js = passkey_script(),
         );
         HttpResponse::builder(StatusCode::OK)
             .body(page_shell("Your account", &body))
             .header(HTTP_HEADER_CONTENT_HTML.clone())
             .no_store()
             .finish()
+    }
+
+    /// The other ways in, below the password form.
+    ///
+    /// A passkey is offered whenever the browser can use one — the button is
+    /// harmless if the visitor has none bound, and hiding it would mean a visitor
+    /// who bound one on another device cannot find it here. The provider link
+    /// appears only in `both`, where the site offers two ways in: showing it in
+    /// `local` would promise a route that the site does not serve.
+    fn login_alternatives(&self, site_host: &str) -> String {
+        let mut out = String::new();
+        out.push_str(
+            r#"<div class="section">
+  <h2>Or use a passkey</h2>
+  <button type="button" id="passkey-signin">Sign in with a passkey</button>
+  <div class="alert" id="passkey-alert" role="alert" style="display:none"></div>
+</div>"#,
+        );
+        let allows_oidc = PingWafAgent::instance()
+            .and_then(|agent| agent.get_rules_for_domain(site_host))
+            .and_then(|rules| {
+                rules.oidc.as_ref().map(|oidc| oidc.auth_mode.clone())
+            })
+            .is_some_and(|mode| mode == "both");
+        if allows_oidc {
+            out.push_str(
+                r#"<div class="section">
+  <h2>Or sign in with your provider</h2>
+  <p class="muted">Continue with the identity provider this site is
+     registered with.</p>
+  <a class="link-button" href="/oauth2/callback">Continue with the provider</a>
+</div>"#,
+            );
+        }
+        out.push_str(&passkey_login_script());
+        out
+    }
+
+    /// The bound passkeys, as rows for the portal.
+    ///
+    /// A failure here degrades to a note rather than taking the portal down:
+    /// the site list and the password form still work, and a visitor who
+    /// cannot list their passkeys can still sign in with a password.
+    async fn passkey_rows(&self, session_data: &VisitorSession) -> String {
+        let Some(agent) = Self::agent() else {
+            return String::new();
+        };
+        let passkeys = match agent
+            .visitor_auth()
+            .visitor_passkey_list(
+                &agent.agent_id(),
+                &session_data.site_id,
+                &session_data.visitor_id,
+            )
+            .await
+        {
+            Ok(response) if response.error.is_empty() => response.passkeys,
+            Ok(_) => {
+                return r#"<p class="muted">Your passkeys could not be listed right now.</p>"#
+                    .to_string();
+            },
+            Err(error) => {
+                warn!(
+                    category = CATEGORY,
+                    error = %error,
+                    "visitor: could not list passkeys"
+                );
+                return r#"<p class="muted">Your passkeys could not be listed right now.</p>"#
+                    .to_string();
+            },
+        };
+        if passkeys.is_empty() {
+            return r#"<p class="muted">No passkeys bound yet.</p>"#
+                .to_string();
+        }
+        let mut rows = String::new();
+        for passkey in &passkeys {
+            let last = if passkey.last_used_at.is_empty() {
+                "never used".to_string()
+            } else {
+                format!("last used {}", passkey.last_used_at)
+            };
+            rows.push_str(&format!(
+                r#"<div class="row">
+  <div>
+    <div class="name">{name}</div>
+    <div class="domain">{last}</div>
+  </div>
+</div>"#,
+                name = escape_html(&passkey.name),
+                last = escape_html(&last),
+            ));
+        }
+        rows
     }
 
     /// Handles the portal's visibility switch.
@@ -761,7 +875,7 @@ var wait = setInterval(function () {{
         let site_id = form.site_id;
         if site_id.is_empty() {
             return Ok(RequestPluginResult::Respond(
-                HttpResponse::redirect(PORTAL_PATH).unwrap_or_else(|_| {
+                see_other(PORTAL_PATH).unwrap_or_else(|_| {
                     error_page(
                         StatusCode::BAD_REQUEST,
                         "Nothing to change",
@@ -788,7 +902,7 @@ var wait = setInterval(function () {{
             );
         }
         Ok(RequestPluginResult::Respond(
-            HttpResponse::redirect(PORTAL_PATH).unwrap_or_else(|_| {
+            see_other(PORTAL_PATH).unwrap_or_else(|_| {
                 error_page(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Could not continue",
@@ -1079,7 +1193,7 @@ var wait = setInterval(function () {{
                     .is_some_and(|scheme| scheme == "https");
                 let cookie =
                     session_cookie(&value, SESSION_TTL_SECONDS, secure);
-                let mut response = match HttpResponse::redirect(PORTAL_PATH) {
+                let mut response = match see_other(PORTAL_PATH) {
                     Ok(response) => response,
                     Err(_) => {
                         return Ok(RequestPluginResult::Respond(error_page(
@@ -1275,7 +1389,7 @@ impl Plugin for VisitorAuth {
             // than an error: the visitor's cookie expired, and signing in
             // again is what they want.
             return Ok(RequestPluginResult::Respond(
-                HttpResponse::redirect(LOGIN_PATH).unwrap_or_else(|_| {
+                see_other(LOGIN_PATH).unwrap_or_else(|_| {
                     error_page(
                         StatusCode::UNAUTHORIZED,
                         "Sign in required",
@@ -1365,8 +1479,163 @@ fn now_secs() -> i64 {
         .unwrap_or_default()
 }
 
+/// The portal's passkey-binding script.
+///
+/// A thin client over the same JSON endpoints the console's own passkey card
+/// uses, written against the browser's `navigator.credentials` rather than a
+/// library: the data plane renders plain HTML and has no build step to pull
+/// one in. The ceremony itself runs in the control plane, which owns the
+/// credential store — this only relays the options and the answer.
+fn passkey_script() -> String {
+    PASSKEY_SCRIPT.replace("{register}", PASSKEY_REGISTER_PATH)
+}
+
+/// The login page's passkey sign-in script.
+///
+/// Mirrors the portal's binding script in the other direction: fetch the
+/// options, ask the authenticator, send the assertion back. The control plane
+/// verifies it and issues the session, so nothing here decides anything.
+fn passkey_login_script() -> String {
+    PASSKEY_LOGIN_SCRIPT.replace("{login}", PASSKEY_LOGIN_PATH)
+}
+
+const PASSKEY_LOGIN_SCRIPT: &str = r#"function b64urlToBuf(s) {
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  var raw = atob(s), buf = new Uint8Array(raw.length);
+  for (var i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
+  return buf.buffer;
+}
+function bufToB64url(buf) {
+  var bytes = new Uint8Array(buf), s = '';
+  for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function passkeyAlert(text) {
+  var el = document.getElementById('passkey-alert');
+  if (!el) return;
+  el.textContent = text;
+  el.style.display = 'block';
+}
+var pkBtn = document.getElementById('passkey-signin');
+if (pkBtn) pkBtn.addEventListener('click', async function () {
+  if (!window.PublicKeyCredential) { passkeyAlert('This browser does not support passkeys.'); return; }
+  pkBtn.disabled = true;
+  try {
+    var begin = await fetch('{login}', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    var start = await begin.json();
+    if (!begin.ok) { passkeyAlert(start.error || 'Could not start.'); return; }
+    var opts = JSON.parse(start.options).publicKey;
+    opts.challenge = b64urlToBuf(opts.challenge);
+    if (opts.allowCredentials) opts.allowCredentials = opts.allowCredentials.map(function (c) {
+      return Object.assign({}, c, { id: b64urlToBuf(c.id) });
+    });
+    var assertion = await navigator.credentials.get({ publicKey: opts });
+    var payload = {
+      ceremony_id: start.ceremony_id,
+      credential: JSON.stringify({
+        id: assertion.id,
+        rawId: bufToB64url(assertion.rawId),
+        type: assertion.type,
+        response: {
+          authenticatorData: bufToB64url(assertion.response.authenticatorData),
+          clientDataJSON: bufToB64url(assertion.response.clientDataJSON),
+          signature: bufToB64url(assertion.response.signature),
+          userHandle: assertion.response.userHandle ? bufToB64url(assertion.response.userHandle) : null
+        }
+      })
+    };
+    var finish = await fetch('{login}', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    var done = await finish.json();
+    if (finish.ok && done.ok) { location.href = done.redirect || '/_pingwaf/portal'; }
+    else { passkeyAlert(done.error || 'That passkey could not be verified.'); }
+  } catch (e) {
+    passkeyAlert(e && e.name === 'NotAllowedError' ? 'Cancelled.' : 'That passkey could not be verified.');
+  } finally { pkBtn.disabled = false; }
+});"#;
+
+/// The script body, with `{register}` standing in for the endpoint. Kept as a
+/// constant so the path appears once, where the router already names it.
+const PASSKEY_SCRIPT: &str = r#"function b64urlToBuf(s) {
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  var raw = atob(s), buf = new Uint8Array(raw.length);
+  for (var i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
+  return buf.buffer;
+}
+function bufToB64url(buf) {
+  var bytes = new Uint8Array(buf), s = '';
+  for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function show(text) {
+  var el = document.getElementById('passkey-alert');
+  if (!el) return;
+  el.textContent = text;
+  el.style.display = 'block';
+}
+var addBtn = document.getElementById('passkey-add');
+if (addBtn) addBtn.addEventListener('click', async function () {
+  if (!window.PublicKeyCredential) { show('This browser does not support passkeys.'); return; }
+  addBtn.disabled = true;
+  try {
+    var begin = await fetch('{register}', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    var start = await begin.json();
+    if (!begin.ok) { show(start.error || 'Could not start.'); return; }
+    var opts = JSON.parse(start.options).publicKey;
+    opts.challenge = b64urlToBuf(opts.challenge);
+    if (opts.user && opts.user.id) opts.user.id = b64urlToBuf(opts.user.id);
+    if (opts.excludeCredentials) opts.excludeCredentials = opts.excludeCredentials.map(function (c) {
+      return Object.assign({}, c, { id: b64urlToBuf(c.id) });
+    });
+    var cred = await navigator.credentials.create({ publicKey: opts });
+    var payload = {
+      ceremony_id: start.ceremony_id,
+      name: (document.getElementById('passkey-name') || {}).value || '',
+      credential: JSON.stringify({
+        id: cred.id,
+        rawId: bufToB64url(cred.rawId),
+        type: cred.type,
+        response: {
+          attestationObject: bufToB64url(cred.response.attestationObject),
+          clientDataJSON: bufToB64url(cred.response.clientDataJSON)
+        }
+      })
+    };
+    var finish = await fetch('{register}', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    var done = await finish.json();
+    if (finish.ok && done.ok) { show('Passkey bound. Reloading...'); location.reload(); }
+    else { show(done.error || 'That passkey could not be bound.'); }
+  } catch (e) {
+    show(e && e.name === 'NotAllowedError' ? 'Cancelled.' : 'That passkey could not be bound.');
+  } finally { addBtn.disabled = false; }
+});"#;
+
 fn no_store(response: HttpResponse) -> HttpResponse {
     response
+}
+
+/// A redirect that tells the browser to **switch to GET**.
+///
+/// `HttpResponse::redirect` answers 307, which preserves the method and the
+/// body: a browser following it re-sends the POST. That is right for the WAF
+/// challenge, where the body is a proof of work worth repeating, and wrong
+/// here — the body of the form we just answered carries the visitor's
+/// **password**, and replaying it against the portal would put a credential in
+/// a request the portal never expected. 303 is the status that means "the
+/// answer is over there, ask for it with GET".
+fn see_other(location: &str) -> pingora::Result<HttpResponse> {
+    let value = HeaderValue::from_str(location).map_err(|error| {
+        pingora::Error::because(
+            pingora::ErrorType::InternalError,
+            "location is not a header value",
+            error,
+        )
+    })?;
+    Ok(HttpResponse::builder(StatusCode::SEE_OTHER)
+        .header((http::header::LOCATION, value))
+        .header(HTTP_HEADER_NO_CACHE.clone())
+        .finish())
 }
 
 /// A JSON body, for the endpoints the browser calls with `fetch`.

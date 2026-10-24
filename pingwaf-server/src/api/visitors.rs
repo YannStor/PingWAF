@@ -27,6 +27,7 @@ use axum::Json;
 use axum::Router;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set,
+    TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -147,6 +148,11 @@ async fn create(
     }
 
     let now = chrono::Utc::now();
+    // One transaction for the account and its grants: the grants are validated
+    // (an unknown site id is refused), and a refusal that left the account
+    // behind would create a visitor the operator was told was not created —
+    // which is exactly what a partial write did before this.
+    let txn = state.db.begin().await?;
     let model = site_visitor::ActiveModel {
         id: Set(Uuid::new_v4()),
         email: Set(email),
@@ -157,12 +163,13 @@ async fn create(
         created_at: Set(now),
         updated_at: Set(now),
     }
-    .insert(&state.db)
+    .insert(&txn)
     .await?;
 
     if let Some(site_ids) = payload.site_ids {
-        replace_grants(&state, model.id, site_ids).await?;
+        replace_grants(&txn, model.id, site_ids).await?;
     }
+    txn.commit().await?;
 
     tracing::info!(
         visitor_id = %model.id,
@@ -204,13 +211,17 @@ async fn update(
         active.token_version = Set(row.token_version + 1);
         touched = true;
     }
+    // The same transaction boundary as `create`: a grant list that is refused
+    // must not leave the account fields already written.
+    let txn = state.db.begin().await?;
     if touched {
         active.updated_at = Set(chrono::Utc::now());
-        active.update(&state.db).await?;
+        active.update(&txn).await?;
     }
     if let Some(site_ids) = payload.site_ids {
-        replace_grants(&state, row.id, site_ids).await?;
+        replace_grants(&txn, row.id, site_ids).await?;
     }
+    txn.commit().await?;
 
     tracing::info!(visitor_id = %row.id, by = %admin.email, "visitor account updated");
     let refreshed = load(&state, &visitor_id).await?;
@@ -244,11 +255,14 @@ async fn destroy(
 /// a merge would make "remove this site" impossible to express. Unknown site
 /// ids are refused rather than silently skipped — a grant to a site that does
 /// not exist would look like access that never works.
-async fn replace_grants(
-    state: &AppState,
+async fn replace_grants<C>(
+    db: &C,
     visitor_id: Uuid,
     site_ids: Vec<Uuid>,
-) -> Result<(), ApiError> {
+) -> Result<(), ApiError>
+where
+    C: sea_orm::ConnectionTrait,
+{
     let unique: Vec<Uuid> = {
         let mut seen = std::collections::BTreeSet::new();
         site_ids.into_iter().filter(|id| seen.insert(*id)).collect()
@@ -256,7 +270,7 @@ async fn replace_grants(
     if !unique.is_empty() {
         let found = site::Entity::find()
             .filter(site::Column::Id.is_in(unique.clone()))
-            .all(&state.db)
+            .all(db)
             .await?;
         if found.len() != unique.len() {
             return Err(ApiError::BadRequest(
@@ -266,7 +280,7 @@ async fn replace_grants(
     }
     visitor_site_grant::Entity::delete_many()
         .filter(visitor_site_grant::Column::VisitorId.eq(visitor_id))
-        .exec(&state.db)
+        .exec(db)
         .await?;
     let now = chrono::Utc::now();
     for site_id in unique {
@@ -279,7 +293,7 @@ async fn replace_grants(
             visible: Set(true),
             created_at: Set(now),
         }
-        .insert(&state.db)
+        .insert(db)
         .await?;
     }
     Ok(())
