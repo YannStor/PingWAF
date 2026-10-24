@@ -47,6 +47,13 @@ type Result<T, E = Error> = std::result::Result<T, E>;
 
 const CATEGORY: &str = "oidc";
 const DEFAULT_REDIRECT_PATH: &str = "/oauth2/callback";
+
+/// Where a `both` site's login page sends a visitor who chose the provider.
+///
+/// A path of its own rather than the site root, because the site root is
+/// already the thing being gated: reaching it without a session is what sends
+/// the browser to the local login page, so linking to it would bounce back.
+pub(crate) const PROVIDER_ENTRY_PATH: &str = "/_pingwaf/oidc";
 const DEFAULT_COOKIE_NAME: &str = "pingap_oidc";
 const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(12 * 3600);
 /// How long somebody has to log in at the provider: from the redirect to
@@ -1581,11 +1588,12 @@ impl Plugin for Oidc {
         }
         // Not what a client without a session gets to say of itself.
         strip_claim_headers(session.req_header_mut(), &self.own_headers);
-        // A site that signs visitors in locally sends the browser to its own
-        // login page rather than to the provider. The check runs before the
-        // navigation test so a script still gets a 401: a page redirect is
-        // only useful to something that can follow one.
-        if self.auth_mode.allows_local() {
+        // A site that offers both sends the browser to the local login page
+        // first, and that page links to `PROVIDER_ENTRY_PATH` for the
+        // provider. That path is the one exception: without it the provider
+        // flow would be unreachable in `both`, because this branch redirects
+        // every session-less navigation to the local page.
+        if self.auth_mode.allows_local() && path != PROVIDER_ENTRY_PATH {
             if !is_navigation(session) {
                 return Ok(RequestPluginResult::Respond(text(
                     StatusCode::UNAUTHORIZED,

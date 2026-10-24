@@ -99,6 +99,16 @@ pub(crate) fn owns_path(path: &str) -> bool {
     )
 }
 
+/// Paths this plugin must leave to the OIDC plugin.
+///
+/// The provider entry is the one hole in the gate: a `both` site sends every
+/// session-less navigation to the local login page, and that page's "continue
+/// with the provider" link has to reach the OIDC plugin instead — otherwise
+/// the link lands back on the page it came from.
+pub(crate) fn is_delegated(path: &str) -> bool {
+    path == crate::oidc::PROVIDER_ENTRY_PATH
+}
+
 /// Body cap for a form post. A login form is a few hundred bytes; anything
 /// larger is not one.
 const MAX_FORM_BODY: usize = 8 * 1024;
@@ -789,12 +799,12 @@ var wait = setInterval(function () {{
   <h2>Or sign in with your provider</h2>
   <p class="muted">Continue with the identity provider this site is
      registered with.</p>
-  <a class="link-button" href="/oauth2/callback">Continue with the provider</a>
+  <a class="link-button" href="{provider_entry}">Continue with the provider</a>
 </div>"#,
             );
         }
         out.push_str(&passkey_login_script());
-        out
+        out.replace("{provider_entry}", crate::oidc::PROVIDER_ENTRY_PATH)
     }
 
     /// The bound passkeys, as rows for the portal.
@@ -1323,6 +1333,11 @@ impl Plugin for VisitorAuth {
         // The OIDC plugin runs the equivalent check for the modes that use it;
         // in `both` this one is reached first and the two agree, because both
         // test the same thing (a session for this site).
+        // The provider entry belongs to the OIDC plugin; stepping aside here is what
+        // lets a `both` site reach it at all.
+        if is_delegated(&path) {
+            return Ok(RequestPluginResult::Skipped);
+        }
         if !owns_path(&path) {
             if let Some(data) = self.session(session, &site_host, now)
                 && self.session_is_live(&data).await
