@@ -8,6 +8,42 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.30.1] — 2026-10-24
+
+Four findings from a full test pass over 0.30.0, three of them latent since the
+features they belong to landed.
+
+### Fixed
+
+- **A planned restart no longer looks like a crash.** The control-plane restart
+  history inferred everything from the gap between two starts, which cannot
+  tell a `docker compose restart` from a `kill -9`: both are followed by a
+  start seconds later, so every planned restart was labelled `unclean` and an
+  ordinary redeploy read as a crash loop. A process that is *given* a chance to
+  stop can say so, so it now writes a stop row on the way out
+  (`control_plane_stops`, migration `077`) and the next start reads it. The row
+  is matched against the previous boot's own timestamp rather than merely
+  existing, so a stop left over from two restarts ago cannot make a crash look
+  planned.
+- **The restart history's retention bound is per host, not per table.** One host
+  in a restart loop could push another host's rows out of the window, so the
+  replica that is fine lost the history an operator would read to see that it
+  is fine. Each host is trimmed to its own window now — also the unit the
+  console reads in.
+- **A WAF rule could block the visitor login page.** The visitor plugin runs
+  *after* the WAF, so a rule that matched `/_pingwaf/login` answered the site's
+  own front door with a block page. Found by driving the flow against a live
+  deployment: a burst of sign-ins tripped a rule and every later visit to the
+  login page returned `403` until the IP was unblocked by hand — a lockout with
+  no way back in from the site itself. The whole `/_pingwaf/` surface is now
+  skipped, because no rule an operator writes should be able to lock them out
+  of the way back in. The endpoints keep their own protection: a proof-of-work
+  challenge gates every sign-in.
+- **The demo's 443 handshake failure was not a code fault.** The site had no
+  certificate at all, so the listener fell back to another site's and the
+  signature algorithm it offered did not suit the client. A certificate for the
+  site fixes it; TLS 1.3 completes and the site answers.
+
 ## [PingWAF 0.30.0] — 2026-10-24
 
 The first stable release of the OIDC and visitor sign-in work. Two ways in are
