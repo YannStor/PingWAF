@@ -1169,10 +1169,14 @@ var wait = setInterval(function () {{
             .await
         {
             Ok(result) if result.ok => {
-                // The control plane bumped the token version, so every session
-                // minted before this change is now invalid — including this
-                // one. Re-issue it with the new version so the visitor is not
-                // thrown out of the tab they just used.
+                // Every session minted before this change is now invalid,
+                // including this one. Drop the cached verdicts first: an entry
+                // written under the old version still reads as "valid" for up
+                // to a minute, which would keep an old cookie working past the
+                // change that was meant to end it.
+                live_cache_drop_visitor(&session_data.visitor_id);
+                // Re-issue this session with the new version so the visitor is
+                // not thrown out of the tab they just used.
                 let renewed = VisitorSession {
                     token_version: result.token_version,
                     ..session_data.clone()
@@ -1862,6 +1866,22 @@ fn live_cache_put(key: String, verdict: bool) {
         LIVE_SESSIONS.clear();
     }
     LIVE_SESSIONS.insert(key, (verdict, now_secs().max(0) as u64));
+}
+
+/// Drops every cached verdict for a visitor.
+///
+/// Called when this process is the one that ended their sessions — a password
+/// change here bumps the version, and the entry cached under the *old* version
+/// still says "valid" for the rest of its minute. Without this, the visitor
+/// who just changed their password (and anyone holding their old cookie) keeps
+/// working until that entry expires, which is exactly the window the version
+/// check exists to close.
+///
+/// Only this process's entries are dropped. Another instance still holds its
+/// own copy until its minute runs out — that is the documented bound on the
+/// cache, and it is why the check is advisory rather than authoritative.
+fn live_cache_drop_visitor(visitor_id: &str) {
+    LIVE_SESSIONS.retain(|key, _| !key.contains(visitor_id));
 }
 
 register_plugin!("visitor_auth", VisitorAuth);
