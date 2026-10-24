@@ -55,6 +55,10 @@ pub struct LogEntry {
     pub waf_event_type: String,
     pub waf_details: String,
     pub waf_matched_tags: Vec<String>,
+    /// Who the request was made by, when the site authenticated them: the
+    /// OIDC session's `sub`. Empty for an anonymous request. An identifier
+    /// the provider issued, never a secret, so it is safe to store.
+    pub user_identity: String,
     pub total_latency_ms: u64,
     pub cache_status: String,
     pub tls_version: String,
@@ -1110,6 +1114,7 @@ impl ControlPlaneClient {
             waf_event_type: entry.waf_event_type.clone(),
             waf_details: entry.waf_details.clone(),
             waf_matched_tags: entry.waf_matched_tags.clone(),
+            user_identity: entry.user_identity.clone(),
             total_latency_ms: entry.total_latency_ms,
             cache_status: entry.cache_status.clone(),
             tls_version: entry.tls_version.clone(),
@@ -1173,6 +1178,378 @@ fn attach_agent_token<T>(
         if let Ok(value) = token.parse() {
             request.metadata_mut().insert("x-agent-token", value);
         }
+    }
+}
+
+/// How long a visitor-auth call may take before it is treated as a refusal.
+///
+/// Short on purpose. A login is a person waiting at a form, and a control
+/// plane that has not answered in this long is not going to answer usefully.
+/// The data plane turns the timeout into "login is unavailable" rather than
+/// letting the request hang, which is the fail-closed direction.
+const VISITOR_AUTH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The visitor-authentication calls, on the same channel the rest of the
+/// agent uses.
+///
+/// Every method here returns `Err` when the control plane cannot be reached.
+/// The caller must treat that as a refusal — a login that cannot be checked is
+/// not a login — rather than falling back to anything local.
+impl ControlPlaneClient {
+    /// Opens a client for one visitor-auth call.
+    ///
+    /// A fresh channel per call rather than a cached one: logins are rare
+    /// (a person signing in, not a per-request path), and the connection
+    /// machinery the long-lived streams use would otherwise need a second
+    /// reconnect loop to keep alive. The cost is a TCP+HTTP/2 handshake on a
+    /// login, which is the same order as the bcrypt verification that follows
+    /// it.
+    async fn visitor_auth_client(
+        &self,
+    ) -> anyhow::Result<ProtoClient<Channel>> {
+        let channel = self.create_channel().await?;
+        Ok(ProtoClient::new(channel))
+    }
+
+    /// The agent token, or an error when the agent has not registered yet.
+    ///
+    /// Every visitor RPC authenticates with it, so a call before registration
+    /// cannot succeed and says so rather than sending an empty credential.
+    fn require_agent_token(&self) -> anyhow::Result<String> {
+        self.agent_token
+            .load_full()
+            .map(|token| token.as_ref().clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "agent is not registered with the control plane"
+                )
+            })
+    }
+
+    /// Asks for a proof-of-work challenge for a site's login form.
+    pub async fn visitor_login_challenge(
+        &self,
+        agent_id: &str,
+        site_id: &str,
+    ) -> anyhow::Result<proto::VisitorChallengeResponse> {
+        let token = self.require_agent_token()?;
+        let mut client = self.visitor_auth_client().await?;
+        let request = proto::VisitorChallengeRequest {
+            agent_id: agent_id.to_string(),
+            agent_token: token,
+            site_id: site_id.to_string(),
+        };
+        let response = tokio::time::timeout(
+            VISITOR_AUTH_TIMEOUT,
+            client.visitor_login_challenge(request),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("control plane timed out"))?
+        .map_err(|status| anyhow::anyhow!("control plane refused: {status}"))?;
+        Ok(response.into_inner())
+    }
+
+    /// Exchanges a solved challenge and credentials for an identity.
+    ///
+    /// The password is passed through and never logged or retained here.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn visitor_login(
+        &self,
+        agent_id: &str,
+        site_id: &str,
+        challenge_id: &str,
+        solution: &str,
+        timestamp: i64,
+        email: &str,
+        password: &str,
+    ) -> anyhow::Result<proto::VisitorLoginResponse> {
+        let token = self.require_agent_token()?;
+        let mut client = self.visitor_auth_client().await?;
+        let request = proto::VisitorLoginRequest {
+            agent_id: agent_id.to_string(),
+            agent_token: token,
+            site_id: site_id.to_string(),
+            challenge_id: challenge_id.to_string(),
+            solution: solution.to_string(),
+            timestamp,
+            email: email.to_string(),
+            password: password.to_string(),
+        };
+        let response = tokio::time::timeout(
+            VISITOR_AUTH_TIMEOUT,
+            client.visitor_login(request),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("control plane timed out"))?
+        .map_err(|status| anyhow::anyhow!("control plane refused: {status}"))?;
+        Ok(response.into_inner())
+    }
+
+    /// Reports the end of a visitor session.
+    pub async fn visitor_logout(
+        &self,
+        agent_id: &str,
+        visitor_id: &str,
+        site_id: &str,
+    ) -> anyhow::Result<()> {
+        let token = self.require_agent_token()?;
+        let mut client = self.visitor_auth_client().await?;
+        let request = proto::VisitorLogoutRequest {
+            agent_id: agent_id.to_string(),
+            agent_token: token,
+            visitor_id: visitor_id.to_string(),
+            site_id: site_id.to_string(),
+        };
+        tokio::time::timeout(
+            VISITOR_AUTH_TIMEOUT,
+            client.visitor_logout(request),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("control plane timed out"))?
+        .map_err(|status| anyhow::anyhow!("control plane refused: {status}"))?;
+        Ok(())
+    }
+
+    /// Changes a visitor's password, returning the new token version.
+    pub async fn visitor_change_password(
+        &self,
+        agent_id: &str,
+        site_id: &str,
+        visitor_id: &str,
+        current_password: &str,
+        new_password: &str,
+    ) -> anyhow::Result<proto::VisitorChangePasswordResponse> {
+        let token = self.require_agent_token()?;
+        let mut client = self.visitor_auth_client().await?;
+        let request = proto::VisitorChangePasswordRequest {
+            agent_id: agent_id.to_string(),
+            agent_token: token,
+            visitor_id: visitor_id.to_string(),
+            current_password: current_password.to_string(),
+            new_password: new_password.to_string(),
+            site_id: site_id.to_string(),
+        };
+        let response = tokio::time::timeout(
+            VISITOR_AUTH_TIMEOUT,
+            client.visitor_change_password(request),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("control plane timed out"))?
+        .map_err(|status| anyhow::anyhow!("control plane refused: {status}"))?;
+        Ok(response.into_inner())
+    }
+
+    /// The sites a visitor may enter, for the portal.
+    pub async fn visitor_grants(
+        &self,
+        agent_id: &str,
+        site_id: &str,
+        visitor_id: &str,
+    ) -> anyhow::Result<proto::VisitorGrantsResponse> {
+        let token = self.require_agent_token()?;
+        let mut client = self.visitor_auth_client().await?;
+        let request = proto::VisitorGrantsRequest {
+            agent_id: agent_id.to_string(),
+            agent_token: token,
+            visitor_id: visitor_id.to_string(),
+            site_id: site_id.to_string(),
+        };
+        let response = tokio::time::timeout(
+            VISITOR_AUTH_TIMEOUT,
+            client.visitor_grants(request),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("control plane timed out"))?
+        .map_err(|status| anyhow::anyhow!("control plane refused: {status}"))?;
+        Ok(response.into_inner())
+    }
+
+    /// Starts a passkey registration for a signed-in visitor.
+    pub async fn visitor_passkey_register_begin(
+        &self,
+        agent_id: &str,
+        visitor_id: &str,
+        site_id: &str,
+    ) -> anyhow::Result<proto::VisitorPasskeyOptionsResponse> {
+        let token = self.require_agent_token()?;
+        let mut client = self.visitor_auth_client().await?;
+        let request = proto::VisitorPasskeyBeginRequest {
+            agent_id: agent_id.to_string(),
+            agent_token: token,
+            visitor_id: visitor_id.to_string(),
+            site_id: site_id.to_string(),
+        };
+        let response = tokio::time::timeout(
+            VISITOR_AUTH_TIMEOUT,
+            client.visitor_passkey_register_begin(request),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("control plane timed out"))?
+        .map_err(|status| anyhow::anyhow!("control plane refused: {status}"))?;
+        Ok(response.into_inner())
+    }
+
+    /// Finishes a passkey registration.
+    pub async fn visitor_passkey_register_finish(
+        &self,
+        agent_id: &str,
+        site_id: &str,
+        ceremony_id: &str,
+        credential_json: &str,
+        name: &str,
+    ) -> anyhow::Result<proto::VisitorPasskeyFinishResponse> {
+        let token = self.require_agent_token()?;
+        let mut client = self.visitor_auth_client().await?;
+        let request = proto::VisitorPasskeyFinishRequest {
+            agent_id: agent_id.to_string(),
+            agent_token: token,
+            site_id: site_id.to_string(),
+            ceremony_id: ceremony_id.to_string(),
+            credential_json: credential_json.to_string(),
+            name: name.to_string(),
+        };
+        let response = tokio::time::timeout(
+            VISITOR_AUTH_TIMEOUT,
+            client.visitor_passkey_register_finish(request),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("control plane timed out"))?
+        .map_err(|status| anyhow::anyhow!("control plane refused: {status}"))?;
+        Ok(response.into_inner())
+    }
+
+    /// Starts a passkey sign-in.
+    pub async fn visitor_passkey_login_begin(
+        &self,
+        agent_id: &str,
+        site_id: &str,
+    ) -> anyhow::Result<proto::VisitorPasskeyOptionsResponse> {
+        let token = self.require_agent_token()?;
+        let mut client = self.visitor_auth_client().await?;
+        let request = proto::VisitorPasskeyBeginRequest {
+            agent_id: agent_id.to_string(),
+            agent_token: token,
+            visitor_id: String::new(),
+            site_id: site_id.to_string(),
+        };
+        let response = tokio::time::timeout(
+            VISITOR_AUTH_TIMEOUT,
+            client.visitor_passkey_login_begin(request),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("control plane timed out"))?
+        .map_err(|status| anyhow::anyhow!("control plane refused: {status}"))?;
+        Ok(response.into_inner())
+    }
+
+    /// Finishes a passkey sign-in, returning the identity on success.
+    pub async fn visitor_passkey_login_finish(
+        &self,
+        agent_id: &str,
+        site_id: &str,
+        ceremony_id: &str,
+        credential_json: &str,
+    ) -> anyhow::Result<proto::VisitorLoginResponse> {
+        let token = self.require_agent_token()?;
+        let mut client = self.visitor_auth_client().await?;
+        let request = proto::VisitorPasskeyFinishRequest {
+            agent_id: agent_id.to_string(),
+            agent_token: token,
+            site_id: site_id.to_string(),
+            ceremony_id: ceremony_id.to_string(),
+            credential_json: credential_json.to_string(),
+            name: String::new(),
+        };
+        let response = tokio::time::timeout(
+            VISITOR_AUTH_TIMEOUT,
+            client.visitor_passkey_login_finish(request),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("control plane timed out"))?
+        .map_err(|status| anyhow::anyhow!("control plane refused: {status}"))?;
+        Ok(response.into_inner())
+    }
+
+    /// Lists a visitor's passkeys, for the portal.
+    pub async fn visitor_passkey_list(
+        &self,
+        agent_id: &str,
+        site_id: &str,
+        visitor_id: &str,
+    ) -> anyhow::Result<proto::VisitorPasskeyListResponse> {
+        let token = self.require_agent_token()?;
+        let mut client = self.visitor_auth_client().await?;
+        let request = proto::VisitorGrantsRequest {
+            agent_id: agent_id.to_string(),
+            agent_token: token,
+            visitor_id: visitor_id.to_string(),
+            site_id: site_id.to_string(),
+        };
+        let response = tokio::time::timeout(
+            VISITOR_AUTH_TIMEOUT,
+            client.visitor_passkey_list(request),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("control plane timed out"))?
+        .map_err(|status| anyhow::anyhow!("control plane refused: {status}"))?;
+        Ok(response.into_inner())
+    }
+
+    /// Checks that a session is still valid.
+    ///
+    /// The data plane caches the answer briefly, so this is called at most
+    /// once per cache window per session rather than on every request.
+    pub async fn visitor_validate_session(
+        &self,
+        agent_id: &str,
+        site_id: &str,
+        visitor_id: &str,
+        token_version: i64,
+    ) -> anyhow::Result<proto::VisitorValidateResponse> {
+        let token = self.require_agent_token()?;
+        let mut client = self.visitor_auth_client().await?;
+        let request = proto::VisitorValidateRequest {
+            agent_id: agent_id.to_string(),
+            agent_token: token,
+            site_id: site_id.to_string(),
+            visitor_id: visitor_id.to_string(),
+            token_version,
+        };
+        let response = tokio::time::timeout(
+            VISITOR_AUTH_TIMEOUT,
+            client.visitor_validate_session(request),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("control plane timed out"))?
+        .map_err(|status| anyhow::anyhow!("control plane refused: {status}"))?;
+        Ok(response.into_inner())
+    }
+
+    /// Toggles the portal's per-site "show this here" switch.
+    pub async fn visitor_set_site_visible(
+        &self,
+        agent_id: &str,
+        visitor_id: &str,
+        site_id: &str,
+        visible: bool,
+    ) -> anyhow::Result<proto::VisitorSetVisibleResponse> {
+        let token = self.require_agent_token()?;
+        let mut client = self.visitor_auth_client().await?;
+        let request = proto::VisitorSetVisibleRequest {
+            agent_id: agent_id.to_string(),
+            agent_token: token,
+            visitor_id: visitor_id.to_string(),
+            site_id: site_id.to_string(),
+            visible,
+        };
+        let response = tokio::time::timeout(
+            VISITOR_AUTH_TIMEOUT,
+            client.visitor_set_site_visible(request),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("control plane timed out"))?
+        .map_err(|status| anyhow::anyhow!("control plane refused: {status}"))?;
+        Ok(response.into_inner())
     }
 }
 

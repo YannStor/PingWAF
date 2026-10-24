@@ -176,8 +176,40 @@ publish:
 hooks:
 	cp hooks/* .git/hooks/
 
+# CHANGELOG.md is written by hand, one section per release, in the same style
+# as the ones above it: a short "why" per entry, not the commit subjects. It is
+# deliberately NOT generated from the commit log — the notes explain what was
+# wrong and what changed for an operator, which a subject line does not. See
+# CONTRIBUTING.md ("Release notes").
+#
+# `version` therefore only reports what a release still owes, and fails when the
+# section for $(VERSION) is missing, so a bump cannot land a version whose notes
+# were never written. Nothing here edits CHANGELOG.md, and git-cliff is not
+# invoked even when installed (it would print its own template, not the file).
+# The commit list is best-effort: it says so when it cannot be produced, rather
+# than printing nothing and looking like "no commits were missed".
 version:
-	git cliff --unreleased --tag v$(VERSION) --prepend CHANGELOG.md
+	@set -e; \
+	v="$(VERSION)"; \
+	[ -n "$$v" ] || { echo "Cargo.toml has no [workspace.package] version" >&2; exit 1; }; \
+	[ -f CHANGELOG.md ] || { echo "CHANGELOG.md is missing" >&2; exit 1; }; \
+	if grep -q "^## \[PingWAF $$v\]" CHANGELOG.md; then \
+	  echo "CHANGELOG.md has a section for $$v"; \
+	else \
+	  echo "CHANGELOG.md has no '## [PingWAF $$v]' section — write it before tagging." >&2; \
+	  exit 1; \
+	fi; \
+	last="$$(git describe --tags --abbrev=0 2>/dev/null || echo '')"; \
+	echo "--- commit subjects since $$last (for reference only) ---"; \
+	if [ -z "$$last" ]; then \
+	  git log --oneline 2>/dev/null || echo "(could not read the commit log)"; \
+	elif [ "$$(git rev-parse HEAD)" = "$$(git rev-parse "$$last^{commit}" 2>/dev/null)" ]; then \
+	  echo "(HEAD is $$last itself; nothing committed since that tag)"; \
+	else \
+	  git log --oneline "$$last..HEAD" 2>/dev/null || echo "(could not read the commit log)"; \
+	fi
+
+.PHONY: version
 
 # Bump both places the version lives: [workspace.package] and the per-member
 # requirements in [workspace.dependencies]. `make bump V=1.2.3` sets it outright.

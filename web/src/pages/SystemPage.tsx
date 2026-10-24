@@ -7,7 +7,6 @@ import { Card, CardBody, CardHeader } from '@/components/ui/Card'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { ErrorState } from '@/components/ErrorState'
 import { MetricCards, MetricPills } from '@/components/system/MetricCards'
-import { MemoryDetail } from '@/components/system/MemoryDetail'
 import { ModuleTable } from '@/components/system/ModuleTable'
 import { MethodTable } from '@/components/system/MethodTable'
 import { NodeSection } from '@/components/system/NodeSection'
@@ -107,14 +106,12 @@ export function SystemPage() {
         </>
       )}
 
-      {metrics.data && (
-        <div className="mt-4">
-          <MemoryDetail memory={metrics.data.memory} />
-        </div>
-      )}
-
       <NodeSection
-        nodes={nodes.data}
+        nodes={
+          nodes.data
+            ? { control: nodes.data.control, boots: nodes.data.boots }
+            : undefined
+        }
         error={nodes.isError ? nodes.error : null}
         loading={nodes.isFetching}
         onRetry={() => void nodes.refetch()}

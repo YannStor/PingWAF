@@ -37,6 +37,67 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The release body comes from CHANGELOG.md, and it is created by exactly one
+  # job. It used to be `generate_release_notes: true` on the upload step of
+  # every `binaries` leg: two jobs writing the same release concurrently, each
+  # with GitHub's own generated body, which is why v0.29.3 was published with
+  # the same "Full Changelog" line twice and none of the notes. Creating the
+  # release here, before the legs run, also means the legs only ever upload
+  # assets.
+  release-notes:
+    name: Create release from CHANGELOG
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Extract the CHANGELOG section for this tag
+        id: notes
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          # From the `## [PingWAF <version>]` heading up to the next `## `
+          # heading. The version is taken from the tag, so a section that does
+          # not exist is a hard failure: a release whose notes were never
+          # written must not publish (same contract as `make version`).
+          awk -v v="$VERSION" '
+            index($0, "## [PingWAF " v "]") == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > /tmp/notes.md
+          if ! grep -q "^## \[PingWAF ${VERSION}\]" CHANGELOG.md; then
+            echo "CHANGELOG.md has no section for ${VERSION}; write it before tagging." >&2
+            exit 1
+          fi
+          # `-s` alone would accept a section that holds only whitespace: a
+          # heading followed immediately by the next `## ` leaves a newline.
+          if [ -z "$(tr -d '[:space:]' < /tmp/notes.md)" ]; then
+            echo "the CHANGELOG section for ${VERSION} is empty" >&2
+            exit 1
+          fi
+          {
+            cat /tmp/notes.md
+            echo
+            echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo v0.0.0)...${GITHUB_REF_NAME}"
+          } > /tmp/body.md
+          echo "--- body ---"
+          cat /tmp/body.md
+
+      - name: Create the release
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          body_path: /tmp/body.md
+          # A `-rc.1` / `-beta.2` tag is a test build: mark it a pre-release
+          # so GitHub's `/releases/latest` keeps pointing at the newest
+          # stable one. `install.sh` resolves its version from that endpoint,
+          # so a pre-release that took the flag would be installed by anyone
+          # running the installer without asking for a specific version.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
   # Build the dashboard bundle once; both binaries legs embed it via rust-embed
   # (which reads ../web/dist at compile time), replacing the per-leg Node setup
   # + frontend build that used to duplicate the npm critical path.
@@ -69,11 +130,13 @@ jobs:
 
   binaries:
     name: Build ${{ matrix.plat }}/${{ matrix.arch }}
-    needs: web-dist
+    # `release-notes` first: the release must exist (and its notes must have
+    # been found in CHANGELOG.md) before any asset is uploaded into it.
+    needs: [release-notes, web-dist]
     runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 120
     permissions:
-      contents: write # create the release and upload assets
+      contents: write # upload assets into the release created above
     strategy:
       fail-fast: false
       matrix:
@@ -181,11 +244,14 @@ jobs:
           path: target/${{ matrix.target }}/release/pingwaf
           retention-days: 1
 
+      # Only assets: the release (and its body, from CHANGELOG.md) was created
+      # once by `release-notes`. Both legs upload here, concurrently, and each
+      # used to carry `generate_release_notes: true` — two writers for one
+      # body, which is how v0.29.3 got the same line twice and no notes.
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          generate_release_notes: true
           files: |
             pingwaf-${{ matrix.plat }}-${{ matrix.arch }}.tar.xz
             pingwaf-${{ matrix.plat }}-${{ matrix.arch }}.tar.xz.sha256
@@ -285,6 +351,26 @@ jobs:
           IMAGE="ghcr.io/shuaizend/pingwaf"
           # Derive major.minor from version (e.g. 0.14.3 -> 0.14)
           MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1,2)
+
+          # A pre-release (`-rc.1`, `-beta.2`, …) gets its own immutable tag
+          # and nothing else. `latest` and `0.30` must keep pointing at the
+          # newest *stable* release: a test build that moved them would hand
+          # `docker compose pull` and `install.sh` an unreleased binary with
+          # no way for the operator to tell. The per-arch tags it is built
+          # from are already version-pinned and safe to share.
+          #
+          # `[[` and `${VERSION%%-*}` are bash; the step's shell is bash by
+          # default on ubuntu runners, and the alternation stays portable
+          # rather than reaching for grep -E.
+          if [[ "$VERSION" == *-* ]]; then
+            echo "::notice::pre-release $VERSION: publishing :$VERSION only"
+            docker manifest create "${IMAGE}:${VERSION}" \
+              "${IMAGE}:${VERSION}-amd64" \
+              "${IMAGE}:${VERSION}-arm64" \
+              --amend
+            docker manifest push "${IMAGE}:${VERSION}"
+            exit 0
+          fi
 
           for tag in "$VERSION" "$MAJOR_MINOR" "latest"; do
             docker manifest create "${IMAGE}:${tag}" \

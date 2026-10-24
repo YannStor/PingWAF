@@ -8,6 +8,7 @@ pub use cookie::{
     CLEARANCE_COOKIE_NAME,
 };
 pub use fingerprint::BrowserFingerprint;
+pub use js_challenge::page::POW_JS;
 pub use js_challenge::verify::{check_browser_integrity, IntegrityResult};
 pub use js_challenge::{
     generate_request_id, ChallengeConfig, ChallengeDecision, ChallengeEngine,

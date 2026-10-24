@@ -44,6 +44,22 @@ describe('GET /api/v1/system/nodes contract', () => {
         last_seen: null,
       },
     ],
+    boots: [
+      {
+        booted_at: '2026-10-22T12:00:00Z',
+        reason: 'unclean',
+        version: '0.29.3',
+        hostname: 'waf-1',
+        previous_uptime_seconds: 12,
+      },
+      {
+        booted_at: '2026-10-22T11:59:00Z',
+        reason: 'fresh',
+        version: '0.29.3',
+        hostname: 'waf-1',
+        previous_uptime_seconds: null,
+      },
+    ],
   }
 
   it('types carry the null-able agent fields; fetchSystemNodes hits /system/nodes', async () => {
@@ -53,38 +69,79 @@ describe('GET /api/v1/system/nodes contract', () => {
     expect(src).toContain("apiClient.get<SystemNodes>('/system/nodes')")
   })
 
-  it('NodeSection renders missing values as — and empty agents as a placeholder', () => {
-    const src = read('src/components/system/NodeSection.tsx')
-    expect(src).toContain("t('system.nodes.empty')")
-    expect(src).toContain('—')
-    expect(src).toContain('formatRelative(a.last_seen)')
+  it('the boot history is typed with a nullable previous uptime', () => {
+    // A first boot has no predecessor: the uptime is null, not 0, so the card
+    // cannot read "lived 0 seconds".
+    expect(PAYLOAD.boots[1]!.previous_uptime_seconds).toBeNull()
+    expect(PAYLOAD.boots[0]!.previous_uptime_seconds).toBe(12)
+    const src = read('src/api/debug.ts')
+    expect(src).toContain('SystemControlPlaneBoot')
+    expect(src).toContain('previous_uptime_seconds: number | null')
   })
 
-  it('agent memory column shows used_memory_bytes ?? memory_bytes with a total tooltip', () => {
+  it('NodeSection renders the boot history, not an agent table', () => {
     const src = read('src/components/system/NodeSection.tsx')
-    expect(src).toContain('a.used_memory_bytes ?? a.memory_bytes')
-    expect(src).toContain("t('system.nodes.memoryTotal')")
+    // The agent table is gone: the card is the control-plane restart history.
+    expect(src).not.toContain('AgentTable')
+    expect(src).not.toContain('last_seen')
+    expect(src).toContain("t('system.nodes.boots')")
+    expect(src).toContain("t('system.nodes.bootsEmpty')")
+    expect(src).toContain('boot.previous_uptime_seconds')
   })
 
-  it('locales carry the new memory and pool-node keys in every language', () => {
+  it('an unclean boot is the only reason that reads as danger', () => {
+    const src = read('src/components/system/NodeSection.tsx')
+    expect(src).toContain('unclean: ')
+    expect(src).toContain("REASON_TONE[boot.reason]")
+  })
+
+  it('locales carry the boot-history and pool-node keys in every language', () => {
     for (const lang of ['en', 'zh', 'ja']) {
       const parsed = JSON.parse(read(`src/i18n/locales/${lang}/common.json`)) as {
-        system: { nodes: Record<string, string> }
+        system: { nodes: Record<string, string> & { reason: Record<string, string> } }
         pages: { origin: Record<string, string> }
       }
-      expect(parsed.system.nodes.memoryTotal).toBeTruthy()
-      expect(parsed.system.nodes.memoryUsed).toBeTruthy()
+      expect(parsed.system.nodes.boots).toBeTruthy()
+      expect(parsed.system.nodes.bootsHint).toBeTruthy()
+      expect(parsed.system.nodes.bootsEmpty).toBeTruthy()
+      expect(parsed.system.nodes.uptimeHint).toBeTruthy()
+      // Every reason the API can send has a label, in every language.
+      for (const reason of ['fresh', 'after_stop', 'unclean']) {
+        expect(parsed.system.nodes.reason[reason], `${lang}.reason.${reason}`).toBeTruthy()
+      }
       expect(parsed.pages.origin.poolNodes).toBeTruthy()
       expect(parsed.pages.origin.poolEmpty).toBeTruthy()
     }
   })
 
-  it('CPU bar uses host_cpu_percent only (process_cpu can exceed 100)', () => {
+  it('the removed agent table leaves no orphan keys behind', () => {
+    for (const lang of ['en', 'zh', 'ja']) {
+      const parsed = JSON.parse(read(`src/i18n/locales/${lang}/common.json`)) as {
+        system: { nodes: Record<string, unknown> }
+      }
+      for (const gone of ['agents', 'name', 'status', 'memoryTotal', 'memoryUsed', 'lastSeen', 'empty']) {
+        expect(parsed.system.nodes[gone], `${lang}.${gone}`).toBeUndefined()
+      }
+    }
+  })
+
+  /**
+   * 两个 CPU 字段现在同量纲（后端把单核值除以核数，0-100），所以文本只做
+   * 格式化、不做换算，进度条两者都可画。
+   *
+   * 历史缺陷：`process_cpu_percent` 曾是单核口径（可到 400），卡片对它又乘
+   * 一次 100，把 5% 显示成 "500.0%"。这条契约守住修复：格式化走
+   * `formatCpuPercent`（不换算），条走 `cpuBar`（钳制）。
+   */
+  it('CPU text is formatted without rescaling, and both readings may draw a bar', () => {
     const src = read('src/components/system/NodeSection.tsx')
-    expect(src).not.toContain('processBar')
+    // 文本必须走只格式化的那条路径，不能再出现 `v * 100` 这类换算。
+    expect(src).toContain('formatCpuPercent(control.process_cpu_percent)')
+    expect(src).toContain('formatCpuPercent(control.host_cpu_percent)')
+    expect(src).not.toMatch(/toFixed\(1\)%\s*`?.*\*\s*100/)
+    // 两个字段同量纲，都可以画条。
+    expect(src).toContain('cpuBar(control.process_cpu_percent)')
     expect(src).toContain('cpuBar(control.host_cpu_percent)')
-    // rps 是整数，不做小数位
-    expect(src).toContain('a.rps.toFixed(0)')
   })
 })
 
@@ -122,10 +179,22 @@ describe('profile module memory column contract', () => {
 /** response_replace 提交体契约：rules 为空 → null。 */
 describe('site response_replace submit contract', () => {
   it('ResponseReplaceCard sends response_replace via sitesApi.update and nulls an empty rule list', () => {
-    const src = read('src/pages/sites/basic/ResponseReplaceCard.tsx')
+    const src = read('src/pages/sites/ResponseReplaceCard.tsx')
     expect(src).toContain('sitesApi.update(site.id')
     expect(src).toContain("save.mutate({ response_replace })")
     expect(src).toMatch(/rules\.length === 0\s*\?\s*null/)
+  })
+
+  it('the card lives on the rewrite page, not in the basic tab', () => {
+    // 2026-10-23：响应体替换从站点基础设置移到「重写规则」页，两类"改写"同页。
+    const rewrite = read('src/pages/sites/RewritePage.tsx')
+    expect(rewrite).toContain("from './ResponseReplaceCard'")
+    expect(rewrite).toMatch(/<ResponseReplaceCard\b/)
+    const basic = read('src/pages/sites/basic/BasicPage.tsx')
+    expect(basic).not.toMatch(/<ResponseReplaceCard\b/)
+    expect(basic).not.toMatch(/import\s+\{\s*ResponseReplaceCard\s*\}/)
+    // 旧位置的文件必须真的没了：留着的话没人 import，编译照样过，回归也就无声。
+    expect(() => read('src/pages/sites/basic/ResponseReplaceCard.tsx')).toThrow()
   })
 
   it('locales keep responseReplace and routes.upstreamHost keys in every language', () => {

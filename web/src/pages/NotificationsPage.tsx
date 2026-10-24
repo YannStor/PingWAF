@@ -461,6 +461,8 @@ const EVENT_TOGGLE_KEY: Record<string, keyof NotificationSettings> = {
   'site.upstream_offline': 'notify_site_upstream',
   'site.upstream_abnormal': 'notify_site_upstream',
   'auth.login_anomaly': 'notify_auth_login_anomaly',
+  'site.oidc_login_failed': 'notify_site_oidc_auth',
+  'site.oidc_idp_unavailable': 'notify_site_oidc_auth',
 }
 
 function SettingsCard({

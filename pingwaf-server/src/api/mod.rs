@@ -31,6 +31,7 @@ pub mod logs;
 pub mod mcp;
 pub mod mtls;
 pub mod notifications;
+pub mod oidc_providers;
 pub mod origin_settings;
 pub mod passkeys;
 pub mod rate_limit;
@@ -41,6 +42,7 @@ pub mod self_protection;
 pub mod settings;
 pub mod site_basic_auth;
 pub mod site_failover;
+pub mod site_oidc;
 pub mod sites;
 pub mod ssl;
 pub mod state;
@@ -48,6 +50,7 @@ pub mod system;
 pub mod system_tls;
 pub mod users;
 pub(crate) mod validation;
+pub mod visitors;
 pub mod waf_settings;
 
 use crate::frontend::serve_frontend;
@@ -124,8 +127,11 @@ pub fn build_router(state: AppState) -> Router {
         .merge(sites::routes())
         .merge(ai_crawl::routes())
         .merge(site_basic_auth::routes())
+        .merge(site_oidc::routes())
+        .merge(oidc_providers::routes())
         .merge(keys::routes())
         .merge(users::routes())
+        .merge(visitors::routes())
         .merge(agents::routes())
         .merge(rules::routes())
         .merge(rate_limiting::routes())

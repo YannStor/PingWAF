@@ -71,6 +71,16 @@ pub mod m20240101_000063_site_upstream_pool_address_family;
 pub mod m20240101_000064_agent_memory_split;
 pub mod m20240101_000065_site_ssl_protocols;
 pub mod m20240101_000066_site_ai_crawl;
+pub mod m20240101_000067_site_oidc;
+pub mod m20240101_000068_control_plane_boots;
+pub mod m20240101_000069_oidc_providers;
+pub mod m20240101_000070_site_oidc_access;
+pub mod m20240101_000071_log_user_identity;
+pub mod m20240101_000072_visitor_accounts;
+pub mod m20240101_000073_visitor_site_grants;
+pub mod m20240101_000074_visitor_passkeys;
+pub mod m20240101_000075_visitor_auth_states;
+pub mod m20240101_000076_site_oidc_auth_mode;
 
 use sea_orm_migration::prelude::*;
 
@@ -157,6 +167,16 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000064_agent_memory_split::Migration),
             Box::new(m20240101_000065_site_ssl_protocols::Migration),
             Box::new(m20240101_000066_site_ai_crawl::Migration),
+            Box::new(m20240101_000067_site_oidc::Migration),
+            Box::new(m20240101_000068_control_plane_boots::Migration),
+            Box::new(m20240101_000069_oidc_providers::Migration),
+            Box::new(m20240101_000070_site_oidc_access::Migration),
+            Box::new(m20240101_000071_log_user_identity::Migration),
+            Box::new(m20240101_000072_visitor_accounts::Migration),
+            Box::new(m20240101_000073_visitor_site_grants::Migration),
+            Box::new(m20240101_000074_visitor_passkeys::Migration),
+            Box::new(m20240101_000075_visitor_auth_states::Migration),
+            Box::new(m20240101_000076_site_oidc_auth_mode::Migration),
         ]
     }
 }
@@ -168,7 +188,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 66);
+        assert_eq!(migrations.len(), 76);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

@@ -806,6 +806,12 @@ export interface SecurityEvent {
   waf_details: string | null
   country_code: string | null
   user_agent: string | null
+  /**
+   * Who made the request, when the site authenticated them: the OIDC
+   * session's `sub`. `null` for anonymous traffic and for rows written
+   * before the column existed.
+   */
+  user_identity: string | null
   created_at: string
 }
 
@@ -831,6 +837,8 @@ export interface AccessLogSummary {
   referer: string | null
   country_code: string | null
   tls_version: string | null
+  /** The authenticated caller's OIDC `sub`; `null` when anonymous. */
+  user_identity: string | null
   request_body_size: number | null
   request_body_truncated: boolean | null
   scheme: string | null
@@ -866,6 +874,8 @@ export interface SecurityLogQuery extends PaginationQuery {
   host?: string
   path?: string
   country_code?: string
+  /** The authenticated caller's OIDC `sub` (exact match). */
+  user_identity?: string
   request_id?: string
   q?: string
 }
@@ -883,6 +893,8 @@ export interface AccessLogQuery extends PaginationQuery {
   path?: string
   cache_status?: string
   country_code?: string
+  /** The authenticated caller's OIDC `sub` (exact match). */
+  user_identity?: string
   min_latency_ms?: number
   request_id?: string
   /** Matches only rows with no owning site (no `Host` header on the wire). */
@@ -2433,6 +2445,161 @@ export interface AiCrawlerRow {
   last_seen: string | null
 }
 
+/* ── OIDC: identity providers and per-site gates ──────────────────── */
+
+/**
+ * An identity provider — `/api/v1/oidc/providers`.
+ *
+ * Provider credentials belong to the deployment, not to a site: one Keycloak
+ * realm usually fronts several, so the client secret is stored once and sites
+ * reference it. Managed from the Account page.
+ */
+export interface OidcProvider {
+  id: string
+  /** Unique display name, shown in the site's provider picker. */
+  name: string
+  /** A disabled provider cannot be selected by a site. */
+  enabled: boolean
+  /** Absolute http(s) URL, no trailing slash. */
+  issuer: string
+  client_id: string
+  /** `'***'` when a secret is stored; `''` when none is. */
+  client_secret: string
+  scopes: string[]
+  /** Sites whose gate points here, so a delete can say what it would affect. */
+  site_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface CreateOidcProviderRequest {
+  name: string
+  enabled?: boolean
+  issuer: string
+  client_id: string
+  client_secret?: string
+  scopes?: string[]
+}
+
+export type UpdateOidcProviderRequest = Partial<CreateOidcProviderRequest>
+
+/** One ID-token claim forwarded to the origin as a request header. */
+export interface OidcHeaderClaim {
+  claim: string
+  header: string
+}
+
+/** How an access rule holds a claim against a value. */
+export type OidcAccessOperator = 'eq' | 'ne' | 'contains' | 'in' | 'exists'
+
+/** Every operator, for the rule editor's picker. */
+export const OIDC_ACCESS_OPERATORS: OidcAccessOperator[] = [
+  'eq',
+  'ne',
+  'contains',
+  'in',
+  'exists',
+]
+
+/** One access rule: a claim, how to hold it, and what to hold it against. */
+export interface OidcAccessRule {
+  claim: string
+  operator: OidcAccessOperator
+  /** Unused by `exists`; the API stores it empty there. */
+  value: string
+}
+
+/** What a site does with a signed-in visitor who is not in the rules. */
+/**
+ * How a visitor signs in at a site.
+ *
+ * `access_mode` decides who may enter once signed in; this decides how they
+ * sign in at all. `oidc` is the default and the pre-local-accounts behaviour,
+ * so a site that never touches this keeps working as it did.
+ */
+export type OidcAuthMode = 'oidc' | 'local' | 'both'
+
+export const OIDC_AUTH_MODES: OidcAuthMode[] = ['oidc', 'local', 'both']
+
+export type OidcAccessMode = 'allow_all' | 'require_any' | 'require_all'
+
+export const OIDC_ACCESS_MODES: OidcAccessMode[] = [
+  'allow_all',
+  'require_any',
+  'require_all',
+]
+
+/**
+ * Per-site OpenID Connect sign-in — `/api/v1/sites/{siteId}/oidc`.
+ *
+ * The provider's credentials are not here: a site points at one with
+ * `provider_id` and carries only what differs per site.
+ */
+export interface SiteOidc {
+  id: string
+  site_id: string
+  enabled: boolean
+  /** The provider this site authenticates against; `null` = not chosen. */
+  provider_id: string | null
+  /** Its display name, so the picker needs no second request. */
+  provider_name: string | null
+  /** `'***'` when a secret is stored; `''` when none is. */
+  cookie_secret: string
+  redirect_path: string
+  /** `''` = no logout endpoint. */
+  logout_path: string
+  /** `''` = derived from the request Host. */
+  redirect_url: string
+  cookie_name: string
+  session_ttl_seconds: number
+  claims_to_headers: OidcHeaderClaim[]
+  auth_mode: OidcAuthMode
+  access_mode: OidcAccessMode
+  access_rules: OidcAccessRule[]
+  created_at: string
+  updated_at: string
+}
+
+/**
+ * The `PUT` payload.
+ *
+ * `provider_id` is `string | null` rather than optional-and-nullable because
+ * the two mean different things: omitting the key keeps the stored provider,
+ * `null` clears it. The API reads them apart.
+ */
+export type UpdateOidcRequest = Partial<
+  Pick<
+    SiteOidc,
+    | 'enabled'
+    | 'cookie_secret'
+    | 'redirect_path'
+    | 'logout_path'
+    | 'redirect_url'
+    | 'cookie_name'
+    | 'session_ttl_seconds'
+    | 'claims_to_headers'
+    | 'auth_mode'
+    | 'access_mode'
+    | 'access_rules'
+  >
+> & {
+  provider_id?: string | null
+}
+
+/** Secret sent back to keep the stored one unchanged. */
+export const OIDC_SECRET_MASK = '***'
+/** Defaults and bounds mirrored from the control plane. */
+export const OIDC_DEFAULT_REDIRECT_PATH = '/oauth2/callback'
+export const OIDC_DEFAULT_COOKIE_NAME = 'pingap_oidc'
+export const OIDC_DEFAULT_SESSION_TTL_SECONDS = 43200
+export const OIDC_MIN_SESSION_TTL_SECONDS = 60
+export const OIDC_MAX_SESSION_TTL_SECONDS = 31536000
+export const OIDC_MIN_COOKIE_SECRET_LENGTH = 16
+export const OIDC_MAX_PROVIDER_NAME_LENGTH = 128
+export const OIDC_MAX_ACCESS_RULES = 32
+/** `scopes` always contains `openid`; the control plane adds it. */
+export const OIDC_ALWAYS_SCOPE = 'openid'
+
 /** `GET /analytics/ai-crawlers` — AI crawler traffic overview. */
 export interface AiCrawlerOverview {
   requests: number
@@ -2444,3 +2611,39 @@ export interface AiCrawlerOverview {
 }
 
 
+
+/* ── Visitor accounts ─────────────────────────────────────────────── */
+
+/**
+ * A person a protected site admits — `/api/v1/visitors`.
+ *
+ * Distinct from a console operator: a visitor signs in at the site's own login
+ * page and never reaches this console. `site_ids` is the set of sites they may
+ * enter; only granted sites are reachable after signing in.
+ */
+export interface Visitor {
+  id: string
+  email: string
+  name: string
+  disabled: boolean
+  site_ids: string[]
+  created_at: string
+  updated_at: string
+}
+
+export interface CreateVisitorRequest {
+  email: string
+  password: string
+  name?: string
+  disabled?: boolean
+  site_ids?: string[]
+}
+
+export interface UpdateVisitorRequest {
+  name?: string
+  disabled?: boolean
+  /** Absent leaves the stored password. */
+  password?: string
+  /** Replaces the whole grant list when present. */
+  site_ids?: string[]
+}

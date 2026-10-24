@@ -53,6 +53,7 @@ Pingap 将 `pingap-proxy/src/server.rs` 中的 pingora 回调映射为五个 `Pl
 | `key_auth` | 请求头或查询参数中的 API Key | [key_auth](./key_auth.md) |
 | `jwt` | JWT 校验（HMAC、公钥或远程 JWKS）与签发 | [jwt](./jwt.md) |
 | `combined_auth` | app id + 时间戳 + HMAC 摘要，可选绑定 IP | [combined_auth](./combined_auth.md) |
+| `oidc` | OIDC 登录（PKCE），加密会话 Cookie | [oidc](./oidc.md) |
 | `forward_auth` | 将决策委托给外部 HTTP 服务 | [forward_auth](./forward_auth.md) |
 | `csrf` | 双提交 Cookie CSRF 防护 | [csrf](./csrf.md) |
 

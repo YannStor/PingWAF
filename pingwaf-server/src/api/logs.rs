@@ -52,6 +52,9 @@ pub struct SecurityQuery {
     pub host: Option<String>,
     pub path: Option<String>,
     pub country_code: Option<String>,
+    /// The authenticated caller's OIDC `sub`, exact match. This is the filter
+    /// an investigation starts from: "what else did this account do".
+    pub user_identity: Option<String>,
     /// Exact request id, e.g. when correlating with an `X-Request-ID` header.
     pub request_id: Option<String>,
     /// Protection type filter: `managed` / `waf` / `ip_geo` / `bot` /
@@ -79,6 +82,8 @@ pub struct AccessQuery {
     pub path: Option<String>,
     pub cache_status: Option<String>,
     pub country_code: Option<String>,
+    /// The authenticated caller's OIDC `sub`, exact match.
+    pub user_identity: Option<String>,
     pub min_latency_ms: Option<i64>,
     /// Exact request id, e.g. when correlating with an `X-Request-ID` header.
     pub request_id: Option<String>,
@@ -350,6 +355,13 @@ async fn list_security(
             &country.to_uppercase(),
         ));
     }
+    if let Some(identity) = non_empty(&query.user_identity) {
+        // Exact match, not `text_filter`: an identity is one value, and the
+        // `a,b` list semantics would make a `sub` containing a comma (which
+        // some providers issue) unfilterable.
+        condition =
+            condition.add(security_event::Column::UserIdentity.eq(identity));
+    }
     if let Some(request_id) = non_empty(&query.request_id) {
         condition =
             condition.add(security_event::Column::RequestId.eq(request_id));
@@ -422,6 +434,10 @@ pub struct AccessLogSummary {
     pub referer: Option<String>,
     pub country_code: Option<String>,
     pub tls_version: Option<String>,
+    /// Who the request was made by, when the site authenticated them: the
+    /// OIDC session's `sub`. `None` for anonymous traffic and for rows
+    /// written before migration 000071.
+    pub user_identity: Option<String>,
     pub request_body_size: Option<i64>,
     pub request_body_truncated: Option<bool>,
     pub scheme: Option<String>,
@@ -432,7 +448,7 @@ pub struct AccessLogSummary {
 
 /// Columns backing [`AccessLogSummary`], kept next to the struct so the two
 /// cannot drift: the summary is exactly these fields.
-fn summary_columns() -> [access_log::Column; 26] {
+fn summary_columns() -> [access_log::Column; 27] {
     [
         access_log::Column::Id,
         access_log::Column::SiteId,
@@ -454,6 +470,7 @@ fn summary_columns() -> [access_log::Column; 26] {
         access_log::Column::Referer,
         access_log::Column::CountryCode,
         access_log::Column::TlsVersion,
+        access_log::Column::UserIdentity,
         access_log::Column::RequestBodySize,
         access_log::Column::RequestBodyTruncated,
         access_log::Column::Scheme,
@@ -527,6 +544,11 @@ async fn list_access(
             access_log::Column::CountryCode,
             &country.to_uppercase(),
         ));
+    }
+    if let Some(identity) = non_empty(&query.user_identity) {
+        // Exact match, not `text_filter`: an identity is one value.
+        condition =
+            condition.add(access_log::Column::UserIdentity.eq(identity));
     }
     if let Some(min_latency) = query.min_latency_ms {
         condition =

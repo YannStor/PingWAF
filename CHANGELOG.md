@@ -8,7 +8,605 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.30.0-rc.20] — 2026-10-24
+
+> **Pre-release.** Twentieth candidate: the pre-merge review's findings, chief
+> among them `both` mode being unable to use the provider at all. Publishes
+> `:0.30.0-rc.20` only — `:latest` and `:0.30` keep pointing at the newest
+> stable release, and GitHub marks it a pre-release so `install.sh` (which
+> resolves `/releases/latest`) is unaffected. Pin it explicitly:
+> `PINGWAF_TAG=0.30.0-rc.20`.
+
+### Fixed
+
+- **A `both` site could not sign anyone in through the provider.** Two gates
+  run on such a site and `visitor_auth` is first, but it gated every path it
+  did not own — including the provider's callback. The browser arriving with a
+  code was answered with a redirect to the local login page, so the code was
+  never exchanged; and a visitor who had signed in through the provider was
+  sent back to the local form on every request, because this plugin recognised
+  only its own cookie. It now hands the configured paths (the callback is
+  per-site) to the OIDC plugin and recognises the other session by its cookie
+  name, reading only its presence — the signature belongs to the plugin that
+  runs next. Confirmed against the deployed build before fixing: the callback
+  answered `307 → /_pingwaf/login?next=/oauth2/callback?code=…`.
+- **A password change could be driven from any site's agent.** It checked that
+  the agent served *something*, not that the account was granted the site it
+  was acting for, so a compromised edge node could guess passwords against
+  every account in the deployment.
+- **Disabling an account did not end its sessions**, only the next sign-in. It
+  bumps the token version now, which is what the session check compares.
+- **The session cookie's `Secure` flag was inferred three different ways**, and
+  the plugin's way ignored the site's proxy trust, so a site behind a
+  TLS-terminating proxy got a cookie without it.
+- **`no_store` was a function that returned its argument**, leaving the
+  sign-in redirect — which carries `Set-Cookie` — cacheable.
+- **The visibility switch reported success on a refusal**, because the control
+  plane answers a revoked grant with `ok: false` rather than an error.
+- **Two lists were N+1**: visitor grants and provider site counts are each one
+  query now.
+
+## [PingWAF 0.30.0-rc.19] — 2026-10-24
+
+> **Pre-release.** Nineteenth candidate: rc.18 plus the provider link in `both`
+> mode, which pointed at the callback rather than at a login. Publishes
+> `:0.30.0-rc.19` only — `:latest` and `:0.30` keep pointing at the newest
+> stable release, and GitHub marks it a pre-release so `install.sh` (which
+> resolves `/releases/latest`) is unaffected. Pin it explicitly:
+> `PINGWAF_TAG=0.30.0-rc.19`.
+
+### Fixed
+
+- **A `both`-mode site had no working way to reach the provider.** The OIDC
+  plugin sends every session-less navigation to the local login page, and that
+  page's "continue with the provider" link pointed at the callback path — which
+  is where the provider *returns to*, not where a login starts — so clicking it
+  landed on a callback with no code. Pointing it at the site root would have
+  bounced straight back. The link now targets `/_pingwaf/oidc`, a path the
+  visitor plugin delegates to the OIDC plugin, and the one session-less
+  navigation the OIDC plugin treats as belonging to the provider rather than
+  the local form.
+
+## [PingWAF 0.30.0-rc.18] — 2026-10-24
+
+> **Pre-release.** Eighteenth candidate: rc.17 plus a session that outlived the
+> password change meant to end it. Publishes `:0.30.0-rc.18` only — `:latest`
+> and `:0.30` keep pointing at the newest stable release, and GitHub marks it a
+> pre-release so `install.sh` (which resolves `/releases/latest`) is
+> unaffected. Pin it explicitly: `PINGWAF_TAG=0.30.0-rc.18`.
+
+### Security
+
+- **A password change did not end the sessions it should, for up to a
+  minute.** The session check caches its verdict so a page view costs no round
+  trip, keyed by site, visitor and token version. That covers the ordinary case
+  — a new session is a new key — but not the one the version check exists for:
+  the entry written under the *old* version still read as valid for the rest of
+  its minute, so a pre-change cookie kept working. The control plane answered
+  correctly (`version_changed`); it was never asked, because the cache spoke
+  first. A password change now drops this process's cached verdicts for the
+  visitor before re-issuing its own session. Found by driving the flow end to
+  end rather than by any unit test, which is what the whole run is for.
+
+## [PingWAF 0.30.0-rc.17] — 2026-10-24
+
+> **Pre-release.** Seventeenth candidate: rc.16 plus two portal actions that
+> were broken by a form parser that did not know the field names its own HTML
+> sends. Publishes `:0.30.0-rc.17` only — `:latest` and `:0.30` keep pointing
+> at the newest stable release, and GitHub marks it a pre-release so
+> `install.sh` (which resolves `/releases/latest`) is unaffected. Pin it
+> explicitly: `PINGWAF_TAG=0.30.0-rc.17`.
+
+### Fixed
+
+- **Changing a password answered `400`.** The portal's password form posts
+  `new_password`, and the parser knew only `password`, so the new value parsed
+  as empty and the "passwords do not match" check fired on a form where they
+  matched. The name is now read into the field the handler already uses.
+- **The site visibility switch could only ever be turned off.** The switch
+  posts `visible` and the parser knew only `next`, so the value was always
+  empty and the site was always set to hidden — a visitor could hide a site
+  and then not unhide it. Both directions now work, and a test asserts on the
+  field names as literals, because the point is to notice when the HTML
+  changes under them.
+
+## [PingWAF 0.30.0-rc.16] — 2026-10-24
+
+> **Pre-release.** Sixteenth candidate: rc.15 plus three fixes the end-to-end
+> run found in the visitor surface. Publishes `:0.30.0-rc.16` only — `:latest`
+> and `:0.30` keep pointing at the newest stable release, and GitHub marks it a
+> pre-release so `install.sh` (which resolves `/releases/latest`) is
+> unaffected. Pin it explicitly: `PINGWAF_TAG=0.30.0-rc.16`.
+
+### Fixed
+
+- **A refused grant left the visitor account behind.** Creating a visitor wrote
+  the account and then validated the site grants, so a grant naming an unknown
+  site answered `400` — and left the account in the table, which is a visitor
+  the operator was told was not created. Updating had the same shape. Both now
+  run in one transaction, as the rest of the API does for a write that spans
+  tables.
+- **A sign-in redirected with `307`, replaying the password.** `307` preserves
+  the method and the body, so a browser following the redirect re-sends the
+  POST — and the body of the login form carries the visitor's password. The
+  visitor flow now answers `303 See Other`, which is the status that means
+  "ask for it with `GET`". The shared redirect helper is left alone: the WAF
+  challenge page depends on its `307`.
+- **The visitor portal did not render the passkey section.** The gRPC calls,
+  the credential store and the ceremony were all in place and the page showed
+  only the site list and the password form, so a visitor could not bind a
+  passkey at all — most of why the feature exists. The portal now lists bound
+  passkeys and offers a binding button, and the login page gains the matching
+  sign-in button plus a provider link in `both` mode, where the site offers two
+  ways in.
+
+## [PingWAF 0.30.0-rc.15] — 2026-10-24
+
+> **Pre-release.** Fifteenth candidate: rc.14 plus a fix the end-to-end run
+> found in the site lookup. Publishes `:0.30.0-rc.15` only — `:latest` and
+> `:0.30` keep pointing at the newest stable release, and GitHub marks it a
+> pre-release so `install.sh` (which resolves `/releases/latest`) is
+> unaffected. Pin it explicitly: `PINGWAF_TAG=0.30.0-rc.15`.
+
+### Fixed
+
+- **Every visitor-auth call failed with a database error.** The site lookup
+  matched a request's host against `alternate_domains` with a raw
+  `? = ANY(...)` expression, which the Postgres driver rejected when
+  parameterised — so the login page answered `502` and no visitor could sign
+  in. The match now runs in Rust over the sites one agent serves, where the set
+  is a handful of rows and the comparison cannot be got wrong by a dialect
+  detail. No compile step or unit test of the surrounding logic could see the
+  original: the expression is a string, and the failure was the database's
+  opinion of it.
+
+## [PingWAF 0.30.0-rc.14] — 2026-10-24
+
+> **Pre-release.** Fourteenth candidate: rc.13 plus one fix found by the
+> end-to-end run. Publishes `:0.30.0-rc.14` only — `:latest` and `:0.30` keep
+> pointing at the newest stable release, and GitHub marks it a pre-release so
+> `install.sh` (which resolves `/releases/latest`) is unaffected. Pin it
+> explicitly: `PINGWAF_TAG=0.30.0-rc.14`.
+
+### Fixed
+
+- **A `local` site could not be enabled.** The `enabled` guard demanded a
+  `provider_id` unconditionally, but a site in `local` mode has no provider by
+  definition — it signs visitors in against an account on this deployment — so
+  the one call that makes the feature reachable answered `400`. The plugin and
+  the data-plane wiring both handled the case; only the guard did not. Found by
+  the end-to-end run against the deployed build, which is the only place it
+  could appear: the unit tests cover the plugin's parsing and the API's
+  per-field validation, and neither goes through the merged guard. A test now
+  pins the relationship the guard depends on.
+
+## [PingWAF 0.30.0-rc.13] — 2026-10-24
+
+> **Pre-release.** Thirteenth candidate: a protected site can sign visitors in
+> with an account held by this deployment, and the CPU card reports a number
+> that means what it says. Publishes `:0.30.0-rc.13` only — `:latest` and
+> `:0.30` keep pointing at the newest stable release, and GitHub marks it a
+> pre-release so `install.sh` (which resolves `/releases/latest`) is
+> unaffected. Pin it explicitly: `PINGWAF_TAG=0.30.0-rc.13`.
+
+### Fixed
+
+- **The control-plane CPU card showed values like `500%`.** The card
+  multiplied an already-percent figure by 100 a second time, so a process using
+  5% of the machine rendered as `500.0%` beside a machine-wide figure in the
+  low tens. The backend now puts sysinfo's per-core reading on the
+  whole-machine scale (divided by the core count, clamped to 0-100) and the
+  front end only formats it, so the two readings finally share one unit. A
+  contract test now guards against the double conversion returning.
+
+### Added
+
+- **Local visitor sign-in for protected sites.** A gated site had exactly one
+  way in: the provider's authorization-code flow. `site_oidc.auth_mode` adds
+  the other half — an account held by this deployment, signed in at the site's
+  own login page — and lets a site offer both. The default is `oidc`, so every
+  existing site keeps doing exactly what it did.
+  - **Visitor accounts** (`site_visitors`, migration 072) are global rather
+    than per-site, so one person may be granted several; `visitor_site_grants`
+    (073) carries the grants and the portal's per-site visibility switch.
+    Managed on the console's Account page, and distinct from `users` — the two
+    credential stores rotate independently.
+  - **The login page** is rendered by the data plane, with the WAF challenge's
+    own proof of work (`POW_JS`) rather than a copy: the control plane verifies
+    with the same `verify_proof_of_work`, and two implementations that drifted
+    would fail every login.
+  - **The credential check runs in the control plane**, over eleven new gRPC
+    calls. The challenge is stored in `visitor_auth_states` (075) rather than a
+    process-local map, so a login works across several data-plane instances —
+    the instance that renders the form and the one that receives the POST are
+    routinely different.
+  - **The visitor portal** (`/_pingwaf/portal`) lists the granted sites with a
+    per-site switch, changes the password, and enrols passkeys (074) through
+    the same `passkey-server` the console uses.
+
+### Security
+
+- **A `local` site had no gate.** Only the OIDC plugin enforced a session, and
+  a `local` site does not register it, so the site's own content was served to
+  anyone. The visitor plugin now enforces the gate on every path it does not
+  own.
+- **A password change did not end the sessions it should.** The session cookie
+  carried a `token_version` that nothing compared, so a stolen cookie stayed
+  usable until it expired. `VisitorValidateSession` now checks the version, the
+  account's state and the grant, cached for a minute so a page view still costs
+  no round trip; an unreachable control plane keeps the session rather than
+  tearing down every visitor on a blip.
+- Expired challenges and ceremonies are swept by the monitor loop — they are
+  written by anonymous page loads, so they previously grew without bound.
+- The passkey list and registration are scoped to a granted site, and the
+  portal's visibility switch addresses the site by id rather than by hostname.
+
+## [PingWAF 0.30.0-rc.12] — 2026-10-23
+
+> **Pre-release.** Twelfth candidate: rc.11 without the diagnostics it left
+> behind, plus two build-hygiene guards. Publishes `:0.30.0-rc.12` only —
+> `:latest` and `:0.30` keep pointing at the newest stable release, and GitHub
+> marks it a pre-release so `install.sh` (which resolves `/releases/latest`) is
+> unaffected. Pin it explicitly: `PINGWAF_TAG=0.30.0-rc.12`.
+
+### Fixed
+
+- **The rc.10 diagnostics are gone.** rc.10 added four `tracing::warn!` lines
+  to trace the authenticated identity through the access-log path. rc.11 fixed
+  the bug they found and removed the two in `waf.rs`, but two stayed behind in
+  `oidc.rs` — so the rc.11 image logs a warning on every authenticated request.
+  The fix they led to is unchanged; only the logging is removed.
+
+### Added
+
+- **A ceiling on `target/`.** `Cargo.toml` already pins the debug-info profiles
+  and disables incremental for `test`, but it leaves `dev` incremental ON for
+  `make dev` (bacon). Measured on 2026-10-23 that left 37 GB in
+  `target/debug/incremental` and 76 GB in `target/`: `Makefile`'s
+  `check-target` guard sweeps past `TARGET_MAX_GB`, but it only runs under
+  `make`, and a bare `cargo build` / `cargo test` / `cargo clippy` walks
+  straight past it. `.cargo/config.toml` now applies to every cargo invocation;
+  an edit loop that wants the cache back sets `CARGO_INCREMENTAL=1` for that
+  shell.
+- **`scripts/sweep-host-storage.sh`**, for a host that runs PingWAF from images
+  rather than building it. It reclaims stopped containers, dangling images,
+  unused volumes, images older than a given age that no running container uses,
+  journal size and stale `/tmp` entries — driving podman's own commands, never
+  the storage tree. That last part is the point: a 2026-10-23 cleanup that
+  removed "orphan" overlay directories by hand took a running container's
+  writable layer with it, because the layers `layers.json` does not list are
+  not garbage — a container's own layer is not in that file either.
+
+## [PingWAF 0.30.0-rc.11] — 2026-10-23
+
+> **Pre-release.** Eleventh candidate: the fix for the identity being dropped
+> in the agent's conversion, plus the removal of rc.10's diagnostics.
+> Publishes `:0.30.0-rc.11` only.
+
+### Fixed
+
+- **The agent dropped the authenticated identity when converting an access
+  entry.** The WAF put the value on its `AccessLogEntry` and the control
+  plane knew how to store it, but `PingWafAgent::log_access` built the
+  shipped `LogEntry` with a hardcoded empty string — so the column was NULL
+  on every deployment while `security_events`, which goes through a different
+  conversion, carried the account. Found with the temporary diagnostics from
+  rc.10: the data plane logged the correct identity at every point, which
+  narrowed it to the one hop in between. A regression test now walks the same
+  path and asserts on the value the agent would send.
+
+## [PingWAF 0.30.0-rc.10] — 2026-10-23
+
+> **Pre-release.** Tenth candidate: rc.9 with diagnostic logging on the
+> response path, published so the remaining question about the access-log
+> identity can be answered from a live container log rather than by
+> inference. Publishes `:0.30.0-rc.10` only.
+
+### Changed
+
+- **Temporary diagnostic logging on the access-log path.** The identity
+  reached `security_events` but not `access_logs`, and the two paths differ
+  in ways the unit tests do not exercise: an event reads the request context
+  directly, while the access entry is amended during the request phase and
+  completed during the response phase, and a response with a body is held
+  rather than shipped inline. The log lines print the identity at each of
+  those points, so the next run says which one drops it. They are removed
+  once the answer is in — this is not meant to ship.
+
+## [PingWAF 0.30.0-rc.9] — 2026-10-23
+
+> **Pre-release.** Ninth candidate: rc.8 plus the identity write on the path
+> that actually carries a streamed response. Publishes `:0.30.0-rc.9` only.
+
+### Fixed
+
+- **The identity is written when the entry is held for the body phase, not
+  only when the response finishes at the header phase.** rc.8 read the
+  context in the two places that ship an entry directly, but a response with
+  a body is *held* first — the facts are stashed and the entry is completed
+  later, in the body phase. A body that never reaches its end-of-stream (the
+  client vanished, the upstream died mid-body) is then shipped by the sweep,
+  which has no request context, so the identity was lost exactly there. It is
+  now written when the entry is held, which covers every path the entry can
+  take afterwards.
+
+## [PingWAF 0.30.0-rc.8] — 2026-10-23
+
+> **Pre-release.** Eighth candidate: rc.7 plus a second path for the
+> authenticated identity, which still reached the access log empty on a live
+> deployment. Publishes `:0.30.0-rc.8` only.
+
+### Fixed
+
+- **The identity is read from the request context as well as the pending
+  entry.** rc.7 fixed the request id being replaced mid-chain, which was one
+  way the entry's amendment could be orphaned; on a live deployment the
+  access log was still empty while `security_events.user_identity` was
+  populated. The two paths differ: an event reads `ctx.state` directly, while
+  the access entry is amended in the request phase and read back in the
+  response phase — more moving parts, and the one that broke. The response
+  phase now consults `ctx.state` again before shipping and lets it win, so
+  the identity is logged even when the amendment did not land. `ctx.state` is
+  what the event path already proves works.
+
+## [PingWAF 0.30.0-rc.7] — 2026-10-23
+
+> **Pre-release.** Seventh candidate: rc.6 plus the fix for the access-log
+> columns that stayed empty. Publishes `:0.30.0-rc.7` only; `:latest` and
+> `:0.30` keep pointing at the newest stable release.
+
+### Fixed
+
+- **The authenticated identity and the request body reached the access log
+  empty.** `pingap:requestId` runs *after* `pingwaf:waf` in the chain and
+  replaced `ctx.state.request_id` unconditionally. The WAF keys its pending
+  access entry on the id it minted, so every later amendment — the identity
+  from rc.6, the request-body facts — was written against an id nothing would
+  read: the entry under the WAF's id was completed and shipped with an empty
+  identity, and the entry under the new id was never created. An id another
+  plugin already minted now wins.
+
+  This was invisible in the unit tests and in the gate: the access log still
+  shipped for every request, and only a live login showed
+  `security_events.user_identity` populated while the matching `access_logs`
+  row stayed `NULL` — the events path reads the context directly, the access
+  path goes through the pending entry, and the difference is what pointed at
+  the lookup.
+
+## [PingWAF 0.30.0-rc.6] — 2026-10-23
+
+> **Pre-release.** Sixth candidate: rc.5 plus the authenticated-identity
+> column and the trusted-proxy scheme fix. Publishes `:0.30.0-rc.6` only;
+> `:latest` and `:0.30` keep pointing at the newest stable release. Pin it
+> with `PINGWAF_TAG=0.30.0-rc.6`.
+
+### Added
+
+- **Log entries say *who* made a request, not only where it came from.** A
+  site behind an OIDC gate now records the authenticated caller's `sub` on
+  both the access log and the security event (`user_identity`, migration
+  `000071`, indexed on both tables and mapped as a `keyword` in the
+  Elasticsearch template so "everything this account did" is an exact
+  filter). It is the identifier the provider issued — stable for the
+  account, not a secret, and deliberately not the email or the name, which
+  are personal data that change. `NULL` means anonymous, which is most
+  traffic and every row written before this migration: an empty string would
+  claim the caller was identified and turned out to be nobody.
+
+  The value is set by the OIDC plugin once it validates a session, and
+  recorded *before* the access-rule check, so a refusal is traceable to the
+  account that was refused. The WAF runs ahead of OIDC in the chain (an
+  unauthenticated attacker is stopped without being sent to a provider), so
+  an event it raises during the request phase is anonymous by construction;
+  the access log, written on the response, carries the identity.
+
+### Fixed
+
+- **A site behind a TLS-terminating proxy derives its scheme from
+  `X-Forwarded-Proto`.** The data plane only sees the last hop, so a CDN or
+  a load balancer made `ctx.conn.tls_version` `None` on a site that is only
+  reachable over `https://`. The OIDC `redirect_uri` was then built as
+  `http://…` and the session cookie was set without `Secure`, which the
+  browser refuses or drops. The header is now read under the same trust the
+  client IP already uses — the direct peer must be inside the site's
+  configured `trusted_proxy_ranges` — so an untrusted client cannot talk the
+  site into a weaker scheme, and an unusable value falls back to the
+  connection's own TLS state. Logout clears the cookie with the same flag it
+  was set with, which it previously could not.
+
 ## [Unreleased]
+
+### Changed
+
+- **The response-body replacement policy moved to the site's Rewrite Rules
+  page.** It sat in the site's basic settings while the rewrite rules — the
+  other way to modify what a site returns — were on a page of their own, so
+  "change what comes back" was split across two tabs. The card now renders
+  under the rule list, where both halves of rewriting are visible together,
+  and remounts when the stored policy changes so the form cannot keep showing
+  a value the server has already normalised. Nothing about the policy itself
+  changed: it is still `sites.response_replace` behind
+  `PUT /api/v1/sites/{site_id}`.
+- **The dashboard's "Top threat IPs" and "Top triggered rules" now match the
+  site traffic page.** The two pages had grown separate copies of the same two
+  tables and drifted apart: the dashboard showed a country *code* where the
+  traffic page showed a flag, rendered a blocked count as red text instead of
+  a badge, listed a rule's raw id as a second line, and gave neither table a
+  drill-down. Both pages now render one shared pair of tables, which also
+  brings loading skeletons, the empty state and the inline error to the
+  traffic page — it previously rendered an empty table while the query was
+  still in flight. The dashboard's tables gained the traffic page's
+  click-through into the matching log rows, and the two cards now sit in the
+  same two-column grid. Two details were settled while merging the copies
+  rather than picked from either side: a rule's action badge follows the log
+  page's tone map (`log` stays blue — the traffic page had been painting it
+  yellow), and the drill-down link carries the window it was ranked over.
+  Passing only `preset` made the logs page fall back to *its own* 24-hour
+  default, so a 30-day ranking drilled into a day of rows while the picker
+  still read 30d; the traffic page's existing links had the same bug and are
+  fixed with it. The dashboard's cross-site rows no longer narrow the logs to
+  the site the IP hit last — that site filter is applied only when the
+  dashboard is already scoped to one.
+- **The standalone "Memory detail" card is gone from System observation.** The
+  overview cards and pills already report RSS, RSS peak, available memory and
+  usage, so the card was a second copy of the same numbers plus swap, page
+  faults and buffers that nothing acted on. The metrics endpoint is unchanged
+  — only the redundant rendering was removed.
+
+## [PingWAF 0.30.0-rc.5] — 2026-10-23
+
+> **Pre-release.** Fifth candidate: rc.4 plus the provider card's i18n fix.
+> Publishes `:0.30.0-rc.5` only; `:latest` and `:0.30` keep pointing at the
+> newest stable release. Pin it with `PINGWAF_TAG=0.30.0-rc.5`.
+
+### Fixed
+
+- **The site's provider card rendered its own i18n key.** The card asks for
+  `pages.oidc.providerHint`, which an earlier locale pass removed as an orphan
+  while the card still read it, so the explanation line showed the literal
+  string `pages.oidc.providerHint`. All three languages have it back, and a
+  test now extracts every `pages.oidc.*` / `pages.account.*` key the panel and
+  the account card ask for — including the ones built from the access-mode and
+  operator enums — and fails if any is missing from any locale.
+
+## [PingWAF 0.30.0-rc.4] — 2026-10-23
+
+> **Pre-release.** Fourth candidate: rc.3 plus the access-rule session fix.
+> Publishes `:0.30.0-rc.4` only.
+
+### Fixed
+
+- **A rule's claim was not kept in the session, so no rule could ever match.**
+  Access rules run on every request against the session, because the ID token
+  is only in hand during the callback. The callback kept `sub` and the
+  claim-to-header claims, but not the claims the rules read — so
+  `require_any` / `require_all` denied every visitor, including the ones the
+  rules were written to admit, and a site behind the gate was unreachable for
+  everybody. `AccessPolicy::claims` now reports every claim the rules name
+  (deduplicated, since one claim may appear in several rules) and the callback
+  keeps those too. `allow_all` reads nothing, so its session is unchanged.
+
+## [PingWAF 0.30.0-rc.3] — 2026-10-23
+
+> **Pre-release.** Third candidate: rc.2 plus the callback cookie fix.
+> Publishes `:0.30.0-rc.3` only.
+
+### Fixed
+
+- **A callback's session cookie reached the browser only if it was the last
+  one.** An OIDC callback sets two cookies — the session, and the login cookie
+  it clears — and only the second survived to the wire, so a successful login
+  redirected back to the site and then bounced straight to the provider again:
+  an infinite loop with a valid session nobody ever received. The cause was in
+  the response builder, not the plugin: `new_response_header` added every
+  custom header with pingora's `insert_header`, which *replaces* all headers
+  under the same name (the crate documents it as the difference from
+  `append_header`). `Set-Cookie` is now appended while every other header
+  keeps replacing, so a response cannot grow two `Content-Type`s from a plugin
+  and the builder. Two regression tests pin it.
+
+## [PingWAF 0.30.0-rc.2] — 2026-10-23
+
+> **Pre-release.** The second release candidate: the boot history from rc.1
+> plus OIDC. Published so it can run against a real deployment before it
+> reaches a stable version. It publishes `:0.30.0-rc.2` only — `:latest` and
+> `:0.30` keep pointing at the newest stable release, and GitHub marks it a
+> pre-release so `install.sh` (which resolves `/releases/latest`) is
+> unaffected. Pin it explicitly: `PINGWAF_TAG=0.30.0-rc.2`.
+
+### Added
+
+- **Site-level OIDC authentication, with providers configured once.** An
+  identity provider — issuer, client credentials, scopes — is a property of
+  the deployment rather than of a site, since one Keycloak realm usually
+  fronts several; storing its client secret once means rotating it is one
+  edit. Providers are managed on the console's **Account** page
+  (`/api/v1/oidc/providers`) and a site references one, keeping only what
+  differs per site: the callback paths, the session cookie name and TTL, the
+  session key, the claim-to-header map, and the access rules.
+- **Access rules: who may enter, once they are signed in.** Authenticating
+  proves *who* a visitor is; `access_mode` (`allow_all`, the default and the
+  previous behaviour, or `require_any` / `require_all`) holds the ID token's
+  claims against rules of `claim:operator:value` with `eq`, `ne`, `contains`,
+  `in` and `exists`. A denied visitor gets a `403` — they are authenticated,
+  they simply may not enter, and redirecting them back to the provider would
+  loop because the same account returns. The check runs where the session is
+  read, the one place a request carrying a session can be refused, so it
+  cannot be walked around by replaying an older session.
+- **Migration 069** (`oidc_providers`) and **070** (`site_oidc` gains
+  `provider_id`, `access_mode`, `access_rules`; loses the credential columns).
+  Deleting a provider is refused while sites still point at it, and the
+  foreign key is `ON DELETE SET NULL` so a delete that did happen would leave
+  a site visibly unconfigured rather than silently taking its rules.
+
+### Fixed
+
+- **The OIDC work was never on a release.** It lived on `feature/oidc` and
+  was not merged, so `0.30.0-rc.1` answered `404` for
+  `/api/v1/sites/{id}/oidc`. It is on this branch now.
+
+## [PingWAF 0.30.0-rc.1] — 2026-10-22
+
+> **Pre-release.** A test build of the control-plane restart history on
+> `/system`, published so it can run against a real deployment before it
+> reaches a stable version. It publishes `:0.30.0-rc.1` only — `:latest` and
+> `:0.30` keep pointing at the newest stable release, and GitHub marks it a
+> pre-release so `install.sh` (which resolves `/releases/latest`) is
+> unaffected. Pin it explicitly to use it: `PINGWAF_TAG=0.30.0-rc.1`.
+
+### Added
+
+- **Control-plane restart history on `/system`.** The observation page shows
+  the newest five control-plane starts in place of the agent-node table
+  (agents keep their own page; the card was answering a different question
+  than the rest of the page). Each row carries the start time, version,
+  hostname and how long the *previous* process lived, plus a reason badge:
+  `fresh` (no previous boot), `after_stop` (it lived at least 60 s, so a
+  planned stop fits) or `unclean` (it did not). Several boots minutes apart
+  is what an OOM kill or a crash loop looks like from the outside.
+  `GET /api/v1/system/nodes` gained a `boots[]` array; the rows live in a new
+  `control_plane_boots` table (migration `000068`), swept to the newest 100.
+
+  A start is recorded rather than a stop because a process killed by the OOM
+  killer runs no code and cannot write anything — startup is the only moment
+  it can speak, so the gap between two starts is the previous process's
+  uptime. Two adjacent rows are only compared within one `hostname`, so a
+  second replica starting seconds later is never read as this process's
+  predecessor.
+
+## [Unreleased]
+
+### Added
+
+- **Site-level OIDC authentication** (ported from upstream pingap) plus its
+  control-plane integration. The data plane gains the `oidc` plugin — ported
+  verbatim from upstream `vicanso/pingap` (`pingap-plugin/src/oidc.rs`, commit
+  `77ba8bfebe658827a7bff92acfd05068eb8bb954`, 2026-10-09), which this fork had
+  been missing — providing browser login via the authorization code flow with
+  PKCE: an unauthenticated browser is 302-redirected to the identity provider,
+  the callback verifies PKCE `state`/`nonce` and the ID token against the
+  provider's JWKS, and the session lives in an AES-256-GCM-SIV-encrypted
+  cookie derived from `cookie_secret`, so nothing is stored server-side.
+  Configured ID-token claims can be injected into request headers, guarded
+  against client forgery and `Connection`-header smuggling. The shared
+  symbols the plugin depends on (`pingap-plugin/src/jwt.rs` claim/JWKS
+  helpers, `pingap-core` `protect_from_connection_header` and
+  `Features::original_uri`, `pingap-util` `seal`/`unseal`) were brought over
+  with it. Local adaptations: the constructor logs only `issuer`/`client_id`
+  (never the secrets), the plugin reports `site.oidc_login_failed` (warning)
+  and `site.oidc_idp_unavailable` (critical) security events — a capability
+  upstream does not have — and the control plane turns those events into
+  alerts gated by the new `notify_site_oidc_auth` notification switch (on by
+  default). The control plane adds `GET/PUT /api/v1/sites/{site_id}/oidc`
+  with masked secrets (a stored secret shows `***`, an unset one stays empty;
+  `***` on input keeps the stored value, `""` clears it) and a hard refusal —
+  not a silent downgrade — when enabling with missing required values. The
+  dashboard gains an **OIDC** tab next to IP restriction, geo restriction and
+  basic auth under a site's access control. Site cloning deliberately does
+  not copy the OIDC configuration (callback hostname binding, sibling-domain
+  session sharing, one IdP client per callback host). Docs:
+  [oidc plugin](./pingap-plugin/docs/oidc.md),
+  [API reference](./docs/api.md#oidc-authentication).
 
 ### Security
 

@@ -60,6 +60,13 @@ pub struct SecurityEvent {
     pub user_agent: String,
     pub country_code: String,
     pub matched_tags: Vec<String>,
+    /// Who the request was made by, when the site authenticated them: the
+    /// OIDC session's `sub`. Empty for an anonymous request.
+    ///
+    /// An identifier the provider issued, never a secret or a token, so it is
+    /// safe to store and to search on — and it is what makes an event
+    /// traceable back to an account after the fact.
+    pub user_identity: String,
 }
 
 /// An access log entry for a proxied request.
@@ -86,6 +93,10 @@ pub struct AccessLogEntry {
     pub referer: String,
     pub tls_version: String,
     pub country_code: String,
+    /// Who the request was made by, when the site authenticated them (the
+    /// OIDC session's `sub`). Empty for an anonymous request, which is the
+    /// ordinary case. An identifier the provider issued, never a secret.
+    pub user_identity: String,
     pub request_headers: Vec<(String, String)>,
     pub request_body: Option<Vec<u8>>,
     pub request_body_size: u64,
@@ -173,6 +184,23 @@ impl PingWafAgent {
 
         info!(agent_id = %agent_id, "PingWAF agent started");
         Ok(agent)
+    }
+
+    /// This agent's id, as the control plane knows it.
+    ///
+    /// The visitor-auth RPCs carry it alongside the token; it is derived the
+    /// same way the connection loop derives it, so the two cannot disagree.
+    pub fn agent_id(&self) -> String {
+        self.config.resolved_agent_id()
+    }
+
+    /// The visitor-authentication client, for the data plane's login page.
+    ///
+    /// Returns `None` in standalone mode (no agent), where there is no control
+    /// plane to ask and therefore no way to sign a visitor in. The caller must
+    /// treat that as a refusal.
+    pub fn visitor_auth(&self) -> &Arc<ControlPlaneClient> {
+        &self.client
     }
 
     /// Get the global agent instance (if started).
@@ -279,6 +307,7 @@ impl PingWafAgent {
             waf_event_type: event.event_type,
             waf_details: event.details,
             waf_matched_tags: event.matched_tags,
+            user_identity: event.user_identity,
             total_latency_ms: 0,
             cache_status: String::new(),
             tls_version: String::new(),
@@ -325,6 +354,11 @@ impl PingWafAgent {
             waf_event_type: String::new(),
             waf_details: String::new(),
             waf_matched_tags: Vec::new(),
+            // Who the request was made by, when the WAF learned it from an
+            // OIDC session. Carried through from the entry the plugin built;
+            // dropping it here is what kept the column empty on every
+            // deployment that tried it.
+            user_identity: entry.user_identity,
             total_latency_ms: entry.total_latency_ms,
             cache_status: entry.cache_status,
             tls_version: entry.tls_version,

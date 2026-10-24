@@ -65,6 +65,7 @@ Each request-step plugin returns one of three results:
 | `key_auth` | API key in a header or query parameter | [docs/key_auth.md](docs/key_auth.md) |
 | `jwt` | JWT verification (HMAC, public key or remote JWKS) and token minting | [docs/jwt.md](docs/jwt.md) |
 | `combined_auth` | app id + timestamp + HMAC digest, optionally IP bound | [docs/combined_auth.md](docs/combined_auth.md) |
+| `oidc` | OpenID Connect login (PKCE) with an encrypted session cookie | [docs/oidc.md](docs/oidc.md) |
 | `forward_auth` | Delegate the decision to an external HTTP service | [docs/forward_auth.md](docs/forward_auth.md) |
 | `csrf` | Double-submit-cookie CSRF protection | [docs/csrf.md](docs/csrf.md) |
 

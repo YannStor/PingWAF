@@ -37,6 +37,12 @@ pub mod security_events {
         pub country_code: Option<String>,
         #[sea_orm(column_type = "Text")]
         pub user_agent: Option<String>,
+        /// Who the request was made by, when the site authenticated them: the
+        /// OIDC session's `sub`. NULL for an anonymous request (the ordinary
+        /// case) and for every row written before migration 000071 — an empty
+        /// string would claim the caller was identified and turned out to be
+        /// nobody.
+        pub user_identity: Option<String>,
         pub created_at: DateTimeUtc,
     }
 
@@ -98,6 +104,10 @@ pub mod access_logs {
         pub response_body: Option<String>,
         pub response_body_size: Option<i64>,
         pub response_body_truncated: Option<bool>,
+        /// Who the request was made by, when the site authenticated them: the
+        /// OIDC session's `sub`. NULL for an anonymous request and for rows
+        /// written before migration 000071.
+        pub user_identity: Option<String>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

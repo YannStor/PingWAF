@@ -322,6 +322,19 @@ pub struct RequestState {
     pub location_processing_count: i32,
     /// The total number of requests accepted for this location.
     pub location_accepted_count: u64,
+    /// Who the request was made by, when a plugin authenticated them.
+    ///
+    /// Set by the OIDC plugin once it has validated a session, and read by
+    /// whoever writes a log or an event, so an entry can be traced back to an
+    /// account rather than only to an address. The value is the provider's
+    /// `sub` — an identifier it issued, never a secret — and `None` means the
+    /// request was anonymous, which is the ordinary case.
+    ///
+    /// The plugin chain runs WAF before OIDC (an unauthenticated attacker is
+    /// stopped without being sent to a provider), so an event raised during
+    /// the request phase is anonymous by construction; the access log, written
+    /// on the response, sees the identity.
+    pub user_identity: Option<String>,
 }
 
 /// All cache-related configuration and statistics for a request.
@@ -352,6 +365,14 @@ pub struct CacheInfo {
 pub struct Features {
     /// A map of custom variables for request processing.
     pub variables: Option<AHashMap<String, String>>,
+    /// The uri the client asked for, when the location has rewritten it.
+    ///
+    /// A plugin that sends the client somewhere relative to where it is (the
+    /// `directory` plugin adding the closing slash, the `oidc` plugin matching
+    /// its callback path) goes by this: the rewritten path is the upstream's,
+    /// not the browser's. `None` when the location rewrote nothing, so the
+    /// request's own uri is the client's.
+    pub original_uri: Option<http::Uri>,
     /// A list of plugin names and their processing times in milliseconds.
     pub plugin_processing_times: Option<Vec<(Arc<str>, u32)>>,
     /// Statistics about response compression.

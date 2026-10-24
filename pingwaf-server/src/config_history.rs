@@ -35,8 +35,8 @@ use crate::models::{
     defense_settings, error_pages, geo_rules, ip_access_rules, ip_group_sites,
     mtls_ca, mtls_client_certificate, origin_settings, rate_limit_rules,
     rewrite_rules, rule, rule_groups, site, site_ai_bot_policies,
-    site_ai_crawl_settings, site_basic_auth, site_certificates, site_routes,
-    site_ssl, site_upstream_pools, site_upstreams, waf_settings,
+    site_ai_crawl_settings, site_basic_auth, site_certificates, site_oidc,
+    site_routes, site_ssl, site_upstream_pools, site_upstreams, waf_settings,
 };
 
 /// Schema marker inside the snapshot document; bumped when the layout changes.
@@ -202,6 +202,7 @@ pub async fn capture_site_snapshot(
         "site_basic_auth",
         site_id
     );
+    snapshot_table!(db, tables, site_oidc, Id, "site_oidc", site_id);
     snapshot_table!(db, tables, rewrite_rules, Id, "rewrite_rules", site_id);
     snapshot_table!(
         db,
@@ -535,6 +536,7 @@ async fn restore_site_rows(
     collect_live_rows!(txn, live, bot_protection, "bot_protection", site_id);
     collect_live_rows!(txn, live, geo_rules, "geo_rules", site_id);
     collect_live_rows!(txn, live, site_basic_auth, "site_basic_auth", site_id);
+    collect_live_rows!(txn, live, site_oidc, "site_oidc", site_id);
     collect_live_rows!(txn, live, rewrite_rules, "rewrite_rules", site_id);
     collect_live_rows!(
         txn,
@@ -576,6 +578,7 @@ async fn restore_site_rows(
     delete_site_table!(txn, bot_protection, site_id);
     delete_site_table!(txn, geo_rules, site_id);
     delete_site_table!(txn, site_basic_auth, site_id);
+    delete_site_table!(txn, site_oidc, site_id);
     delete_site_table!(txn, rewrite_rules, site_id);
     delete_site_table!(txn, site_ai_bot_policies, site_id);
     delete_site_table!(txn, site_ai_crawl_settings, site_id);
@@ -623,6 +626,7 @@ async fn restore_site_rows(
     restore_site_table!(txn, tables, live, bot_protection, "bot_protection");
     restore_site_table!(txn, tables, live, geo_rules, "geo_rules");
     restore_site_table!(txn, tables, live, site_basic_auth, "site_basic_auth");
+    restore_site_table!(txn, tables, live, site_oidc, "site_oidc");
     restore_site_table!(txn, tables, live, rewrite_rules, "rewrite_rules");
     restore_site_table!(
         txn,

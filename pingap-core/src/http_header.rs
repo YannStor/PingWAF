@@ -33,6 +33,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 // Define string constants for commonly used HTTP header names.
 const HTTP_HEADER_X_FORWARDED_FOR: &str = "x-forwarded-for";
 const HTTP_HEADER_X_REAL_IP: &str = "x-real-ip";
+/// The scheme the outermost proxy saw; read only from a trusted peer.
+const HTTP_HEADER_X_FORWARDED_PROTO: &str = "x-forwarded-proto";
+
+// The scheme as a `&'static str`, for callers that build a URL rather than a
+// header value (the `SCHEME_*` statics above are `HeaderValue`s).
+const SCHEME_HTTPS_STR: &str = "https";
+const SCHEME_HTTP_STR: &str = "http";
 
 // Define byte slice constants for special variable tags used in header value processing.
 // These are matched against the raw bytes of a header value.
@@ -617,6 +624,69 @@ pub fn resolve_client_ip_with_trust(
     }
 }
 
+/// The scheme a request actually arrived over, honouring a trusted proxy's
+/// `X-Forwarded-Proto`.
+///
+/// The data plane only sees the last hop. When a CDN or a TLS-terminating
+/// load balancer sits in front, that hop is plain HTTP and
+/// `ctx.conn.tls_version` is `None` even though the browser used HTTPS — so a
+/// caller that derives a redirect URL (OIDC's `redirect_uri`, the session
+/// cookie's `Secure` flag) from the connection alone would produce an
+/// `http://` URL for a site that is only reachable over `https://`, and the
+/// browser would refuse or the cookie would not stick.
+///
+/// `X-Forwarded-Proto` is client-controlled unless the direct peer is a
+/// proxy the operator named, so trust is the same as for the client IP: the
+/// peer must fall inside `trust.trusted_ranges`. An untrusted peer, a
+/// disabled trust setting, or a value that is not `http`/`https` all fall
+/// back to the connection's own TLS state — never to a header a client
+/// could set to talk the site into a weaker scheme.
+///
+/// Only the first entry of a comma-separated list is read, which is what the
+/// outermost proxy (the one the browser talked to) appends.
+pub fn resolve_scheme_with_trust(
+    session: &Session,
+    ctx: &Ctx,
+    trust: &ProxyTrust,
+) -> &'static str {
+    let from_connection = || {
+        if ctx.conn.tls_version.is_some() {
+            SCHEME_HTTPS_STR
+        } else {
+            SCHEME_HTTP_STR
+        }
+    };
+    if !trust.enabled {
+        return from_connection();
+    }
+    let Some(peer) = session
+        .client_addr()
+        .and_then(|addr| addr.as_inet())
+        .map(|addr| addr.ip())
+    else {
+        // No peer address (a unit-test mock, an exotic transport): trust
+        // cannot be judged, so nothing forwarded is believed.
+        return from_connection();
+    };
+    if !trust.peer_is_trusted(peer) {
+        return from_connection();
+    }
+    let Some(value) = get_req_header_value(
+        session.req_header(),
+        HTTP_HEADER_X_FORWARDED_PROTO,
+    ) else {
+        return from_connection();
+    };
+    match value.split(',').next().unwrap_or_default().trim() {
+        "https" => SCHEME_HTTPS_STR,
+        "http" => SCHEME_HTTP_STR,
+        // A trusted proxy sent something unusable. Falling back to the
+        // connection is right: it may well be the https we were told about
+        // only badly, and it is never worse than what we already knew.
+        _ => from_connection(),
+    }
+}
+
 /// A convenient helper to get a header value as a `&str` from a `RequestHeader`.
 pub fn get_req_header_value<'a>(
     req_header: &'a RequestHeader,
@@ -734,6 +804,62 @@ pub fn remove_query_from_header(
     Ok(())
 }
 
+/// Takes `names` out of what the `Connection` header of a request
+/// nominates, for the headers the proxy itself has put on the request.
+///
+/// A header named in `Connection` is one its sender calls hop-by-hop, and it
+/// is removed from the request that goes to the upstream. For a header of the
+/// client's own that is as it should be. For one a plugin set - the address of
+/// the client, what the auth service said of it - it let the client decide that
+/// the upstream does not get it: `Connection: X-User-Id` was enough. Only
+/// `Host` and the `X-Forwarded-*` headers were safe from that.
+///
+/// The rest of the header stays as it is: `keep-alive`, `upgrade` and what
+/// else the client nominated.
+pub fn protect_from_connection_header(
+    req: &mut RequestHeader,
+    names: &[HeaderName],
+) {
+    if names.is_empty() || !req.headers.contains_key(header::CONNECTION) {
+        return;
+    }
+    let nominated = |token: &str| {
+        names
+            .iter()
+            .any(|name| name.as_str().eq_ignore_ascii_case(token))
+    };
+    let mut kept = vec![];
+    let mut removed = false;
+    for value in req.headers.get_all(header::CONNECTION).iter() {
+        // A value that is not text has no name in it to take out.
+        // A value that is not text has no name in it to take out, but the other
+        // values still do: skipping this one rather than giving up keeps a
+        // client from switching the protection off by sending one header line
+        // with an invalid byte in it.
+        let Ok(value) = value.to_str() else {
+            continue;
+        };
+        for token in value.split(',').map(str::trim) {
+            if token.is_empty() {
+                continue;
+            }
+            if nominated(token) {
+                removed = true;
+            } else {
+                kept.push(token);
+            }
+        }
+    }
+    if !removed {
+        return;
+    }
+    let kept = kept.join(", ");
+    req.remove_header(&header::CONNECTION);
+    if !kept.is_empty() {
+        let _ = req.insert_header(header::CONNECTION, kept);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -763,6 +889,85 @@ mod tests {
             .expect("the h1 session always carries a digest")
             .socket_digest = Some(Arc::new(socket_digest));
         session
+    }
+
+    /// The scheme a request arrived over, honouring a trusted proxy.
+    ///
+    /// A CDN or a TLS-terminating load balancer makes the last hop plain HTTP,
+    /// so a site that is only reachable over `https://` would otherwise have
+    /// its redirect URL and its cookie flags derived from `http://`.
+    #[tokio::test]
+    async fn test_resolve_scheme_with_trust() {
+        let ranges = &["10.0.0.0/8".to_string()];
+        let trust = ProxyTrust::new(true, "x-forwarded-for", true, ranges);
+        let ctx = Ctx::default();
+
+        // A trusted proxy saying https is believed even though this hop is
+        // plain HTTP — the case the whole function exists for.
+        let session = new_test_session_with_peer(
+            &["Host: app.test", "X-Forwarded-Proto: https"],
+            "/",
+            "10.0.0.1".parse().unwrap(),
+        )
+        .await;
+        assert_eq!("https", resolve_scheme_with_trust(&session, &ctx, &trust));
+
+        // A direct client from a public address controls its own headers, so
+        // its claim of https is refused and the connection decides.
+        let session = new_test_session_with_peer(
+            &["Host: app.test", "X-Forwarded-Proto: https"],
+            "/",
+            "203.0.113.9".parse().unwrap(),
+        )
+        .await;
+        assert_eq!("http", resolve_scheme_with_trust(&session, &ctx, &trust));
+
+        // A trusted proxy that sent something unusable falls back to the
+        // connection rather than to a guess.
+        let session = new_test_session_with_peer(
+            &["Host: app.test", "X-Forwarded-Proto: ftp"],
+            "/",
+            "10.0.0.1".parse().unwrap(),
+        )
+        .await;
+        assert_eq!("http", resolve_scheme_with_trust(&session, &ctx, &trust));
+
+        // The first entry is the outermost proxy's, which is what the browser
+        // talked to.
+        let session = new_test_session_with_peer(
+            &["Host: app.test", "X-Forwarded-Proto: https, http"],
+            "/",
+            "10.0.0.1".parse().unwrap(),
+        )
+        .await;
+        assert_eq!("https", resolve_scheme_with_trust(&session, &ctx, &trust));
+
+        // Trust disabled: the header is ignored entirely.
+        let untrusted = ProxyTrust::default();
+        let session = new_test_session_with_peer(
+            &["Host: app.test", "X-Forwarded-Proto: https"],
+            "/",
+            "10.0.0.1".parse().unwrap(),
+        )
+        .await;
+        assert_eq!(
+            "http",
+            resolve_scheme_with_trust(&session, &ctx, &untrusted)
+        );
+
+        // No header at all: the connection's own state, which is https here.
+        let mut tls_ctx = Ctx::default();
+        tls_ctx.conn.tls_version = Some("tls1.3".into());
+        let session = new_test_session_with_peer(
+            &["Host: app.test"],
+            "/",
+            "10.0.0.1".parse().unwrap(),
+        )
+        .await;
+        assert_eq!(
+            "https",
+            resolve_scheme_with_trust(&session, &tls_ctx, &trust)
+        );
     }
 
     #[tokio::test]

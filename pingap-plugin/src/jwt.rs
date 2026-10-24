@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{Error, get_duration_conf, get_hash_key, get_str_conf};
+use super::{
+    Error, get_duration_conf, get_hash_key, get_str_conf, get_str_slice_conf,
+};
 use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::{Bytes, BytesMut};
-use http::StatusCode;
+use http::{HeaderName, HeaderValue, StatusCode};
 use humantime::parse_duration;
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
@@ -29,7 +31,7 @@ use pingap_core::{
 use pingap_core::{
     HTTP_HEADER_CONTENT_JSON, HTTP_HEADER_TRANSFER_CHUNKED, HttpResponse,
 };
-use pingora::http::ResponseHeader;
+use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::proxy::Session;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -180,7 +182,10 @@ struct JwksCache {
 /// A remote JWKS endpoint with a TTL cache, single-flight refresh and key
 /// rotation. Verification serves cached keys lock-free; only a cache miss /
 /// expiry / unknown `kid` triggers a rate-limited refetch.
-struct JwksSource {
+///
+/// Shared with the `oidc` plugin, which points one at the `jwks_uri` its
+/// provider advertises.
+pub(crate) struct JwksSource {
     url: String,
     ttl: Duration,
     /// Minimum spacing between refetches, to bound refetching on unknown kids.
@@ -239,6 +244,65 @@ impl JwksSource {
             return None;
         }
         cache.keys.get(kid).cloned()
+    }
+
+    /// The keys at `url`, kept for an hour: for the `oidc` plugin, which learns
+    /// where the keys of its provider are when it asks the provider.
+    pub(crate) fn new(url: String, client: reqwest::Client) -> Self {
+        Self {
+            url,
+            ttl: Duration::from_secs(3600),
+            cooldown: Duration::from_secs(10),
+            client,
+            cache: ArcSwapOption::empty(),
+            refresh_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    /// The claims of `token`, when one of the keys verifies it under the
+    /// validation that `validation` gives for its algorithm: the caller says
+    /// what the token is held to beyond its signature.
+    ///
+    /// An ID token names its key with `kid`; a provider that publishes a single
+    /// key may omit it, in which case every cached key is tried. As in
+    /// `verify`, no token signed with a secret is accepted (algorithm
+    /// confusion).
+    pub(crate) async fn verify_with(
+        &self,
+        token: &str,
+        validation: impl Fn(Algorithm) -> Validation,
+    ) -> Option<ClaimMap> {
+        let header = decode_header(token).ok()?;
+        if !is_asymmetric_alg(header.alg) {
+            return None;
+        }
+        let validation = validation(header.alg);
+        let kid = header.kid.as_deref();
+        if let Some(claims) = self.verify_cached(token, kid, &validation) {
+            return Some(claims);
+        }
+        self.refresh().await;
+        self.verify_cached(token, kid, &validation)
+    }
+
+    /// Verifies against whatever the cache holds, ignoring the TTL: after a
+    /// refresh attempt a stale key is still better than locking the site out.
+    fn verify_cached(
+        &self,
+        token: &str,
+        kid: Option<&str>,
+        validation: &Validation,
+    ) -> Option<ClaimMap> {
+        let cache = self.cache.load_full()?;
+        let candidates: Vec<&DecodingKey> = match kid {
+            Some(kid) => cache.keys.get(kid).into_iter().collect(),
+            None => cache.keys.values().collect(),
+        };
+        candidates.into_iter().find_map(|key| {
+            decode::<ClaimMap>(token, key, validation)
+                .ok()
+                .map(|data| data.claims)
+        })
     }
 
     async fn verify(&self, token: &str) -> bool {
@@ -716,10 +780,175 @@ impl ModifyResponseBody for Sign {
 
 register_plugin!("jwt", JwtAuth);
 
+/// Every claim of a token, for the rules that are about more than its times.
+///
+/// Shared with the `oidc` plugin, which reads the claims of an ID token out of
+/// the same verification paths.
+pub(crate) type ClaimMap = serde_json::Map<String, serde_json::Value>;
+
+/// A claim as the value of a header: text as it is, a number or a boolean as it
+/// is written, a list of those joined by commas. `None` for what has no such
+/// form - an object, a list of objects - and for text a header cannot carry, a
+/// line break in it above all.
+pub(crate) fn claim_header_value(
+    value: &serde_json::Value,
+) -> Option<HeaderValue> {
+    use serde_json::Value;
+    let scalar = |value: &Value| match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        _ => None,
+    };
+    let text = match value {
+        Value::Array(items) => items
+            .iter()
+            .map(scalar)
+            .collect::<Option<Vec<_>>>()?
+            .join(","),
+        other => scalar(other)?,
+    };
+    HeaderValue::from_bytes(text.as_bytes()).ok()
+}
+
+/// Removes from a request every header that is one of `own` to an upstream: the
+/// names themselves, and what folds to them when `_` is read as `-`.
+pub(crate) fn strip_claim_headers(
+    header: &mut RequestHeader,
+    own: &[HeaderName],
+) {
+    if own.is_empty() {
+        return;
+    }
+    let folded = |name: &str| {
+        name.bytes()
+            .map(|byte| if byte == b'_' { b'-' } else { byte })
+            .collect::<Vec<u8>>()
+    };
+    let own: Vec<Vec<u8>> =
+        own.iter().map(|name| folded(name.as_str())).collect();
+    let sent: Vec<HeaderName> = header
+        .headers
+        .keys()
+        .filter(|name| own.contains(&folded(name.as_str())))
+        .cloned()
+        .collect();
+    for name in sent {
+        header.remove_header(&name);
+    }
+}
+
+/// The `claims_to_headers` of a plugin: `claim:Header-Name` entries. `invalid`
+/// makes the error of the plugin out of a message.
+pub(crate) fn parse_claims_to_headers(
+    value: &PluginConf,
+    invalid: &dyn Fn(String) -> Error,
+) -> Result<Vec<(String, HeaderName)>> {
+    get_str_slice_conf(value, "claims_to_headers")
+        .iter()
+        .map(|item| {
+            // At the last colon: a header name has none, and the name of a
+            // claim may - the namespaced ones are urls
+            // (`https://example.com/roles`).
+            let (claim, header) = item
+                .rsplit_once(':')
+                .map(|(claim, header)| (claim.trim(), header.trim()))
+                .filter(|(claim, _)| !claim.is_empty())
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "claims_to_headers: {item:?} should be claim:Header-Name"
+                    ))
+                })?;
+            let name =
+                HeaderName::from_bytes(header.as_bytes()).map_err(|_| {
+                    invalid(format!(
+                        "claims_to_headers: {header:?} is not a header name"
+                    ))
+                })?;
+            // What frames the body, names the upstream, or carries the
+            // request's own credentials and client address is not a place for
+            // something a token says: a claim in `Authorization` would replace
+            // the origin's authentication, and one in `X-Forwarded-For` would
+            // rewrite the address the origin sees.
+            if [
+                http::header::CONTENT_LENGTH,
+                http::header::TRANSFER_ENCODING,
+                http::header::HOST,
+                http::header::CONNECTION,
+                http::header::AUTHORIZATION,
+                http::header::COOKIE,
+                http::header::SET_COOKIE,
+                HeaderName::from_static("x-forwarded-for"),
+                HeaderName::from_static("x-forwarded-proto"),
+                HeaderName::from_static("x-real-ip"),
+            ]
+            .contains(&name)
+            {
+                return Err(invalid(format!(
+                    "claims_to_headers: {name} is not a header for a claim"
+                )));
+            }
+            Ok((claim.to_string(), name))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use pingap_config::PluginConf;
+
+    /// The `oidc` plugin reads its claim mappings through this function, so the
+    /// header names it refuses are the whole defence against a claim landing
+    /// somewhere that changes the request's meaning.
+    #[test]
+    fn claims_to_headers_refuses_the_headers_that_matter() {
+        let invalid = |message: String| Error::Invalid {
+            category: "test".to_string(),
+            message,
+        };
+        let parse = |entries: &str| {
+            let conf: PluginConf =
+                toml::from_str(&format!("claims_to_headers = {entries}"))
+                    .expect("valid toml");
+            parse_claims_to_headers(&conf, &invalid)
+        };
+
+        // The format the control plane generates.
+        let parsed = parse(r#"["email:X-Auth-Email", "sub:X-Auth-Sub"]"#)
+            .expect("valid entries");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].0, "email");
+        assert_eq!(parsed[0].1.as_str(), "x-auth-email");
+
+        // A namespaced claim keeps its colons: the split is at the last one.
+        let parsed = parse(r#"["https://example.com/roles:X-Auth-Roles"]"#)
+            .expect("namespaced claim");
+        assert_eq!(parsed[0].0, "https://example.com/roles");
+
+        for header in [
+            "Content-Length",
+            "Transfer-Encoding",
+            "Host",
+            "Connection",
+            "Authorization",
+            "Cookie",
+            "Set-Cookie",
+            "X-Forwarded-For",
+            "X-Forwarded-Proto",
+            "X-Real-IP",
+        ] {
+            assert!(
+                parse(&format!(r#"["email:{header}"]"#)).is_err(),
+                "{header} must be refused"
+            );
+        }
+
+        // A malformed entry and an empty claim are refused too.
+        assert!(parse(r#"["no-colon"]"#).is_err());
+        assert!(parse(r#"["  :X-Auth"]"#).is_err());
+        assert!(parse(r#"["email:not a header"]"#).is_err());
+    }
     use pingap_core::{Ctx, PluginStep};
     use pingora::proxy::Session;
     use pretty_assertions::assert_eq;

@@ -28,6 +28,9 @@ const byteLen = (s: string) => new TextEncoder().encode(s).length
  *
  * ⚠️ 压缩响应（gzip/br）下替换不生效 —— 数据面的已知限制，卡片内固定提示。
  * 保存走 `PUT /api/v1/sites/{id}`；`rules: []` 视为清空，提交 `null`。
+ *
+ * 挂载在「重写规则」页：响应体替换与重写规则同属"改写经过本站的请求/响应"，
+ * 放在同一页比塞进基础设置更容易被发现（2026-10-23 迁移）。
  */
 export function ResponseReplaceCard({ site }: { site: Site }) {
   const { t } = useTranslation()

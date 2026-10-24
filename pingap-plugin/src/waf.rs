@@ -1512,6 +1512,14 @@ struct PendingAccess {
     referer: String,
     tls_version: String,
     country_code: String,
+    /// Who the request was made by, backfilled by the OIDC plugin once it has
+    /// validated a session. Empty while the request is anonymous, and also
+    /// when the site has no gate at all.
+    ///
+    /// The entry is created during the request phase, which runs *before* the
+    /// OIDC plugin (an unauthenticated attacker is stopped without being sent
+    /// to a provider), so this cannot be filled in at creation time.
+    user_identity: String,
     request_headers: Vec<(String, String)>,
     request_body: Option<Vec<u8>>,
     request_body_size: u64,
@@ -1777,6 +1785,37 @@ fn amend_pending_access_body(
     }
 }
 
+/// Records who the request is from on the pending access entry.
+///
+/// Called by the OIDC plugin once a session has been validated, which happens
+/// after this entry was created: the WAF runs first in the chain. A no-op when
+/// the entry is gone (already answered or swept), which is why the caller does
+/// not depend on it.
+pub fn amend_pending_access_identity(request_id: &str, identity: &str) {
+    if identity.is_empty() {
+        return;
+    }
+    if let Some(mut entry) = PENDING_ACCESS.get_mut(request_id) {
+        entry.user_identity = identity.to_string();
+    }
+}
+
+/// The identity to log, preferring what the context holds.
+///
+/// The pending entry is written by the OIDC plugin in the *request* phase and
+/// read back here in the *response* phase, which makes it the more fragile of
+/// the two paths — anything that changes the request id in between orphans the
+/// write (the entry is keyed on it). The context is the same value the
+/// security-event path already reads successfully, so it is consulted again
+/// here and wins when it has something to say: the identity is then logged
+/// even if the amendment never landed.
+fn identity_from(ctx: &Ctx, amended: String) -> String {
+    match ctx.state.user_identity.clone() {
+        Some(identity) if !identity.is_empty() => identity,
+        _ => amended,
+    }
+}
+
 /// What a completed (or capped) body inspection concluded, shared by the
 /// request phase and the request-body filter.
 enum VerdictOutcome {
@@ -1996,6 +2035,7 @@ fn emit_access(
         referer: pending.referer,
         tls_version: pending.tls_version,
         country_code: pending.country_code,
+        user_identity: pending.user_identity,
         request_headers: pending.request_headers,
         request_body: pending.request_body,
         request_body_size: pending.request_body_size,
@@ -2110,6 +2150,9 @@ pub(crate) fn emit_challenge_access(
             .unwrap_or_default()
             .to_string(),
         country_code: String::new(),
+        // Filled in by the OIDC plugin when a session names the caller; this
+        // response is generated before that plugin runs.
+        user_identity: String::new(),
         request_headers: cap_headers(
             headers
                 .iter()
@@ -2603,6 +2646,11 @@ impl WafPlugin {
             user_agent,
             country_code: request_data.country_code.clone().unwrap_or_default(),
             matched_tags: verdict.matched_rules.clone(),
+            // The WAF runs before the OIDC plugin, so no session has
+            // named the caller yet: an event raised here is anonymous by
+            // construction. The access log, written on the response, is
+            // where the identity appears.
+            user_identity: String::new(),
         });
     }
 
@@ -2696,6 +2744,11 @@ impl WafPlugin {
                 .unwrap_or_default(),
             country_code: request_data.country_code.clone().unwrap_or_default(),
             matched_tags: Vec::new(),
+            // The WAF runs before the OIDC plugin, so no session has
+            // named the caller yet: an event raised here is anonymous by
+            // construction. The access log, written on the response, is
+            // where the identity appears.
+            user_identity: String::new(),
         });
     }
 
@@ -2738,6 +2791,11 @@ impl WafPlugin {
                 .unwrap_or_default(),
             country_code: request_data.country_code.clone().unwrap_or_default(),
             matched_tags: Vec::new(),
+            // The WAF runs before the OIDC plugin, so no session has
+            // named the caller yet: an event raised here is anonymous by
+            // construction. The access log, written on the response, is
+            // where the identity appears.
+            user_identity: String::new(),
         });
     }
 
@@ -3287,6 +3345,11 @@ impl Plugin for WafPlugin {
                         .unwrap_or_default()
                         .to_string(),
                     country_code: country.clone().unwrap_or_default(),
+                    // Backfilled by the OIDC plugin
+                    // (`amend_pending_access_identity`) once it has validated
+                    // a session: this entry is built during the request phase,
+                    // which runs before that plugin.
+                    user_identity: String::new(),
                     request_headers: log_headers,
                     // The body prefix is backfilled by the request-body
                     // filter (`amend_pending_access_body`) once the bytes
@@ -3907,6 +3970,11 @@ impl Plugin for WafPlugin {
                         .clone()
                         .unwrap_or_default(),
                     matched_tags: Vec::new(),
+                    // The WAF runs before the OIDC plugin, so no session has
+                    // named the caller yet: an event raised here is anonymous by
+                    // construction. The access log, written on the response, is
+                    // where the identity appears.
+                    user_identity: String::new(),
                 });
             }
             let (log_body, log_body_size, log_truncated) =
@@ -4119,6 +4187,17 @@ impl Plugin for WafPlugin {
                     cache_status,
                 })
             } else {
+                // The entry is held for the body phase, which counts the
+                // streamed bytes before shipping it. The identity is written
+                // now rather than there: a response whose body never reaches
+                // its end-of-stream — the client vanished, the upstream died
+                // mid-body — is shipped by the sweep instead, and the sweep
+                // has no request context to read it from. Writing it here
+                // means it survives whichever path the entry takes.
+                entry.user_identity = identity_from(
+                    ctx,
+                    std::mem::take(&mut entry.user_identity),
+                );
                 entry.response = Some(ResponseFacts {
                     status_code: status as u32,
                     upstream_addr: ctx.upstream.address.clone(),
@@ -4135,9 +4214,11 @@ impl Plugin for WafPlugin {
             }
         };
         if let HeaderOutcome::Immediate(facts) = outcome {
-            let Some((_, pending)) = PENDING_ACCESS.remove(&request_id) else {
+            let Some((_, mut pending)) = PENDING_ACCESS.remove(&request_id)
+            else {
                 return Ok(ResponsePluginResult::Unchanged);
             };
+            pending.user_identity = identity_from(ctx, pending.user_identity);
             emit_access(&agent, &request_id, pending, facts);
         }
         Ok(ResponsePluginResult::Unchanged)
@@ -4159,6 +4240,7 @@ impl Plugin for WafPlugin {
             else {
                 return Ok(ResponseBodyPluginResult::Unchanged);
             };
+            pending.user_identity = identity_from(ctx, pending.user_identity);
             let Some(agent) = PingWafAgent::instance() else {
                 return Ok(ResponseBodyPluginResult::Unchanged);
             };
@@ -4371,6 +4453,7 @@ ml_threshold = 0.75
             },
             response_replace: None,
             ai_crawl: None,
+            oidc: None,
         }
     }
 
@@ -6553,6 +6636,58 @@ inspect_body = true"###,
         assert_eq!(Some(b"page one".to_vec()), entry.response_body);
         // Consumed exactly once.
         assert!(agent.client.pop_log().await.is_none());
+    }
+
+    /// The authenticated identity survives every hop from the plugin to the
+    /// control plane.
+    ///
+    /// Regression: the WAF put it on `AccessLogEntry`, but the agent's
+    /// `log_access` built the shipped `LogEntry` with a hardcoded empty
+    /// string, so the column was NULL on every deployment — while
+    /// `security_events` (a different conversion) carried the account. This
+    /// walks the same path the plugin does and asserts on the value the agent
+    /// would send.
+    #[tokio::test]
+    async fn test_access_log_carries_the_authenticated_identity() {
+        let (_guard, agent, _dir) = install_test_agent().await;
+        let plugin = WafPlugin::new(
+            &toml::from_str::<PluginConf>(r###"mode = "block""###).unwrap(),
+        )
+        .unwrap();
+
+        let input_header = "GET /whoami HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let mock_io = Builder::new().read(input_header.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        let mut ctx = Ctx::default();
+        ctx.conn.client_ip = Some("203.0.113.44".to_string());
+        plugin
+            .handle_request(PluginStep::EarlyRequest, &mut session, &mut ctx)
+            .await
+            .unwrap();
+
+        // What the OIDC plugin does once it validates a session, in the
+        // request phase — before the response phase completes the entry.
+        ctx.state.user_identity = Some("user-42".to_string());
+        let request_id = ctx.state.request_id.clone().unwrap();
+        amend_pending_access_identity(&request_id, "user-42");
+
+        let mut resp = ResponseHeader::build(200, None).unwrap();
+        plugin
+            .handle_response(&mut session, &mut ctx, &mut resp)
+            .await
+            .unwrap();
+        plugin
+            .handle_response_body(&mut session, &mut ctx, &mut None, true)
+            .unwrap();
+
+        let entry = agent.client.pop_log().await.unwrap();
+        assert_eq!(request_id, entry.request_id);
+        assert_eq!(
+            "user-42", entry.user_identity,
+            "the identity must reach the shipped entry, not be dropped in the \
+             agent's conversion"
+        );
     }
 
     #[test]

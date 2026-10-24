@@ -11,6 +11,7 @@
 pub mod ai;
 pub mod api;
 pub mod auth;
+pub mod boot_history;
 pub mod config;
 pub mod config_history;
 pub mod defaults;
@@ -79,6 +80,26 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
         .await
         .map_err(|err| anyhow::anyhow!("migration failed: {err}"))?;
     tracing::info!("schema migrations applied");
+
+    // ── 3a. Record this start ───────────────────────────────────────────────
+    // The control plane cannot announce its own death (an OOM kill runs no
+    // code), so each start writes a row and the gap to the previous row is the
+    // previous process's uptime. Best-effort: a control plane that cannot
+    // record its own boot still has to serve traffic.
+    match boot_history::record_boot(&db, boot_history::version(), &hostname())
+        .await
+    {
+        Ok(row) => tracing::info!(
+            booted_at = %row.booted_at,
+            reason = %row.reason,
+            previous_uptime_secs = ?row.previous_uptime_seconds,
+            "control plane boot recorded"
+        ),
+        Err(err) => tracing::warn!(
+            error = %err,
+            "could not record the control plane boot"
+        ),
+    }
 
     // ── 3b. Pin the JWT secret for the life of the instance ────────────────
     resolve_jwt_secret(&db, &mut config).await?;
@@ -393,6 +414,22 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
 
 /// Reloads the notification channels and settings every minute, so edits made
 /// outside this process (the CLI, another instance) are picked up.
+/// The machine this control plane is running on, as `/etc/hostname` reports
+/// it, falling back to `HOSTNAME` / `COMPUTERNAME`.
+///
+/// Same resolution the agent uses, so a control plane and an agent on one host
+/// agree on its name. Recorded with each boot so a move between hosts is
+/// visible in the history rather than implied.
+fn hostname() -> String {
+    std::fs::read_to_string("/etc/hostname")
+        .map(|value| value.trim().to_string())
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 fn start_notify_reload_loop(state: AppState) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {

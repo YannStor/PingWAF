@@ -12,6 +12,7 @@ pub mod cache_status;
 pub mod config;
 pub mod control_plane;
 pub mod registry;
+pub mod visitor_auth;
 
 pub use cache_status::{CacheStatusRegistry, SiteCacheStatus};
 pub use control_plane::ControlPlaneService;

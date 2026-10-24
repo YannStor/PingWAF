@@ -15,7 +15,15 @@ use pingwaf_proto::control_plane::{
     BlockedIp, CertEventAck, CertEventEntry, GetSiteConfigRequest, HostSample,
     LogAck, LogEntry, Metric, MetricAck, MetricBatch, RegisterAgentRequest,
     RegisterAgentResponse, RuleBundle, ServerCommand, SiteConfig, SiteStatus,
-    SyncRulesRequest, UpstreamHealth,
+    SyncRulesRequest, UpstreamHealth, VisitorChallengeRequest,
+    VisitorChallengeResponse, VisitorChangePasswordRequest,
+    VisitorChangePasswordResponse, VisitorGrantsRequest, VisitorGrantsResponse,
+    VisitorLoginRequest, VisitorLoginResponse, VisitorLogoutRequest,
+    VisitorLogoutResponse, VisitorPasskeyBeginRequest,
+    VisitorPasskeyFinishRequest, VisitorPasskeyFinishResponse,
+    VisitorPasskeyListResponse, VisitorPasskeyOptionsResponse,
+    VisitorSetVisibleRequest, VisitorSetVisibleResponse,
+    VisitorValidateRequest, VisitorValidateResponse,
 };
 use sea_orm::sea_query::Expr;
 use sea_orm::{
@@ -75,6 +83,11 @@ const MAX_COUNTRY: usize = 2;
 const MAX_CACHE_STATUS: usize = 20;
 const MAX_TLS_VERSION: usize = 10;
 const MAX_UPSTREAM: usize = 255;
+/// Matches the `user_identity` column (migration 000071). The agent is a
+/// separate process and an OIDC `sub` is provider-defined, so an oversized
+/// one has to be cut here: a value longer than the column would fail the
+/// whole batch insert and cost the log entries either side of it.
+const MAX_USER_IDENTITY: usize = 255;
 const MAX_METRIC_NAME: usize = 200;
 
 /// Probe samples are kept for a day: at a 5-second cadence a single agent
@@ -110,7 +123,9 @@ static LAST_METRIC_SWEEP: AtomicI64 = AtomicI64::new(0);
 
 /// The gRPC control plane service.
 pub struct ControlPlaneService {
-    db: DatabaseConnection,
+    /// `pub(crate)` so the visitor-auth RPCs in `grpc/visitor_auth.rs` can
+    /// reach the same connection; everything else stays private to this file.
+    pub(crate) db: DatabaseConnection,
     config: Arc<ServerConfig>,
     agents: AgentRegistry,
     /// Optional Elasticsearch shipper. When present, every streamed log entry is
@@ -140,7 +155,13 @@ impl ControlPlaneService {
     }
 
     /// Verifies an agent token and returns the matching row.
-    async fn authorize(&self, token: &str) -> Result<agent::Model, Status> {
+    ///
+    /// `pub(crate)` because the visitor-auth RPCs in `grpc/visitor_auth.rs`
+    /// authenticate the same way.
+    pub(crate) async fn authorize(
+        &self,
+        token: &str,
+    ) -> Result<agent::Model, Status> {
         if token.trim().is_empty() {
             return Err(Status::unauthenticated(INVALID_CREDENTIALS));
         }
@@ -173,7 +194,10 @@ impl ControlPlaneService {
 
     /// Sites this agent is allowed to see: its own binding, or every site owned
     /// by the user that issued its API key.
-    async fn visible_sites(
+    ///
+    /// `pub(crate)` because the visitor-auth RPCs in `grpc/visitor_auth.rs`
+    /// scope their answers by the same set.
+    pub(crate) async fn visible_sites(
         &self,
         row: &agent::Model,
     ) -> Result<Vec<site::Model>, Status> {
@@ -616,6 +640,42 @@ impl ControlPlaneTrait for ControlPlaneService {
                 event_batch.push(event);
             }
 
+            // Two OIDC failures are operational events, not traffic: a login
+            // that cannot be completed (a wrong client secret, a replayed code)
+            // and a provider that cannot be reached (which makes the protected
+            // part of the site unreachable). They are the only security events
+            // that also raise an alert — a generic bridge would turn every
+            // blocked request into a notification.
+            if let Some((event_type, severity)) =
+                oidc_alert_for(&message.waf_event_type)
+            {
+                crate::notify::emit(crate::notify::AlertEvent {
+                    event_type: event_type.to_string(),
+                    severity,
+                    title: oidc_alert_title(event_type, &message.host),
+                    message: oidc_alert_message(
+                        event_type,
+                        &message.host,
+                        &message.waf_details,
+                    ),
+                    details: Some(serde_json::json!({
+                        "site_id": message.site_id,
+                        "host": message.host,
+                        "path": message.path,
+                        "client_ip": message.client_ip,
+                        "reason": message.waf_details,
+                        "agent_id": message.agent_id,
+                    })),
+                    // Keyed on the site, not the client: an attacker cycling
+                    // through addresses must not be able to flood the channels,
+                    // and "this site's logins are all failing" is the useful
+                    // signal. The dedup window then collapses a burst into one
+                    // alert per channel.
+                    dedup_key: Some(message.site_id.clone()),
+                })
+                .await;
+            }
+
             // Mirror the entry into Elasticsearch for full-text search and long
             // retention. Both calls are non-blocking `try_send`s, so a slow or
             // down ES cluster can never apply back-pressure to the agent stream.
@@ -922,6 +982,102 @@ impl ControlPlaneTrait for ControlPlaneService {
         }
 
         Ok(Response::new(config))
+    }
+
+    // ── Visitor authentication ─────────────────────────────────────────
+    //
+    // The bodies live in `grpc/visitor_auth.rs`; the trait requires them
+    // here. Each is a thin forward so the implementation stays in one file
+    // with its tests, while the service keeps one `impl` block per trait.
+
+    async fn visitor_login_challenge(
+        &self,
+        request: Request<VisitorChallengeRequest>,
+    ) -> Result<Response<VisitorChallengeResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_login_challenge(self, request).await
+    }
+
+    async fn visitor_login(
+        &self,
+        request: Request<VisitorLoginRequest>,
+    ) -> Result<Response<VisitorLoginResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_login(self, request).await
+    }
+
+    async fn visitor_logout(
+        &self,
+        request: Request<VisitorLogoutRequest>,
+    ) -> Result<Response<VisitorLogoutResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_logout(self, request).await
+    }
+
+    async fn visitor_change_password(
+        &self,
+        request: Request<VisitorChangePasswordRequest>,
+    ) -> Result<Response<VisitorChangePasswordResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_change_password(self, request).await
+    }
+
+    async fn visitor_grants(
+        &self,
+        request: Request<VisitorGrantsRequest>,
+    ) -> Result<Response<VisitorGrantsResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_grants(self, request).await
+    }
+
+    async fn visitor_set_site_visible(
+        &self,
+        request: Request<VisitorSetVisibleRequest>,
+    ) -> Result<Response<VisitorSetVisibleResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_set_site_visible(self, request).await
+    }
+
+    async fn visitor_passkey_register_begin(
+        &self,
+        request: Request<VisitorPasskeyBeginRequest>,
+    ) -> Result<Response<VisitorPasskeyOptionsResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_passkey_begin(self, request, false)
+            .await
+    }
+
+    async fn visitor_passkey_register_finish(
+        &self,
+        request: Request<VisitorPasskeyFinishRequest>,
+    ) -> Result<Response<VisitorPasskeyFinishResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_passkey_register_finish(
+            self, request,
+        )
+        .await
+    }
+
+    async fn visitor_passkey_login_begin(
+        &self,
+        request: Request<VisitorPasskeyBeginRequest>,
+    ) -> Result<Response<VisitorPasskeyOptionsResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_passkey_begin(self, request, true)
+            .await
+    }
+
+    async fn visitor_passkey_login_finish(
+        &self,
+        request: Request<VisitorPasskeyFinishRequest>,
+    ) -> Result<Response<VisitorLoginResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_passkey_login_finish(self, request)
+            .await
+    }
+
+    async fn visitor_passkey_list(
+        &self,
+        request: Request<VisitorGrantsRequest>,
+    ) -> Result<Response<VisitorPasskeyListResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_passkey_list(self, request).await
+    }
+
+    async fn visitor_validate_session(
+        &self,
+        request: Request<VisitorValidateRequest>,
+    ) -> Result<Response<VisitorValidateResponse>, Status> {
+        crate::grpc::visitor_auth::visitor_validate_session(self, request).await
     }
 }
 
@@ -2029,6 +2185,10 @@ fn access_log_row(
         referer: Set(optional(&entry.referer)),
         country_code: Set(truncate(&entry.country_code, MAX_COUNTRY)),
         tls_version: Set(truncate(&entry.tls_version, MAX_TLS_VERSION)),
+        // Who made the request, when the site authenticated them. `optional`
+        // maps an empty string to NULL: the column means "no identity", and a
+        // stored `""` would read as an identified caller with no name.
+        user_identity: Set(truncate(&entry.user_identity, MAX_USER_IDENTITY)),
         request_headers: Set(headers_json(&entry.request_headers)),
         request_body: Set(body_text(&entry.request_body)),
         request_body_size: Set(positive_i64(entry.request_body_size as i64)),
@@ -2062,6 +2222,58 @@ fn is_waf_event(entry: &LogEntry) -> bool {
     !entry.waf_action.trim().is_empty()
         || entry.waf_score != 0
         || !entry.waf_rule_id.trim().is_empty()
+}
+
+/// The alert an OIDC security event raises, if it raises one.
+///
+/// The data plane reports two kinds of OIDC failure and both are worth a
+/// notification; everything else it sends through the same channel (there is
+/// nothing else today) is not. Matching on the exact strings the `oidc` plugin
+/// writes is deliberate: a new event type has to be added here to alert, so a
+/// noisy one cannot slip into the alert stream by accident.
+fn oidc_alert_for(event_type: &str) -> Option<(&'static str, &'static str)> {
+    match event_type.trim() {
+        "oidc_login_failed" => Some((
+            crate::models::event_type::SITE_OIDC_LOGIN_FAILED,
+            crate::models::severity::WARNING,
+        )),
+        "oidc_idp_unavailable" => Some((
+            crate::models::event_type::SITE_OIDC_IDP_UNAVAILABLE,
+            crate::models::severity::CRITICAL,
+        )),
+        _ => None,
+    }
+}
+
+/// The subject line of an OIDC alert.
+fn oidc_alert_title(event_type: &str, host: &str) -> String {
+    let host = if host.trim().is_empty() { "?" } else { host };
+    if event_type == crate::models::event_type::SITE_OIDC_IDP_UNAVAILABLE {
+        format!("OIDC provider unreachable for site {host}")
+    } else {
+        format!("OIDC login failed for site {host}")
+    }
+}
+
+/// The body of an OIDC alert: what failed and where, without the query string
+/// (which carries the authorization code and the state).
+fn oidc_alert_message(event_type: &str, host: &str, details: &str) -> String {
+    let host = if host.trim().is_empty() { "?" } else { host };
+    let reason = details.trim();
+    let reason = if reason.is_empty() { "unknown" } else { reason };
+    if event_type == crate::models::event_type::SITE_OIDC_IDP_UNAVAILABLE {
+        format!(
+            "Site '{host}' could not reach its OIDC provider ({reason}). \
+             Unauthenticated visitors cannot complete the login flow, so the \
+             protected part of the site is unreachable."
+        )
+    } else {
+        format!(
+            "A login on site '{host}' could not be completed ({reason}). \
+             Repeated failures usually mean a wrong client secret or redirect \
+             URL, or a replayed authorization code."
+        )
+    }
 }
 
 /// Maps a shipped log entry onto a `security_events` row, or `None` when the
@@ -2112,6 +2324,10 @@ fn security_event_row(
         waf_details: Set(optional(&entry.waf_details)),
         country_code: Set(truncate(&entry.country_code, MAX_COUNTRY)),
         user_agent: Set(optional(&entry.user_agent)),
+        // Who made the request, when the site authenticated them. `optional`
+        // maps an empty string to NULL: the column means "no identity", and a
+        // stored `""` would read as an identified caller with no name.
+        user_identity: Set(truncate(&entry.user_identity, MAX_USER_IDENTITY)),
         created_at: Set(Utc::now()),
         ..Default::default()
     })
@@ -2230,6 +2446,7 @@ fn security_event_document(
         severity: None,
 
         user_agent: optional(&entry.user_agent),
+        user_identity: optional(&entry.user_identity),
         country_code: optional(&entry.country_code),
         asn: positive_u32(entry.asn),
 
@@ -2409,6 +2626,24 @@ fn positive_i32(value: i64) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The OIDC alerts are raised from inside the ingest loop, which drops any
+    /// entry stamped with a site the agent does not serve — an entry with an
+    /// empty stamp included. A plugin that reported an empty `site_id` would
+    /// therefore be silently discarded, and neither the `security_events` row
+    /// nor the alert would ever appear. The plugin resolves the real id from
+    /// the rule cache; this pins the ingest-side half of that contract.
+    #[test]
+    fn an_entry_without_a_visible_site_is_dropped_before_any_alert() {
+        let site = Uuid::new_v4();
+        assert!(site_stamp_is_visible(&site.to_string(), &[site]));
+        // The failure mode the OIDC plugin had: an empty stamp is not visible,
+        // so the entry never reaches `security_event_row` or the alert branch.
+        assert!(!site_stamp_is_visible("", &[site]));
+        assert!(!site_stamp_is_visible("   ", &[site]));
+        assert!(!site_stamp_is_visible("not-a-uuid", &[site]));
+        assert!(!site_stamp_is_visible(&Uuid::new_v4().to_string(), &[site]));
+    }
 
     /// D03: an `acme_failed` event from the edge turns the certificate row
     /// `failed` with the real reason, without touching anything else.
@@ -2645,6 +2880,55 @@ mod tests {
         assert_eq!(event.score.unwrap(), Some(42));
     }
 
+    /// The identity is stored on both tables, an absent one stays NULL, and an
+    /// oversized one is cut rather than allowed to fail the batch insert.
+    #[test]
+    fn the_user_identity_is_stored_and_bounded() {
+        let mut entry = LogEntry {
+            client_ip: "10.0.0.1".into(),
+            method: "GET".into(),
+            host: "example.com".into(),
+            path: "/".into(),
+            waf_action: action::BLOCK.into(),
+            waf_rule_id: "sqli-942100".into(),
+            user_identity: "user-1234".into(),
+            ..Default::default()
+        };
+
+        let event = security_event_row(&entry, None, None, Utc::now())
+            .expect("a blocked request produces an event");
+        assert_eq!(event.user_identity.unwrap(), Some("user-1234".into()));
+        assert_eq!(
+            access_log_row(&entry, None, None, Utc::now())
+                .user_identity
+                .unwrap(),
+            Some("user-1234".into())
+        );
+
+        // Anonymous traffic stores NULL, not "": the column means "no
+        // identity", and a stored empty string would read as an identified
+        // caller with no name.
+        entry.user_identity = String::new();
+        assert_eq!(
+            security_event_row(&entry, None, None, Utc::now())
+                .unwrap()
+                .user_identity
+                .unwrap(),
+            None
+        );
+
+        // An OIDC `sub` is provider-defined, and the agent is a separate
+        // process: a value longer than the column must be cut here or the
+        // whole batch insert fails and takes the surrounding entries with it.
+        entry.user_identity = "x".repeat(MAX_USER_IDENTITY + 50);
+        let stored = security_event_row(&entry, None, None, Utc::now())
+            .unwrap()
+            .user_identity
+            .unwrap()
+            .expect("a truncated value is still stored");
+        assert_eq!(MAX_USER_IDENTITY, stored.chars().count());
+    }
+
     #[test]
     fn waf_decisions_are_not_routed_to_access_logs() {
         // A blocked request arrives as two entries: the WAF decision (which
@@ -2670,6 +2954,74 @@ mod tests {
             ..Default::default()
         };
         assert!(is_waf_event(&monitored));
+    }
+
+    /// Only the two OIDC failures raise an alert. Everything else the data
+    /// plane sends — every blocked request — must not, or the notification
+    /// channels become a firehose.
+    #[test]
+    fn only_the_oidc_failures_raise_alerts() {
+        use crate::models::{event_type, severity};
+
+        assert_eq!(
+            oidc_alert_for("oidc_login_failed"),
+            Some((event_type::SITE_OIDC_LOGIN_FAILED, severity::WARNING))
+        );
+        assert_eq!(
+            oidc_alert_for("oidc_idp_unavailable"),
+            Some((event_type::SITE_OIDC_IDP_UNAVAILABLE, severity::CRITICAL))
+        );
+        // Padded values still match: the agent may trim or pad a string.
+        assert!(oidc_alert_for(" oidc_login_failed ").is_some());
+
+        for other in [
+            "",
+            "block",
+            "challenge",
+            "rate_limit",
+            "managed",
+            "waf",
+            "basic_auth",
+            // A prefix is not a match.
+            "oidc_login_failed_extra",
+        ] {
+            assert_eq!(None, oidc_alert_for(other), "{other} must not alert");
+        }
+    }
+
+    /// The alert body must never carry the query string: it holds the
+    /// authorization code and the state.
+    #[test]
+    fn oidc_alerts_name_the_site_and_never_the_query() {
+        use crate::models::event_type;
+
+        let failed = oidc_alert_message(
+            event_type::SITE_OIDC_LOGIN_FAILED,
+            "app.example.com",
+            "reason=token_exchange_failed",
+        );
+        assert!(failed.contains("app.example.com"));
+        assert!(failed.contains("token_exchange_failed"));
+
+        let unreachable = oidc_alert_message(
+            event_type::SITE_OIDC_IDP_UNAVAILABLE,
+            "app.example.com",
+            "endpoint=discovery status=timeout",
+        );
+        assert!(unreachable.contains("unreachable"));
+
+        // An absent host and reason still render something readable.
+        let bare =
+            oidc_alert_message(event_type::SITE_OIDC_LOGIN_FAILED, "", "");
+        assert!(bare.contains('?'));
+        assert!(bare.contains("unknown"));
+
+        assert!(
+            oidc_alert_title(event_type::SITE_OIDC_LOGIN_FAILED, "a.test")
+                .contains("a.test")
+        );
+        assert!(oidc_alert_title(event_type::SITE_OIDC_IDP_UNAVAILABLE, "")
+            .contains('?'));
     }
 
     #[test]

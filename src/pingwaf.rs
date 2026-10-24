@@ -50,7 +50,8 @@ use pingora::server;
 use pingora::server::configuration::Opt;
 use pingora::services::background::background_service;
 use pingwaf_agent::cache::{
-    CachedRules, HealthCheckConfig, ResponseReplaceConfig, RuleCache, SslConfig,
+    CachedRules, HealthCheckConfig, OidcConfig, ResponseReplaceConfig,
+    RuleCache, SslConfig,
 };
 use pingwaf_agent::config::AgentConfig;
 use pingwaf_server::ServerConfig;
@@ -469,6 +470,190 @@ fn site_response_replace_plugin(
     vec![name]
 }
 
+/// Builds the per-site `oidc` plugin that gates the site behind an OpenID
+/// Connect provider.
+///
+/// Every key is written out, including the empty ones, so the generated
+/// configuration can be reconciled with the stored row key by key. The plugin
+/// reads them with the same helpers the upstream plugin does, which is why the
+/// types matter:
+///
+/// * `scopes` and `claims_to_headers` must be TOML **arrays of strings**
+///   (`get_str_slice_conf` reads nothing else) — a joined string would silently
+///   empty the scopes and the login would then be refused by the provider.
+/// * `session_ttl` must be a **string** `"{n}s"`: `get_duration_conf` parses it
+///   with `humantime`, which rejects a bare number and would fall back to the
+///   12-hour default.
+/// * `claims_to_headers` entries are `claim:Header-Name`, the format the plugin
+///   splits on. A header name cannot contain `:` (the API rejects it), so the
+///   split is unambiguous.
+///
+/// A site that has no OIDC, or has it switched off, gets no instance at all.
+fn site_oidc_plugin(
+    site_id: &str,
+    oidc: Option<&OidcConfig>,
+    plugins: &mut HashMap<String, PluginConf>,
+) -> Vec<String> {
+    let Some(oidc) = oidc.filter(|oidc| oidc.enabled) else {
+        return Vec::new();
+    };
+
+    // Which ways in this site offers. The control plane parses and validates
+    // it; an unreadable value here means a row written directly, and the safe
+    // reading is the pre-local-accounts one.
+    let auth_mode = oidc.auth_mode.trim();
+    let allows_local = matches!(auth_mode, "local" | "both");
+    let allows_oidc = !matches!(auth_mode, "local");
+
+    let mut names = Vec::new();
+    // A `local` site signs visitors in at its own login page; the provider's
+    // plugin would only sit unused in the chain, and building it would demand
+    // credentials the site does not have.
+    if allows_local {
+        let mut visitor = PluginConf::new();
+        visitor.insert(
+            "category".to_string(),
+            toml::Value::String("visitor_auth".to_string()),
+        );
+        // The same secret the OIDC session uses: one secret per site to
+        // rotate, with a domain separator keeping the two keys distinct.
+        visitor.insert(
+            "cookie_secret".to_string(),
+            toml::Value::String(oidc.cookie_secret.clone()),
+        );
+        // On a `both` site this plugin is first in the chain, so the provider's
+        // paths have to be handed over explicitly — a gated callback is a login
+        // that can never complete, and an unrecognised OIDC session sends a
+        // signed-in visitor back to the local form on every request.
+        if allows_oidc {
+            let delegated = vec![
+                toml::Value::String(oidc.redirect_path.clone()),
+                toml::Value::String(oidc.logout_path.clone()),
+            ];
+            visitor.insert(
+                "delegated_paths".to_string(),
+                toml::Value::Array(delegated),
+            );
+            visitor.insert(
+                "oidc_cookie_name".to_string(),
+                toml::Value::String(oidc.cookie_name.clone()),
+            );
+        }
+        let name = format!("{site_id}_visitor_auth");
+        plugins.insert(name.clone(), visitor);
+        names.push(name);
+    }
+    if !allows_oidc {
+        return names;
+    }
+
+    let mut conf = PluginConf::new();
+    conf.insert(
+        "category".to_string(),
+        toml::Value::String("oidc".to_string()),
+    );
+    conf.insert(
+        "issuer".to_string(),
+        toml::Value::String(oidc.issuer.clone()),
+    );
+    conf.insert(
+        "client_id".to_string(),
+        toml::Value::String(oidc.client_id.clone()),
+    );
+    conf.insert(
+        "client_secret".to_string(),
+        toml::Value::String(oidc.client_secret.clone()),
+    );
+    conf.insert(
+        "cookie_secret".to_string(),
+        toml::Value::String(oidc.cookie_secret.clone()),
+    );
+    conf.insert(
+        "redirect_path".to_string(),
+        toml::Value::String(oidc.redirect_path.clone()),
+    );
+    conf.insert(
+        "logout_path".to_string(),
+        toml::Value::String(oidc.logout_path.clone()),
+    );
+    conf.insert(
+        "redirect_url".to_string(),
+        toml::Value::String(oidc.redirect_url.clone()),
+    );
+    conf.insert(
+        "scopes".to_string(),
+        toml::Value::Array(
+            oidc.scopes
+                .iter()
+                .map(|scope| toml::Value::String(scope.clone()))
+                .collect(),
+        ),
+    );
+    conf.insert(
+        "cookie_name".to_string(),
+        toml::Value::String(oidc.cookie_name.clone()),
+    );
+    conf.insert(
+        "session_ttl".to_string(),
+        toml::Value::String(format!("{}s", oidc.session_ttl_seconds)),
+    );
+    conf.insert(
+        "claims_to_headers".to_string(),
+        toml::Value::Array(
+            oidc.claims_to_headers
+                .iter()
+                .map(|claim| {
+                    toml::Value::String(format!(
+                        "{}:{}",
+                        claim.claim, claim.header
+                    ))
+                })
+                .collect(),
+        ),
+    );
+    // Access rules are what decide whether a signed-in visitor may enter.
+    // They are passed as `claim:operator:value` triples — the plugin splits
+    // on ':' and the API already refuses a claim containing one, so the
+    // split is unambiguous. `exists` carries no value and is written as a
+    // bare `claim:exists`.
+    conf.insert(
+        "access_mode".to_string(),
+        toml::Value::String(oidc.access_mode.clone()),
+    );
+    // Which ways in the site offers. Passed through verbatim: an empty value
+    // (a config written before the field existed) is read by the plugin as
+    // `oidc`, which is the behaviour those sites already had.
+    conf.insert(
+        "auth_mode".to_string(),
+        toml::Value::String(oidc.auth_mode.clone()),
+    );
+    conf.insert(
+        "access_rules".to_string(),
+        toml::Value::Array(
+            oidc.access_rules
+                .iter()
+                .map(|rule| {
+                    toml::Value::String(if rule.value.is_empty() {
+                        format!("{}:{}", rule.claim, rule.operator)
+                    } else {
+                        format!(
+                            "{}:{}:{}",
+                            rule.claim, rule.operator, rule.value
+                        )
+                    })
+                })
+                .collect(),
+        ),
+    );
+
+    // One instance per site: the session cookie is sealed with the site's
+    // secret and the claims go to that site's upstream only.
+    let name = format!("{site_id}_oidc");
+    plugins.insert(name.clone(), conf);
+    names.push(name);
+    names
+}
+
 /// Synthesizes the data-plane health check URL from the control plane's
 /// per-pool [`HealthCheckConfig`]. The URL host is the upstream (pool) name —
 /// pingap only uses it as the probe request's Host header, nothing resolves
@@ -643,15 +828,18 @@ fn cached_rules_to_pingap_config(
         }
         plugins.insert(CACHE_PLUGIN_NAME.to_string(), cache_conf);
     }
-    let mut location_plugins: Vec<String> = vec![
+    let location_plugins: Vec<String> = vec![
         WAF_PLUGIN_NAME.to_string(),
         CHALLENGE_PLUGIN_NAME.to_string(),
         REWRITE_PLUGIN_NAME.to_string(),
         ERROR_PAGE_PLUGIN_NAME.to_string(),
     ];
-    if cache_enabled {
-        location_plugins.push(CACHE_PLUGIN_NAME.to_string());
-    }
+    // The cache is kept out of `location_plugins` so the per-site OIDC plugin
+    // can be spliced in ahead of it: an authenticated gate behind the cache
+    // could be bypassed by a cache hit. `WAF_PLUGIN_NAME` / `CHALLENGE` /
+    // `REWRITE` / `ERROR_PAGE` stay in the vector because their order relative
+    // to OIDC is fixed (see the assembly below).
+    let cache_plugin = cache_enabled.then(|| CACHE_PLUGIN_NAME.to_string());
 
     for (site_id, site) in &cached.sites {
         if site.domain.is_empty() {
@@ -795,6 +983,17 @@ fn cached_rules_to_pingap_config(
         let mut site_plugins =
             site_ai_file_plugins(site_id, site.ai_crawl.as_ref(), &mut plugins);
         site_plugins.extend(location_plugins.clone());
+        // OIDC sits after the rewrite (so its callback path is matched against
+        // the address the browser asked for, which `original_uri` preserves)
+        // and ahead of the cache (so a cache hit can never skip the gate).
+        site_plugins.extend(site_oidc_plugin(
+            site_id,
+            site.oidc.as_ref(),
+            &mut plugins,
+        ));
+        if let Some(cache_plugin) = &cache_plugin {
+            site_plugins.push(cache_plugin.clone());
+        }
         site_plugins.extend(site_posture_plugins(
             site_id,
             site.ssl_config.as_ref(),
@@ -1890,8 +2089,8 @@ mod tests {
     use super::*;
     use pingwaf_agent::cache::{
         CacheRule as AgentCacheRule, CachedRules, GlobalCacheSettings,
-        ProxyTrustConfig, ResponseReplaceRule, RouteConfig, SiteRules,
-        UpstreamConfig, UpstreamPeer,
+        OidcAccessRule, OidcHeaderClaim, ProxyTrustConfig, ResponseReplaceRule,
+        RouteConfig, SiteRules, UpstreamConfig, UpstreamPeer,
     };
 
     #[test]
@@ -1936,6 +2135,7 @@ mod tests {
             cache_settings: None,
             response_replace: None,
             ai_crawl: None,
+            oidc: None,
         }
     }
 
@@ -2553,6 +2753,189 @@ mod tests {
                 .expect("plugins")
                 .iter()
                 .all(|name| name != "site1_sub_filter")
+        );
+    }
+
+    /// The OIDC plugin's configuration is read by the upstream plugin with
+    /// `get_str_conf` / `get_str_slice_conf` / `get_duration_conf`, and those
+    /// three disagree about types in a way that fails *silently*: a scopes list
+    /// written as one joined string comes back empty (and the provider then
+    /// refuses every login), a `session_ttl` written as a number is rejected by
+    /// `humantime` and falls back to 12 hours, and a `claims_to_headers` array
+    /// of tables injects nothing. So this asserts the `toml::Value` *variant*
+    /// of every key, not just its value.
+    #[test]
+    fn site_oidc_generates_a_plugin_with_the_types_the_plugin_reads() {
+        let mut site = site_rules("site1", "app.example.com");
+        let mut default_pool = pool("pool-a", vec![peer("10.0.0.1:8080")]);
+        default_pool.is_default = true;
+        site.upstreams = vec![default_pool];
+        site.oidc = Some(OidcConfig {
+            enabled: true,
+            issuer: "https://idp.example.com".to_string(),
+            client_id: "pingwaf".to_string(),
+            client_secret: "s3cret".to_string(),
+            cookie_secret: "0123456789abcdef".to_string(),
+            redirect_path: "/oauth2/callback".to_string(),
+            logout_path: "/oauth2/logout".to_string(),
+            redirect_url: String::new(),
+            scopes: vec![
+                "openid".to_string(),
+                "email".to_string(),
+                "profile".to_string(),
+            ],
+            cookie_name: "pingap_oidc".to_string(),
+            session_ttl_seconds: 1800,
+            claims_to_headers: vec![
+                OidcHeaderClaim {
+                    claim: "email".to_string(),
+                    header: "X-Auth-Email".to_string(),
+                },
+                OidcHeaderClaim {
+                    claim: "https://example.com/roles".to_string(),
+                    header: "X-Auth-Roles".to_string(),
+                },
+            ],
+            access_mode: "require_any".to_string(),
+            access_rules: vec![
+                OidcAccessRule {
+                    claim: "groups".to_string(),
+                    operator: "contains".to_string(),
+                    value: "waf-admins".to_string(),
+                },
+                OidcAccessRule {
+                    claim: "hd".to_string(),
+                    operator: "exists".to_string(),
+                    value: String::new(),
+                },
+            ],
+            auth_mode: "both".to_string(),
+        });
+
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site.clone()),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+
+        let conf = config
+            .plugins
+            .get("site1_oidc")
+            .expect("per-site oidc plugin");
+        let string = |key: &str| {
+            conf.get(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
+        // The keys `get_str_conf` reads must be strings.
+        assert_eq!(string("category"), "oidc");
+        assert_eq!(string("issuer"), "https://idp.example.com");
+        assert_eq!(string("client_id"), "pingwaf");
+        assert_eq!(string("client_secret"), "s3cret");
+        assert_eq!(string("cookie_secret"), "0123456789abcdef");
+        assert_eq!(string("redirect_path"), "/oauth2/callback");
+        assert_eq!(string("logout_path"), "/oauth2/logout");
+        // An empty `redirect_url` is stated, not omitted: the generated config
+        // has to reconcile with the stored row key by key.
+        assert_eq!(string("redirect_url"), "");
+        assert_eq!(string("cookie_name"), "pingap_oidc");
+        // `session_ttl` goes through `get_duration_conf`, which needs a
+        // humantime string. A bare number would silently become 12h.
+        assert_eq!(string("session_ttl"), "1800s");
+        // The two `get_str_slice_conf` keys must be arrays of strings.
+        let array = |key: &str| -> Vec<String> {
+            conf.get(key)
+                .and_then(|v| v.as_array())
+                .expect("array")
+                .iter()
+                .map(|v| v.as_str().expect("string element").to_string())
+                .collect()
+        };
+        assert_eq!(array("scopes"), vec!["openid", "email", "profile"]);
+        assert_eq!(
+            array("claims_to_headers"),
+            vec![
+                "email:X-Auth-Email",
+                "https://example.com/roles:X-Auth-Roles"
+            ]
+        );
+
+        // The gate must sit ahead of the cache in the site's locations, or a
+        // cache hit would serve a page without a session.
+        let names = config
+            .locations
+            .get("site1_loc")
+            .expect("fallback location")
+            .plugins
+            .clone()
+            .expect("plugins");
+        let index = |name: &str| names.iter().position(|entry| entry == name);
+        let oidc = index("site1_oidc").expect("oidc must be referenced");
+        if let Some(cache) = index(CACHE_PLUGIN_NAME) {
+            assert!(oidc < cache, "oidc must run before the cache");
+        }
+        if let Some(rewrite) = index(REWRITE_PLUGIN_NAME) {
+            assert!(rewrite < oidc, "oidc must run after the rewrite");
+        }
+
+        // `both` puts two gates on the chain, and the visitor one runs first —
+        // so it has to know what belongs to the other. Without these the
+        // provider's callback would be gated (the code could never be
+        // exchanged) and a visitor holding an OIDC session would be sent back
+        // to the local login page on every request.
+        let visitor = config
+            .plugins
+            .get("site1_visitor_auth")
+            .expect("both mode registers the visitor gate");
+        let visitor_array = |key: &str| -> Vec<String> {
+            visitor
+                .get(key)
+                .and_then(|v| v.as_array())
+                .expect("array")
+                .iter()
+                .map(|v| v.as_str().expect("string element").to_string())
+                .collect()
+        };
+        assert_eq!(
+            visitor_array("delegated_paths"),
+            vec!["/oauth2/callback", "/oauth2/logout"],
+            "the provider's paths must be handed to the OIDC plugin"
+        );
+        assert_eq!(
+            visitor.get("oidc_cookie_name").and_then(|v| v.as_str()),
+            Some("pingap_oidc"),
+            "the visitor gate must recognise the other kind of session"
+        );
+        let visitor_index =
+            index("site1_visitor_auth").expect("visitor gate referenced");
+        assert!(
+            visitor_index < oidc,
+            "the visitor gate runs first, which is why it needs the delegation"
+        );
+
+        // A disabled or absent policy generates nothing at all.
+        let mut off = site.clone();
+        off.oidc = None;
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(off),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+        assert!(!config.plugins.contains_key("site1_oidc"));
+
+        let mut disabled = site;
+        if let Some(oidc) = disabled.oidc.as_mut() {
+            oidc.enabled = false;
+        }
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(disabled),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+        assert!(
+            !config.plugins.contains_key("site1_oidc"),
+            "a switched-off gate must not be registered"
         );
     }
 

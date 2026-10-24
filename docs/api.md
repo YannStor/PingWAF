@@ -579,7 +579,15 @@ trust (`trust_proxy_headers`, `trusted_proxy_ranges`,
 describes where the site sits, and inheriting it would let the clone read an
 `X-Forwarded-For` its own proxy path does not supply. Site basic-auth
 credentials are not copied at all — re-entering them keeps a password that
-has already circulated from becoming the clone's gate.
+has already circulated from becoming the clone's gate. Site OIDC is not
+copied either, for three reasons: the `redirect_url` (or the callback
+derived from the request's `Host`) is bound to the source hostname, so the
+provider would keep sending logins back to the source instead of the clone;
+two sites sharing `cookie_secret` and `cookie_name` across sibling
+subdomains covered by a wildcard `Domain` would share sessions (a login on
+one authenticates the other); and one client registered against two callback
+hosts is rejected outright by most identity providers. Register a fresh
+client per site instead.
 
 **Response:** `201 Created` with the new `SiteResponse`.
 
@@ -1863,6 +1871,7 @@ List security events, newest first.
 | `host` | string | Request host (`*` wildcards allowed) |
 | `path` | string | Substring match on the request path |
 | `country_code` | string | ISO country code, upper-cased server side |
+| `user_identity` | string | The authenticated caller's OIDC `sub` (exact match) |
 | `request_id` | string | Exact request id, e.g. from an `X-Request-ID` header |
 | `q` | string | Free text; matches the path or the host |
 
@@ -1944,6 +1953,7 @@ List access logs, newest first.
 | `path` | string | Substring match on the request path |
 | `cache_status` | string | `hit`, `miss`, … (lower-cased, `a,b` for a list) |
 | `country_code` | string | ISO country code, upper-cased server side |
+| `user_identity` | string | The authenticated caller's OIDC `sub` (exact match) |
 | `min_latency_ms` | int | Only rows at or above this total latency |
 | `request_id` | string | Exact request id |
 | `q` | string | Free text; matches the path or the host |
@@ -2692,6 +2702,106 @@ be non-empty and unique. Enabling the gate with no credential is rejected.
   "hide_credentials": true
 }
 ```
+
+---
+
+## OIDC Authentication
+
+Site-wide OpenID Connect login (authorization code flow with PKCE) for one
+site. The stored configuration is shipped to the agents, whose `oidc` data
+plane plugin sends unauthenticated browsers to the identity provider, verifies
+the ID token that comes back and issues an encrypted session cookie — flow
+details and the security properties are in
+[oidc.md](../pingap-plugin/docs/oidc.md). Failed logins and an unreachable
+provider surface as the `site.oidc_login_failed` (warning) and
+`site.oidc_idp_unavailable` (critical) alert events; delivery is gated by the
+`notify_site_oidc_auth` notification switch (on by default, covering both).
+Normal unauthenticated redirects are not alerted.
+
+Reads require site read permission, writes site write permission.
+
+### GET /sites/{site_id}/oidc
+
+Get the site's OIDC configuration, creating a disabled default when the site
+never saved one.
+
+**Response (200):**
+```json
+{
+  "id": "0d1b0f2e-…",
+  "site_id": "6f1c…",
+  "enabled": false,
+  "issuer": "",
+  "client_id": "",
+  "client_secret": "",
+  "cookie_secret": "",
+  "redirect_path": "/oauth2/callback",
+  "logout_path": "",
+  "redirect_url": "",
+  "scopes": ["openid"],
+  "cookie_name": "pingap_oidc",
+  "session_ttl_seconds": 43200,
+  "claims_to_headers": [],
+  "created_at": "2026-09-30T09:00:00Z",
+  "updated_at": "2026-09-30T09:00:00Z"
+}
+```
+
+`session_ttl_seconds` is the plugin's `session_ttl` in seconds (60–31536000;
+the default 43200 is 12 hours), and `claims_to_headers` entries are
+`{"claim": "email", "header": "X-Auth-Email"}` objects.
+
+**Masking differs from basic auth:** `client_secret` and `cookie_secret` are
+returned as `***` only when a value is stored — an unset secret comes back as
+`""`. Public OIDC clients and no-logout setups legitimately have an empty
+`client_secret`, so a blanket mask would leave the dashboard unable to tell
+"unset" from "set".
+
+### PUT /sites/{site_id}/oidc
+
+Update the configuration. Every field is optional; an omitted field keeps its
+value. `claims_to_headers` replaces the whole list when present. Secrets
+follow the mask rules above: sending `***` keeps the stored secret (rejected
+with `400` when nothing is stored — there is no old value to keep), and `""`
+clears it.
+
+**Request:**
+```json
+{
+  "enabled": true,
+  "issuer": "https://keycloak.example.com/realms/main",
+  "client_id": "pingap",
+  "client_secret": "***",
+  "cookie_secret": "0123456789abcdef0123456789abcdef",
+  "redirect_path": "/oauth2/callback",
+  "logout_path": "/oauth2/logout",
+  "redirect_url": "https://app.example.com/oauth2/callback",
+  "scopes": ["openid", "profile", "email"],
+  "cookie_name": "pingap_oidc",
+  "session_ttl_seconds": 43200,
+  "claims_to_headers": [{"claim": "email", "header": "X-Auth-Email"}]
+}
+```
+
+Validation failures are `400` with `code: "bad_request"` and a stable
+message prefix per rule — e.g. `issuer must be an absolute http(s) URL`,
+`client_id must be 1-255 characters`, `cookie_secret must be at least 16
+characters`, `redirect_path must be an absolute path without a query or
+fragment`, `logout_path must differ from redirect_path`,
+`redirect_url path must equal redirect_path`, `cookie_name must not start
+with '__Host-'`, `session_ttl_seconds must be between 60 and 31536000`, and
+`header '{header}' must not be set from a claim` (the header names a request
+header the plugin must own: `Content-Length`, `Transfer-Encoding`, `Host`,
+`Connection`). Duplicate claims or headers, duplicate scopes and over-long
+values are rejected the same way; `openid` is always kept as the first scope.
+
+Enabling the gate is refused — never silently downgraded to disabled — when a
+required value is missing, checked in this order: `issuer is required while
+oidc is enabled`, `client_id is required while oidc is enabled`,
+`cookie_secret is required while oidc is enabled`, `cookie_secret must be at
+least 16 characters`. `client_secret` is deliberately *not* required: a public
+client authenticates with PKCE alone, and the plugin sends the `client_id` on
+its own for it.
 
 ---
 
@@ -3617,8 +3727,8 @@ platform and in every build, and have no enable switch.
 ### GET /system/nodes
 
 The fleet view in one request: the control-plane process's own counters plus
-one row per registered agent — what the dashboard's node table renders. It is
-the only endpoint that answers "how loaded is the fleet" in one call.
+one row per registered agent. It is the only endpoint that answers "how loaded
+is the fleet" in one call.
 
 **Response (200):**
 
@@ -3644,6 +3754,22 @@ the only endpoint that answers "how loaded is the fleet" in one call.
       "rps": null,
       "sites": 1,
       "last_seen": "2024-01-01T12:00:00Z"
+    }
+  ],
+  "boots": [
+    {
+      "booted_at": "2026-10-22T12:31:05Z",
+      "reason": "unclean",
+      "version": "0.29.3",
+      "hostname": "waf-1",
+      "previous_uptime_seconds": 12
+    },
+    {
+      "booted_at": "2026-10-22T12:30:53Z",
+      "reason": "fresh",
+      "version": "0.29.3",
+      "hostname": "waf-1",
+      "previous_uptime_seconds": null
     }
   ]
 }
@@ -3685,6 +3811,32 @@ table does not reshuffle between polls:
 Fields the control plane does not know yet are `null` rather than `0`: a
 node that has never heartbeated reporting "0 %" would read as an idle node
 instead of an unknown one.
+
+**`boots[]`** — the newest control-plane starts, newest first (at most five),
+written by `control_plane_boots` (migration `000068`). One row per start; the
+gap between two rows is how long the previous process lived.
+
+| Field | Meaning |
+|-------|---------|
+| `booted_at` | When the process started, server time |
+| `reason` | `fresh` (no previous boot on record), `after_stop` (the previous process lived at least 60 s, so a planned stop fits), `unclean` (it lived less — the previous process was almost certainly killed without shutting down) |
+| `version` | The control plane's version at that start |
+| `hostname` | The machine it came up on |
+| `previous_uptime_seconds` | How long the previous process lived, in seconds; `null` for the first boot, and when the clock moved backwards between the two starts |
+
+**Why a start is recorded rather than a stop.** A process killed by the OOM
+killer (or `SIGKILL`, or a crash) runs no code, so it cannot write a "stopped"
+row. A start is the one moment it can speak, which is why the history is built
+from starts. The practical reading: **several boots minutes apart means the
+container is being killed in a loop**, whereas one boot a week ago means a
+normal deploy.
+
+**Replicas.** Several control-plane replicas may share one database; the table
+is shared, so `reason` and `previous_uptime_seconds` are always computed
+against the previous boot **of the same `hostname`** — another replica starting
+seconds later is never mistaken for this process's predecessor. The list itself
+is not host-scoped: it shows the newest starts across the fleet, which is what
+makes a rolling restart readable. The table keeps its newest 100 rows overall.
 
 Known caveats, unchanged behaviour the numbers must be read with:
 
