@@ -1887,7 +1887,19 @@ fn parse_form(body: &str) -> LoginForm {
             "solution" => form.solution = value,
             "next" => form.next = value,
             "site_id" => form.site_id = value,
+            // The visibility switch posts the state it wants next under
+            // `visible`. It shares the `next` slot with the login form's
+            // `next`, because both mean "the value that follows this request"
+            // — one a path, one a boolean, and neither handler reads the
+            // other's form.
+            "visible" => form.next = value,
             "current_password" => form.current_password = value,
+            // The password form names its fields `new_password` and
+            // `confirm_password`; the login form names its password
+            // `password`. Both land in `form.password`, because the two
+            // handlers read it as "the password this form is about" — the one
+            // to check on login, the one to set on change.
+            "new_password" => form.password = value,
             "confirm_password" => form.confirm_password = value,
             "timestamp" => {
                 form.timestamp = value.parse().unwrap_or_default();
@@ -2120,5 +2132,38 @@ mod tests {
         assert!(empty.email.is_empty());
         assert!(empty.password.is_empty());
         assert_eq!(0, empty.timestamp);
+    }
+
+    /// Every field the portal's own forms post is one the parser reads.
+    ///
+    /// The two disagreed once: the password form posts `new_password` and the
+    /// switch posts `visible`, and the parser knew neither — so changing a
+    /// password answered 400 ("the passwords do not match", because the new
+    /// one parsed as empty) and the switch could only ever be turned off. The
+    /// names are asserted here as literals rather than derived, because the
+    /// point is to notice when the HTML changes under them.
+    #[test]
+    fn the_parser_reads_every_field_the_portal_posts() {
+        // The password form.
+        let change = parse_form(
+            "current_password=old&new_password=new-secret&confirm_password=new-secret",
+        );
+        assert_eq!("old", change.current_password);
+        assert_eq!(
+            "new-secret", change.password,
+            "the password form's new_password must land in the field the \
+             handler reads as the password to set"
+        );
+        assert_eq!("new-secret", change.confirm_password);
+
+        // The visibility switch, both directions.
+        let on = parse_form("site_id=abc&visible=true");
+        assert_eq!("abc", on.site_id);
+        assert_eq!(
+            "true", on.next,
+            "visible must reach the field it is read from"
+        );
+        let off = parse_form("site_id=abc&visible=false");
+        assert_eq!("false", off.next);
     }
 }
