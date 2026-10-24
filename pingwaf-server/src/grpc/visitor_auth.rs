@@ -406,10 +406,12 @@ pub(crate) async fn visitor_change_password(
 ) -> Result<Response<VisitorChangePasswordResponse>, Status> {
     let payload = request.into_inner();
     let agent_row = service.authorize(&payload.agent_token).await?;
-    // Any site the agent serves is enough to identify the caller here: the
-    // account is deployment-wide, so this is not scoped to one site. The
-    // check still runs, so an agent that serves nothing cannot act.
-    let _ = agent_site_ids(service, &agent_row).await?;
+    // Scoped like every other visitor call: the site has to be one this agent
+    // serves, and the account has to be granted it. The account is
+    // deployment-wide, but that is not a reason for one site's agent to reach
+    // another site's visitors — a compromised edge node would otherwise be
+    // able to drive password guesses against every account in the deployment.
+    let site_row = resolve_site(service, &agent_row, &payload.site_id).await?;
 
     let visitor_id = Uuid::parse_str(payload.visitor_id.trim())
         .map_err(|_| Status::invalid_argument("visitor_id is not a UUID"))?;
@@ -423,6 +425,19 @@ pub(crate) async fn visitor_change_password(
             "Account not found.",
         )));
     };
+    let granted = visitor_site_grant::Entity::find()
+        .filter(visitor_site_grant::Column::VisitorId.eq(visitor.id))
+        .filter(visitor_site_grant::Column::SiteId.eq(site_row.id))
+        .one(&service.db)
+        .await
+        .map_err(db_status)?
+        .is_some();
+    if !granted {
+        return Ok(Response::new(password_refusal(
+            error_code::UNKNOWN_VISITOR,
+            "Account not found.",
+        )));
+    }
     if visitor.disabled {
         return Ok(Response::new(password_refusal(
             error_code::DISABLED,

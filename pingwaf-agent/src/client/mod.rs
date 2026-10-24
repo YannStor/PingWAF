@@ -1314,6 +1314,7 @@ impl ControlPlaneClient {
     pub async fn visitor_change_password(
         &self,
         agent_id: &str,
+        site_id: &str,
         visitor_id: &str,
         current_password: &str,
         new_password: &str,
@@ -1326,6 +1327,7 @@ impl ControlPlaneClient {
             visitor_id: visitor_id.to_string(),
             current_password: current_password.to_string(),
             new_password: new_password.to_string(),
+            site_id: site_id.to_string(),
         };
         let response = tokio::time::timeout(
             VISITOR_AUTH_TIMEOUT,

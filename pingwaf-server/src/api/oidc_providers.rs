@@ -19,6 +19,8 @@ use axum::extract::{Path, State};
 use axum::routing::get;
 use axum::Json;
 use axum::Router;
+use std::collections::HashMap;
+
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
     QueryOrder, Set,
@@ -109,11 +111,44 @@ async fn list(
         .order_by_asc(oidc_provider::Column::Name)
         .all(&state.db)
         .await?;
-    let mut views = Vec::with_capacity(rows.len());
-    for row in &rows {
-        views.push(to_view(&state, row).await?);
+    // One query for every site reference rather than one per provider: the
+    // count is shown on the Account page, which loads on every visit, and a
+    // deployment with a dozen providers would otherwise answer it with a dozen
+    // round trips.
+    let referencing = site_oidc::Entity::find().all(&state.db).await?;
+    let mut counts: HashMap<Uuid, u64> = HashMap::new();
+    for row in referencing {
+        if let Some(provider_id) = row.provider_id {
+            *counts.entry(provider_id).or_default() += 1;
+        }
     }
+    let views = rows
+        .into_iter()
+        .map(|row| {
+            let site_count = counts.get(&row.id).copied().unwrap_or_default();
+            view_of(row, site_count)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Json(views))
+}
+
+/// The response shape, from a row and how many sites point at it.
+fn view_of(
+    row: oidc_provider::Model,
+    site_count: u64,
+) -> Result<ProviderView, ApiError> {
+    Ok(ProviderView {
+        id: row.id,
+        name: row.name.clone(),
+        enabled: row.enabled,
+        issuer: row.issuer.clone(),
+        client_id: row.client_id.clone(),
+        client_secret: mask_secret(&row.client_secret),
+        scopes: crate::api::site_oidc::decode_scopes(&row.scopes)?,
+        site_count,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    })
 }
 
 /// `GET /api/v1/oidc/providers/{provider_id}`
@@ -350,18 +385,7 @@ async fn to_view(
         .filter(site_oidc::Column::ProviderId.eq(row.id))
         .count(&state.db)
         .await?;
-    Ok(ProviderView {
-        id: row.id,
-        name: row.name.clone(),
-        enabled: row.enabled,
-        issuer: row.issuer.clone(),
-        client_id: row.client_id.clone(),
-        client_secret: mask_secret(&row.client_secret),
-        scopes: crate::api::site_oidc::decode_scopes(&row.scopes)?,
-        site_count,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    })
+    view_of(row.clone(), site_count)
 }
 
 fn mask_secret(value: &str) -> String {

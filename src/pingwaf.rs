@@ -521,6 +521,24 @@ fn site_oidc_plugin(
             "cookie_secret".to_string(),
             toml::Value::String(oidc.cookie_secret.clone()),
         );
+        // On a `both` site this plugin is first in the chain, so the provider's
+        // paths have to be handed over explicitly — a gated callback is a login
+        // that can never complete, and an unrecognised OIDC session sends a
+        // signed-in visitor back to the local form on every request.
+        if allows_oidc {
+            let delegated = vec![
+                toml::Value::String(oidc.redirect_path.clone()),
+                toml::Value::String(oidc.logout_path.clone()),
+            ];
+            visitor.insert(
+                "delegated_paths".to_string(),
+                toml::Value::Array(delegated),
+            );
+            visitor.insert(
+                "oidc_cookie_name".to_string(),
+                toml::Value::String(oidc.cookie_name.clone()),
+            );
+        }
         let name = format!("{site_id}_visitor_auth");
         plugins.insert(name.clone(), visitor);
         names.push(name);
@@ -2860,6 +2878,41 @@ mod tests {
         if let Some(rewrite) = index(REWRITE_PLUGIN_NAME) {
             assert!(rewrite < oidc, "oidc must run after the rewrite");
         }
+
+        // `both` puts two gates on the chain, and the visitor one runs first —
+        // so it has to know what belongs to the other. Without these the
+        // provider's callback would be gated (the code could never be
+        // exchanged) and a visitor holding an OIDC session would be sent back
+        // to the local login page on every request.
+        let visitor = config
+            .plugins
+            .get("site1_visitor_auth")
+            .expect("both mode registers the visitor gate");
+        let visitor_array = |key: &str| -> Vec<String> {
+            visitor
+                .get(key)
+                .and_then(|v| v.as_array())
+                .expect("array")
+                .iter()
+                .map(|v| v.as_str().expect("string element").to_string())
+                .collect()
+        };
+        assert_eq!(
+            visitor_array("delegated_paths"),
+            vec!["/oauth2/callback", "/oauth2/logout"],
+            "the provider's paths must be handed to the OIDC plugin"
+        );
+        assert_eq!(
+            visitor.get("oidc_cookie_name").and_then(|v| v.as_str()),
+            Some("pingap_oidc"),
+            "the visitor gate must recognise the other kind of session"
+        );
+        let visitor_index =
+            index("site1_visitor_auth").expect("visitor gate referenced");
+        assert!(
+            visitor_index < oidc,
+            "the visitor gate runs first, which is why it needs the delegation"
+        );
 
         // A disabled or absent policy generates nothing at all.
         let mut off = site.clone();

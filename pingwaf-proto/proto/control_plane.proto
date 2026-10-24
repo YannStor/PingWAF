@@ -1189,6 +1189,9 @@ message VisitorChangePasswordRequest {
   string visitor_id = 3;
   string current_password = 4;
   string new_password = 5;
+  // The host the caller is acting for, so the request can be scoped to a site
+  // this agent serves and one the account is granted.
+  string site_id = 6;
 }
 
 message VisitorChangePasswordResponse {

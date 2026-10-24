@@ -25,6 +25,8 @@ use axum::extract::{Path, State};
 use axum::routing::get;
 use axum::Json;
 use axum::Router;
+use std::collections::HashMap;
+
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set,
     TransactionTrait,
@@ -101,11 +103,41 @@ async fn list(
         .order_by_asc(site_visitor::Column::Email)
         .all(&state.db)
         .await?;
-    let mut views = Vec::with_capacity(rows.len());
-    for row in &rows {
-        views.push(to_view(&state, row).await?);
+    // Every grant in one query rather than one per visitor: the console opens
+    // this list on the Account page, and a deployment with a few hundred
+    // visitors would otherwise answer it with a few hundred round trips.
+    let grants = visitor_site_grant::Entity::find()
+        .order_by_asc(visitor_site_grant::Column::SiteId)
+        .all(&state.db)
+        .await?;
+    let mut by_visitor: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    for grant in grants {
+        by_visitor
+            .entry(grant.visitor_id)
+            .or_default()
+            .push(grant.site_id);
     }
+    let views = rows
+        .into_iter()
+        .map(|row| {
+            let site_ids = by_visitor.remove(&row.id).unwrap_or_default();
+            view_of(row, site_ids)
+        })
+        .collect();
     Ok(Json(views))
+}
+
+/// The response shape, from a row and the sites it may enter.
+fn view_of(row: site_visitor::Model, site_ids: Vec<Uuid>) -> VisitorView {
+    VisitorView {
+        id: row.id,
+        email: row.email,
+        name: row.name,
+        disabled: row.disabled,
+        site_ids,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
 }
 
 /// `GET /api/v1/visitors/{visitor_id}`
@@ -196,6 +228,13 @@ async fn update(
     }
     if let Some(disabled) = payload.disabled {
         active.disabled = Set(disabled);
+        // Disabling has to end the sessions the account is holding, not just
+        // the next sign-in — that is the whole point of disabling someone. The
+        // version bump is what does it: the session check compares versions,
+        // and a mismatch ends the session.
+        if disabled {
+            active.token_version = Set(row.token_version + 1);
+        }
         touched = true;
     }
     if let Some(password) = payload.password {
@@ -321,15 +360,10 @@ async fn to_view(
         .order_by_asc(visitor_site_grant::Column::SiteId)
         .all(&state.db)
         .await?;
-    Ok(VisitorView {
-        id: row.id,
-        email: row.email.clone(),
-        name: row.name.clone(),
-        disabled: row.disabled,
-        site_ids: grants.into_iter().map(|grant| grant.site_id).collect(),
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    })
+    Ok(view_of(
+        row.clone(),
+        grants.into_iter().map(|grant| grant.site_id).collect(),
+    ))
 }
 
 /// Lowercases and trims, the same normalisation the sign-in path applies, so

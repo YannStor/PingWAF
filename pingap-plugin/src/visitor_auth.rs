@@ -39,8 +39,9 @@ use http::header::SET_COOKIE;
 use http::{HeaderName, HeaderValue, StatusCode};
 use pingap_config::PluginConf;
 use pingap_core::{
-    Ctx, HTTP_HEADER_CONTENT_HTML, HTTP_HEADER_NO_CACHE, HttpResponse, Plugin,
-    PluginStep, RequestPluginResult, get_cookie_value, get_host,
+    Ctx, HTTP_HEADER_CONTENT_HTML, HTTP_HEADER_NO_CACHE, HTTP_HEADER_NO_STORE,
+    HttpResponse, Plugin, PluginStep, RequestPluginResult, get_cookie_value,
+    get_host,
 };
 use pingora::proxy::Session;
 use pingwaf_agent::PingWafAgent;
@@ -51,7 +52,9 @@ use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 
-use super::{Error, get_hash_key, get_step_conf, get_str_conf};
+use super::{
+    Error, get_hash_key, get_step_conf, get_str_conf, get_str_slice_conf,
+};
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -101,12 +104,19 @@ pub(crate) fn owns_path(path: &str) -> bool {
 
 /// Paths this plugin must leave to the OIDC plugin.
 ///
-/// The provider entry is the one hole in the gate: a `both` site sends every
+/// The provider entry is always one of them: a `both` site sends every
 /// session-less navigation to the local login page, and that page's "continue
 /// with the provider" link has to reach the OIDC plugin instead — otherwise
 /// the link lands back on the page it came from.
-pub(crate) fn is_delegated(path: &str) -> bool {
+///
+/// The site's own OIDC paths — the callback the provider returns to, and the
+/// logout path — are the rest, and they come from the configuration because
+/// the callback path is per-site. A gated callback is a provider login that
+/// can never complete: the browser arrives with a code this plugin would
+/// answer with a redirect to the local form.
+pub(crate) fn is_delegated(path: &str, delegated: &[String]) -> bool {
     path == crate::oidc::PROVIDER_ENTRY_PATH
+        || delegated.iter().any(|owned| owned == path)
 }
 
 /// Body cap for a form post. A login form is a few hundred bytes; anything
@@ -171,6 +181,20 @@ pub struct VisitorAuth {
     /// Key the session cookie is signed with, derived from the site's
     /// `cookie_secret` so one site's cookie does not open another.
     key: [u8; 32],
+    /// Paths the OIDC plugin owns on a `both` site, which this plugin must not
+    /// gate: the callback the provider returns to, and the logout path.
+    ///
+    /// Empty on a `local` site, which has no provider and therefore no paths to
+    /// hand over.
+    delegated_paths: Vec<String>,
+    /// The cookie an OIDC session lives in, when the site offers the provider.
+    ///
+    /// This plugin is first in the chain, so it sees a request before the OIDC
+    /// plugin does. Without knowing which cookie carries the other kind of
+    /// session it would send a signed-in visitor back to the local login page
+    /// on every request — the two plugins would each consider the other's
+    /// session absent.
+    oidc_cookie_name: Option<String>,
 }
 
 impl VisitorAuth {
@@ -219,6 +243,48 @@ impl VisitorAuth {
             return None;
         }
         Some(parsed)
+    }
+
+    /// Whether the browser reached this site over TLS.
+    ///
+    /// The same question the OIDC plugin asks, answered the same way, because both
+    /// set a session cookie for the same visitor on a `both` site and a cookie that
+    /// is `Secure` in one path and not the other is a bug waiting to be found. A
+    /// site behind a TLS-terminating proxy has no TLS on the connection this
+    /// process sees, so the forwarded scheme is consulted — through the site's own
+    /// proxy-trust configuration, since believing the header from anyone would let
+    /// a client claim https it does not have.
+    fn is_secure(session: &Session, ctx: &Ctx) -> bool {
+        match crate::oidc::site_proxy_trust(session) {
+            Some(trust) => {
+                pingap_core::resolve_scheme_with_trust(session, ctx, &trust)
+                    == "https"
+            },
+            None => {
+                pingap_core::resolve_scheme_with_trust(
+                    session,
+                    ctx,
+                    &pingap_core::ProxyTrust::default(),
+                ) == "https"
+            },
+        }
+    }
+
+    /// Whether the request carries an OIDC session cookie.
+    ///
+    /// Only its presence is checked, never its contents: the signature belongs to
+    /// the OIDC plugin, which runs after this one and is the only thing that can
+    /// judge it. What this answers is the routing question — "is there another
+    /// way in that someone has already taken?" — and a forged cookie only means
+    /// this plugin steps aside and the OIDC plugin rejects it, which is where the
+    /// request would have gone anyway.
+    ///
+    /// `None` on a site with no provider, so a `local` site never takes this path.
+    fn oidc_session_present(&self, session: &Session) -> bool {
+        let Some(name) = self.oidc_cookie_name.as_deref() else {
+            return false;
+        };
+        get_cookie_value(session.req_header(), name).is_some()
     }
 
     /// Whether the control plane still considers this session good.
@@ -894,8 +960,12 @@ var wait = setInterval(function () {{
                 }),
             ));
         }
-        if let Some(agent) = Self::agent()
-            && let Err(error) = agent
+        // The control plane answers a refused switch with `ok: false` rather than a
+        // transport error, so both have to be checked — otherwise a visitor whose
+        // grant was revoked mid-session would see the page reload as though the change
+        // had been saved.
+        if let Some(agent) = Self::agent() {
+            let outcome = agent
                 .visitor_auth()
                 .visitor_set_site_visible(
                     &agent.agent_id(),
@@ -903,13 +973,24 @@ var wait = setInterval(function () {{
                     &site_id,
                     visible,
                 )
-                .await
-        {
-            warn!(
-                category = CATEGORY,
-                error = %error,
-                "visitor: could not update the site switch"
-            );
+                .await;
+            let failed = match &outcome {
+                Ok(result) if result.ok => None,
+                Ok(result) => Some(result.error.clone()),
+                Err(error) => Some(error.to_string()),
+            };
+            if let Some(reason) = failed {
+                warn!(
+                    category = CATEGORY,
+                    error = %reason,
+                    "visitor: could not update the site switch"
+                );
+                return Ok(RequestPluginResult::Respond(error_page(
+                    StatusCode::FORBIDDEN,
+                    "Could not change that",
+                    "The site switch was not updated. Please sign in again.",
+                )));
+            }
         }
         Ok(RequestPluginResult::Respond(
             see_other(PORTAL_PATH).unwrap_or_else(|_| {
@@ -1141,6 +1222,7 @@ var wait = setInterval(function () {{
     async fn handle_password_post(
         &self,
         session: &mut Session,
+        ctx: &mut Ctx,
         session_data: &VisitorSession,
     ) -> pingora::Result<RequestPluginResult> {
         let Some(body) = read_form_body(session).await else {
@@ -1172,6 +1254,7 @@ var wait = setInterval(function () {{
             .visitor_auth()
             .visitor_change_password(
                 &agent.agent_id(),
+                &session_data.site_id,
                 &session_data.visitor_id,
                 &form.current_password,
                 &form.password,
@@ -1200,11 +1283,7 @@ var wait = setInterval(function () {{
                 };
                 // The cookie is re-issued with the same `Secure` policy the
                 // request arrived under, so a TLS site keeps it.
-                let secure = session
-                    .req_header()
-                    .uri
-                    .scheme_str()
-                    .is_some_and(|scheme| scheme == "https");
+                let secure = Self::is_secure(session, ctx);
                 let cookie =
                     session_cookie(&value, SESSION_TTL_SECONDS, secure);
                 let mut response = match see_other(PORTAL_PATH) {
@@ -1264,6 +1343,18 @@ impl TryFrom<&PluginConf> for VisitorAuth {
                     .to_string(),
             ));
         }
+        // A `both` site hands the provider's paths to the OIDC plugin. They are
+        // listed rather than hard-coded because the callback path is per-site
+        // configuration, and a path this plugin gated would stop a provider
+        // login from ever completing: the code could not be exchanged.
+        let delegated_paths = get_str_slice_conf(value, "delegated_paths")
+            .into_iter()
+            .filter(|path| path.starts_with('/'))
+            .collect::<Vec<String>>();
+        // The other kind of session, when the site has one. Its absence is what
+        // tells this plugin it is the site's only gate.
+        let oidc_cookie_name = Some(get_str_conf(value, "oidc_cookie_name"))
+            .filter(|name| !name.is_empty());
         // The session cookie is signed with a key derived from the site's
         // `cookie_secret` — the same secret the OIDC session uses, so a site
         // has one secret to rotate rather than two. It is required: a cookie
@@ -1287,6 +1378,8 @@ impl TryFrom<&PluginConf> for VisitorAuth {
             hash_value,
             plugin_step,
             key,
+            delegated_paths,
+            oidc_cookie_name,
         })
     }
 }
@@ -1323,7 +1416,7 @@ impl Plugin for VisitorAuth {
         };
         let now = now_secs();
         let method = session.req_header().method.clone();
-        let secure = ctx.conn.tls_version.is_some();
+        let secure = Self::is_secure(session, ctx);
 
         // The gate. A path this plugin does not own is the site's own content,
         // and a visitor without a session must not reach it — this plugin is
@@ -1333,15 +1426,26 @@ impl Plugin for VisitorAuth {
         // The OIDC plugin runs the equivalent check for the modes that use it;
         // in `both` this one is reached first and the two agree, because both
         // test the same thing (a session for this site).
-        // The provider entry belongs to the OIDC plugin; stepping aside here is what
-        // lets a `both` site reach it at all.
-        if is_delegated(&path) {
+        //
+        // On a `both` site this plugin is *first* in the chain, so anything
+        // belonging to the other way in has to be handed over explicitly.
+        // Otherwise the provider's callback would be gated (the code could
+        // never be exchanged) and a visitor holding an OIDC session would be
+        // sent back to the local login page on every request.
+        if is_delegated(&path, &self.delegated_paths) {
             return Ok(RequestPluginResult::Skipped);
         }
         if !owns_path(&path) {
             if let Some(data) = self.session(session, &site_host, now)
                 && self.session_is_live(&data).await
             {
+                return Ok(RequestPluginResult::Continue);
+            }
+            // An OIDC session is the other way in. Its presence is enough to
+            // step aside: the OIDC plugin, which runs after this one, is what
+            // validates it — this plugin has neither the provider's keys nor
+            // any business reading them.
+            if self.oidc_session_present(session) {
                 return Ok(RequestPluginResult::Continue);
             }
             // A browser is sent to the login page; anything that cannot follow
@@ -1436,7 +1540,9 @@ impl Plugin for VisitorAuth {
             return self.handle_visibility_post(session, &session_data).await;
         }
         if path == PASSWORD_PATH && method == http::Method::POST {
-            return self.handle_password_post(session, &session_data).await;
+            return self
+                .handle_password_post(session, ctx, &session_data)
+                .await;
         }
         if path == PASSKEY_REGISTER_PATH && method == http::Method::POST {
             return self.handle_passkey_register(session, &session_data).await;
@@ -1630,7 +1736,26 @@ if (addBtn) addBtn.addEventListener('click', async function () {
   } finally { addBtn.disabled = false; }
 });"#;
 
-fn no_store(response: HttpResponse) -> HttpResponse {
+/// Marks a response as uncacheable, when its builder did not already.
+///
+/// The sign-in and sign-out redirects carry `Set-Cookie`, and a cache that
+/// stored one would hand a visitor's session to the next person through it.
+/// `see_other` sets `no-cache` on the redirect it builds, but `no-store` is
+/// the directive that stops the response being written down at all — which is
+/// what a body containing a session needs.
+///
+/// The header is appended to the response's header list, the same place
+/// `.no_store()` on the builder puts it, and skipped when it is already there
+/// so a response never carries the directive twice.
+fn no_store(mut response: HttpResponse) -> HttpResponse {
+    let headers = response.headers.get_or_insert_with(Vec::new);
+    if headers
+        .iter()
+        .any(|header| header.0 == http::header::CACHE_CONTROL)
+    {
+        return response;
+    }
+    headers.push(HTTP_HEADER_NO_STORE.clone());
     response
 }
 
@@ -2123,6 +2248,47 @@ mod tests {
     }
 
     /// The session cookie is `HttpOnly` and `SameSite=Lax`, and carries
+    /// A response that carries a session is not cacheable.
+    ///
+    /// Regression: this helper was a function that returned its argument, so
+    /// the sign-in redirect — which carries `Set-Cookie` — was marked
+    /// uncacheable only by whatever the redirect builder happened to set. A
+    /// shared cache that stored it would hand one visitor's session to the next.
+    #[test]
+    fn a_response_with_a_session_is_not_cacheable() {
+        let has_no_store = |response: &HttpResponse| {
+            response.headers.as_ref().is_some_and(|headers| {
+                headers
+                    .iter()
+                    .any(|header| header.0 == http::header::CACHE_CONTROL)
+            })
+        };
+
+        let marked = no_store(HttpResponse::builder(StatusCode::OK).finish());
+        assert!(
+            has_no_store(&marked),
+            "a session-bearing response must say it is uncacheable"
+        );
+
+        // A response that already says so is left alone rather than carrying
+        // the directive twice — `see_other` sets `no-cache` of its own.
+        let already = HttpResponse::builder(StatusCode::SEE_OTHER)
+            .no_store()
+            .finish();
+        let untouched = no_store(already);
+        let count = untouched
+            .headers
+            .as_ref()
+            .map(|headers| {
+                headers
+                    .iter()
+                    .filter(|header| header.0 == http::header::CACHE_CONTROL)
+                    .count()
+            })
+            .unwrap_or_default();
+        assert_eq!(1, count, "the directive must not be duplicated");
+    }
+
     /// `Secure` when the site is reached over TLS — a session cookie without
     /// `HttpOnly` is readable by any script on the origin.
     #[test]

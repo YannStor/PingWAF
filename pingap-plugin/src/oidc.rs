@@ -425,7 +425,7 @@ fn is_http_url(value: &str) -> bool {
 /// this agent serves), in which case the connection's own TLS state decides
 /// the scheme. Same source as the client-IP resolution the WAF uses, so a
 /// deployment names its proxy once and both agree.
-fn site_proxy_trust(session: &Session) -> Option<ProxyTrust> {
+pub(crate) fn site_proxy_trust(session: &Session) -> Option<ProxyTrust> {
     let host = pingap_core::get_host(session.req_header())?;
     let agent = PingWafAgent::instance()?;
     let site_rules = agent.get_rules_for_domain(&host)?;
