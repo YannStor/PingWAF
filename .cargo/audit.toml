@@ -76,4 +76,16 @@ ignore = [
     # on package name and version only. Remove when sea-orm moves to sqlx 0.9
     # (sea-orm 2) AND pingora ships a sentry release that uses 1.x.
     "RUSTSEC-2026-0381",
+
+    # crypto-bigint 0.5.5 (RUSTSEC-2026-0387, several operations intended to be
+    # constant-time can branch on secrets, depending on compiler and CPU). The
+    # fix is 0.7.6, a breaking major release, and 0.5 is a closed line — so this
+    # cannot be resolved by `cargo update`. It reaches this tree through
+    # `passkey-server 0.1.4 -> p256 0.13.2 -> elliptic-curve 0.13.8`, and
+    # passkey-server is the latest release. Exposure is limited to the WebAuthn
+    # *verification* path: passkey-server holds no private key (the credential
+    # never leaves the authenticator), so it runs public-key operations on data
+    # the client supplies — there is no secret integer for a timing channel to
+    # leak. Remove when passkey-server moves to p256 0.14 / elliptic-curve 0.14.
+    "RUSTSEC-2026-0387",
 ]

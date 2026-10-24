@@ -301,8 +301,29 @@ mod tests {
             ca.meta.subject_dn
         );
         assert_eq!(ca.meta.fingerprint_sha256.len(), 64);
-        // rcgen derives a 20-byte serial from the public key.
-        assert_eq!(ca.meta.serial.len(), 40);
+        // A 20-byte serial, hex-encoded. The length is not fixed: DER drops
+        // leading zero bytes from an INTEGER, so a serial that starts with one
+        // renders as 38 characters rather than 40 — about one in 256, which is
+        // how often this test used to fail. What matters is that it is there
+        // and plausibly sized, not that it is exactly 40.
+        assert!(
+            (38..=40).contains(&ca.meta.serial.len()),
+            "serial should be a 20-byte integer: {} ({} chars)",
+            ca.meta.serial,
+            ca.meta.serial.len()
+        );
+        assert!(
+            ca.meta.serial.chars().all(|c| c.is_ascii_hexdigit()),
+            "serial should be hex: {}",
+            ca.meta.serial
+        );
+        // Two certificates must not share a serial, which is the property the
+        // random generation is there for.
+        let other = generate_ca("PingWAF mTLS CA", Some("Acme"), 365).unwrap();
+        assert_ne!(
+            ca.meta.serial, other.meta.serial,
+            "serials must be unique across generated certificates"
+        );
         assert!(ca.key_pem.is_some());
 
         let reparsed = parse_cert_meta(&ca.cert_pem).unwrap();
