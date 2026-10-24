@@ -8,6 +8,35 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.30.2] — 2026-10-24
+
+### Security
+
+- **The WAF's step-aside for the visitor login page covered a prefix, which was
+  a way around the WAF.** 0.30.1 skipped every path starting with `/_pingwaf/`
+  so a rule could not block the site's own front door. But a prefix matches
+  `/_pingwaf/<anything>`: on a site with no login page — where nothing serves
+  that prefix — the request skipped every rule and went straight upstream, and
+  the skip sat before the dynamic IP block, so a blocked client could still use
+  it. Confirmed against a live deployment: `/.env` and a random path were
+  blocked, while `/_pingwaf/anything` reached the origin. `/_pingwaf/../admin`
+  matched too, and most origins normalise the `..` away — a path-traversal hole
+  rather than just an unprotected one.
+
+  The skip is now the exact endpoints the plugin owns, and only when the site's
+  chain actually carries the plugin that serves them. On any other site those
+  paths are not an endpoint, they are just a path, and a path that skips every
+  rule is a hole.
+
+### Fixed
+
+- **The stop record was matched without an upper bound.** `stopped_at >=
+  previous.booted_at` alone accepts a row written *later* — by a second process
+  sharing the hostname, by a restored dump, by a fast clock — as evidence about
+  a boot it never described, which would label a crash a planned stop. That is
+  the one direction the restart-history mechanism must not fail in, so the
+  match is bounded at both ends now.
+
 ## [PingWAF 0.30.1] — 2026-10-24
 
 Four findings from a full test pass over 0.30.0, three of them latent since the
