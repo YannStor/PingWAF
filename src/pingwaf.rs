@@ -1138,7 +1138,12 @@ fn cached_rules_to_pingap_config(
         }
     }
 
-    if location_names.is_empty() {
+    // A site with an ACME certificate but no usable upstream has no location
+    // to proxy to, yet the certificate and its HTTP-01 challenge are still
+    // valid work. Keep the certificate-only config so the challenge handler
+    // and issuance task can run; ordinary requests simply 404/503 until an
+    // upstream is available. Truly empty configs still return None.
+    if location_names.is_empty() && certificates.is_empty() {
         return None;
     }
 
@@ -1594,10 +1599,14 @@ pub async fn start_data_plane(
     // with the proxy — the HTTP-01 challenge handler reads tokens from it,
     // and a renewed PEM lands in both the config and the certificate
     // provider below. PINGAP_DISABLE_ACME opts out entirely.
-    let acme_enabled = !config.certificates.is_empty()
-        && std::env::var("PINGAP_DISABLE_ACME")
-            .unwrap_or_default()
-            .is_empty();
+    //
+    // Do not derive this from the certificates present at boot: the first
+    // certificate is usually requested after the data plane is already
+    // running, and a hot-reloaded certificate would otherwise never start
+    // the issuance task or the port-80 challenge handler.
+    let acme_enabled = std::env::var("PINGAP_DISABLE_ACME")
+        .unwrap_or_default()
+        .is_empty();
     let mut background_tasks = BackgroundTaskService::new(
         "data_plane_background_tasks",
         Duration::from_secs(60),
@@ -3068,6 +3077,30 @@ mod tests {
         assert_eq!(
             sanitize_algo("hash:query:q"),
             Some("hash:query:q".to_string())
+        );
+    }
+
+    #[test]
+    fn acme_certificate_survives_a_site_without_an_upstream() {
+        let mut site = site_rules("site1", "acme.example.com");
+        site.upstreams.clear();
+        site.ssl_config = Some(acme_ssl());
+
+        let config = cached_rules_to_pingap_config(
+            &one_site_cache(site),
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("an ACME certificate is valid work without a proxy location");
+
+        assert!(config.locations.is_empty());
+        assert!(config.certificates.contains_key("site1_cert"));
+        assert_eq!(
+            config
+                .servers
+                .get("pingwaf")
+                .and_then(|server| server.locations.as_ref())
+                .map(Vec::len),
+            Some(0)
         );
     }
 

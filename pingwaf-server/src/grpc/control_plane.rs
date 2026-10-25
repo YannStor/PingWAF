@@ -1213,6 +1213,12 @@ async fn persist_site_certificates(
     statuses: &[SiteStatus],
 ) {
     let now = Utc::now();
+    if !statuses.is_empty() {
+        tracing::debug!(
+            site_statuses = statuses.len(),
+            "persisting edge certificate state"
+        );
+    }
     for status in statuses {
         let row_status = match status.ssl_status.as_str() {
             "valid" | "expiring_soon" => cert_status::ACTIVE,

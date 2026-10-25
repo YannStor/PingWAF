@@ -1380,6 +1380,13 @@ impl RuleCache {
         // provider the ACME task writes into; without one every site reports
         // an empty status and the control plane leaves its rows alone.
         let ssl = crate::cert_status::snapshot();
+        if !ssl.is_empty() {
+            tracing::debug!(
+                sites = rules.sites.len(),
+                certificate_sites = ssl.len(),
+                "certificate status snapshot for heartbeat"
+            );
+        }
         let mut out = Vec::with_capacity(rules.sites.len());
         for (site_id, site) in rules.sites.iter() {
             // A site answers on its primary domain and every alias, and the

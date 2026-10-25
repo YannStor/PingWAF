@@ -8,6 +8,19 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.31.0-e2e.2] — 2026-10-25
+
+> **Internal E2E build — not a release.** Adds ACME lifecycle decoupling and
+> diagnostic logging for edge certificate status reporting. Removed after the
+> test run.
+
+### Fixed
+
+- ACME task and HTTP-01 challenge handler are available when the first
+  certificate is created after startup.
+- A site with an ACME certificate but no usable upstream keeps its certificate
+  entry and listeners instead of dropping the whole data-plane config.
+
 ## [PingWAF 0.31.0-e2e.1] — 2026-10-25
 
 > **Internal E2E build — not a release.** Adds the staging-only ACME switch so

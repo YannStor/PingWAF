@@ -113,3 +113,6 @@ docs-internal/
 # Local-only by design — never commit (see scripts/hooks/pre-commit and the
 # CI guard in .github/workflows/ci.yml).
 .codebuddy/
+e2e/node_modules/
+e2e/test-results/
+e2e/artifacts/

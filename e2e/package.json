@@ -1,0 +1,16 @@
+{
+  "name": "pingwaf-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "test:acme": "playwright test specs/acme-staging.spec.ts",
+    "install:browser": "playwright install chromium",
+    "report": "playwright show-report artifacts/html"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "@types/node": "^24.10.0",
+    "typescript": "~5.9.3"
+  }
+}
