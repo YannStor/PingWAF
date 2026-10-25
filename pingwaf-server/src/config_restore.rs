@@ -212,6 +212,13 @@ async fn merge_row<C: ConnectionTrait>(
 
     for field in spec.secrets {
         let explicitly_null = row.get(*field).is_some_and(Value::is_null);
+        // `key_pem` is nullable on certificate tables: an explicit null can
+        // mean "this certificate has no private key", which is a valid state
+        // to restore. Non-nullable key columns are still rejected by the
+        // column validation below.
+        if explicitly_null && *field == "key_pem" {
+            continue;
+        }
         if explicitly_null && required_secret(spec.name, field, &row) {
             return Err(DbErr::Custom(format!(
                 "{}.{field} cannot be restored as an explicit null secret",
