@@ -8,6 +8,49 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.31.0-rc.1] — 2026-10-25
+
+> **Pre-release.** First candidate for the account-page and configuration-backup
+> work. Publishes `:0.31.0-rc.1` only — `:latest` and `:0.31` keep pointing at
+> the newest stable release, and GitHub marks it a pre-release so `install.sh`
+> (which resolves `/releases/latest`) is unaffected. Pin it explicitly:
+> `PINGWAF_TAG=0.31.0-rc.1`.
+
+### Added
+
+- **Account page parity with Settings.** The same sticky quick navigation,
+  scroll-spy and section layout, filtered by role. OIDC providers and visitor
+  accounts come first, users next, and API keys are always last.
+- **Visitor remarks.** Create, edit, list and clear a console-only note of up to
+  500 characters for recognising accounts in collaborative operation. Stored by
+  a new migration and never exposed to the data plane.
+- **Complete encrypted configuration backups.** A unified 38-table restorable
+  catalogue covers site policy, shared resources, OIDC, visitors and grants,
+  notifications, AI, cache and certificates. Password-based Argon2id and
+  AES-256-GCM encryption, zstd compression, SHA-256 verification, and bounded
+  S3/GitHub upload tasks with expiring leases. Target credentials are sealed,
+  never returned by the API, and remote storage receives only ciphertext.
+- **Upload preview and safe restore.** Decrypt, validate and preview before/after
+  counts, changes, owner mappings and warnings. Confirmation creates an
+  encrypted pre-restore backup and applies the replacement in the same
+  serializable transaction, with runtime refresh warnings reported separately.
+- **Reliable retention.** The 30-day and newest-50 rules now run at startup,
+  daily and on demand, and also apply to backup records. Backup lists read
+  metadata only, not ciphertext.
+
+### Fixed
+
+- **Snapshot and rollback correctness.** v2 snapshots and v1 readers share one
+  engine: missing tables are preserved, explicitly empty tables are cleared,
+  global singleton objects are readable, new columns get database defaults, and
+  restore uses actual writes rather than `ActiveModel`'s `Unchanged` state.
+- **Review-discovered safety issues.** Corrected `jsonb_populate_recordset`
+  argument order, prevented missing-`sites` pruning, retained complete
+  configurations for sites outside ordinary rollbacks, bounded untrusted KDF
+  parameters and concurrency, preserved exact download bytes, re-sealed
+  instance-managed secrets for the restoring instance, fenced stale upload
+  attempts and invalidated stale restore previews.
+
 ## [PingWAF 0.30.2] — 2026-10-24
 
 ### Security
