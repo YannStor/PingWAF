@@ -8,6 +8,21 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.31.0-rc.2] — 2026-10-25
+
+> **Pre-release.** Second candidate: rc.1 plus a restore fix found by the
+> end-to-end run. Publishes `:0.31.0-rc.2` only — `:latest` and `:0.31` keep
+> pointing at the newest stable release. Pin it explicitly:
+> `PINGWAF_TAG=0.31.0-rc.2`.
+
+### Fixed
+
+- **Certificates with no private key can be restored.** The secret preflight
+  treated an explicit `null` `key_pem` as an attempt to bypass secret recovery,
+  but that is a legitimate state on certificate tables. Preview and restore now
+  accept it, while non-nullable secret columns and unresolved secret materials
+  still fail closed.
+
 ## [PingWAF 0.31.0-rc.1] — 2026-10-25
 
 > **Pre-release.** First candidate for the account-page and configuration-backup
