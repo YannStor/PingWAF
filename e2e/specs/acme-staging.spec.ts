@@ -1,13 +1,18 @@
 import { execFileSync } from 'node:child_process'
 import { test, expect } from '../fixtures/app'
 
-const domain = process.env.E2E_ACME_DOMAIN ?? 'mirror.liveflowhub.com'
+const domain = process.env.E2E_ACME_DOMAIN?.trim() ?? ''
 const timeout = Number(process.env.E2E_ACME_TIMEOUT ?? 900_000)
 
 test.describe('ACME staging with an unreachable origin', () => {
+  test.skip(
+    !domain,
+    'E2E_ACME_DOMAIN must be set explicitly; refusing to touch a shared real domain',
+  )
   test('issues HTTP-01 even when the site has no usable upstream', async ({ app }) => {
     test.setTimeout(timeout + 120_000)
     await app.deleteSiteIfPresent(domain)
+    await app.deleteCertificatesFor(domain)
     await app.createSite({
       name: `E2E ACME ${Date.now().toString(36)}`,
       domain,
@@ -42,6 +47,7 @@ test.describe('ACME staging with an unreachable origin', () => {
       expect(certificate.toUpperCase()).toContain('STAGING')
     } finally {
       await app.deleteSiteIfPresent(domain)
+      await app.deleteCertificatesFor(domain)
     }
   })
 })

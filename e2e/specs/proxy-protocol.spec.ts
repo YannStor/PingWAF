@@ -1,7 +1,9 @@
 import { test, expect } from '../fixtures/app'
+import { requiredEnv } from '../support/env'
 
 const run = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
-const origin = process.env.E2E_ORIGIN_URL ?? 'http://e2e-origin-a:8080'
+const origin = requiredEnv('E2E_ORIGIN_URL')
+const tlsOrigin = process.env.E2E_ORIGIN_TLS_URL
 
 test.describe('reverse proxy protocol and transport', () => {
   test('WebSocket, headers and large responses survive the edge', async ({ app }) => {
@@ -12,6 +14,7 @@ test.describe('reverse proxy protocol and transport', () => {
       upstream: origin,
     })
     try {
+      await app.waitForSite(domain)
       await app.page.goto(`http://${domain}/`)
       const echoed = await app.page.evaluate(
         () =>
@@ -39,23 +42,31 @@ test.describe('reverse proxy protocol and transport', () => {
       expect(headers.headers['x-e2e']).toBe('present')
       expect(headers.headers.host).toBe(domain)
 
-      const response = await app.page.goto(`http://${domain}/big`)
-      expect(response?.status()).toBe(200)
-      expect((await response?.body())?.length).toBeGreaterThan(2 * 1024 * 1024 - 1024)
+      const big = await app.page.evaluate(async () => {
+        const response = await fetch('/big')
+        return {
+          status: response.status,
+          bytes: (await response.arrayBuffer()).byteLength,
+        }
+      })
+      expect(big.status).toBe(200)
+      expect(big.bytes).toBeGreaterThan(2 * 1024 * 1024 - 1024)
     } finally {
       await app.deleteSite(domain)
     }
   })
 
   test('HTTPS origin is supported with certificate verification disabled', async ({ app }) => {
+    test.skip(!tlsOrigin, 'E2E_ORIGIN_TLS_URL is not configured')
     const domain = `tls-origin-${run}.e2e.test`
     await app.createSite({
       name: `E2E TLS origin ${run}`,
       domain,
-      upstream: 'https://e2e-origin-a:8443',
+      upstream: tlsOrigin as string,
       upstreamTls: true,
     })
     try {
+      await app.waitForSite(domain)
       const response = await app.page.goto(`http://${domain}/a`)
       expect(response?.status()).toBe(200)
       expect(await app.page.locator('body').innerText()).toContain('"route":"a"')

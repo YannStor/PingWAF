@@ -1028,10 +1028,9 @@ fn run() -> Result<(), Box<dyn Error>> {
         !acme.is_empty() && !domains.is_empty() && !dns_challenge
     });
 
-    if std::env::var("PINGAP_DISABLE_ACME")
-        .unwrap_or_default()
-        .is_empty()
-    {
+    if !pingwaf::env_flag_is_true(
+        std::env::var("PINGAP_DISABLE_ACME").ok().as_deref(),
+    ) {
         simple_background_service.add_task(
             "lets_encrypt",
             new_lets_encrypt_service(

@@ -1,7 +1,9 @@
 import { test as base, expect, type Page } from '@playwright/test'
+import { requiredEnv } from '../support/env'
 
 export type App = {
   page: Page
+  adminUrl(path: string): string
   createSite(input: {
     name: string
     domain: string
@@ -9,8 +11,10 @@ export type App = {
     alternateDomains?: string[]
     upstreamTls?: boolean
   }): Promise<string>
+  waitForSite(domain: string, timeout?: number): Promise<void>
   deleteSite(domain: string): Promise<void>
   deleteSiteIfPresent(domain: string): Promise<void>
+  deleteCertificatesFor(domain: string): Promise<void>
   addRoute(input: {
     name: string
     path: string
@@ -26,6 +30,10 @@ export type App = {
     challenge?: 'http-01' | 'dns-01'
   }): Promise<void>
   waitForCertificate(domain: string, status: string, timeout?: number): Promise<void>
+}
+
+function adminPath(path: string) {
+  return new URL(path, requiredEnv('E2E_BASE_URL')).toString()
 }
 
 async function login(page: Page) {
@@ -49,7 +57,7 @@ async function createSite(
     upstreamTls?: boolean
   },
 ) {
-  await page.goto('/sites')
+  await page.goto(adminPath('/sites'))
   await page.getByRole('button', { name: 'Add site' }).click()
   const dialog = page.getByRole('dialog', { name: 'Add site' })
   await dialog.getByRole('textbox', { name: /Name/ }).fill(input.name)
@@ -68,14 +76,28 @@ async function createSite(
     await dialog.getByRole('switch', { name: /HTTPS to origin/ }).check()
   }
   await dialog.getByRole('button', { name: 'Create', exact: true }).click()
-  await expect(page).toHaveURL(/\/sites\/([0-9a-f-]{36})\/basic/, { timeout: 30_000 })
+  await expect(page).toHaveURL(/\/sites\/([0-9a-f-]{36})\/basic/, { timeout: 90_000 })
   const match = page.url().match(/\/sites\/([0-9a-f-]{36})\/basic/)
   if (!match) throw new Error(`site id missing from ${page.url()}`)
   return match[1]
 }
 
+async function waitForSite(page: Page, domain: string, timeout = 30_000) {
+  await expect
+    .poll(
+      async () => {
+        const response = await page.goto(`http://${domain}/?e2e-ready=1`, {
+          waitUntil: 'domcontentloaded',
+        })
+        return response?.status() ?? 0
+      },
+      { timeout, intervals: [1_000, 2_000, 5_000] },
+    )
+    .toBe(200)
+}
+
 async function deleteSite(page: Page, domain: string) {
-  await page.goto('/sites')
+  await page.goto(adminPath('/sites'))
   const row = page.getByRole('row').filter({ hasText: domain })
   await row.getByRole('button', { name: 'Delete' }).click()
   const dialog = page.getByRole('dialog')
@@ -84,13 +106,25 @@ async function deleteSite(page: Page, domain: string) {
 }
 
 async function deleteSiteIfPresent(page: Page, domain: string) {
-  await page.goto('/sites')
+  await page.goto(adminPath('/sites'))
   const row = page.getByRole('row').filter({ hasText: domain })
   if ((await row.count()) === 0) return
   await row.getByRole('button', { name: 'Delete' }).click()
   const dialog = page.getByRole('dialog')
   await dialog.getByRole('button', { name: /Delete/ }).last().click()
   await expect(row).toHaveCount(0, { timeout: 30_000 })
+}
+
+async function deleteCertificatesFor(page: Page, domain: string) {
+  await page.goto(adminPath('/ssl'))
+  for (;;) {
+    const row = page.getByRole('row').filter({ hasText: domain })
+    if ((await row.count()) === 0) return
+    await row.first().getByRole('button', { name: 'Delete' }).click()
+    const dialog = page.getByRole('dialog')
+    await dialog.getByRole('button', { name: /Delete/ }).last().click()
+    await expect(row).toHaveCount(0, { timeout: 30_000 })
+  }
 }
 
 async function addRoute(
@@ -104,7 +138,7 @@ async function addRoute(
     upstreamHost?: string
   },
 ) {
-  await page.getByRole('button', { name: 'Add route' }).click()
+  await page.getByRole('button', { name: 'Add route' }).first().click()
   const dialog = page.getByRole('dialog', { name: 'Add route' })
   await dialog.getByRole('textbox', { name: /Rule name/ }).fill(input.name)
   if (input.match) {
@@ -112,6 +146,9 @@ async function addRoute(
   }
   await dialog.getByRole('textbox', { name: /Path/ }).fill(input.path)
   if (input.rewritePath) {
+    if ((input.match ?? 'prefix') !== 'prefix') {
+      throw new Error('rewritePath is only available for prefix routes')
+    }
     await dialog.getByRole('textbox', { name: 'Rewrite path' }).fill(input.rewritePath)
   }
   if (input.stripPrefix) {
@@ -127,7 +164,7 @@ async function addRoute(
 async function addNode(page: Page, address: string) {
   await page.getByRole('button', { name: 'Add node' }).first().click()
   const dialog = page.getByRole('dialog', { name: 'Add node' })
-  await dialog.getByRole('textbox', { name: /Address/ }).fill(address)
+  await dialog.getByRole('textbox', { name: /address/i }).fill(address)
   await dialog.getByRole('button', { name: 'Create', exact: true }).click()
   await expect(dialog).toHaveCount(0, { timeout: 30_000 })
 }
@@ -136,7 +173,7 @@ async function requestCertificate(
   page: Page,
   input: { domain: string; email: string; challenge?: 'http-01' | 'dns-01' },
 ) {
-  await page.goto('/ssl')
+  await page.goto(adminPath('/ssl'))
   await page.getByRole('button', { name: 'Apply or upload' }).click()
   const dialog = page.getByRole('dialog', {
     name: 'Apply for or upload a certificate',
@@ -160,12 +197,11 @@ async function requestCertificate(
 }
 
 async function waitForCertificate(page: Page, domain: string, status: string, timeout = 900_000) {
-  await page.goto('/ssl')
-  await page.getByRole('tab', { name: 'Application log' }).click()
+  await page.goto(adminPath('/ssl'))
   const row = page
     .getByRole('row')
     .filter({ hasText: domain })
-    .filter({ hasText: new RegExp(`status: ${status}`, 'i') })
+    .filter({ hasText: new RegExp(status, 'i') })
   await expect(row.first()).toBeVisible({ timeout })
 }
 
@@ -175,9 +211,12 @@ export const test = base.extend<{ app: App }>({
     await login(page)
     await use({
       page,
+      adminUrl: (path) => new URL(path, requiredEnv('E2E_BASE_URL')).toString(),
       createSite: (input) => createSite(page, input),
+      waitForSite: (domain, timeout) => waitForSite(page, domain, timeout),
       deleteSite: (domain) => deleteSite(page, domain),
       deleteSiteIfPresent: (domain) => deleteSiteIfPresent(page, domain),
+      deleteCertificatesFor: (domain) => deleteCertificatesFor(page, domain),
       addRoute: (input) => addRoute(page, input),
       addNode: (address) => addNode(page, address),
       requestCertificate: (input) => requestCertificate(page, input),

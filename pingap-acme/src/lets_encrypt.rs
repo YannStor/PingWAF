@@ -50,7 +50,8 @@ use std::sync::Arc;
 #[cfg(feature = "openssl")]
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 static WELL_KNOWN_PATH_PREFIX: &str = "/.well-known/acme-challenge/";
@@ -187,13 +188,61 @@ const ACME_FAILURE_MARKER: &str = "acme_failed";
 ///
 /// Newlines are folded into spaces: the capture layer stores one message per
 /// event and the control plane parses the line.
+/// Keeps an error diagnostic without echoing URL query strings. DNS provider
+/// errors can include the request URL, and those URLs carry credentials as
+/// query parameters; the text is persisted, shown in the console and sent to
+/// notification channels, so query strings must never travel with it.
+fn redact_url_queries(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for part in text.split_inclusive(char::is_whitespace) {
+        if !part.contains("://") {
+            out.push_str(part);
+            continue;
+        }
+        match part.split_once('?') {
+            Some((prefix, _)) => {
+                out.push_str(prefix);
+                out.push_str("?[redacted]");
+                if let Some(space) =
+                    part.chars().last().filter(|c| c.is_whitespace())
+                {
+                    out.push(space);
+                }
+            },
+            None => out.push_str(part),
+        }
+    }
+    out
+}
+
 fn acme_failure_event_message(domains: &[String], error: &Error) -> String {
-    let reason = error.to_string().replace(['\n', '\r'], " ");
+    let reason =
+        redact_url_queries(&error.to_string().replace(['\n', '\r'], " "));
     format!(
         "{} domain={} reason={reason}",
         ACME_FAILURE_MARKER,
         domains.join(",")
     )
+}
+
+/// Failure state for one certificate/domain set.
+struct RetryState {
+    failures: u32,
+    next_attempt: Instant,
+}
+
+/// Backoff after a failed order. The first retry is deliberately soon (a
+/// transient DNS/HTTP hiccup should recover quickly), then backs off to six
+/// hours so a persistent misconfiguration cannot exhaust CA quotas or the
+/// notification channel.
+fn retry_delay(failures: u32) -> Duration {
+    match failures {
+        0 | 1 => Duration::from_secs(5 * 60),
+        2 => Duration::from_secs(15 * 60),
+        3 => Duration::from_secs(30 * 60),
+        4 => Duration::from_secs(60 * 60),
+        _ => Duration::from_secs(6 * 60 * 60),
+    }
 }
 
 /// Periodically checks and updates certificates that need renewal.
@@ -202,29 +251,37 @@ fn acme_failure_event_message(domains: &[String], error: &Error) -> String {
 /// - The configured domains have changed
 /// - The certificate cannot be loaded
 ///
-/// The check runs every UPDATE_INTERVAL iterations to avoid excessive checks.
+/// The scan runs every tick so a newly created site is attempted within a
+/// minute. Failed certificate/domain pairs are skipped until their own
+/// exponential-backoff deadline, so retries stay bounded.
 async fn do_update_certificates(
     count: u32,
     config_manager: Arc<ConfigManager>,
     params: &[UpdateCertificateParams],
     provider: Arc<dyn CertificateProvider>,
     sender: Option<Arc<NotificationSender>>,
+    retries: &mut HashMap<String, RetryState>,
 ) -> Result<bool, ServiceError> {
     if params.is_empty() {
-        return Ok(false);
-    }
-    // The task ticks once a minute. Check every tick: a newly created site
-    // must not sit pending for ten minutes before the first order is even
-    // attempted. Renewal itself is still gated by `should_renew` (validity
-    // and domain comparison), so this does not hit the CA on every tick.
-    const UPDATE_INTERVAL: u32 = 1;
-    if !count.is_multiple_of(UPDATE_INTERVAL) {
         return Ok(false);
     }
     let config = config_manager.get_current_config();
     for item in params.iter() {
         let name = &item.name;
         let domains = &item.domains;
+        let retry_key = format!("{name}|{}", domains.join(","));
+        if retries
+            .get(&retry_key)
+            .is_some_and(|state| state.next_attempt > Instant::now())
+        {
+            debug!(
+                target: LOG_TARGET,
+                name,
+                domains = domains.join(","),
+                "certificate retry is backing off"
+            );
+            continue;
+        }
         let is_manual = item.dns_provider == DNS_PROVIDER_MANUAL;
         // manual dns challenge is only run once
         if item.dns_challenge && is_manual && count > 0 {
@@ -257,6 +314,7 @@ async fn do_update_certificates(
         };
 
         if !should_renew {
+            retries.remove(&retry_key);
             debug!(
                 target: LOG_TARGET,
                 domains = domains.join(","),
@@ -266,7 +324,7 @@ async fn do_update_certificates(
             continue;
         }
 
-        if let Err(e) = renew_certificate(
+        match renew_certificate(
             config_manager.clone(),
             item.clone(),
             provider.clone(),
@@ -274,19 +332,37 @@ async fn do_update_certificates(
         )
         .await
         {
-            // Terminal failure for this attempt. Besides the operator log,
-            // this line is the event the control plane turns into a `failed`
-            // certificate row: the raw ACME capture ships only the message
-            // text, so the domains travel inside it for site attribution.
-            let message = acme_failure_event_message(domains, &e);
-            error!(
-                target: LOG_TARGET,
-                error = %e,
-                domains = domains.join(","),
-                name,
-                "{}",
-                message
-            );
+            Ok(()) => {
+                retries.remove(&retry_key);
+            },
+            Err(e) => {
+                let failures = retries
+                    .get(&retry_key)
+                    .map_or(1, |state| state.failures.saturating_add(1));
+                let delay = retry_delay(failures);
+                retries.insert(
+                    retry_key,
+                    RetryState {
+                        failures,
+                        next_attempt: Instant::now() + delay,
+                    },
+                );
+                // Terminal failure for this attempt. Besides the operator log,
+                // this line is the event the control plane turns into a
+                // `failed` certificate row: the raw ACME capture ships only
+                // the message text, so the domains travel inside it for site
+                // attribution.
+                let message = acme_failure_event_message(domains, &e);
+                error!(
+                    target: LOG_TARGET,
+                    error = %e,
+                    domains = domains.join(","),
+                    name,
+                    retry_in_secs = delay.as_secs(),
+                    "{}",
+                    message
+                );
+            },
         }
     }
     Ok(true)
@@ -389,6 +465,7 @@ struct LetsEncryptTask {
     certificate_provider: Arc<dyn CertificateProvider>,
     sender: Option<Arc<NotificationSender>>,
     running: AtomicBool,
+    retries: Mutex<HashMap<String, RetryState>>,
 }
 
 #[async_trait]
@@ -431,12 +508,14 @@ impl BackgroundTask for LetsEncryptTask {
                 dns_service_url,
             });
         }
+        let mut retries = self.retries.lock().await;
         do_update_certificates(
             count,
             self.config_manager.clone(),
             &params,
             self.certificate_provider.clone(),
             self.sender.clone(),
+            &mut retries,
         )
         .await?;
 
@@ -584,6 +663,7 @@ pub fn new_lets_encrypt_service(
         certificate_provider,
         sender,
         running: AtomicBool::new(false),
+        retries: Mutex::new(HashMap::new()),
     })
 }
 
@@ -714,7 +794,7 @@ fn acme_production_from_value(value: Option<&str>) -> bool {
     };
     !matches!(
         value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
+        "1" | "true" | "yes" | "on" | "staging" | "stage"
     )
 }
 
@@ -1429,6 +1509,28 @@ mod tests {
     }
 
     #[test]
+    fn failure_text_redacts_url_queries() {
+        use super::redact_url_queries;
+        let text = "provider https://dns.example/update?access_key_secret=topsecret failed";
+        let redacted = redact_url_queries(text);
+        assert!(!redacted.contains("topsecret"));
+        assert!(redacted.contains("?[redacted]"));
+        assert!(redacted.ends_with("failed"));
+    }
+
+    #[test]
+    fn failed_certificate_retries_back_off() {
+        use super::retry_delay;
+        use std::time::Duration;
+        assert_eq!(retry_delay(1), Duration::from_secs(5 * 60));
+        assert_eq!(retry_delay(2), Duration::from_secs(15 * 60));
+        assert_eq!(retry_delay(3), Duration::from_secs(30 * 60));
+        assert_eq!(retry_delay(4), Duration::from_secs(60 * 60));
+        assert_eq!(retry_delay(5), Duration::from_secs(6 * 60 * 60));
+        assert_eq!(retry_delay(100), Duration::from_secs(6 * 60 * 60));
+    }
+
+    #[test]
     fn staging_is_opt_in_only() {
         use super::acme_production_from_value;
 
@@ -1437,13 +1539,15 @@ mod tests {
         assert!(acme_production_from_value(Some("")));
         assert!(acme_production_from_value(Some("false")));
         assert!(acme_production_from_value(Some("0")));
-        assert!(acme_production_from_value(Some("staging")));
         assert!(acme_production_from_value(Some("  nope  ")));
         // Only the documented opt-ins select staging.
         assert!(!acme_production_from_value(Some("1")));
         assert!(!acme_production_from_value(Some("true")));
         assert!(!acme_production_from_value(Some(" YES ")));
         assert!(!acme_production_from_value(Some("On")));
+        assert!(!acme_production_from_value(Some("staging")));
+        assert!(!acme_production_from_value(Some(" STAGE ")));
+        assert!(acme_production_from_value(Some("production")));
     }
 
     #[test]

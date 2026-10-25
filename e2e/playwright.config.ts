@@ -1,11 +1,15 @@
 import { defineConfig, devices } from '@playwright/test'
+import { requiredEnv } from './support/env'
 
 const zone = process.env.E2E_ZONE ?? 'e2e.test'
-const edgeIp = process.env.E2E_EDGE_IP ?? '47.242.20.155'
-const baseURL = process.env.E2E_BASE_URL ?? 'https://47.242.20.155:9080'
+const edgeIp = requiredEnv('E2E_EDGE_IP')
+const baseURL = requiredEnv('E2E_BASE_URL')
 
 export default defineConfig({
   testDir: './specs',
+  // A unique directory per run keeps Playwright from bulk-deleting prior
+  // traces, which also avoids the IDE safe-delete guard on large result sets.
+  outputDir: process.env.E2E_OUTPUT_DIR ?? './test-results',
   timeout: 180_000,
   expect: { timeout: 20_000 },
   fullyParallel: false,

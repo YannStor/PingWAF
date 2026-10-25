@@ -185,6 +185,17 @@ fn extract_port(addr: &str) -> &str {
     addr.rsplit(':').next().unwrap_or("9090")
 }
 
+/// Parses an environment flag with the same truthy spellings used by the
+/// ACME staging switch. `false`, `0`, `no`, `off` and absence are false.
+pub(crate) fn env_flag_is_true(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
 /// Build the `RunMode` from the parsed CLI.
 ///
 /// The maintenance commands never reach this: [`main`] routes them to
@@ -1604,9 +1615,9 @@ pub async fn start_data_plane(
     // certificate is usually requested after the data plane is already
     // running, and a hot-reloaded certificate would otherwise never start
     // the issuance task or the port-80 challenge handler.
-    let acme_enabled = std::env::var("PINGAP_DISABLE_ACME")
-        .unwrap_or_default()
-        .is_empty();
+    let acme_enabled =
+        !env_flag_is_true(std::env::var("PINGAP_DISABLE_ACME").ok().as_deref());
+    info!(enabled = acme_enabled, "data plane: ACME task state");
     let mut background_tasks = BackgroundTaskService::new(
         "data_plane_background_tasks",
         Duration::from_secs(60),
@@ -3102,6 +3113,11 @@ mod tests {
                 .map(Vec::len),
             Some(0)
         );
+        // The configuration must survive the same parser used by the data
+        // plane: a certificate-only site still needs its 80/443 listeners.
+        let servers = parse_from_conf(config);
+        assert!(servers.iter().any(|server| server.addr == "0.0.0.0:80"));
+        assert!(servers.iter().any(|server| server.addr == "0.0.0.0:443"));
     }
 
     #[test]

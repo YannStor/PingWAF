@@ -25,7 +25,7 @@ function headersFor(path, extra = {}) {
     'x-origin-name': NAME,
     'x-origin-path': path,
     'x-origin-requests': String(count(path)),
-    'cache-control': 'no-store',
+    'cache-control': path === '/cache' ? 'public, max-age=60' : 'no-store',
     ...extra,
   }
 }
@@ -83,9 +83,6 @@ function sendJson(res, status, value, extra) {
 async function handler(req, res) {
   const url = new URL(req.url, `http://${req.headers.host ?? 'origin'}`)
   const path = url.pathname
-  if (req.method === 'GET' && path === '/ws') {
-    return websocket(req, res)
-  }
   if (req.method === 'GET' && path === '/big') {
     res.writeHead(200, headersFor(path, { 'content-type': 'application/octet-stream', 'content-length': large.length }))
     return res.end(large)
@@ -117,23 +114,28 @@ async function handler(req, res) {
   sendJson(res, 200, value)
 }
 
-function websocket(req, res) {
+function websocket(req, socket) {
   const key = req.headers['sec-websocket-key']
   if (!key) {
-    res.writeHead(400)
-    return res.end('missing websocket key')
+    socket.destroy()
+    return
   }
   const accept = createHash('sha1')
     .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
     .digest('base64')
-  res.writeHead(101, {
-    Upgrade: 'websocket',
-    Connection: 'Upgrade',
-    'Sec-WebSocket-Accept': accept,
-  })
+  socket.write(
+    [
+      'HTTP/1.1 101 Switching Protocols',
+      'Upgrade: websocket',
+      'Connection: Upgrade',
+      `Sec-WebSocket-Accept: ${accept}`,
+      '',
+      '',
+    ].join('\r\n'),
+  )
 
   let buffer = Buffer.alloc(0)
-  req.on('data', (chunk) => {
+  const consume = (chunk) => {
     buffer = Buffer.concat([buffer, chunk])
     while (buffer.length >= 2) {
       const second = buffer[1]
@@ -157,12 +159,20 @@ function websocket(req, res) {
       if (mask) for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4]
       const opcode = buffer[0] & 0x0f
       buffer = buffer.subarray(offset + length)
-      if (opcode === 0x8) return res.end()
-      if (opcode === 0x9) return res.write(frame(0xA, payload))
-      if (opcode === 0x1 || opcode === 0x2) res.write(frame(opcode, Buffer.concat([Buffer.from('echo:'), payload])))
+      if (opcode === 0x8) {
+        socket.end()
+        return
+      }
+      if (opcode === 0x9) {
+        socket.write(frame(0xA, payload))
+        return
+      }
+      if (opcode === 0x1 || opcode === 0x2) {
+        socket.write(frame(opcode, Buffer.concat([Buffer.from('echo:'), payload])))
+      }
     }
-  })
-  req.on('end', () => res.end())
+  }
+  socket.on('data', consume)
 }
 
 function frame(opcode, payload) {
@@ -183,11 +193,21 @@ function frame(opcode, payload) {
 }
 
 const http = createHttpServer(handler)
+http.on('upgrade', (req, socket) => {
+  const path = new URL(req.url, 'http://origin').pathname
+  if (path === '/ws') websocket(req, socket)
+  else socket.destroy()
+})
 http.listen(PORT, '0.0.0.0', () => console.log(`origin ${NAME} http ${PORT}`))
 
 if (TLS_PORT) {
   const cert = readFileSync(process.env.TLS_CERT)
   const key = readFileSync(process.env.TLS_KEY)
   const https = createHttpsServer({ cert, key }, handler)
+  https.on('upgrade', (req, socket) => {
+    const path = new URL(req.url, 'https://origin').pathname
+    if (path === '/ws') websocket(req, socket)
+    else socket.destroy()
+  })
   https.listen(TLS_PORT, '0.0.0.0', () => console.log(`origin ${NAME} https ${TLS_PORT}`))
 }

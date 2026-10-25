@@ -8,6 +8,23 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.31.0-e2e.4] — 2026-10-25
+
+> **Internal E2E build — not a release.** Review follow-up: bounded ACME retry
+> backoff, consistent flag parsing, redacted failure text, and hardened E2E
+> defaults.
+
+### Fixed
+
+- Failed ACME orders back off 5m → 15m → 30m → 1h → 6h instead of creating a
+  new order every minute; a successful issuance clears the state.
+- `PINGAP_DISABLE_ACME=false/0/no/off` no longer disables ACME by presence.
+- Staging accepts `staging`/`stage`; unknown values still keep production.
+- ACME failure text redacts URL query strings before persistence, display and
+  notifications.
+- E2E refuses to run without explicitly supplied base URL, edge IP, origins
+  and ACME domain; test cleanup uses the admin origin.
+
 ## [PingWAF 0.31.0-e2e.3] — 2026-10-25
 
 > **Internal E2E build — not a release.** Follow-up to e2e.2: check ACME
