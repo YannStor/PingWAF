@@ -8,6 +8,17 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.31.0-e2e.1] — 2026-10-25
+
+> **Internal E2E build — not a release.** Adds the staging-only ACME switch so
+> the demo can exercise HTTP-01 against Let's Encrypt staging while reproducing
+> the upstream-unreachable SSL defect. This section and tag are removed after
+> the test run.
+
+### Added
+
+- `PINGAP_ACME_STAGING` opt-in for the staging directory and account.
+
 ## [PingWAF 0.31.0] — 2026-10-25
 
 This release brings the Account page in line with Settings and makes

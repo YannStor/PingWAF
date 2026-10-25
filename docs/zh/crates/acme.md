@@ -88,6 +88,7 @@ ACME 账号也存在那里：storage 类别的 `lets_encrypt_account` 条目（�
 | Variable | Effect |
 | --- | --- |
 | `PINGAP_DISABLE_ACME` | 跳过 ACME 后台任务。80 端口 challenge 监听器仍会创建。 |
+| `PINGAP_ACME_STAGING` | 设为 `1`/`true`/`yes`/`on` 时使用 Let's Encrypt staging 目录和独立账号；未设置或其他值保持生产环境。仅用于测试，staging 证书不被客户端信任。 |
 
 适合预发或测试：其余配置行为一致，但不联系 Let's Encrypt。
 

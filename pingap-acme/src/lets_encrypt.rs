@@ -149,8 +149,10 @@ async fn update_certificate_lets_encrypt(
     };
 
     // get new certificate from lets encrypt
+    let production = acme_production_from_env();
     let (pem, key) =
-        new_lets_encrypt(config_manager.clone(), true, params.clone()).await?;
+        new_lets_encrypt(config_manager.clone(), production, params.clone())
+            .await?;
 
     cert.tls_cert = Some(pem);
     cert.tls_key = Some(key);
@@ -697,6 +699,27 @@ pub async fn handle_lets_encrypt(
     }
 }
 
+/// Reads the explicit staging opt-in.
+///
+/// Production is the default: an unset, empty, false, or malformed value must
+/// never silently redirect a deployment at the staging CA. Only the documented
+/// truthy spellings do.
+fn acme_production_from_value(value: Option<&str>) -> bool {
+    let Some(value) = value else {
+        return true;
+    };
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// Resolves the ACME directory from `PINGAP_ACME_STAGING`.
+fn acme_production_from_env() -> bool {
+    let value = std::env::var("PINGAP_ACME_STAGING").ok();
+    acme_production_from_value(value.as_deref())
+}
+
 /// The storage entry the ACME account credentials live in, one per CA
 /// environment.
 fn account_storage_name(production: bool) -> &'static str {
@@ -906,6 +929,11 @@ async fn new_lets_encrypt(
     } else {
         LetsEncrypt::Staging.url()
     };
+    info!(
+        target: LOG_TARGET,
+        ca = if production { "production" } else { "staging" },
+        "acme environment selected"
+    );
     ensure_crypto_provider();
 
     let account =
@@ -1394,6 +1422,24 @@ mod tests {
         use super::account_storage_name;
         assert_eq!("lets_encrypt_account", account_storage_name(true));
         assert_eq!("lets_encrypt_staging_account", account_storage_name(false));
+    }
+
+    #[test]
+    fn staging_is_opt_in_only() {
+        use super::acme_production_from_value;
+
+        // Default and every non-truthy spelling keep production.
+        assert!(acme_production_from_value(None));
+        assert!(acme_production_from_value(Some("")));
+        assert!(acme_production_from_value(Some("false")));
+        assert!(acme_production_from_value(Some("0")));
+        assert!(acme_production_from_value(Some("staging")));
+        assert!(acme_production_from_value(Some("  nope  ")));
+        // Only the documented opt-ins select staging.
+        assert!(!acme_production_from_value(Some("1")));
+        assert!(!acme_production_from_value(Some("true")));
+        assert!(!acme_production_from_value(Some(" YES ")));
+        assert!(!acme_production_from_value(Some("On")));
     }
 
     #[test]

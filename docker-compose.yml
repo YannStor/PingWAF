@@ -47,6 +47,9 @@ services:
       # it: PINGWAF_TLS_SANS=waf.example.com
       - PINGWAF_TLS_ENABLED=${TLS_ENABLED:-true}
       - PINGWAF_HEARTBEAT_INTERVAL=${HEARTBEAT_INTERVAL:-15}
+      # Opt into the Let's Encrypt staging CA for tests only. Empty/unset keeps
+      # production; never set this on a real deployment.
+      - PINGAP_ACME_STAGING=${PINGAP_ACME_STAGING:-}
       - RUST_LOG=${RUST_LOG:-info,sqlx=warn}
       # Elasticsearch (optional — uncomment to enable log shipping)
       # - PINGWAF_ES_ENABLED=true
