@@ -366,7 +366,7 @@ fn prepared_ids(
             prepared
                 .rows
                 .iter()
-                .filter_map(|row| row.get(field).map(Value::to_string))
+                .filter_map(|row| json_key(row, field))
                 .collect()
         })
         .unwrap_or_default()
@@ -921,6 +921,25 @@ mod tests {
     fn uuid_keys_are_raw_strings_not_json_quoted() {
         let id = Uuid::new_v4();
         assert_eq!(json_key(&json!({"id": id}), "id"), Some(id.to_string()));
+    }
+
+    #[test]
+    fn prepared_reference_ids_use_raw_uuid_strings() {
+        let id = Uuid::new_v4();
+        let spec = spec_for("ip_groups").expect("catalogued");
+        let prepared = [PreparedTable {
+            spec,
+            rows: vec![json!({"id": id})],
+            change: TableChange {
+                before: 0,
+                after: 1,
+                added: 0,
+                removed: 0,
+                changed: 0,
+            },
+        }];
+        assert!(prepared_ids(&prepared, "ip_groups", "id")
+            .contains(&id.to_string()));
     }
 
     #[test]
