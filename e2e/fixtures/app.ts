@@ -98,6 +98,8 @@ async function waitForSite(page: Page, domain: string, timeout = 30_000) {
 
 async function deleteSite(page: Page, domain: string) {
   await page.goto(adminPath('/sites'))
+  const search = page.getByRole('textbox', { name: 'Search' })
+  if (await search.count()) await search.fill(domain)
   const row = page.getByRole('row').filter({ hasText: domain })
   await row.getByRole('button', { name: 'Delete' }).click()
   const dialog = page.getByRole('dialog')
@@ -107,6 +109,8 @@ async function deleteSite(page: Page, domain: string) {
 
 async function deleteSiteIfPresent(page: Page, domain: string) {
   await page.goto(adminPath('/sites'))
+  const search = page.getByRole('textbox', { name: 'Search' })
+  if (await search.count()) await search.fill(domain)
   const row = page.getByRole('row').filter({ hasText: domain })
   if ((await row.count()) === 0) return
   await row.getByRole('button', { name: 'Delete' }).click()

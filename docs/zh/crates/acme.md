@@ -79,7 +79,7 @@ buffer_days = 30
 - **文件** 存储：证书落在配置目录。
 - **快速启动**：证书持久化到 `~/.pingap/acme/<domains>.toml`（仅属主可读），下次启动恢复。
 
-HTTP-01 challenge 令牌也经配置存储往返，因此 ACME 需要可写后端。令牌保存时带 `created_at` 时间戳并每小时清扫一次：超过一天的（远超共享存储的任何实例仍可能向 CA 提供它的时间窗口）会被删除，令牌不再在存储类别里无限堆积。
+HTTP-01 challenge 令牌也经配置存储往返，因此 ACME 需要可写后端。令牌保存时带 `created_at` 时间戳并每小时清扫一次：超过 **7 天订单寿命加 1 天** 的令牌会被删除，令牌不再在存储类别里无限堆积。
 
 ACME 账号也存在那里：storage 类别的 `lets_encrypt_account` 条目（对 staging CA 是 `lets_encrypt_staging_account`），之后每次下单、共享后端的任一实例都复用它。原来每次下单都注册一个新账号，而 Let's Encrypt 对此按 IP 限流；存下的账号不再可用时会换新的。该条目保存账号私钥，和证书条目保存 `tls_key` 一样。
 
@@ -87,8 +87,8 @@ ACME 账号也存在那里：storage 类别的 `lets_encrypt_account` 条目（�
 
 | Variable | Effect |
 | --- | --- |
-| `PINGAP_DISABLE_ACME` | 跳过 ACME 后台任务。80 端口 challenge 监听器仍会创建。 |
-| `PINGAP_ACME_STAGING` | 设为 `1`/`true`/`yes`/`on` 时使用 Let's Encrypt staging 目录和独立账号；未设置或其他值保持生产环境。仅用于测试，staging 证书不被客户端信任。 |
+| `PINGAP_DISABLE_ACME` | 设为 `1`/`true`/`yes`/`on` 时跳过 ACME 后台任务；80 端口监听器仍会创建，但不再拦截 challenge 路径。`false`/`0` 等保持启用。 |
+| `PINGAP_ACME_STAGING` | 设为 `1`/`true`/`yes`/`on`/`staging` 时使用 Let's Encrypt staging 目录和独立账号；未设置、`production` 或其他值保持生产环境。仅用于测试，staging 证书不被客户端信任。 |
 
 适合预发或测试：其余配置行为一致，但不联系 Let's Encrypt。
 

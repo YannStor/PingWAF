@@ -12,7 +12,7 @@ API directly.
 | `specs/proxy-routing.spec.ts` | site creation, primary/alias hosts, prefix/exact/regex routes, rewrite, strip, upstream Host, unknown-host 404 |
 | `specs/proxy-upstream.spec.ts` | multi-origin and health/failover checks |
 | `specs/proxy-protocol.spec.ts` | WebSocket, 1 MiB+ response, request headers, HTTPS origin |
-| `specs/proxy-cache-compression.spec.ts` | edge HIT/MISS and origin request count, upstream gzip/brotli |
+| `specs/proxy-cache-compression.spec.ts` | edge HIT/MISS via an origin sequence, upstream gzip; brotli is checked with `curl --compressed` because Chromium 156 reports `ERR_CONTENT_DECODING_FAILED` for the fixture |
 | `specs/proxy-errors.spec.ts` | unknown host, path traversal, 1 MiB upload |
 | `specs/acme-staging.spec.ts` | unreachable upstream + HTTP-01 + staging issuer + HTTPS/HTTP2 |
 

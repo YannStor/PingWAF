@@ -8,9 +8,11 @@ const originB = requiredEnv('E2E_ORIGIN_B_URL')
 test.describe('multi-upstream and health handling', () => {
   test('a second origin can be added and the site keeps serving', async ({ app, browser }) => {
     const domain = `upstream-${run}.e2e.test`
+    const alternate = `upstream-alt-${run}.e2e.test`
     const siteId = await app.createSite({
       name: `E2E upstream ${run}`,
       domain,
+      alternateDomains: [alternate],
       upstream: originA,
     })
     try {
@@ -18,14 +20,19 @@ test.describe('multi-upstream and health handling', () => {
       await app.page.goto(app.adminUrl(`/sites/${siteId}/basic`))
       await app.addNode(originB)
       await app.waitForSite(domain)
+      // The new node needs one health-check cycle before the load balancer
+      // admits it; without this the test only ever observes the first node.
+      await app.page.waitForTimeout(12_000)
 
       const seen = new Set<string>()
       for (let i = 0; i < 10; i++) {
         const context = await browser.newContext({ ignoreHTTPSErrors: true })
         const page = await context.newPage()
-        const response = await page.goto(`http://${domain}/?probe=${i}`)
-        expect(response?.status()).toBe(200)
-        seen.add(await page.locator('body').innerText())
+        for (const host of [domain, alternate]) {
+          const response = await page.goto(`http://${host}/?probe=${i}`)
+          expect(response?.status()).toBe(200)
+          seen.add(await page.locator('body').innerText())
+        }
         await context.close()
       }
       expect([...seen].some((body) => body.includes('"origin":"a"'))).toBe(true)

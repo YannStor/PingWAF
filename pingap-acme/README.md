@@ -118,8 +118,8 @@ account's private key, like a certificate entry holds its `tls_key`.
 
 | Variable | Effect |
 | --- | --- |
-| `PINGAP_DISABLE_ACME` | Skips the ACME background task. The port-80 challenge listener is still created. |
-| `PINGAP_ACME_STAGING` | Set to `1`/`true`/`yes`/`on` to use the Let's Encrypt staging directory and its separate stored account. Unset or any other value keeps production. For tests only: staging certificates are not trusted by clients. |
+| `PINGAP_DISABLE_ACME` | Set to `1`/`true`/`yes`/`on` to skip the ACME background task. The port-80 listener remains, but it no longer intercepts challenge paths. `false`/`0` and similar values keep ACME enabled. |
+| `PINGAP_ACME_STAGING` | Set to `1`/`true`/`yes`/`on`/`staging` to use the Let's Encrypt staging directory and its separate stored account. Unset, `production`, or any other value keeps production. For tests only: staging certificates are not trusted by clients. |
 
 Useful in staging or in tests, where you want the rest of the configuration to
 behave identically without contacting Let's Encrypt.

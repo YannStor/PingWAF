@@ -8,57 +8,32 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
-## [PingWAF 0.31.0-e2e.4] — 2026-10-25
-
-> **Internal E2E build — not a release.** Review follow-up: bounded ACME retry
-> backoff, consistent flag parsing, redacted failure text, and hardened E2E
-> defaults.
-
-### Fixed
-
-- Failed ACME orders back off 5m → 15m → 30m → 1h → 6h instead of creating a
-  new order every minute; a successful issuance clears the state.
-- `PINGAP_DISABLE_ACME=false/0/no/off` no longer disables ACME by presence.
-- Staging accepts `staging`/`stage`; unknown values still keep production.
-- ACME failure text redacts URL query strings before persistence, display and
-  notifications.
-- E2E refuses to run without explicitly supplied base URL, edge IP, origins
-  and ACME domain; test cleanup uses the admin origin.
-
-## [PingWAF 0.31.0-e2e.3] — 2026-10-25
-
-> **Internal E2E build — not a release.** Follow-up to e2e.2: check ACME
-> renewals every tick so a newly created certificate is attempted promptly
-> instead of waiting up to ten minutes.
-
-### Fixed
-
-- New ACME orders are picked up on the next one-minute tick (and the first
-  check runs shortly after startup) instead of every tenth tick.
-
-## [PingWAF 0.31.0-e2e.2] — 2026-10-25
-
-> **Internal E2E build — not a release.** Adds ACME lifecycle decoupling and
-> diagnostic logging for edge certificate status reporting. Removed after the
-> test run.
-
-### Fixed
-
-- ACME task and HTTP-01 challenge handler are available when the first
-  certificate is created after startup.
-- A site with an ACME certificate but no usable upstream keeps its certificate
-  entry and listeners instead of dropping the whole data-plane config.
-
-## [PingWAF 0.31.0-e2e.1] — 2026-10-25
-
-> **Internal E2E build — not a release.** Adds the staging-only ACME switch so
-> the demo can exercise HTTP-01 against Let's Encrypt staging while reproducing
-> the upstream-unreachable SSL defect. This section and tag are removed after
-> the test run.
+## [Unreleased]
 
 ### Added
 
-- `PINGAP_ACME_STAGING` opt-in for the staging directory and account.
+- **Browser E2E suite.** Playwright scenarios cover site creation, routing and
+  rewrites, multi-origin/health behavior, WebSocket, large/streamed bodies,
+  cache hits, gzip, upstream TLS, path traversal, host mismatch, uploads and
+  ACME staging. Tests require explicit demo/origin/domain inputs and never fall
+  back to a shared production hostname.
+- **Staging ACME opt-in.** `PINGAP_ACME_STAGING` selects the staging directory
+  and account (`1/true/yes/on/staging/stage`); production remains the default.
+
+### Fixed
+
+- **ACME is independent of upstream availability.** The issuance task and
+  port-80 challenge handler stay enabled across hot reloads, and a site with an
+  ACME certificate but no location keeps its certificate/listeners instead of
+  dropping the whole data-plane config.
+- **ACME retries are bounded.** Failed orders back off 5m → 15m → 30m → 1h → 6h
+  instead of creating a new order every minute; success clears the state.
+- **ACME flags are consistent.** `PINGAP_DISABLE_ACME=false/0/no/off` no longer
+  disables issuance merely because the variable is present.
+- **Failure diagnostics redact URL query strings** before they reach the
+  database, console or notifications.
+- **New orders are attempted on the next one-minute scan** rather than waiting
+  for every tenth tick.
 
 ## [PingWAF 0.31.0] — 2026-10-25
 
