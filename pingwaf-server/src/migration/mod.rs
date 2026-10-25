@@ -82,6 +82,10 @@ pub mod m20240101_000074_visitor_passkeys;
 pub mod m20240101_000075_visitor_auth_states;
 pub mod m20240101_000076_site_oidc_auth_mode;
 mod m20240101_000077_control_plane_stops;
+pub mod m20240101_000078_visitor_remark;
+pub mod m20240101_000079_config_version_scope;
+pub mod m20240101_000080_config_backups;
+pub mod m20240101_000081_backup_upload_lease;
 
 use sea_orm_migration::prelude::*;
 
@@ -179,6 +183,10 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000075_visitor_auth_states::Migration),
             Box::new(m20240101_000076_site_oidc_auth_mode::Migration),
             Box::new(m20240101_000077_control_plane_stops::Migration),
+            Box::new(m20240101_000078_visitor_remark::Migration),
+            Box::new(m20240101_000079_config_version_scope::Migration),
+            Box::new(m20240101_000080_config_backups::Migration),
+            Box::new(m20240101_000081_backup_upload_lease::Migration),
         ]
     }
 }
@@ -190,7 +198,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 77);
+        assert_eq!(migrations.len(), 81);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

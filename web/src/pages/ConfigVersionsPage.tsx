@@ -5,8 +5,12 @@ import {
   ArrowCounterClockwise,
   ClockCounterClockwise,
   Eye,
+  Trash,
 } from '@phosphor-icons/react'
 import { PageHeader } from '@/components/PageHeader'
+import { BackupsCard } from '@/components/config/BackupsCard'
+import { BackupCreateForm } from '@/components/config/BackupCreateForm'
+import { BackupTargetsCard } from '@/components/config/BackupTargetsCard'
 import { ErrorState } from '@/components/ErrorState'
 import { Badge, type BadgeTone } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
@@ -24,6 +28,7 @@ import {
   type ConfigVersionDetail,
   type ConfigVersionSummary,
 } from '@/api/configVersions'
+import { configBackupsApi, configBackupKeys } from '@/api/configBackups'
 import { errorMessage } from '@/api/errors'
 import { useCanWrite, useSitesList } from '@/hooks'
 import { formatDateTime } from '@/lib/format'
@@ -34,13 +39,26 @@ import { formatDateTime } from '@/lib/format'
  */
 const PAGE_SIZE = 50
 
-/** Scope filter value standing for the deployment-wide versions. */
+/** Scope filter values for settings-only and full-deployment versions. */
 const GLOBAL_SCOPE = 'global'
+const DEPLOYMENT_SCOPE = 'deployment'
 
 /* ── Snapshot diffing ───────────────────────────────────────────────── */
 
 /** One snapshot row — the serialized model, field names as stored. */
 type SnapshotRow = Record<string, unknown>
+type SnapshotTableValue = SnapshotRow[] | SnapshotRow | null
+
+function normaliseTables(
+  tables: Record<string, SnapshotTableValue>,
+): Record<string, SnapshotRow[]> {
+  return Object.fromEntries(
+    Object.entries(tables).map(([name, value]) => [
+      name,
+      Array.isArray(value) ? value : value ? [value] : [],
+    ]),
+  )
+}
 
 /** Columns that can identify a row across two snapshots, best first. */
 const IDENTITY_KEYS = [
@@ -89,15 +107,17 @@ interface TableDiff {
  * than guessed at. A matched row whose content differs counts as changed.
  */
 function diffSnapshots(
-  previous: Record<string, SnapshotRow[]>,
-  current: Record<string, SnapshotRow[]>,
+  previous: Record<string, SnapshotTableValue>,
+  current: Record<string, SnapshotTableValue>,
 ): TableDiff[] {
-  const tables = [...new Set([...Object.keys(previous), ...Object.keys(current)])].sort()
+  const beforeTables = normaliseTables(previous)
+  const afterTables = normaliseTables(current)
+  const tables = [...new Set([...Object.keys(beforeTables), ...Object.keys(afterTables)])].sort()
   const diffs: TableDiff[] = []
 
   for (const table of tables) {
-    const before = previous[table] ?? []
-    const after = current[table] ?? []
+    const before = beforeTables[table] ?? []
+    const after = afterTables[table] ?? []
 
     const known = new Map<string, SnapshotRow>()
     const anonymous: SnapshotRow[] = []
@@ -140,6 +160,8 @@ const SOURCE_TONES: Record<string, BadgeTone> = {
   api: 'info',
   cli: 'neutral',
   rollback: 'warning',
+  restore: 'warning',
+  'pre-rollback': 'neutral',
 }
 
 /* ── Detail dialog ──────────────────────────────────────────────────── */
@@ -184,7 +206,7 @@ function VersionDetailDialog({
 
   const counts = useMemo(() => {
     if (!data) return []
-    return Object.entries(data.snapshot.tables ?? {})
+    return Object.entries(normaliseTables(data.snapshot.tables ?? {}))
       .filter(([, rows]) => rows.length > 0)
       .sort(([a], [b]) => a.localeCompare(b))
   }, [data])
@@ -232,7 +254,11 @@ function VersionDetailDialog({
               },
               {
                 label: t('pages.configVersions.scope'),
-                value: data.site_domain ?? t('pages.configVersions.globalScope'),
+                value:
+                  data.site_domain ??
+                  (data.scope === DEPLOYMENT_SCOPE
+                    ? t('pages.configVersions.deploymentScope')
+                    : t('pages.configVersions.globalScope')),
               },
               {
                 label: t('pages.configVersions.source'),
@@ -350,6 +376,7 @@ export function ConfigVersionsPage() {
   const [scope, setScope] = useState('')
   const [detail, setDetail] = useState<ConfigVersionSummary | null>(null)
   const [pending, setPending] = useState<ConfigVersionSummary | null>(null)
+  const [confirmPrune, setConfirmPrune] = useState(false)
 
   const sites = useSitesList({ page: 1, page_size: 200 })
 
@@ -360,6 +387,10 @@ export function ConfigVersionsPage() {
   })
 
   const rows = versions.data ?? []
+  const backupTargets = useQuery({
+    queryKey: configBackupKeys.targets,
+    queryFn: configBackupsApi.listTargets,
+  })
 
   const rollback = useMutation({
     mutationFn: (id: number) => configVersionsApi.rollback(id),
@@ -378,6 +409,20 @@ export function ConfigVersionsPage() {
     onError: (error) => toast.error(errorMessage(error)),
   })
 
+  const prune = useMutation({
+    mutationFn: configVersionsApi.prune,
+    onSuccess: (result) => {
+      setConfirmPrune(false)
+      toast.success(
+        t('pages.configVersions.pruneDone', { count: result.deleted }),
+      )
+      void queryClient.invalidateQueries({
+        queryKey: configVersionKeys.all,
+      })
+    },
+    onError: (error) => toast.error(errorMessage(error)),
+  })
+
   /**
    * The version recorded immediately before `row` inside the same scope —
    * what the detail dialog diffs against. The API returns the list newest
@@ -386,7 +431,12 @@ export function ConfigVersionsPage() {
   const previousOf = (row: ConfigVersionSummary): number | null => {
     const index = rows.findIndex((item) => item.id === row.id)
     for (let cursor = index + 1; cursor < rows.length; cursor += 1) {
-      if (rows[cursor].site_id === row.site_id) return rows[cursor].id
+      if (
+        rows[cursor].site_id === row.site_id &&
+        rows[cursor].scope === row.scope
+      ) {
+        return rows[cursor].id
+      }
     }
     return null
   }
@@ -412,7 +462,9 @@ export function ConfigVersionsPage() {
             <span className="pw-mono text-sm">{row.site_domain}</span>
           ) : (
             <Badge tone="brand" size="sm">
-              {t('pages.configVersions.globalScope')}
+              {row.scope === DEPLOYMENT_SCOPE
+                ? t('pages.configVersions.deploymentScope')
+                : t('pages.configVersions.globalScope')}
             </Badge>
           ),
       },
@@ -490,6 +542,10 @@ export function ConfigVersionsPage() {
     () => [
       { value: '', label: t('pages.configVersions.allScopes') },
       { value: GLOBAL_SCOPE, label: t('pages.configVersions.globalScope') },
+      {
+        value: DEPLOYMENT_SCOPE,
+        label: t('pages.configVersions.deploymentScope'),
+      },
       ...(sites.data ?? []).map((site) => ({
         value: site.id,
         label: site.domain,
@@ -504,16 +560,31 @@ export function ConfigVersionsPage() {
         title={t('pages.configVersions.title')}
         description={t('pages.configVersions.description')}
         actions={
-          <Button
-            variant="ghost"
-            onClick={() => void versions.refetch()}
-            loading={versions.isFetching}
-          >
-            <ClockCounterClockwise className="h-4 w-4" />
-            {t('common.refresh')}
-          </Button>
+          <div className="flex items-center gap-2">
+            {canWrite && (
+              <Button
+                variant="secondary"
+                onClick={() => setConfirmPrune(true)}
+                icon={<Trash weight="duotone" className="h-4 w-4" />}
+              >
+                {t('pages.configVersions.pruneAction')}
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              onClick={() => void versions.refetch()}
+              loading={versions.isFetching}
+            >
+              <ClockCounterClockwise className="h-4 w-4" />
+              {t('common.refresh')}
+            </Button>
+          </div>
         }
       />
+
+      <BackupTargetsCard canWrite={canWrite} />
+      <BackupCreateForm targets={backupTargets.data ?? []} canWrite={canWrite} />
+      <BackupsCard targets={backupTargets.data ?? []} canWrite={canWrite} />
 
       <Card>
         <CardBody className="flex flex-col gap-4">
@@ -587,10 +658,24 @@ export function ConfigVersionsPage() {
         })}
         description={t('pages.configVersions.rollbackConfirmDescription', {
           scope:
-            pending?.site_domain ?? t('pages.configVersions.globalScope'),
+            pending?.site_domain ??
+            (pending?.scope === DEPLOYMENT_SCOPE
+              ? t('pages.configVersions.deploymentScope')
+              : t('pages.configVersions.globalScope')),
           time: formatDateTime(pending?.created_at),
         })}
         confirmLabel={t('pages.configVersions.rollback')}
+        cancelLabel={t('common.cancel')}
+      />
+      <ConfirmDialog
+        open={confirmPrune}
+        onClose={() => setConfirmPrune(false)}
+        onConfirm={() => prune.mutate()}
+        tone="danger"
+        loading={prune.isPending}
+        title={t('pages.configVersions.pruneConfirmTitle')}
+        description={t('pages.configVersions.pruneConfirmDescription')}
+        confirmLabel={t('pages.configVersions.pruneAction')}
         cancelLabel={t('common.cancel')}
       />
     </div>

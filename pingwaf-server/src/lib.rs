@@ -13,7 +13,12 @@ pub mod api;
 pub mod auth;
 pub mod boot_history;
 pub mod config;
+pub mod config_backup;
+pub mod config_backup_crypto;
+pub mod config_backup_targets;
+pub mod config_catalog;
 pub mod config_history;
+pub mod config_restore;
 pub mod defaults;
 pub mod es;
 pub mod frontend;
@@ -80,6 +85,28 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
         .await
         .map_err(|err| anyhow::anyhow!("migration failed: {err}"))?;
     tracing::info!("schema migrations applied");
+
+    // Apply retention at startup as well as in the daily monitor: a scope that
+    // has not produced a new version recently must not keep expired rows.
+    match config_history::prune_expired(&db).await {
+        Ok(deleted) if deleted > 0 => {
+            tracing::info!(
+                deleted,
+                "expired configuration versions pruned at startup"
+            );
+        },
+        Ok(_) => {},
+        Err(error) => {
+            tracing::warn!(error = %error, "startup configuration-version prune failed");
+        },
+    }
+
+    if let Err(error) = config_backup::reset_stale_uploads(&db).await {
+        tracing::warn!(error = %error, "stale backup-upload recovery failed at startup");
+    }
+    if let Err(error) = config_backup::prune_backups(&db).await {
+        tracing::warn!(error = %error, "startup backup-record prune failed");
+    }
 
     // ── 3a. Record this start ───────────────────────────────────────────────
     // The control plane cannot announce its own death (an OOM kill runs no

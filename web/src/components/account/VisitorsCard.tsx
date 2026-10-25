@@ -11,10 +11,19 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { ErrorState } from '@/components/ErrorState'
 import { Input } from '@/components/ui/Input'
 import { Switch } from '@/components/ui/Switch'
+import { Textarea } from '@/components/ui/Textarea'
 import { useToast } from '@/components/ui/Toast'
 import { visitorApi, visitorKeys } from '@/api/siteOidc'
 import { sitesApi, siteKeys } from '@/api/sites'
 import type { Visitor } from '@/api/types'
+import {
+  EMPTY_VISITOR_FORM as EMPTY_FORM,
+  VISITOR_REMARK_MAX_LENGTH,
+  createVisitorPayload,
+  updateVisitorPayload,
+  visitorFormFrom as formFrom,
+  type VisitorFormState as FormState,
+} from './visitorForm'
 
 /**
  * Visitor accounts, managed for the whole deployment.
@@ -30,34 +39,6 @@ import type { Visitor } from '@/api/types'
  * it. That is deliberately unlike the OIDC provider card, where the console
  * holds a credential it never uses itself.
  */
-
-interface FormState {
-  email: string
-  password: string
-  name: string
-  disabled: boolean
-  siteIds: string[]
-}
-
-const EMPTY_FORM: FormState = {
-  email: '',
-  password: '',
-  name: '',
-  disabled: false,
-  siteIds: [],
-}
-
-function formFrom(visitor: Visitor): FormState {
-  return {
-    email: visitor.email,
-    // Never populated: the server has no plaintext to send, and an empty
-    // field is what "keep the current password" means.
-    password: '',
-    name: visitor.name,
-    disabled: visitor.disabled,
-    siteIds: visitor.site_ids,
-  }
-}
 
 export function VisitorsCard({ canWrite }: { canWrite: boolean }) {
   const { t } = useTranslation()
@@ -89,22 +70,9 @@ export function VisitorsCard({ canWrite }: { canWrite: boolean }) {
     mutationFn: (payload: { id: string | null; form: FormState }) => {
       const { id, form } = payload
       if (id === null) {
-        return visitorApi.create({
-          email: form.email.trim(),
-          password: form.password,
-          name: form.name.trim(),
-          disabled: form.disabled,
-          site_ids: form.siteIds,
-        })
+        return visitorApi.create(createVisitorPayload(form))
       }
-      return visitorApi.update(id, {
-        name: form.name.trim(),
-        disabled: form.disabled,
-        site_ids: form.siteIds,
-        // Omitted when untouched, so the stored password survives an edit
-        // that only changes the grants.
-        ...(form.password === '' ? {} : { password: form.password }),
-      })
+      return visitorApi.update(id, updateVisitorPayload(form))
     },
     onSuccess: (_saved, variables) => {
       toast.success(
@@ -199,6 +167,11 @@ export function VisitorsCard({ canWrite }: { canWrite: boolean }) {
                       count: visitor.site_ids.length,
                     })}
                   </div>
+                  {visitor.remark !== '' && (
+                    <p className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-fg-subtle">
+                      {visitor.remark}
+                    </p>
+                  )}
                 </div>
                 {canWrite && (
                   <div className="flex shrink-0 items-center gap-1">
@@ -303,6 +276,18 @@ export function VisitorsCard({ canWrite }: { canWrite: boolean }) {
             autoComplete="off"
             onChange={(event) =>
               setForm((current) => ({ ...current, name: event.target.value }))
+            }
+          />
+          <Textarea
+            label={t('pages.account.visitorRemark')}
+            hint={t('pages.account.visitorRemarkHint', {
+              max: VISITOR_REMARK_MAX_LENGTH,
+            })}
+            value={form.remark}
+            rows={3}
+            maxLength={VISITOR_REMARK_MAX_LENGTH}
+            onChange={(event) =>
+              setForm((current) => ({ ...current, remark: event.target.value }))
             }
           />
           <Switch

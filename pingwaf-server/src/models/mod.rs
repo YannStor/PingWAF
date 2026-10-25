@@ -21,6 +21,8 @@ pub mod cache_settings;
 pub mod certificate_events;
 pub mod certificates;
 pub mod challenge_settings;
+pub mod config_backup_targets;
+pub mod config_backups;
 pub mod config_versions;
 pub mod control_plane_boots;
 pub mod control_plane_stops;
@@ -67,6 +69,8 @@ pub use api_protection::{
     control_plane_access_logs as control_plane_access_log,
 };
 pub use certificates::site_certificates;
+pub use config_backup_targets as config_backup_target;
+pub use config_backups as config_backup;
 pub use config_versions as config_version;
 pub use control_plane_boots::control_plane_boots as control_plane_boot;
 pub use control_plane_stops::control_plane_stops as control_plane_stop;

@@ -19,6 +19,9 @@ pub struct Model {
     pub id: i64,
     /// `None` for deployment-wide snapshots, the site for site policies.
     pub site_id: Option<Uuid>,
+    /// `site`, `global` or `deployment`; prevents the two NULL-site scopes
+    /// from sharing one history, dedup window and retention policy.
+    pub scope: String,
     /// Config fingerprint the agents compare (`""` when unknown).
     pub config_hash: String,
     /// Where the change came from: `api`, `cli` or `rollback`.

@@ -245,6 +245,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "argon2"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072"
+dependencies = [
+ "base64ct",
+ "blake2",
+ "cpufeatures 0.2.17",
+ "password-hash",
+]
+
+[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4392,6 +4404,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "password-hash"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
+dependencies = [
+ "base64ct",
+ "rand_core 0.6.4",
+ "subtle",
+]
+
+[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5469,6 +5492,7 @@ version = "0.30.2"
 dependencies = [
  "anyhow",
  "arc-swap",
+ "argon2",
  "async-trait",
  "axum",
  "base64 0.23.1",
@@ -5503,6 +5527,7 @@ dependencies = [
  "sha2 0.11.0",
  "sysinfo",
  "tempfile",
+ "thiserror 2.0.21",
  "time",
  "tokio",
  "tokio-rustls",
@@ -5511,8 +5536,10 @@ dependencies = [
  "tower",
  "tower-http 0.7.1",
  "tracing",
+ "urlencoding",
  "uuid",
  "x509-parser 0.18.1",
+ "zstd 0.14.0",
 ]
 
 [[package]]
@@ -7835,7 +7862,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

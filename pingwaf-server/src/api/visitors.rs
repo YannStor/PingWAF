@@ -42,6 +42,7 @@ use crate::models::{site, site_visitor, visitor_site_grant};
 
 pub const MAX_VISITOR_NAME_LEN: usize = 128;
 pub const MAX_VISITOR_EMAIL_LEN: usize = 255;
+pub const MAX_VISITOR_REMARK_LEN: usize = 500;
 
 /// What the dashboard receives. Never a password or a hash.
 #[derive(Debug, Serialize)]
@@ -49,6 +50,8 @@ pub struct VisitorView {
     pub id: Uuid,
     pub email: String,
     pub name: String,
+    /// Console-only context for collaborators; never used for authentication.
+    pub remark: String,
     pub disabled: bool,
     /// Sites this visitor may enter, so the dashboard can show the grants
     /// without a second request per row.
@@ -64,6 +67,8 @@ pub struct CreateVisitorRequest {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
+    pub remark: Option<String>,
+    #[serde(default)]
     pub disabled: Option<bool>,
     /// The sites to grant on creation, so a new account is usable in one call.
     #[serde(default)]
@@ -74,6 +79,9 @@ pub struct CreateVisitorRequest {
 pub struct UpdateVisitorRequest {
     #[serde(default)]
     pub name: Option<String>,
+    /// Empty clears the note; omitted preserves the stored one.
+    #[serde(default)]
+    pub remark: Option<String>,
     #[serde(default)]
     pub disabled: Option<bool>,
     /// Sets a new password. Absent leaves the stored one.
@@ -133,6 +141,7 @@ fn view_of(row: site_visitor::Model, site_ids: Vec<Uuid>) -> VisitorView {
         id: row.id,
         email: row.email,
         name: row.name,
+        remark: row.remark,
         disabled: row.disabled,
         site_ids,
         created_at: row.created_at,
@@ -158,6 +167,8 @@ async fn create(
 ) -> Result<Json<VisitorView>, ApiError> {
     let email = validate_email(&payload.email)?;
     let name = validate_name(payload.name.as_deref().unwrap_or_default())?;
+    let remark =
+        validate_remark(payload.remark.as_deref().unwrap_or_default())?;
     // `hash_password` enforces the same minimum length and 72-byte truncation
     // the console's own accounts use, so one policy governs both.
     let hash = hash_password(&payload.password).map_err(|error| {
@@ -190,6 +201,7 @@ async fn create(
         email: Set(email),
         password_hash: Set(hash),
         name: Set(name),
+        remark: Set(remark),
         disabled: Set(payload.disabled.unwrap_or(false)),
         token_version: Set(0),
         created_at: Set(now),
@@ -224,6 +236,10 @@ async fn update(
 
     if let Some(name) = payload.name {
         active.name = Set(validate_name(&name)?);
+        touched = true;
+    }
+    if let Some(remark) = payload.remark {
+        active.remark = Set(validate_remark(&remark)?);
         touched = true;
     }
     if let Some(disabled) = payload.disabled {
@@ -404,6 +420,18 @@ fn validate_name(raw: &str) -> Result<String, ApiError> {
     Ok(name.to_string())
 }
 
+fn validate_remark(raw: &str) -> Result<String, ApiError> {
+    let remark = raw.trim();
+    // Count characters rather than UTF-8 bytes: the limit is for people writing
+    // notes, including CJK text, not for storage sizing.
+    if remark.chars().count() > MAX_VISITOR_REMARK_LEN {
+        return Err(ApiError::BadRequest(format!(
+            "remark must be at most {MAX_VISITOR_REMARK_LEN} characters"
+        )));
+    }
+    Ok(remark.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,5 +460,18 @@ mod tests {
         assert_eq!("Ann", validate_name("  Ann  ").expect("valid"));
         assert_eq!("", validate_name("").expect("empty is allowed"));
         assert!(validate_name(&"x".repeat(MAX_VISITOR_NAME_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn a_remark_is_trimmed_and_counted_in_characters() {
+        assert_eq!(
+            "夜班协作者",
+            validate_remark("  夜班协作者  ").expect("valid")
+        );
+        assert_eq!("", validate_remark("   ").expect("blank clears"));
+        assert!(validate_remark(&"备".repeat(MAX_VISITOR_REMARK_LEN)).is_ok());
+        assert!(
+            validate_remark(&"备".repeat(MAX_VISITOR_REMARK_LEN + 1)).is_err()
+        );
     }
 }

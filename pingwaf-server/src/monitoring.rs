@@ -138,6 +138,7 @@ async fn health_monitor_loop(
         "agent health monitor started"
     );
 
+    let mut last_config_prune = Utc::now();
     loop {
         tokio::time::sleep(monitor_config.check_interval).await;
 
@@ -167,6 +168,30 @@ async fn health_monitor_loop(
         // ceremony past its expiry cannot be finished.
         if let Err(err) = sweep_visitor_states(&db).await {
             tracing::warn!(error = %err, "visitor state sweep failed");
+        }
+
+        if let Err(error) = crate::config_backup::reset_stale_uploads(&db).await
+        {
+            tracing::warn!(error = %error, "stale backup-upload recovery failed");
+        }
+
+        if Utc::now() - last_config_prune >= chrono::Duration::days(1) {
+            match crate::config_history::prune_expired(&db).await {
+                Ok(deleted) if deleted > 0 => {
+                    tracing::info!(
+                        deleted,
+                        "configuration versions pruned by the daily monitor"
+                    );
+                },
+                Ok(_) => {},
+                Err(error) => {
+                    tracing::warn!(error = %error, "daily configuration-version prune failed");
+                },
+            }
+            if let Err(error) = crate::config_backup::prune_backups(&db).await {
+                tracing::warn!(error = %error, "daily backup-record prune failed");
+            }
+            last_config_prune = Utc::now();
         }
     }
 }

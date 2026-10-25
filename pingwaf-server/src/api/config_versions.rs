@@ -17,6 +17,7 @@ use crate::api::error::ApiError;
 use crate::api::sites::touch_site;
 use crate::api::state::AppState;
 use crate::auth::AuthUser;
+use crate::config_catalog::sanitize_snapshot_for_output;
 use crate::config_history::{self, VersionScope};
 use crate::grpc::{notify_all_config_changed, notify_config_changed};
 use crate::models::{config_version, site};
@@ -25,6 +26,7 @@ use crate::models::{config_version, site};
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/config-versions", get(list_versions))
+        .route("/config-versions/prune", post(prune_versions))
         .route("/config-versions/{version_id}", get(show_version))
         .route(
             "/config-versions/{version_id}/rollback",
@@ -36,6 +38,7 @@ pub fn routes() -> Router<AppState> {
 #[derive(Debug, Serialize)]
 pub struct VersionSummary {
     pub id: i64,
+    pub scope: String,
     pub site_id: Option<Uuid>,
     /// The site's domain, resolved for display.
     pub site_domain: Option<String>,
@@ -76,16 +79,22 @@ async fn list_versions(
         .offset(offset);
     query = match site_id.as_deref() {
         None => query,
-        Some("global") => {
-            query.filter(config_version::Column::SiteId.is_null())
-        },
+        Some("global") => query
+            .filter(config_version::Column::Scope.eq("global"))
+            .filter(config_version::Column::SiteId.is_null()),
+        Some("deployment") => query
+            .filter(config_version::Column::Scope.eq("deployment"))
+            .filter(config_version::Column::SiteId.is_null()),
         Some(raw) => {
             let site_id = Uuid::parse_str(raw.trim()).map_err(|_| {
                 ApiError::BadRequest(
-                    "site_id must be a UUID or 'global'".to_string(),
+                    "site_id must be a UUID, 'global' or 'deployment'"
+                        .to_string(),
                 )
             })?;
-            query.filter(config_version::Column::SiteId.eq(site_id))
+            query
+                .filter(config_version::Column::Scope.eq("site"))
+                .filter(config_version::Column::SiteId.eq(site_id))
         },
     };
 
@@ -114,6 +123,7 @@ async fn list_versions(
                 row.site_id.and_then(|id| domains.get(&id).cloned());
             VersionSummary {
                 id: row.id,
+                scope: row.scope,
                 site_id: row.site_id,
                 site_domain,
                 config_hash: row.config_hash,
@@ -128,6 +138,23 @@ async fn list_versions(
     Ok(Json(summaries))
 }
 
+/// `POST /api/v1/config-versions/prune` — immediately apply the retention
+/// policy to every scope, including scopes with no recent writes.
+async fn prune_versions(
+    State(state): State<AppState>,
+    current: AuthUser,
+) -> Result<Json<Value>, ApiError> {
+    current.require_admin().map_err(ApiError::from)?;
+    let deleted = config_history::prune_expired(&state.db).await?;
+    let cutoff = Utc::now()
+        - chrono::Duration::days(config_history::VERSION_RETENTION_DAYS);
+    tracing::info!(deleted, actor = %current.email, "configuration versions pruned manually");
+    Ok(Json(serde_json::json!({
+        "deleted": deleted,
+        "cutoff": cutoff,
+    })))
+}
+
 /// `GET /api/v1/config-versions/{id}` — administrators only. Returns the
 /// full snapshot; the console uses it for the JSON preview and the CLI for
 /// offline inspection.
@@ -137,12 +164,15 @@ async fn show_version(
     Path(version_id): Path<i64>,
 ) -> Result<Json<config_version::Model>, ApiError> {
     current.require_admin().map_err(ApiError::from)?;
-    let row = config_version::Entity::find_by_id(version_id)
+    let mut row = config_version::Entity::find_by_id(version_id)
         .one(&state.db)
         .await?
         .ok_or(ApiError::NotFound(format!(
             "version {version_id} not found"
         )))?;
+    // A historical snapshot may predate secret stripping. Do not expose it
+    // merely because the version is old enough to contain the material.
+    row.snapshot = sanitize_snapshot_for_output(&row.snapshot);
     Ok(Json(row))
 }
 
@@ -170,8 +200,8 @@ async fn rollback_version(
             touch_site(&state, site_id).await?;
             notify_config_changed(&state, site_id, Some(&current.email)).await;
         },
-        VersionScope::Global => {
-            // The restored global settings ride in every bundle.
+        VersionScope::Global | VersionScope::Deployment => {
+            // The restored settings ride in every bundle.
             notify_all_config_changed(&state, Some(&current.email)).await;
         },
     }
@@ -189,6 +219,7 @@ async fn rollback_version(
         "scope": match outcome.scope {
             VersionScope::Site(site_id) => site_id.to_string(),
             VersionScope::Global => "global".to_string(),
+            VersionScope::Deployment => "deployment".to_string(),
         },
     })))
 }

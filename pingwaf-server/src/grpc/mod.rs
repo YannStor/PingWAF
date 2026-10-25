@@ -278,10 +278,9 @@ pub async fn notify_all_config_changed(state: &AppState, actor: Option<&str>) {
         let Some(visible) = visible_per_agent.get(&row.id.to_string()) else {
             continue;
         };
-        if visible.is_empty() {
-            // An agent with no sites has no bundle to receive.
-            continue;
-        }
+        // An empty visibility set is meaningful too: after a restore removes
+        // the agent's last site, the agent needs the empty bundle rather than
+        // silence while it keeps serving the deleted site.
         let payload = match bundle_cache.get(visible) {
             Some(config) => config.clone(),
             None => {

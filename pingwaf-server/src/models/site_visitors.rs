@@ -22,6 +22,8 @@ pub mod site_visitors {
         /// bcrypt, same verifier and cost policy as `users.password_hash`.
         pub password_hash: String,
         pub name: String,
+        /// Console-only context for collaborators; never sent to the data plane.
+        pub remark: String,
         /// A disabled account keeps its grants and cannot sign in.
         pub disabled: bool,
         /// Bumping this invalidates every session already issued, which is

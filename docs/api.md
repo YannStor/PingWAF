@@ -3266,7 +3266,7 @@ List versions, newest first, without their snapshot payloads.
 
 | Query | Meaning |
 | --- | --- |
-| `site_id` | A site UUID, or `global` for deployment-wide versions. Omit for both. Anything else is a `400`. |
+| `site_id` | A site UUID, `global` for the shared settings, or `deployment` for the full restorable deployment. Omit for all scopes. Anything else is a `400`. |
 | `limit` | Rows to return, default `50`, clamped to `1..=200`. |
 | `offset` | Rows to skip, default `0`. |
 
@@ -3278,7 +3278,7 @@ List versions, newest first, without their snapshot payloads.
     "site_id": "3f5c…",
     "site_domain": "example.com",
     "config_hash": "…",
-    "source": "console",
+    "source": "api",
     "actor": "admin@example.com",
     "summary": { "sites": 1, "site_rules": 12 },
     "created_at": "2026-10-13T09:31:02Z"
@@ -3312,7 +3312,45 @@ rolling back a rollback works and the history stays linear.
 }
 ```
 
-`scope` is `"global"` for a deployment-wide rollback, otherwise the site UUID.
+`scope` is `"global"` for shared settings, `"deployment"` for a full-deployment rollback, otherwise the site UUID. The live state is archived before a rollback is applied. Secret fields in the detail response are sanitized, including snapshots recorded before that rule existed.
+
+### POST /config-versions/prune
+
+Immediately applies retention to every scope: versions older than 30 days are deleted and only the newest 50 rows are kept per `(scope, site_id)` partition. The same policy also runs at startup and once per day, including scopes that have not changed recently.
+
+**Response (200):** `{ "deleted": 12, "cutoff": "2026-09-25T00:00:00Z" }`.
+
+---
+
+## Configuration backups
+
+Administrators only. A backup is a self-contained JSON envelope whose manifest and payload contain a complete deployment, global or site snapshot. Secrets are protected by an operator-supplied password (minimum 12 characters) using Argon2id and AES-256-GCM, compressed with zstd and verified with SHA-256 checksums. Remote targets receive only this encrypted envelope; passwords are never stored or logged.
+
+The restorable catalogue covers 38 tables: site policy, shared resources, OIDC providers and visitors, visitor grants and passkeys, notifications, AI, cache, certificates and approved instance settings. Console users, console API keys and passkeys, agent state, logs, temporary authentication state, environment variables and local GeoIP files are excluded. `instance_settings.jwt_secret` is always excluded. Instance-sealed AI and notification credentials are opened before encryption and re-sealed with the current instance key on restore.
+
+### Backup targets
+
+- `GET /config-backup-targets` — list targets without credentials.
+- `POST /config-backup-targets` — create an `s3` or `github` target. `s3` accepts a custom endpoint, region, bucket, prefix and path-style; `github` accepts repository, branch, prefix, API URL and token. Credentials require `PINGWAF_SECRET_KEY` and are sealed before storage.
+- `PUT /config-backup-targets/{target_id}` — rename, update config or enable/disable. Omitted secret fields keep their stored values.
+- `DELETE /config-backup-targets/{target_id}` — delete a target without deleting backup history.
+- `POST /config-backup-targets/{target_id}/test` — test the bucket or repository connection.
+
+### Backup records
+
+- `GET /config-backups` — list metadata and `octet_length(payload)`, not ciphertext.
+- `POST /config-backups` — create an encrypted backup. Body: `{ "scope": "deployment", "password": "…", "target_id": "optional-uuid" }`. `scope` may also be `global`, or `site` with `site_id`.
+- `GET /config-backups/{backup_id}` — backup metadata.
+- `GET /config-backups/{backup_id}/download` — the original encrypted envelope, suitable for a later upload.
+- `POST /config-backups/{backup_id}/upload` — upload to `{ "target_id": "uuid" }` through a bounded background task with an expiring lease.
+
+### Upload preview and restore
+
+- `POST /config-backups/upload` — multipart `file`, `password`, `scope` and optional `site_id`. Decrypts, validates and returns a stored backup plus a dry-run preview. Invalid uploads create no backup record.
+- `POST /config-backups/{backup_id}/preview` — `{ "password": "…" }`; repeats the dry-run against the current state.
+- `POST /config-backups/{backup_id}/restore` — `{ "password": "…" }`; creates a pre-restore encrypted backup and applies the replacement in the same serializable transaction. Any failure leaves no restored rows and no pre-restore record. The preview reports before/after counts, additions, removals, changes, owner mappings and warnings. On success, affected agents are notified (including empty bundles) and notifications, API protection and TLS are refreshed where possible; post-commit refresh failures are returned as `warnings`, not misreported as a failed restore.
+
+A deployment restore requires a complete schema-2 snapshot. Missing tables are rejected, while an explicitly empty table means an empty configuration. Site ownership is restored when the original owner exists, otherwise the requesting administrator is used as the explicit default owner. Uploads claiming an unsupported algorithm, excessive KDF costs, an invalid scope, a wrong password or a mismatched checksum are refused.
 
 ---
 

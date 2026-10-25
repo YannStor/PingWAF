@@ -38,6 +38,7 @@ use pingwaf_server::api::self_protection::{self, effective_allowlist};
 use pingwaf_server::auth::password::{
     MAX_PASSWORD_BYTES, hash_password, validate_password,
 };
+use pingwaf_server::config_catalog::sanitize_snapshot_for_output;
 use pingwaf_server::config_history::{self, VersionScope};
 use pingwaf_server::models::{
     api_protection_setting, config_version, defense_settings, ip_groups, role,
@@ -447,8 +448,12 @@ async fn resolve_scope(
     if raw.eq_ignore_ascii_case("global") {
         return Ok(Some(VersionScope::Global));
     }
-    let id = Uuid::parse_str(raw)
-        .with_context(|| format!("'--site {raw}' is not a UUID or 'global'"))?;
+    if raw.eq_ignore_ascii_case("deployment") {
+        return Ok(Some(VersionScope::Deployment));
+    }
+    let id = Uuid::parse_str(raw).with_context(|| {
+        format!("'--site {raw}' is not a UUID, 'global' or 'deployment'")
+    })?;
     let exists = site::Entity::find_by_id(id).one(db).await?.is_some();
     if !exists {
         bail!("no site with id {id}");
@@ -467,12 +472,15 @@ async fn config_history_cmd(opts: ConfigHistoryOpts) -> anyhow::Result<()> {
         .limit(u64::from(opts.limit.clamp(1, 200)));
     query = match scope {
         None => query,
-        Some(VersionScope::Global) => {
-            query.filter(config_version::Column::SiteId.is_null())
-        },
-        Some(VersionScope::Site(id)) => {
-            query.filter(config_version::Column::SiteId.eq(id))
-        },
+        Some(VersionScope::Global) => query
+            .filter(config_version::Column::Scope.eq("global"))
+            .filter(config_version::Column::SiteId.is_null()),
+        Some(VersionScope::Deployment) => query
+            .filter(config_version::Column::Scope.eq("deployment"))
+            .filter(config_version::Column::SiteId.is_null()),
+        Some(VersionScope::Site(id)) => query
+            .filter(config_version::Column::Scope.eq("site"))
+            .filter(config_version::Column::SiteId.eq(id)),
     };
     let rows = query
         .all(&db)
@@ -503,7 +511,7 @@ async fn config_history_cmd(opts: ConfigHistoryOpts) -> anyhow::Result<()> {
             Some(id) => {
                 domains.get(&id).cloned().unwrap_or_else(|| id.to_string())
             },
-            None => "global".to_string(),
+            None => row.scope.clone(),
         };
         let changes = row
             .summary
@@ -551,15 +559,17 @@ async fn config_show(opts: ConfigShowOpts) -> anyhow::Result<()> {
     if opts.json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&row.snapshot)
-                .context("cannot serialise the snapshot")?
+            serde_json::to_string_pretty(&sanitize_snapshot_for_output(
+                &row.snapshot
+            ))
+            .context("cannot serialise the snapshot")?
         );
         return Ok(());
     }
 
     let scope_label = match row.site_id {
         Some(id) => format!("site {id}"),
-        None => "global".to_string(),
+        None => row.scope.clone(),
     };
     println!("version:      {}", row.id);
     println!("scope:        {scope_label}");

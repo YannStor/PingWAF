@@ -17,6 +17,7 @@ pub mod cache;
 pub mod cache_settings;
 pub mod challenge;
 pub mod common;
+pub mod config_backups;
 pub mod config_versions;
 pub mod defense;
 pub mod error;
@@ -161,6 +162,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(api_protection::routes())
         .merge(ai::routes())
         .merge(mcp::routes())
+        .merge(config_backups::routes())
         .merge(config_versions::routes())
         .merge(notifications::routes())
         .merge(login_security::routes())

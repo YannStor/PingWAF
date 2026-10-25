@@ -700,22 +700,51 @@ Read-only credentials see only the read tools; administrators with a `write` key
 ## Config Versions
 
 **Config versions** in the sidebar records a version of the configuration on
-every change — per site, and deployment-wide for the global settings — and
-lets you roll one back. Administrators only: other roles are redirected away
-from the page.
+every change and lets you roll one back. Administrators only: other roles are
+redirected away from the page.
 
-- **The list** shows each version's scope (site domain or global), config
-  hash, source, operator and row counts. Filter by scope and date, and page
-  through the history.
+- **The list** shows each version's scope (site domain, global settings or full
+  deployment), config hash, source, operator and row counts. Filter by scope
+  and date, and page through the history. Versions older than 30 days and
+  entries beyond the newest 50 per scope are pruned at startup, daily and on
+  demand with **Prune old versions**.
 - **The detail view** compares a version with the one before it, table by
   table, so you can see exactly which rows a change touched before deciding.
-- **Rollback** restores the selected snapshot's rows and pushes the restored
-  configuration to the agents, behind a confirmation. The rollback is itself
-  recorded as a new version attributed to you, so it appears at the top of the
-  list and can be rolled back in turn.
+- **Rollback** archives the live state first, restores the selected snapshot
+  and pushes it to the agents, behind a confirmation. It is recorded as a new
+  version and can be rolled back in turn.
 
-Rolling back is a configuration change like any other: agents pick it up
-through their normal bundle update, so nothing needs restarting.
+### Encrypted configuration backups
+
+The same page also manages complete encrypted backups:
+
+1. **Add a target** (optional): an S3-compatible endpoint/bucket or a GitHub
+   repository. Credentials are sealed with `PINGWAF_SECRET_KEY` and never
+   returned by the API. Use **Test connection** before the first upload.
+2. **Create encrypted backup now** and enter a backup password of at least 12
+   characters. The password is used only for that operation and is not stored
+   or logged. Choose a remote target or keep the backup local, then download
+   the `.pwb.json` envelope for safekeeping.
+3. **Upload backup file** to restore. Enter the same password and review the
+   dry-run: before/after rows, additions, removals, changes, owner mappings
+   and warnings. No secret values are shown. A deployment restore requires a
+   complete schema-2 snapshot; an invalid password, checksum or scope is
+   refused.
+4. **Confirm full replacement** only after reviewing the impact. PingWAF
+   creates a fresh encrypted pre-restore backup and applies the change in one
+   serializable transaction. If anything fails, no partial configuration or
+   pre-restore record is left. On success the pre-restore backup remains
+   available as a way back, and runtime refresh failures are reported as
+   warnings rather than hidden.
+
+Backups include the restorable database configuration (sites, rules, shared
+resources, OIDC, visitors and grants, notifications, AI, cache and
+certificates). They exclude console identities, agent state, logs, temporary
+authentication state, environment variables and local GeoIP files. Restoring
+sealed AI or notification credentials requires the current instance's
+`PINGWAF_SECRET_KEY`. Backup records follow the same 30-day and per-scope
+retention policy, and abandoned uploads become retryable after their lease
+expires.
 
 ## Internationalization (i18n)
 

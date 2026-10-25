@@ -61,6 +61,8 @@ export interface RequestOptions extends Omit<RequestInit, 'body'> {
   query?: object
   /** Skip Authorization header injection and 401 refresh handling. */
   skipAuth?: boolean
+  /** Return the response body as text without attempting JSON.parse. */
+  rawText?: boolean
 }
 
 function buildUrl(path: string, query?: RequestOptions['query']): string {
@@ -149,7 +151,7 @@ async function send(
   options: RequestOptions,
   token: string | null,
 ): Promise<Response> {
-  const { body, query, skipAuth: _skipAuth, headers, ...rest } = options
+  const { body, query, skipAuth: _skipAuth, rawText: _rawText, headers, ...rest } = options
 
   // FormData (multipart uploads) passes through untouched: the browser must
   // generate the Content-Type with its own multipart boundary.
@@ -230,6 +232,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     throw apiError
   }
 
+  if (options.rawText) return (await response.text()) as T
   if (response.status === 204) return undefined as T
   const text = await response.text()
   if (!text) return undefined as T

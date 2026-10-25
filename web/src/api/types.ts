@@ -2625,6 +2625,8 @@ export interface Visitor {
   id: string
   email: string
   name: string
+  /** Operator-only note for recognising the account; never sent to the data plane. */
+  remark: string
   disabled: boolean
   site_ids: string[]
   created_at: string
@@ -2635,12 +2637,15 @@ export interface CreateVisitorRequest {
   email: string
   password: string
   name?: string
+  remark?: string
   disabled?: boolean
   site_ids?: string[]
 }
 
 export interface UpdateVisitorRequest {
   name?: string
+  /** Empty clears the note; omitted preserves it. */
+  remark?: string
   disabled?: boolean
   /** Absent leaves the stored password. */
   password?: string

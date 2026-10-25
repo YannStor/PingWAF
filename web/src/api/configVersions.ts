@@ -3,10 +3,11 @@ import { apiClient } from './client'
 /** One recorded configuration version (snapshot excluded). */
 export interface ConfigVersionSummary {
   id: number
+  scope: 'site' | 'global' | 'deployment'
   site_id: string | null
   site_domain: string | null
   config_hash: string
-  source: 'api' | 'cli' | 'rollback'
+  source: 'api' | 'cli' | 'rollback' | 'restore' | 'pre-rollback' | string
   actor: string | null
   /** Per-table row counts captured with the version. */
   summary: Record<string, number> | null
@@ -17,9 +18,19 @@ export interface ConfigVersionSummary {
 export interface ConfigVersionDetail extends ConfigVersionSummary {
   snapshot: {
     schema: number
-    site: Record<string, unknown> | null
-    tables: Record<string, Record<string, unknown>[]>
+    scope?: 'site' | 'global' | 'deployment'
+    site_id?: string | null
+    site?: Record<string, unknown> | null
+    tables: Record<
+      string,
+      Record<string, unknown>[] | Record<string, unknown> | null
+    >
   }
+}
+
+export interface PruneResult {
+  deleted: number
+  cutoff: string
 }
 
 /** What a rollback produced. */
@@ -52,6 +63,8 @@ export const configVersionsApi = {
 
   rollback: (id: number) =>
     apiClient.post<RollbackResult>(`/config-versions/${id}/rollback`, {}),
+
+  prune: () => apiClient.post<PruneResult>('/config-versions/prune', {}),
 }
 
 export default configVersionsApi
