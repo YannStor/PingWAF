@@ -8,42 +8,10 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
-## [PingWAF 0.31.0-rc.3] — 2026-10-25
+## [PingWAF 0.31.0] — 2026-10-25
 
-> **Pre-release.** Third candidate: rc.2 plus the reference-validation fix from
-> the end-to-end run. Publishes `:0.31.0-rc.3` only — `:latest` and `:0.31` keep
-> pointing at the newest stable release. Pin it explicitly:
-> `PINGWAF_TAG=0.31.0-rc.3`.
-
-### Fixed
-
-- **References to existing IP groups validate correctly.** UUIDs were compared
-  in their JSON-quoted form, so a valid group could be reported missing during
-  preview and restore. Reference ids now use the same raw-string form as the
-  database ids, and a regression test covers the comparison.
-
-## [PingWAF 0.31.0-rc.2] — 2026-10-25
-
-> **Pre-release.** Second candidate: rc.1 plus a restore fix found by the
-> end-to-end run. Publishes `:0.31.0-rc.2` only — `:latest` and `:0.31` keep
-> pointing at the newest stable release. Pin it explicitly:
-> `PINGWAF_TAG=0.31.0-rc.2`.
-
-### Fixed
-
-- **Certificates with no private key can be restored.** The secret preflight
-  treated an explicit `null` `key_pem` as an attempt to bypass secret recovery,
-  but that is a legitimate state on certificate tables. Preview and restore now
-  accept it, while non-nullable secret columns and unresolved secret materials
-  still fail closed.
-
-## [PingWAF 0.31.0-rc.1] — 2026-10-25
-
-> **Pre-release.** First candidate for the account-page and configuration-backup
-> work. Publishes `:0.31.0-rc.1` only — `:latest` and `:0.31` keep pointing at
-> the newest stable release, and GitHub marks it a pre-release so `install.sh`
-> (which resolves `/releases/latest`) is unaffected. Pin it explicitly:
-> `PINGWAF_TAG=0.31.0-rc.1`.
+This release brings the Account page in line with Settings and makes
+configuration history a complete, encrypted and restorable safety net.
 
 ### Added
 
@@ -57,8 +25,8 @@ verbatim for reference and attribution, and is not maintained here.
   catalogue covers site policy, shared resources, OIDC, visitors and grants,
   notifications, AI, cache and certificates. Password-based Argon2id and
   AES-256-GCM encryption, zstd compression, SHA-256 verification, and bounded
-  S3/GitHub upload tasks with expiring leases. Target credentials are sealed,
-  never returned by the API, and remote storage receives only ciphertext.
+  S3-compatible/GitHub upload tasks with expiring leases. Target credentials are
+  sealed, never returned by the API, and remote storage receives only ciphertext.
 - **Upload preview and safe restore.** Decrypt, validate and preview before/after
   counts, changes, owner mappings and warnings. Confirmation creates an
   encrypted pre-restore backup and applies the replacement in the same
@@ -79,6 +47,11 @@ verbatim for reference and attribution, and is not maintained here.
   parameters and concurrency, preserved exact download bytes, re-sealed
   instance-managed secrets for the restoring instance, fenced stale upload
   attempts and invalidated stale restore previews.
+- **Certificates without a private key restore correctly.** An explicit `null`
+  `key_pem` is a legitimate certificate state, while non-nullable secret columns
+  and unresolved secret materials still fail closed.
+- **IP-group references validate correctly.** Reference ids now use the same raw
+  string form as database UUIDs instead of their JSON-quoted representation.
 
 ## [PingWAF 0.30.2] — 2026-10-24
 
