@@ -8,6 +8,20 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.31.0-rc.3] — 2026-10-25
+
+> **Pre-release.** Third candidate: rc.2 plus the reference-validation fix from
+> the end-to-end run. Publishes `:0.31.0-rc.3` only — `:latest` and `:0.31` keep
+> pointing at the newest stable release. Pin it explicitly:
+> `PINGWAF_TAG=0.31.0-rc.3`.
+
+### Fixed
+
+- **References to existing IP groups validate correctly.** UUIDs were compared
+  in their JSON-quoted form, so a valid group could be reported missing during
+  preview and restore. Reference ids now use the same raw-string form as the
+  database ids, and a regression test covers the comparison.
+
 ## [PingWAF 0.31.0-rc.2] — 2026-10-25
 
 > **Pre-release.** Second candidate: rc.1 plus a restore fix found by the
