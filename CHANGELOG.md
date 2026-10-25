@@ -8,6 +8,17 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.31.0-e2e.3] — 2026-10-25
+
+> **Internal E2E build — not a release.** Follow-up to e2e.2: check ACME
+> renewals every tick so a newly created certificate is attempted promptly
+> instead of waiting up to ten minutes.
+
+### Fixed
+
+- New ACME orders are picked up on the next one-minute tick (and the first
+  check runs shortly after startup) instead of every tenth tick.
+
 ## [PingWAF 0.31.0-e2e.2] — 2026-10-25
 
 > **Internal E2E build — not a release.** Adds ACME lifecycle decoupling and

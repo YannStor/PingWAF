@@ -213,7 +213,11 @@ async fn do_update_certificates(
     if params.is_empty() {
         return Ok(false);
     }
-    const UPDATE_INTERVAL: u32 = 10;
+    // The task ticks once a minute. Check every tick: a newly created site
+    // must not sit pending for ten minutes before the first order is even
+    // attempted. Renewal itself is still gated by `should_renew` (validity
+    // and domain comparison), so this does not hit the CA on every tick.
+    const UPDATE_INTERVAL: u32 = 1;
     if !count.is_multiple_of(UPDATE_INTERVAL) {
         return Ok(false);
     }
