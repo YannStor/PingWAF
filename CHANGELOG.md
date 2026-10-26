@@ -8,7 +8,10 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
-## [Unreleased]
+## [PingWAF 0.31.1] — 2026-10-26
+
+Patch release for ACME issuance reliability and repeatable browser E2E coverage.
+No schema or API breaking changes; `0.31` and `latest` move to this patch.
 
 ### Added
 
