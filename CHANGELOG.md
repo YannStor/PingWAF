@@ -8,6 +8,34 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.31.2] — 2026-10-27
+
+Patch release for the control-plane admin listener stall. No schema or API
+breaking changes.
+
+### Fixed
+
+- **Admin listener cannot be wedged by a silent client.** `MixedListener` now
+  accepts sockets in a dedicated task and performs protocol detection/TLS
+  handshakes in bounded per-connection tasks. Peek is capped at 5s, TLS
+  handshake at 10s, at most 128 pre-handshakes run concurrently, and the ready
+  queue is bounded; slow clients are closed instead of filling the kernel
+  accept queue. Active HTTP connections are capped at 512 with a 60s idle
+  read/write deadline, and loopback has a separate small pool so a local
+  `/healthz` probe is not starved by remote clients.
+- **Health checks have a hard deadline.** The Compose healthcheck now uses
+  `curl --connect-timeout 2 --max-time 3`, so a stalled admin listener cannot
+  leave the container reporting a stale `healthy` state indefinitely.
+- **Readiness and self-monitoring cannot stall a worker.** The hot-upgrade
+  readiness read/report and the 250ms CPU sample are bounded or moved to the
+  blocking pool.
+
+### Documentation
+
+- Document the 9080/9090 exposure boundary, private binding/VPN guidance, and
+  the distinction between management-plane pre-handshake limits and data-plane
+  downstream timeouts.
+
 ## [PingWAF 0.31.1] — 2026-10-26
 
 Patch release for ACME issuance reliability and repeatable browser E2E coverage.

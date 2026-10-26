@@ -30,7 +30,8 @@ pub struct Sample {
 /// Samples the current CPU, memory and root-disk utilisation.
 ///
 /// CPU usage is a delta between two refreshes, so the call takes a short
-/// pause between them; it runs in the background task only.
+/// pause between them; the monitor invokes it through `spawn_blocking` so the
+/// pause never occupies a Tokio runtime worker.
 pub fn sample() -> Sample {
     let mut system = System::new();
     system.refresh_cpu_usage();
@@ -156,7 +157,16 @@ pub fn start(_state: AppState) -> tokio::task::JoinHandle<()> {
             let Some(manager) = super::global() else {
                 continue;
             };
-            let current = sample();
+            // `sample()` deliberately sleeps 250ms between CPU refreshes.
+            // Run it on the blocking pool so that pause never parks a Tokio
+            // worker that the control-plane listener needs.
+            let current = match tokio::task::spawn_blocking(sample).await {
+                Ok(sample) => sample,
+                Err(err) => {
+                    tracing::warn!(error = %err, "control plane self-monitor sample failed");
+                    continue;
+                },
+            };
             let found = breaches(current, &manager.settings());
 
             for breach in &found {

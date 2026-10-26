@@ -187,7 +187,10 @@ certificate or upload a real one under **Settings → Control plane HTTPS**. Set
 `PINGWAF_TLS_SANS` to the hostname you use if it is not `localhost`.
 
 Health check: `GET http://localhost:9080/healthz` (answers on HTTP and HTTPS;
-everything else redirects to `https://`).
+everything else redirects to `https://`). Use a bounded probe, e.g.
+`curl --connect-timeout 2 --max-time 3 http://localhost:9080/healthz`; `9080`
+is the admin origin and should be bound privately or protected by a firewall,
+not published as a public API.
 
 ### Option B — Build from source
 
@@ -298,7 +301,7 @@ PINGWAF_CONFIG=/etc/pingwaf/pingwaf.toml pingwaf all-in-one   # equivalent
 
 | Port | Purpose |
 | --- | --- |
-| `9080` | REST API + embedded dashboard over HTTPS (health: `GET /healthz`, answered on HTTP too) |
+| `9080` | REST API + embedded dashboard over HTTPS (health: `GET /healthz`, answered on HTTP too); restrict to admin/VPN sources |
 | `9090` | gRPC control plane (agents connect here) |
 | `80` / `443` | Proxied traffic (bound once the first site exists; `443` opens only after a certificate is issued or uploaded — until then only port `80` serves HTTP) |
 

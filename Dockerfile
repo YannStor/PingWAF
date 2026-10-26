@@ -188,7 +188,7 @@ WORKDIR /var/lib/pingwaf
 USER pingwaf
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -sf http://localhost:9080/healthz || exit 1
+    CMD curl --connect-timeout 2 --max-time 3 -sf http://localhost:9080/healthz || exit 1
 
 ENTRYPOINT ["pingwaf"]
 CMD ["all-in-one"]

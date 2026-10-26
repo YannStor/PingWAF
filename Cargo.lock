@@ -4547,7 +4547,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pingap-acme"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4581,7 +4581,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-cache"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "ahash",
  "async-trait",
@@ -4615,7 +4615,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-certificate"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -4641,7 +4641,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-config"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4676,7 +4676,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-core"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "TinyUFO",
  "ahash",
@@ -4705,7 +4705,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-discovery"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "async-trait",
  "bollard",
@@ -4724,7 +4724,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-health"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4746,7 +4746,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-imageoptim"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "async-trait",
  "bytemuck",
@@ -4774,7 +4774,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-location"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -4795,7 +4795,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-logger"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4823,12 +4823,12 @@ dependencies = [
  "tracing-log",
  "tracing-subscriber",
  "walkdir",
- "zstd 0.14.0",
+ "zstd 0.14.3",
 ]
 
 [[package]]
 name = "pingap-otel"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -4845,7 +4845,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-performance"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4875,7 +4875,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-plugin"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "TinyUFO",
  "ahash",
@@ -4938,7 +4938,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-proxy"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "ahash",
  "async-trait",
@@ -4973,7 +4973,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-pyroscope"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "async-trait",
  "pingora",
@@ -4986,14 +4986,14 @@ dependencies = [
 
 [[package]]
 name = "pingap-sentry"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "sentry-core",
 ]
 
 [[package]]
 name = "pingap-upstream"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -5024,7 +5024,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-util"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "aes-gcm-siv",
  "ahash",
@@ -5046,7 +5046,7 @@ dependencies = [
 
 [[package]]
 name = "pingap-webhook"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "async-trait",
  "local-ip-address",
@@ -5161,7 +5161,7 @@ dependencies = [
  "unicase",
  "windows-sys 0.59.0",
  "x509-parser 0.16.0",
- "zstd 0.14.0",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -5352,7 +5352,7 @@ dependencies = [
 
 [[package]]
 name = "pingwaf"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "ahash",
  "anyhow",
@@ -5424,7 +5424,7 @@ dependencies = [
 
 [[package]]
 name = "pingwaf-agent"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5452,7 +5452,7 @@ dependencies = [
 
 [[package]]
 name = "pingwaf-challenge"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -5468,7 +5468,7 @@ dependencies = [
 
 [[package]]
 name = "pingwaf-profiler"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "pretty_assertions",
  "serde",
@@ -5477,7 +5477,7 @@ dependencies = [
 
 [[package]]
 name = "pingwaf-proto"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "prost",
  "prost-types",
@@ -5488,7 +5488,7 @@ dependencies = [
 
 [[package]]
 name = "pingwaf-server"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5539,12 +5539,12 @@ dependencies = [
  "urlencoding",
  "uuid",
  "x509-parser 0.18.1",
- "zstd 0.14.0",
+ "zstd 0.14.3",
 ]
 
 [[package]]
 name = "pingwaf-system"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "bytesize",
  "memory-stats",
@@ -5556,7 +5556,7 @@ dependencies = [
 
 [[package]]
 name = "pingwaf-waf"
-version = "0.31.1"
+version = "0.31.2"
 dependencies = [
  "ahash",
  "aho-corasick",
@@ -7862,7 +7862,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -9378,11 +9378,11 @@ dependencies = [
 
 [[package]]
 name = "zstd"
-version = "0.14.0"
+version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf06bd8162af0734b344780deb55b42a2429ae430870d13fcc12f238e880fe6e"
+checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
 dependencies = [
- "zstd-safe 8.0.0",
+ "zstd-safe 8.2.0",
 ]
 
 [[package]]
@@ -9396,18 +9396,18 @@ dependencies = [
 
 [[package]]
 name = "zstd-safe"
-version = "8.0.0"
+version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae42c0555055784c70058d19ba8e275528e8a99a706684868ace5da4e716a4ab"
+checksum = "ded520f16b29e1a9b771c722221b2b0a0398c2316d9bb3c42b458a5414d7434b"
 dependencies = [
  "zstd-sys",
 ]
 
 [[package]]
 name = "zstd-sys"
-version = "2.1.0+zstd.1.5.7"
+version = "2.1.2+zstd.1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ef0a8027ec3ee71300ab3bcbcd0393f434aa72b91ca6d635a39941deae8eea0"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
 dependencies = [
  "cc",
  "pkg-config",

@@ -164,13 +164,19 @@ control.**
 
 ### Network exposure
 
-- [ ] Bind the dashboard/REST API to an internal interface where possible, and
-      put it behind a reverse proxy or VPN rather than exposing `0.0.0.0:9080`.
+- [ ] Bind the dashboard/REST API to `127.0.0.1:9080` or a private interface and
+      reach it through a VPN/SSH tunnel or a reverse proxy. Do not publish
+      `0.0.0.0:9080` on the public internet: it is the administrative origin and
+      is continuously scanned. If remote access is unavoidable, restrict the
+      cloud security group/host firewall to known administrator addresses.
       The port serves HTTPS by default with a self-signed certificate — upload a
       real one (**Settings → Control plane HTTPS**) or set
       `PINGWAF_TLS_ENABLED=false` behind a proxy that terminates TLS.
 - [ ] Allow port `9090` (gRPC control plane) only from your agent hosts — it is
       not needed by end users.
+- [ ] Use bounded health probes (`curl --connect-timeout 2 --max-time 3`) and an
+      external watchdog; a container healthcheck process can itself hang when
+      the listener is saturated, leaving the status stale.
 - [ ] Never expose PostgreSQL (`5432`) publicly; keep it on a private network or
       the Docker Compose internal network.
 - [ ] Restrict `80`/`443` to the sites you intend to serve.

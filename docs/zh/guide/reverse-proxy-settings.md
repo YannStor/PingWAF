@@ -32,6 +32,8 @@ upstream_host = "origin.internal.example.com"
 
 推荐起点（并非默认值）：读/写超时 `60s`；`downstream_connection_timeout` 取 `5s`–`10s`（必须小于读超时）；`keepalive_request_limit` 取 `1000` 量级用于限制连接年龄。
 
+管理面 `9080` 与数据面是两套监听器：控制台在协议探测阶段有 5 秒上限、TLS 握手有 10 秒上限，限制 128 个并发预握手和 512 个活跃 HTTP 连接，并对活跃连接应用 60 秒读写空闲超时；Pingora 数据面仍需显式配置上述下游超时。不要把 `9080` 直接暴露公网，建议只允许管理员 IP、VPN 或 SSH 隧道访问。
+
 ## 3. 节点名称（Node name）行为变更
 
 `site_upstreams.name` 已从 API 与界面移除：

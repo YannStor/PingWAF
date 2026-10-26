@@ -132,6 +132,13 @@ pub const DEFAULT_RESTART_READY_TIMEOUT: Duration = Duration::from_secs(60);
 /// How often the wait looks at the spawned process and the pid file.
 #[cfg(unix)]
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// A replacement can connect to the readiness socket without ever writing its
+/// pid. Bound that read locally so a broken replacement cannot hold the
+/// restart waiter open until the outer deadline.
+const READY_READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// A replacement must not sit forever reporting readiness to an old process
+/// that has stopped reading the Unix socket.
+const READY_NOTIFY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Initiates an immediate process restart.
 ///
@@ -281,7 +288,14 @@ impl ReadyListener {
     async fn accept(&self) -> io::Result<u32> {
         let (mut stream, _) = self.listener.accept().await?;
         let mut buf = [0u8; 32];
-        let n = stream.read(&mut buf).await?;
+        let n = tokio::time::timeout(READY_READ_TIMEOUT, stream.read(&mut buf))
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "replacement connected to the readiness socket but sent no pid",
+                )
+            })??;
         Ok(std::str::from_utf8(&buf[..n])
             .ok()
             .and_then(|pid| pid.trim().parse().ok())
@@ -436,11 +450,22 @@ impl pingora::services::background::BackgroundService for ReadyNotifyService {
 
 #[cfg(unix)]
 async fn notify_ready(path: &Path) -> io::Result<()> {
-    let mut stream = tokio::net::UnixStream::connect(path).await?;
-    stream
-        .write_all(std::process::id().to_string().as_bytes())
-        .await?;
-    stream.shutdown().await
+    let report = async {
+        let mut stream = tokio::net::UnixStream::connect(path).await?;
+        stream
+            .write_all(std::process::id().to_string().as_bytes())
+            .await?;
+        stream.shutdown().await
+    };
+    tokio::time::timeout(READY_NOTIFY_TIMEOUT, report)
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "timed out reporting readiness to the previous process",
+            )
+        })??;
+    Ok(())
 }
 
 #[cfg(not(unix))]

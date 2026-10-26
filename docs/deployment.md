@@ -562,12 +562,23 @@ The API for all of this is documented in
 | 5432 | TCP | PostgreSQL | Internal only |
 
 ```bash
-# UFW example
+# UFW example — restrict the management plane to trusted sources.
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
-sudo ufw allow 9080/tcp
-sudo ufw allow 9090/tcp  # Only if agents connect remotely
+sudo ufw allow from 203.0.113.10 to any port 9080 proto tcp  # admin/VPN only
+sudo ufw allow from 203.0.113.0/24 to any port 9090 proto tcp # agent nodes only
 ```
+
+`9080` is the authenticated admin console, not a public API. Prefer binding it
+to a private interface or loopback and reaching it through a VPN/SSH tunnel
+instead of publishing it on `0.0.0.0`. `9090` should likewise be reachable only
+from agent hosts. The console's TLS listener deliberately caps protocol
+detection at 5s and TLS handshake at 10s, keeps at most 128 pre-handshakes in
+flight, closes excess connections, caps active HTTP connections at 512 with a
+60s idle read/write deadline, and reserves a small loopback pool for local
+health probes; it does not rely on the kernel accept queue for backpressure.
+The Compose healthcheck uses `curl --connect-timeout 2 --max-time 3`; use the
+same bounded probe in an external watchdog rather than an unbounded `curl`.
 
 ### Login Rate Limiting
 

@@ -872,7 +872,7 @@ async fn serve_http(
 ) -> std::io::Result<()> {
     if control_tls.is_enabled() {
         let listener =
-            tls::MixedListener::new(listener, control_tls.acceptor());
+            tls::MixedListener::new(listener, control_tls.acceptor())?;
         axum::serve(
             listener,
             router.into_make_service_with_connect_info::<tls::ConnInfo>(),
