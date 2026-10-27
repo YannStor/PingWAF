@@ -1901,6 +1901,7 @@ rules = '[{"id":"h","direction":"response","operations":[{"type":"set_header","n
                     trusted_header: String::new(),
                     trust_last_hop: false,
                     trusted_proxy_ranges: Vec::new(),
+                    downstream_timeout_secs: 60,
                 }],
                 config_hash: "hash-1".to_string(),
                 updated_at: None,

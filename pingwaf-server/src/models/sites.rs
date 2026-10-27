@@ -94,6 +94,10 @@ pub mod sites {
         /// `verify_cert`; `None` means the site has no opinion and each pool
         /// follows the deployment-wide `origin_settings.verify_cert`.
         pub origin_verify_cert: Option<bool>,
+        /// Per-site downstream read/write timeout, in seconds. Applied after
+        /// the site's Location matches; request headers still use the
+        /// listener default.
+        pub downstream_timeout_secs: i32,
         /// Response body replacement policy, compiled into the site's
         /// `sub_filter` plugin instance in the agent configuration. `None`
         /// leaves every response untouched.

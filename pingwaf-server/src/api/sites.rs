@@ -20,7 +20,8 @@ use uuid::Uuid;
 use crate::api::common::{
     ensure_acme_wildcard_supported, ensure_domains_available, load_site_read,
     load_site_write, map_domain_conflict, non_empty, normalise_domain,
-    normalise_domain_list, parse_uuid, require_write, Page, Pagination,
+    normalise_domain_list, parse_uuid, require_write, AppJson, Page,
+    Pagination,
 };
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
@@ -82,6 +83,8 @@ pub struct SiteResponse {
     /// `None` means every pool without its own pin follows the
     /// deployment-wide `origin_settings.verify_cert`.
     pub origin_verify_cert: Option<bool>,
+    /// Per-site downstream read/write timeout, in seconds.
+    pub downstream_timeout_secs: u32,
     /// Response body replacement policy; `None` when the site replaces
     /// nothing and no `sub_filter` plugin is generated for it.
     pub response_replace: Option<ResponseReplaceConfig>,
@@ -110,6 +113,10 @@ impl From<site::Model> for SiteResponse {
             trusted_proxy_ranges: model.trusted_proxy_ranges,
             trusted_proxy_group_ids: model.trusted_proxy_group_ids,
             origin_verify_cert: model.origin_verify_cert,
+            downstream_timeout_secs:
+                crate::defaults::normalize_site_downstream_timeout_secs(
+                    model.downstream_timeout_secs,
+                ),
             response_replace: model
                 .response_replace
                 .as_ref()
@@ -237,6 +244,8 @@ pub struct CreateSiteRequest {
     pub status: Option<String>,
     #[serde(default)]
     pub plan: Option<String>,
+    #[serde(default = "default_site_downstream_timeout_secs")]
+    pub downstream_timeout_secs: u32,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -279,6 +288,10 @@ pub struct UpdateSiteRequest {
     /// alone.
     #[serde(default, deserialize_with = "deserialize_present_nullable")]
     pub origin_verify_cert: Option<Option<bool>>,
+    /// Per-site downstream read/write timeout, in seconds. Absent keeps the
+    /// stored value; 0 and values above 3600 are rejected.
+    #[serde(default)]
+    pub downstream_timeout_secs: Option<u32>,
     /// Response body replacement policy. Absent leaves the stored policy
     /// alone, an explicit `null` removes it, an object replaces it wholesale.
     /// A policy with an empty `rules` list also removes it: that is what a
@@ -305,6 +318,23 @@ pub struct CreateUpstreamRequest {
 
 fn default_weight() -> i32 {
     1
+}
+
+fn default_site_downstream_timeout_secs() -> u32 {
+    crate::defaults::DEFAULT_SITE_DOWNSTREAM_TIMEOUT_SECS as u32
+}
+
+fn validate_site_downstream_timeout_secs(value: u32) -> Result<i32, ApiError> {
+    let value = i32::try_from(value).unwrap_or(i32::MAX);
+    if !(crate::defaults::MIN_SITE_DOWNSTREAM_TIMEOUT_SECS
+        ..=crate::defaults::MAX_SITE_DOWNSTREAM_TIMEOUT_SECS)
+        .contains(&value)
+    {
+        return Err(ApiError::BadRequest(
+            "downstream_timeout_secs must be between 1 and 3600".to_string(),
+        ));
+    }
+    Ok(value)
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1039,7 +1069,7 @@ async fn list(
 async fn create(
     State(state): State<AppState>,
     current: AuthUser,
-    Json(payload): Json<CreateSiteRequest>,
+    AppJson(payload): AppJson<CreateSiteRequest>,
 ) -> Result<Response, ApiError> {
     require_write(&current)?;
 
@@ -1077,6 +1107,8 @@ async fn create(
             "plan must be at most 20 characters".to_string(),
         ));
     }
+    let downstream_timeout_secs =
+        validate_site_downstream_timeout_secs(payload.downstream_timeout_secs)?;
 
     let timestamp = Utc::now();
     let id = Uuid::new_v4();
@@ -1100,6 +1132,7 @@ async fn create(
         trusted_proxy_group_ids: Set(Vec::new()),
         // New sites start with no opinion: pools follow the global default.
         origin_verify_cert: Set(None),
+        downstream_timeout_secs: Set(downstream_timeout_secs),
         // Nothing is replaced until the operator configures a policy.
         response_replace: Set(None),
         created_at: Set(timestamp),
@@ -1547,7 +1580,7 @@ async fn update(
     State(state): State<AppState>,
     current: AuthUser,
     Path(site_id): Path<String>,
-    Json(payload): Json<UpdateSiteRequest>,
+    AppJson(payload): AppJson<UpdateSiteRequest>,
 ) -> Result<Json<SiteResponse>, ApiError> {
     let id = parse_uuid(&site_id, "site id")?;
     let model = load_site_write(&state.db, id, &current).await?;
@@ -1660,6 +1693,10 @@ async fn update(
     // `None` and must not touch the stored value, hence the outer check.
     if let Some(verify_cert) = payload.origin_verify_cert {
         active.origin_verify_cert = Set(verify_cert);
+    }
+    if let Some(timeout) = payload.downstream_timeout_secs {
+        active.downstream_timeout_secs =
+            Set(validate_site_downstream_timeout_secs(timeout)?);
     }
     // Same tri-state: absent leaves the stored policy alone, `null` removes
     // it. The policy is validated before it is stored because the data plane
@@ -4568,5 +4605,35 @@ mod tests {
             r#"{"response_replace":{"rules":[{"pattern":1}]}}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn downstream_timeout_defaults_and_range_are_enforced() {
+        let request: CreateSiteRequest = serde_json::from_str(
+            r#"{"name":"site","domain":"example.com","upstream_address":"10.0.0.1:8080"}"#,
+        )
+        .expect("create request");
+        assert_eq!(
+            request.downstream_timeout_secs,
+            crate::defaults::DEFAULT_SITE_DOWNSTREAM_TIMEOUT_SECS as u32
+        );
+
+        for bad in [0, 3601] {
+            assert!(validate_site_downstream_timeout_secs(bad).is_err());
+        }
+        for good in [1, 60, 3600] {
+            assert_eq!(
+                validate_site_downstream_timeout_secs(good).unwrap(),
+                good as i32
+            );
+        }
+        assert_eq!(
+            crate::defaults::normalize_site_downstream_timeout_secs(0),
+            60
+        );
+        assert_eq!(
+            crate::defaults::normalize_site_downstream_timeout_secs(4000),
+            3600
+        );
     }
 }

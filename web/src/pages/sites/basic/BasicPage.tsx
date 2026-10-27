@@ -11,6 +11,7 @@ import { useCanWrite } from '@/hooks'
 import type { IpGroupResponse } from '@/api/types'
 import { FailoverPanel } from '../FailoverPanel'
 import { ProxyTrustCard } from './ProxyTrustCard'
+import { DownstreamTimeoutCard } from './DownstreamTimeoutCard'
 import { OriginPoolsSection } from './OriginPoolsSection'
 import { RoutesSection } from './RoutesSection'
 import { PoolDialog, type PoolDialogRequest } from './PoolDialog'
@@ -133,6 +134,17 @@ export function BasicPage() {
               ipGroups={gateableGroups}
             />
           </div>
+        </section>
+      )}
+
+      {siteQuery.data && (
+        <section className="mt-6">
+          {/* Remount when the server value changes so an unsaved draft is
+              replaced by the authoritative value after a save/refetch. */}
+          <DownstreamTimeoutCard
+            key={`${siteQuery.data.site.id}-${siteQuery.data.site.downstream_timeout_secs}`}
+            site={siteQuery.data.site}
+          />
         </section>
       )}
 

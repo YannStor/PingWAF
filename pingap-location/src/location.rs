@@ -565,6 +565,10 @@ pub struct Location {
     /// X-Forwarded-For, X-Real-IP, X-Forwarded-Proto, etc.
     // pub enable_reverse_proxy_headers: bool,
 
+    /// Per-site downstream read/write timeout; `None` keeps the listener
+    /// default. Stored as a Duration so the request path never parses strings.
+    downstream_timeout: Option<Duration>,
+
     /// Maximum window for retries
     pub max_retries: Option<u8>,
 
@@ -606,6 +610,12 @@ fn get_content_length(header: &RequestHeader) -> Option<usize> {
 }
 
 impl Location {
+    /// Per-site downstream read/write timeout, if configured. The caller
+    /// applies it to the session after this location matches.
+    pub fn downstream_timeout(&self) -> Option<Duration> {
+        self.downstream_timeout
+    }
+
     /// Creates a new Location from configuration
     /// Validates and compiles path/host patterns and other settings
     pub fn new(name: &str, conf: &LocationConf) -> Result<Location> {
@@ -743,6 +753,9 @@ impl Location {
             // enable_reverse_proxy_headers: conf
             //     .enable_reverse_proxy_headers
             //     .unwrap_or_default(),
+            downstream_timeout: conf.downstream_timeout_secs.map(|secs| {
+                Duration::from_secs(u64::from(secs.clamp(1, 3600)))
+            }),
             max_retries: conf.max_retries,
             max_retry_window: conf.max_retry_window,
         };
@@ -2060,5 +2073,48 @@ mod tests {
                 .unwrap()
                 .to_string()
         );
+    }
+
+    #[test]
+    fn downstream_timeout_changes_the_location_hash() {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let hash = |secs| {
+            let mut hasher = DefaultHasher::new();
+            LocationConf {
+                upstream: Some("charts".to_string()),
+                path: Some("/".to_string()),
+                downstream_timeout_secs: secs,
+                ..Default::default()
+            }
+            .hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_ne!(hash(Some(60)), hash(Some(120)));
+    }
+
+    #[test]
+    fn downstream_timeout_is_compiled_to_a_duration() {
+        let lo = Location::new(
+            "timeout",
+            &LocationConf {
+                upstream: Some("charts".to_string()),
+                path: Some("/".to_string()),
+                downstream_timeout_secs: Some(120),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(lo.downstream_timeout(), Some(Duration::from_secs(120)));
+
+        let none = Location::new(
+            "timeout-default",
+            &LocationConf {
+                upstream: Some("charts".to_string()),
+                path: Some("/".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(none.downstream_timeout(), None);
     }
 }

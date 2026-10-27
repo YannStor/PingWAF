@@ -799,6 +799,7 @@ mod tests {
             trusted_proxy_ranges: Vec::new(),
             trusted_proxy_group_ids: Vec::new(),
             origin_verify_cert: None,
+            downstream_timeout_secs: 60,
             response_replace: None,
             created_at: timestamp,
             updated_at: timestamp,

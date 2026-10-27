@@ -853,6 +853,12 @@ fn cached_rules_to_pingap_config(
     let cache_plugin = cache_enabled.then(|| CACHE_PLUGIN_NAME.to_string());
 
     for (site_id, site) in &cached.sites {
+        let site_downstream_timeout_secs = if site.downstream_timeout_secs == 0
+        {
+            60
+        } else {
+            site.downstream_timeout_secs.min(3600)
+        };
         if site.domain.is_empty() {
             continue;
         }
@@ -1032,6 +1038,7 @@ fn cached_rules_to_pingap_config(
                     // less ranked below this catch-all `/` location and
                     // never matched. Pin it to the floor instead.
                     weight: Some(0),
+                    downstream_timeout_secs: Some(site_downstream_timeout_secs),
                     ..Default::default()
                 },
             );
@@ -1100,6 +1107,7 @@ fn cached_rules_to_pingap_config(
                     // its virtual host answers instead of 404ing.
                     upstream_host: (!route.upstream_host.trim().is_empty())
                         .then(|| route.upstream_host.trim().to_string()),
+                    downstream_timeout_secs: Some(site_downstream_timeout_secs),
                     plugins: Some(site_plugins.clone()),
                     ..Default::default()
                 },
@@ -2137,6 +2145,7 @@ mod tests {
             domain: domain.to_string(),
             alternate_domains: vec![],
             status: "active".to_string(),
+            downstream_timeout_secs: 60,
             waf_config: None,
             rate_limit_rules: vec![],
             ip_access_rules: vec![],
@@ -2226,6 +2235,25 @@ mod tests {
             stale_while_revalidate_seconds: 0,
             enabled: true,
         }
+    }
+
+    #[test]
+    fn site_downstream_timeout_reaches_generated_locations() {
+        let mut site = site_rules("site1", "a.example.com");
+        site.downstream_timeout_secs = 120;
+        site.upstreams = vec![pool("", vec![peer("10.0.0.1:8080")])];
+        let cached = one_site_cache(site);
+        let config = cached_rules_to_pingap_config(
+            &cached,
+            Path::new("/tmp/pingwaf-test-cache"),
+        )
+        .expect("config should build");
+        let location = config
+            .locations
+            .values()
+            .find(|location| location.host.as_deref() == Some("a.example.com"))
+            .expect("site location");
+        assert_eq!(location.downstream_timeout_secs, Some(120));
     }
 
     #[test]

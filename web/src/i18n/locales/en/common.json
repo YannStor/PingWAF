@@ -2746,6 +2746,15 @@
         "headerCf": "CF-Connecting-IP (Cloudflare)",
         "headerTrueClient": "True-Client-IP"
       },
+      "downstreamTimeout": {
+        "title": "Downstream timeout",
+        "description": "How long the edge waits on the origin's read/write for this site after the route matches.",
+        "label": "Timeout (seconds)",
+        "hint": "Default 60. Applies after the site route matches; request headers still use the listener default.",
+        "headerNote": "This value covers the request body and response phase. The request line/header phase remains protected by the listener's 60s default. On HTTP/2 the write budget is per stream; Pingora manages H2 reads itself.",
+        "range": "Enter a whole number between {{min}} and {{max}}",
+        "saved": "Downstream timeout saved"
+      },
       "verifyCertDisabledHint": "Turn on \"HTTPS origin\" to configure certificate verification (HTTP origins have no TLS handshake, so there is nothing to verify).",
       "certFollowGlobal": "certificate check follows the deployment default",
       "originTlsSummary": "Origin certificate check (site default):",

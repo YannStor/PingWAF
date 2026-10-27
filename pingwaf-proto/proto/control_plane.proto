@@ -973,6 +973,9 @@ message Site {
   // Only a direct peer inside one of these ranges may set the forwarded
   // header; an empty list means no proxy is trusted.
   repeated string trusted_proxy_ranges = 10;
+  // Per-site downstream read/write timeout in seconds. 0 means the sender
+  // predates the field; the agent must fall back to 60.
+  uint32 downstream_timeout_secs = 11;
 }
 
 enum SiteStatusEnum {

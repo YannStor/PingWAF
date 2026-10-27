@@ -746,8 +746,17 @@ impl Server {
     }
     #[inline]
     fn initialize_context(&self, session: &mut Session, ctx: &mut Ctx) {
-        session.set_read_timeout(self.downstream_read_timeout);
-        session.set_write_timeout(self.downstream_write_timeout);
+        // Reset every request (not just every connection): a keep-alive
+        // connection can switch virtual hosts, and the previous site's
+        // timeout must not leak into the next request. Public listeners
+        // already resolve to 60s in ServerConf; the fallback keeps generic
+        // listeners consistent with Pingora's default.
+        let default_timeout = Some(std::time::Duration::from_secs(60));
+        session
+            .set_read_timeout(self.downstream_read_timeout.or(default_timeout));
+        session.set_write_timeout(
+            self.downstream_write_timeout.or(default_timeout),
+        );
 
         if let Some(stream) = session.stream() {
             ctx.conn.id = stream.id() as usize;
@@ -906,6 +915,16 @@ impl Server {
         ctx.upstream.location_instance = Some(location.clone());
         ctx.upstream.max_retries = location.max_retries;
         ctx.upstream.max_retry_window = location.max_retry_window;
+
+        // The site-level override applies to the body/response phase after
+        // the location is known. Pingora 0.9's `set_read_timeout` is a no-op
+        // for H2, while `set_write_timeout` lives on each H2 stream, so this
+        // is safe for both protocols: H1 gets both values, H2 gets the
+        // per-stream write budget and its read side keeps Pingora's behavior.
+        if let Some(timeout) = location.downstream_timeout() {
+            session.set_read_timeout(Some(timeout));
+            session.set_write_timeout(Some(timeout));
+        }
 
         // `on_request` counts the request before it can reject it with a
         // 429, and the instance is recorded already, so that rejection is
@@ -2278,6 +2297,17 @@ impl ProxyHttp for Server {
         defer!(debug!(target: LOG_TARGET, "<-- logging"););
         end_request();
         self.processing.fetch_sub(1, Ordering::Relaxed);
+        // The next request on this HTTP/1.1 keep-alive connection reads its
+        // headers before `early_request_filter` runs. Restore the listener
+        // default here so a long timeout from the previous site cannot widen
+        // that header window. On H2 the read setter is a no-op and the write
+        // setter is per-stream, so applying the same reset is safe.
+        let default_timeout = Some(std::time::Duration::from_secs(60));
+        session
+            .set_read_timeout(self.downstream_read_timeout.or(default_timeout));
+        session.set_write_timeout(
+            self.downstream_write_timeout.or(default_timeout),
+        );
         if let Some(location) = &ctx.upstream.location_instance {
             location.on_response();
         }
@@ -2723,6 +2753,26 @@ value = 'proxy_set_headers = ["name:value"]'
         let mut buf = vec![];
         client.read_to_end(&mut buf).await.unwrap();
         String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    #[tokio::test]
+    async fn initialize_context_resets_a_previous_site_timeout() {
+        let server = new_server();
+        let (mut session, _client) =
+            new_duplex_session("GET / HTTP/1.1\r\nHost: github.com\r\n\r\n")
+                .await;
+        let mut ctx = Ctx::new();
+
+        session.set_read_timeout(Some(Duration::from_secs(300)));
+        session.set_write_timeout(Some(Duration::from_secs(300)));
+        server.initialize_context(&mut session, &mut ctx);
+
+        assert_eq!(
+            session.get_read_timeout(),
+            Some(Duration::from_secs(60)),
+            "a new request must not inherit the previous site's timeout"
+        );
+        assert_eq!(session.get_write_timeout(), Some(Duration::from_secs(60)));
     }
 
     #[tokio::test]

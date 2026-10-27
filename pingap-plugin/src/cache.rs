@@ -1618,6 +1618,7 @@ purge_ip_list = ["192.168.1.1"]
             domain: "example.com".to_string(),
             alternate_domains: vec![],
             status: "active".to_string(),
+            downstream_timeout_secs: 60,
             waf_config: None,
             rate_limit_rules: vec![],
             ip_access_rules: vec![],

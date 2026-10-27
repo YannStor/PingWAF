@@ -102,6 +102,9 @@ pub struct SiteRules {
     /// the edge consumed it default to `active`.
     #[serde(default = "default_site_status")]
     pub status: String,
+    /// Per-site downstream read/write timeout in seconds; 60 for old caches.
+    #[serde(default = "default_downstream_timeout_secs")]
+    pub downstream_timeout_secs: u32,
     pub waf_config: Option<WafConfig>,
     pub rate_limit_rules: Vec<RateLimitRule>,
     pub ip_access_rules: Vec<IpAccessRule>,
@@ -396,6 +399,10 @@ pub mod site_status {
 /// Default body-withholding window, matching the data-plane default.
 fn default_body_stage_timeout() -> u32 {
     30
+}
+
+fn default_downstream_timeout_secs() -> u32 {
+    60
 }
 
 fn default_site_status() -> String {
@@ -1492,8 +1499,21 @@ impl RuleCache {
         // separately from the proxy path.
         let _sync =
             pingwaf_profiler::timed_method(pingwaf_profiler::Method::AgentSync);
-        let site_rules = Arc::new(Self::convert_bundle(bundle));
         let site_id = bundle.site_id.clone();
+        let previous_timeout = self
+            .inner
+            .load()
+            .sites
+            .get(&site_id)
+            .map(|site| site.downstream_timeout_secs);
+        let mut converted = Self::convert_bundle(bundle);
+        // A rule bundle does not carry site-level fields. Preserve the value
+        // learned from the full SiteConfig instead of resetting it to 60 on
+        // every incremental rule sync.
+        if let Some(timeout) = previous_timeout {
+            converted.downstream_timeout_secs = timeout;
+        }
+        let site_rules = Arc::new(converted);
         let domain = site_rules.domain.clone();
         let alternate_domains = site_rules.alternate_domains.clone();
 
@@ -1672,6 +1692,12 @@ impl RuleCache {
                     site_rules.alternate_domains =
                         site.alternate_domains.clone();
                     site_rules.status = site_status_str(site.status);
+                    site_rules.downstream_timeout_secs =
+                        if site.downstream_timeout_secs == 0 {
+                            default_downstream_timeout_secs()
+                        } else {
+                            site.downstream_timeout_secs
+                        };
                     site_rules.proxy_trust = ProxyTrustConfig {
                         enabled: site.trust_proxy_headers,
                         header: site.trusted_header.clone(),
@@ -2514,6 +2540,7 @@ impl RuleCache {
             alternate_domains: Vec::new(),
             // Set from the owning `Site` in `update_from_site_config`.
             status: default_site_status(),
+            downstream_timeout_secs: default_downstream_timeout_secs(),
             waf_config: bundle.waf.as_ref().map(Self::convert_waf_config),
             rate_limit_rules: bundle
                 .rate_limit_rules
@@ -3497,6 +3524,9 @@ mod tests {
             trusted_header: String::new(),
             trust_last_hop: false,
             trusted_proxy_ranges: Vec::new(),
+            // Old control planes omit the field; prost decodes it as 0 and
+            // the agent must resolve that to 60 rather than 0/1.
+            downstream_timeout_secs: 0,
         };
         cache
             .update_from_site_config(&proto::SiteConfig {
@@ -3522,8 +3552,61 @@ mod tests {
         assert!(cache.get_site_rules_by_id("site-2").is_none());
         assert!(cache.get_site_rules("b.example.com").is_none());
         assert_eq!(cache.blocked_reason("site-2", "203.0.113.1"), None);
-        // The surviving site is untouched.
+        // The surviving site is untouched, and a missing proto field still
+        // resolves to the 60-second default.
         assert!(cache.get_site_rules_by_id("site-1").is_some());
+        assert_eq!(
+            cache
+                .get_site_rules_by_id("site-1")
+                .unwrap()
+                .downstream_timeout_secs,
+            60
+        );
+    }
+
+    #[test]
+    fn incremental_bundle_preserves_site_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache =
+            RuleCache::new(dir.path().to_path_buf(), "test".to_string())
+                .unwrap();
+        cache
+            .update_from_site_config(&proto::SiteConfig {
+                sites: vec![proto::Site {
+                    id: "site-1".to_string(),
+                    name: "example".to_string(),
+                    domain: "example.com".to_string(),
+                    alternate_domains: Vec::new(),
+                    status: 0,
+                    rules: Some(proto::RuleBundle {
+                        site_id: "site-1".to_string(),
+                        config_hash: "hash-1".to_string(),
+                        ..Default::default()
+                    }),
+                    trust_proxy_headers: false,
+                    trusted_header: String::new(),
+                    trust_last_hop: false,
+                    trusted_proxy_ranges: Vec::new(),
+                    downstream_timeout_secs: 180,
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        cache
+            .update_from_bundle(&proto::RuleBundle {
+                site_id: "site-1".to_string(),
+                config_hash: "hash-2".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            cache
+                .get_site_rules_by_id("site-1")
+                .unwrap()
+                .downstream_timeout_secs,
+            180,
+            "a rule-only sync must not reset the site-level timeout"
+        );
     }
 
     #[test]
@@ -3561,6 +3644,7 @@ mod tests {
             trusted_header: String::new(),
             trust_last_hop: false,
             trusted_proxy_ranges: Vec::new(),
+            downstream_timeout_secs: 60,
         };
         cache
             .update_from_site_config(&proto::SiteConfig {
@@ -3632,6 +3716,7 @@ mod tests {
                     domain: "example.com".to_string(),
                     alternate_domains: Vec::new(),
                     status: site_status::PAUSED.to_string(),
+                    downstream_timeout_secs: 60,
                     waf_config: None,
                     rate_limit_rules: Vec::new(),
                     ip_access_rules: Vec::new(),
@@ -3797,6 +3882,7 @@ mod tests {
                 domain: DOMAIN.to_string(),
                 alternate_domains: Vec::new(),
                 status: site_status::ACTIVE.to_string(),
+                downstream_timeout_secs: 60,
                 waf_config: None,
                 rate_limit_rules: Vec::new(),
                 ip_access_rules: Vec::new(),
@@ -3898,6 +3984,7 @@ mod tests {
             trusted_header: String::new(),
             trust_last_hop: false,
             trusted_proxy_ranges: Vec::new(),
+            downstream_timeout_secs: 60,
         };
         assert_eq!(site_status_str(site.status), site_status::PAUSED);
         let rules =
@@ -3933,6 +4020,7 @@ mod tests {
             trusted_header: String::new(),
             trust_last_hop: false,
             trusted_proxy_ranges: Vec::new(),
+            downstream_timeout_secs: 60,
         };
         let rules =
             RuleCache::convert_bundle(site.rules.as_ref().expect("bundle"));

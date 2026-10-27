@@ -916,6 +916,11 @@ pub struct LocationConf {
     #[serde(with = "humantime_serde")]
     pub max_retry_window: Option<Duration>,
 
+    /// Per-site downstream read/write timeout in seconds. `None` keeps the
+    /// listener default (normally 60s). Applied after this Location matches.
+    #[serde(default)]
+    pub downstream_timeout_secs: Option<u32>,
+
     /// Optional description/notes about this location
     pub remark: Option<String>,
 }
@@ -930,6 +935,15 @@ impl LocationConf {
         &self,
         upstream_names: Option<&[String]>,
     ) -> Result<()> {
+        if let Some(secs) = self.downstream_timeout_secs
+            && !(1..=3600).contains(&secs)
+        {
+            return Err(Error::Invalid {
+                message: format!(
+                    "downstream_timeout_secs must be between 1 and 3600, got {secs}"
+                ),
+            });
+        }
         if let Some(host) = &self.upstream_host {
             let host = host.trim();
             if host.is_empty()

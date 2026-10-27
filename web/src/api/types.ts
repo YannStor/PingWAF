@@ -152,6 +152,11 @@ export interface Site {
    */
   origin_verify_cert: boolean | null
   /**
+   * Per-site downstream read/write timeout in seconds, applied after the
+   * site's Location matches. Request headers still use the listener default.
+   */
+  downstream_timeout_secs: number
+  /**
    * Response body replacement policy; `null` when the site replaces nothing.
    */
   response_replace: ResponseReplaceConfig | null
@@ -295,6 +300,8 @@ export interface CreateSiteRequest {
   upstream_tls?: boolean
   status?: string
   plan?: string
+  /** Omitted defaults to 60; 1-3600. */
+  downstream_timeout_secs?: number
 }
 
 /** `POST /sites/{site_id}/clone` — duplicate a site under a new primary domain. */
@@ -330,6 +337,8 @@ export interface UpdateSiteRequest {
    * (pools follow the global default again).
    */
   origin_verify_cert?: boolean | null
+  /** Per-site downstream read/write timeout in seconds (1-3600). */
+  downstream_timeout_secs?: number
   /**
    * Replaces the whole policy; `null` (or a config with no rules) clears it.
    */

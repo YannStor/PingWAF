@@ -87,6 +87,22 @@ pub async fn seed_ip_group_defaults(
 /// Disk budget, in MiB, every new site starts with.
 pub const DEFAULT_CACHE_QUOTA_MB: i32 = 1024;
 
+/// Default/limits for the per-site downstream read/write timeout.
+pub const DEFAULT_SITE_DOWNSTREAM_TIMEOUT_SECS: i32 = 60;
+pub const MIN_SITE_DOWNSTREAM_TIMEOUT_SECS: i32 = 1;
+pub const MAX_SITE_DOWNSTREAM_TIMEOUT_SECS: i32 = 3600;
+
+/// Normalizes a stored value for display/downstream. 0 is the legacy
+/// "unset" sentinel and resolves to the default; out-of-range values are
+/// bounded instead of being echoed to the data plane.
+pub fn normalize_site_downstream_timeout_secs(value: i32) -> u32 {
+    if value <= 0 {
+        DEFAULT_SITE_DOWNSTREAM_TIMEOUT_SECS as u32
+    } else {
+        (value as u32).min(MAX_SITE_DOWNSTREAM_TIMEOUT_SECS as u32)
+    }
+}
+
 /// A built-in WAF rule, expressed the same way a user-defined rule is.
 pub struct DefaultWafRule {
     /// Stable identifier, used as the rule name so seeding stays idempotent.

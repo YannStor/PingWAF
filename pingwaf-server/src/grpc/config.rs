@@ -1775,6 +1775,10 @@ pub async fn build_site_config(
             trust_proxy_headers: row.trust_proxy_headers,
             trusted_header: row.trusted_header.clone(),
             trust_last_hop: row.trust_last_hop,
+            downstream_timeout_secs:
+                crate::defaults::normalize_site_downstream_timeout_secs(
+                    row.downstream_timeout_secs,
+                ),
             trusted_proxy_ranges: merge_trusted_proxy_ranges(
                 &row.trusted_proxy_ranges,
                 &row.trusted_proxy_group_ids,

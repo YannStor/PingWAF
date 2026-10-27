@@ -2746,6 +2746,15 @@
         "headerCf": "CF-Connecting-IP（Cloudflare）",
         "headerTrueClient": "True-Client-IP"
       },
+      "downstreamTimeout": {
+        "title": "下游超时",
+        "description": "站点路由匹配后，边缘等待源站读写的时长。",
+        "label": "超时时间（秒）",
+        "hint": "默认 60。在站点路由匹配后生效；请求头阶段仍使用监听器默认值。",
+        "headerNote": "该值作用于请求体与响应阶段；请求行/请求头阶段仍由监听器默认的 60 秒保护。HTTP/2 的写预算按流生效，读侧由 Pingora 管理。",
+        "range": "请输入 {{min}} 到 {{max}} 之间的整数",
+        "saved": "下游超时已保存"
+      },
       "verifyCertDisabledHint": "开启「HTTPS 源站」后可配置证书校验（HTTP 回源没有 TLS 握手，无可校验对象）。",
       "certFollowGlobal": "证书校验：跟随全局默认",
       "originTlsSummary": "源站证书校验（站点默认）：",

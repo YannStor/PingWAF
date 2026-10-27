@@ -1488,6 +1488,7 @@ cookie_secret = "test-secret"
                         trusted_header: String::new(),
                         trust_last_hop: false,
                         trusted_proxy_ranges: Vec::new(),
+                        downstream_timeout_secs: 60,
                     },
                     proto::Site {
                         id: "site-2".to_string(),
@@ -1504,6 +1505,7 @@ cookie_secret = "test-secret"
                         trusted_header: String::new(),
                         trust_last_hop: false,
                         trusted_proxy_ranges: Vec::new(),
+                        downstream_timeout_secs: 60,
                     },
                 ],
                 config_hash: "hash-1".to_string(),

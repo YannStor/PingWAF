@@ -29,6 +29,11 @@ breaking changes.
 - **Readiness and self-monitoring cannot stall a worker.** The hot-upgrade
   readiness read/report and the 250ms CPU sample are bounded or moved to the
   blocking pool.
+- **Per-site downstream timeout.** Site → Basic now configures a 1–3600s
+  read/write budget (default 60s, stored in the `sites` row and delivered over
+  proto tag 11). It applies after the site's Location matches and is reset
+  before the next HTTP/1.1 keep-alive request; on HTTP/2 the write budget is
+  per stream, while Pingora manages H2 reads.
 
 ### Documentation
 

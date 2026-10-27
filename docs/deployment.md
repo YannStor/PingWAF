@@ -303,6 +303,18 @@ that opens a connection, completes the handshake and then goes quiet holds a
 worker connection for as long as the read timeout (or forever, if read timeout
 is unset).
 
+Generated public listeners default to 60s read/write. The proxy also applies a
+60s request-phase fallback when a generic listener leaves these keys unset;
+the initial request-line/header read still follows the listener setting, so
+configure these keys explicitly for untrusted traffic. A site can override the
+post-routing body/response budget under **Site → Basic → Downstream timeout**
+(1–3600 seconds, default 60). The override applies after the site's Location
+matches, so the request line/header phase still uses the listener value; on an
+HTTP/1.1 keep-alive connection the listener value is restored before the next
+request's headers are read. On HTTP/2 the write timeout is stored per stream, so the site value applies to
+that stream's response; Pingora's H2 read-timeout setter is a no-op and H2
+reads remain under Pingora's own connection handling.
+
 Recommendations (starting points, not defaults):
 
 - Set `downstream_read_timeout` (e.g. `60s`) and
