@@ -179,10 +179,10 @@ pub fn normalize_request<'a>(
                 full_uri.push('&');
             }
             full_uri.push_str(key);
-            if !value.is_empty() {
-                full_uri.push('=');
-                full_uri.push_str(value);
-            }
+            // Preserve the old `format!("{key}={value}")` shape, including
+            // `flag=` for a bare flag; rules may match on the `=`.
+            full_uri.push('=');
+            full_uri.push_str(value);
         }
     }
 
@@ -1441,7 +1441,7 @@ mod tests {
             3,
             false,
         );
-        assert_eq!(req.full_uri, "/a/b?x=1&flag&y=/");
+        assert_eq!(req.full_uri, "/a/b?x=1&flag=&y=/");
         assert_eq!(req.query_params.len(), 3);
     }
 }

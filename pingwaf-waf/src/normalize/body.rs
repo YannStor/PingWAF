@@ -94,19 +94,24 @@ fn decode_one(encoding: &str, bytes: &[u8]) -> Option<Vec<u8>> {
 /// preallocating the full scan ceiling for every request would raise the
 /// concurrent RSS more than it saves in reallocation.
 ///
-/// `None` when the stream is corrupt: partial output from a broken stream
-/// is not something to hand to the detectors as if it were the payload.
+/// `None` when the stream produced no output and failed. A truncated stream
+/// that already yielded bytes is returned as a prefix: the upstream staging
+/// cap can cut a gzip body mid-stream, and discarding the decoded prefix
+/// would send the compressed bytes to the detectors instead of the payload.
 fn read_bounded<R: Read>(reader: R, input_len: usize) -> Option<Vec<u8>> {
     let initial = input_len
         .saturating_mul(4)
         .clamp(4 * 1024, 64 * 1024)
         .min(MAX_DECOMPRESSED_BODY);
     let mut out = Vec::with_capacity(initial);
-    reader
+    match reader
         .take(MAX_DECOMPRESSED_BODY as u64)
         .read_to_end(&mut out)
-        .ok()?;
-    Some(out)
+    {
+        Ok(_) => Some(out),
+        Err(_) if !out.is_empty() => Some(out),
+        Err(_) => None,
+    }
 }
 
 /// Returns the decompressed body, or `None` when there is nothing to undo.
@@ -218,6 +223,18 @@ mod tests {
             decode_body(&header("content-encoding", "gzip"), b"\x1f\x8b\x00")
                 .expect("body is present");
         assert!(!decoded.is_empty());
+    }
+
+    #[test]
+    fn truncated_gzip_keeps_the_decoded_prefix() {
+        let body = gzip(b"payload=1' OR 1=1--");
+        // Drop the CRC/trailer: flate2 yields the complete plaintext and then
+        // reports UnexpectedEof. The prefix must still reach the detectors.
+        let truncated = &body[..body.len() - 4];
+        let decoded =
+            decode_body(&header("content-encoding", "gzip"), truncated)
+                .expect("body is present");
+        assert_eq!(decoded, "payload=1' OR 1=1--");
     }
 
     #[test]
