@@ -36,6 +36,7 @@ pub use config::ServerConfig;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use pingwaf_proto::control_plane::control_plane_server::ControlPlaneServer;
 use sea_orm::{ConnectOptions, Database};
@@ -73,6 +74,11 @@ pub async fn start_server(mut config: ServerConfig) -> anyhow::Result<()> {
     let mut opts = ConnectOptions::new(config.db_url.as_str());
     opts.max_connections(config.db_max_connections)
         .min_connections(config.db_min_connections)
+        // A saturated pool used to make a 100-site sync wait out SQLx's
+        // default acquire timeout (30s) before surfacing an error. Fail the
+        // request sooner so the API/gRPC layer can return a bounded error and
+        // the agent can retry, instead of pinning a request task.
+        .acquire_timeout(Duration::from_secs(5))
         .sqlx_logging(true);
 
     let db = Database::connect(opts).await.map_err(|err| {
