@@ -16,14 +16,17 @@
 //! value    := STRING | NUMBER | BOOL | "{" (STRING|NUMBER)+ "}"
 //! ```
 
+use std::collections::HashMap;
 use std::fmt;
 use std::net::IpAddr;
 use std::str::FromStr;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{anyhow, bail, Result};
 use ipnet::IpNet;
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 // ---------------------------------------------------------------------------
 // AST
@@ -565,7 +568,27 @@ fn finish_scalar(kind: &FieldKind, op: Operator, v: Value) -> Result<Value> {
                 bail!("'matches' requires a string pattern, got {:?}", other)
             },
         };
-        let re = Regex::new(&pattern)?;
+        // `regex`'s default size limit is far above what a WAF rule needs.
+        // Cap the compiled automaton so one pathological operator/pattern
+        // cannot pin tens of MB per profile. A pattern that genuinely needs
+        // more falls back to the old constructor; this keeps existing rule
+        // semantics instead of silently dropping the rule.
+        const MAX_REGEX_SIZE: usize = 4 * 1024 * 1024;
+        let re = match RegexBuilder::new(&pattern)
+            .size_limit(MAX_REGEX_SIZE)
+            .dfa_size_limit(MAX_REGEX_SIZE)
+            .build()
+        {
+            Ok(re) => re,
+            Err(err) => {
+                warn!(
+                    pattern = %pattern,
+                    error = %err,
+                    "regex exceeded the WAF size limit; using the default builder"
+                );
+                Regex::new(&pattern)?
+            },
+        };
         return Ok(Value::Regex(Box::new(re), pattern));
     }
     if matches!(kind, FieldKind::IpSrc)
@@ -591,14 +614,45 @@ fn parse_cidr(s: &str) -> Result<IpNet> {
     bail!("invalid IP or CIDR: {:?}", s)
 }
 
+/// Compiling an expression also builds its regex automata. Control-plane
+/// pushes often carry the same custom rule to many sites, so cache the
+/// immutable AST by expression text (never by rule id/name) to avoid
+/// re-parsing and rebuilding regexes per site. The cache is cleared when it
+/// reaches the cap rather than growing with config churn.
+const MAX_CACHED_EXPRESSIONS: usize = 512;
+
+fn expression_cache() -> &'static Mutex<HashMap<String, Expression>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Expression>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Parse a Cloudflare-style expression string.
 pub fn parse_expression(input: &str) -> Result<Expression> {
+    let cache = expression_cache();
+    {
+        let cache = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(expression) = cache.get(input) {
+            return Ok(expression.clone());
+        }
+    }
+
     let toks = tokenize(input)?;
     let mut p = Parser { toks, pos: 0 };
     let e = p.parse_or()?;
     if p.peek() != &Token::Eof {
         bail!("trailing tokens after expression at position {}", p.pos);
     }
+
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache.len() >= MAX_CACHED_EXPRESSIONS {
+        cache.clear();
+    }
+    cache.insert(input.to_string(), e.clone());
     Ok(e)
 }
 

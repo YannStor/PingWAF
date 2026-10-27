@@ -356,8 +356,12 @@ impl SiteContext {
             );
         }
         Self {
+            // A site with WAF enabled but mode=off is a passthrough site:
+            // compiling the full signature automaton and managed-rule regex
+            // set for it is pure startup/runtime waste. `choice()` below must
+            // also return Disabled so it cannot fall back to the base engine.
             engine: waf_cfg
-                .filter(|cfg| cfg.enabled)
+                .filter(|cfg| cfg.enabled && cfg.mode != CacheWafMode::Off)
                 .map(|cfg| Arc::new(build_site_engine(cfg))),
             policy: AccessPolicy::build(site_rules),
             bot: site_rules
@@ -381,7 +385,7 @@ impl SiteContext {
             observation_mode: site_rules.observation_mode,
             waf_mode: waf_cfg.map(|cfg| cfg.mode),
             inspect_body: waf_cfg
-                .filter(|cfg| cfg.enabled)
+                .filter(|cfg| cfg.enabled && cfg.mode != CacheWafMode::Off)
                 .is_some_and(|cfg| cfg.advanced_mode),
             // Keep the raw wire value: a 0 here means "site unset", and
             // rewriting it to the default would silently override the
@@ -402,7 +406,7 @@ impl SiteContext {
     /// Resolves the engine choice for the rules this context was built from.
     fn choice(&self, site_rules: &CacheSiteRules) -> EngineChoice {
         match site_rules.waf_config.as_ref() {
-            Some(cfg) if cfg.enabled => {
+            Some(cfg) if cfg.enabled && cfg.mode != CacheWafMode::Off => {
                 self.engine.as_ref().map_or(EngineChoice::Base, |engine| {
                     EngineChoice::Site(Arc::clone(engine))
                 })
@@ -415,9 +419,11 @@ impl SiteContext {
 
 /// A cached per-domain context plus the fingerprint it was built from.
 struct CachedSite {
-    /// Config fingerprint the context was built from. An `Arc` so the per
-    /// request fingerprint check stays allocation-free.
-    fingerprint: Arc<str>,
+    /// The exact immutable rules snapshot this context was built from. Arc
+    /// pointer identity is the site-level version: a single-site bundle can
+    /// change the global config hash without invalidating other sites, so the
+    /// global hash is not a valid per-site cache key.
+    rules: Arc<CacheSiteRules>,
     context: Arc<SiteContext>,
     /// Unix seconds of the last cache hit; feeds the host-cache TTL sweep
     /// (`host_cache`), because wildcard/alternate domain matching lets
@@ -2348,8 +2354,15 @@ pub struct WafPlugin {
     hash_value: String,
     /// Per-domain engines built from agent rules, keyed by host.
     site_contexts: DashMap<String, CachedSite>,
+    /// Shared compiled contexts keyed by site id. Alternates and wildcard
+    /// matches map to the same `Arc<SiteContext>` instead of rebuilding the
+    /// WAF engine/access policies for every hostname.
+    site_contexts_by_id: DashMap<String, CachedSite>,
     /// Sweep gate for the `site_contexts` host cache (TTL + hard cap).
     context_sweep: HostCacheSweep,
+    /// Separate sweep gate for the by-site id table, so a deleted site's
+    /// compiled automaton cannot stay resident forever.
+    site_context_sweep: HostCacheSweep,
     /// Rate limit counters, keyed by rule id and characteristic values. Kept
     /// on the plugin so they survive per-site context rebuilds.
     rate_counters: DashMap<String, RateCounter>,
@@ -2534,6 +2547,41 @@ impl WafPlugin {
         Self::try_from(params)
     }
 
+    /// Return the one compiled context for a site id, rebuilding only when
+    /// the control-plane fingerprint changes. Host aliases then share the
+    /// engine and access policies instead of each compiling a copy.
+    fn context_for_site(
+        &self,
+        site_rules: &Arc<CacheSiteRules>,
+    ) -> Arc<SiteContext> {
+        let now = crate::host_cache::unix_now();
+        match self.site_contexts_by_id.entry(site_rules.site_id.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                if Arc::ptr_eq(&entry.get().rules, site_rules) {
+                    touch(&entry.get().last_used, now);
+                    Arc::clone(&entry.get().context)
+                } else {
+                    let context = Arc::new(SiteContext::build(site_rules));
+                    entry.insert(CachedSite {
+                        rules: Arc::clone(site_rules),
+                        context: Arc::clone(&context),
+                        last_used: AtomicU64::new(now),
+                    });
+                    context
+                }
+            },
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let context = Arc::new(SiteContext::build(site_rules));
+                entry.insert(CachedSite {
+                    rules: Arc::clone(site_rules),
+                    context: Arc::clone(&context),
+                    last_used: AtomicU64::new(now),
+                });
+                context
+            },
+        }
+    }
+
     /// Resolve the site data for `host`, consulting the agent rule cache when
     /// available and caching compiled contexts per domain.
     fn resolve_site(&self, host: &str) -> ResolvedSite {
@@ -2578,11 +2626,17 @@ impl WafPlugin {
             .prune(&self.site_contexts, now, |cached| {
                 cached.last_used.load(std::sync::atomic::Ordering::Relaxed)
             });
+        self.site_context_sweep.prune(
+            &self.site_contexts_by_id,
+            now,
+            |cached| {
+                cached.last_used.load(std::sync::atomic::Ordering::Relaxed)
+            },
+        );
         let Some(site_rules) = agent.get_rules_for_domain(host) else {
             return fallback(host.to_string());
         };
 
-        let fingerprint = agent.config_hash();
         // Build under the shard entry lock (single-flight): concurrent first
         // requests for the same host used to each compile a full SiteContext
         // (including the Aho-Corasick automaton) and then overwrite each
@@ -2591,13 +2645,13 @@ impl WafPlugin {
         // callers on this shard for the duration of one build.
         let context = match self.site_contexts.entry(host.to_string()) {
             dashmap::mapref::entry::Entry::Occupied(mut entry) => {
-                if entry.get().fingerprint == fingerprint {
+                if Arc::ptr_eq(&entry.get().rules, &site_rules) {
                     touch(&entry.get().last_used, now);
                     Arc::clone(&entry.get().context)
                 } else {
-                    let context = Arc::new(SiteContext::build(&site_rules));
+                    let context = self.context_for_site(&site_rules);
                     entry.insert(CachedSite {
-                        fingerprint,
+                        rules: Arc::clone(&site_rules),
                         context: Arc::clone(&context),
                         last_used: std::sync::atomic::AtomicU64::new(now),
                     });
@@ -2605,9 +2659,9 @@ impl WafPlugin {
                 }
             },
             dashmap::mapref::entry::Entry::Vacant(entry) => {
-                let context = Arc::new(SiteContext::build(&site_rules));
+                let context = self.context_for_site(&site_rules);
                 entry.insert(CachedSite {
-                    fingerprint,
+                    rules: Arc::clone(&site_rules),
                     context: Arc::clone(&context),
                     last_used: std::sync::atomic::AtomicU64::new(now),
                 });
@@ -3179,7 +3233,9 @@ impl TryFrom<&PluginConf> for WafPlugin {
             body_stage_timeout,
             hash_value,
             site_contexts: DashMap::new(),
+            site_contexts_by_id: DashMap::new(),
             context_sweep: HostCacheSweep::default(),
+            site_context_sweep: HostCacheSweep::default(),
             rate_counters: DashMap::new(),
         })
     }
@@ -3248,7 +3304,8 @@ impl Plugin for WafPlugin {
         let method = req_header.method.as_str().to_string();
         let path = req_header.uri.path().to_string();
         let query = req_header.uri.query().unwrap_or_default().to_string();
-        let mut headers: Vec<(String, String)> = Vec::new();
+        let mut headers: Vec<(String, String)> =
+            Vec::with_capacity(req_header.headers.len());
         let mut user_agent = String::new();
         let mut referer = String::new();
         for (name, value) in req_header.headers.iter() {
@@ -3343,11 +3400,6 @@ impl Plugin for WafPlugin {
         // reach the filter, so their access log carries no body prefix —
         // the refusal reason itself is logged regardless. ──
         let body_limit = log_body_limit();
-        let log_headers = cap_headers(
-            headers
-                .iter()
-                .map(|(name, value)| (name.clone(), value.as_str())),
-        );
         // Advanced-mode sites ask for body inspection even when the plugin
         // switch is off; the plugin-level switch stays authoritative for the
         // truncation cap.
@@ -3386,6 +3438,14 @@ impl Plugin for WafPlugin {
         // Track the request for access logging until the response phase —
         // including WAF-disabled sites, so traffic data stays complete.
         if agent.is_some() {
+            // Only the access log needs this capped copy. Building it before
+            // the `agent.is_some()` gate made a standalone deployment clone
+            // every header for a PendingAccess that was never created.
+            let log_headers = cap_headers(
+                headers
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.as_str())),
+            );
             register_pending_access(
                 &request_id,
                 PendingAccess {
@@ -3861,12 +3921,10 @@ impl Plugin for WafPlugin {
             }
         }
 
-        if matches!(choice, EngineChoice::Disabled) {
-            if let Some(agent) = &agent {
-                agent.record_request(false);
-            }
-            return Ok(RequestPluginResult::Continue);
-        }
+        // Disabled/off sites still need the request-phase accounting and the
+        // body prefix used by the access log. `enforce_verdict` returns
+        // Continue without running rules; the deferred-body block below then
+        // stages the log prefix with `inspect = false`.
         if matches!(choice, EngineChoice::Base) && self.mode == WafMode::Off {
             if let Some(agent) = &agent {
                 agent.record_request(false);
@@ -5166,6 +5224,24 @@ inspect_body = true"###,
         assert_eq!(
             Duration::from_secs(10),
             stage_deadline_timeout(Some(Duration::from_secs(10)))
+        );
+    }
+
+    #[test]
+    fn mode_off_site_builds_no_engine_and_chooses_disabled() {
+        let mut cfg = cache_waf_config(false, Vec::new(), Vec::new());
+        cfg.mode = CacheWafMode::Off;
+        let rules = site_rules(Some(cfg));
+        let site = SiteContext::build(&rules);
+
+        assert!(
+            site.engine.is_none(),
+            "off sites must not compile a WAF engine"
+        );
+        assert!(matches!(site.choice(&rules), EngineChoice::Disabled));
+        assert!(
+            !site.inspect_body,
+            "off sites must not stage a body for WAF"
         );
     }
 

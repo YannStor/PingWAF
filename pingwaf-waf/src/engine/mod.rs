@@ -3973,6 +3973,16 @@ mod tests {
     }
 
     #[test]
+    fn same_profile_engines_share_the_signature_automaton() {
+        let a = WafEngine::new(&WafEngineConfig::default());
+        let b = WafEngine::new(&WafEngineConfig::default());
+        assert!(
+            std::sync::Arc::ptr_eq(&a.signatures, &b.signatures),
+            "engines with the same level/stacks must share the Aho-Corasick automaton"
+        );
+    }
+
+    #[test]
     fn stack_scoped_rules_respect_configured_stacks() {
         // A Java-scoped custom rule must be inactive for an engine built
         // without the Java stack, and active once it is configured.
