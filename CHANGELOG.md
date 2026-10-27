@@ -487,6 +487,43 @@ entry. Sites that configure none of it behave exactly as they did on 0.29.x:
   `cargo audit` are unchanged: fmt does not resolve dependencies, and
   `cargo audit` reads the committed lock file rather than re-resolving.)
 
+### Changed
+
+- **The response-body replacement policy moved to the site's Rewrite Rules
+  page.** It sat in the site's basic settings while the rewrite rules — the
+  other way to modify what a site returns — were on a page of their own, so
+  "change what comes back" was split across two tabs. The card now renders
+  under the rule list, where both halves of rewriting are visible together,
+  and remounts when the stored policy changes so the form cannot keep showing
+  a value the server has already normalised. Nothing about the policy itself
+  changed: it is still `sites.response_replace` behind
+  `PUT /api/v1/sites/{site_id}`.
+- **The dashboard's "Top threat IPs" and "Top triggered rules" now match the
+  site traffic page.** The two pages had grown separate copies of the same two
+  tables and drifted apart: the dashboard showed a country *code* where the
+  traffic page showed a flag, rendered a blocked count as red text instead of
+  a badge, listed a rule's raw id as a second line, and gave neither table a
+  drill-down. Both pages now render one shared pair of tables, which also
+  brings loading skeletons, the empty state and the inline error to the
+  traffic page — it previously rendered an empty table while the query was
+  still in flight. The dashboard's tables gained the traffic page's
+  click-through into the matching log rows, and the two cards now sit in the
+  same two-column grid. Two details were settled while merging the copies
+  rather than picked from either side: a rule's action badge follows the log
+  page's tone map (`log` stays blue — the traffic page had been painting it
+  yellow), and the drill-down link carries the window it was ranked over.
+  Passing only `preset` made the logs page fall back to *its own* 24-hour
+  default, so a 30-day ranking drilled into a day of rows while the picker
+  still read 30d; the traffic page's existing links had the same bug and are
+  fixed with it. The dashboard's cross-site rows no longer narrow the logs to
+  the site the IP hit last — that site filter is applied only when the
+  dashboard is already scoped to one.
+- **The standalone "Memory detail" card is gone from System observation.** The
+  overview cards and pills already report RSS, RSS peak, available memory and
+  usage, so the card was a second copy of the same numbers plus swap, page
+  faults and buffers that nothing acted on. The metrics endpoint is unchanged
+  — only the redundant rendering was removed.
+
 ## [PingWAF 0.29.3] — 2026-10-22
 
 ### Fixed

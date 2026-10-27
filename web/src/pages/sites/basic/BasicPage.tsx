@@ -147,7 +147,6 @@ export function BasicPage() {
           />
         </section>
       )}
-
       {/* Disconnected (failover) policy */}
       <FailoverPanel />
 
