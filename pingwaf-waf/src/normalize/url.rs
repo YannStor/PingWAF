@@ -40,7 +40,10 @@ pub(super) fn bytes_to_scannable(bytes: &[u8]) -> String {
     if let Ok(s) = std::str::from_utf8(bytes) {
         return s.to_string();
     }
-    let mut fixed: Vec<u8> = Vec::with_capacity(bytes.len());
+    // Map directly into the output String. The old shape built a Vec<u8> of
+    // every byte and then a second String (up to 3× the input peak) for a
+    // path that is only reached by invalid/overlong UTF-8 bodies.
+    let mut out = String::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
@@ -48,14 +51,14 @@ pub(super) fn bytes_to_scannable(bytes: &[u8]) -> String {
             && i + 1 < bytes.len()
             && (bytes[i + 1] & 0xC0) == 0x80
         {
-            fixed.push(((b & 0x1F) << 6) | (bytes[i + 1] & 0x3F));
+            out.push(char::from(((b & 0x1F) << 6) | (bytes[i + 1] & 0x3F)));
             i += 2;
         } else {
-            fixed.push(b);
+            out.push(char::from(b));
             i += 1;
         }
     }
-    fixed.iter().map(|&b| b as char).collect()
+    out
 }
 
 /// Apply percent-decoding repeatedly until the string is stable or the layer

@@ -152,7 +152,9 @@ pub fn normalize_request<'a>(
     decoded_values.push(DecodedValue {
         source: ValueSource::Path,
         name: String::new(),
-        decoded: decoded_path_raw.clone(),
+        // `normalize_path` has already borrowed the decoded form; hand the
+        // owned String to the scan list instead of cloning it once more.
+        decoded: decoded_path_raw,
         field: true,
     });
 
@@ -433,7 +435,9 @@ fn parse_query(
                 decoded_values,
             )
         {
-            out.push((key_decoded.clone(), val_decoded));
+            // Nothing below uses the key on this branch (the JSON unpack
+            // already recorded its members), so move it into `out`.
+            out.push((key_decoded, val_decoded));
             continue;
         }
         out.push((key_decoded.clone(), val_decoded.clone()));
@@ -657,7 +661,20 @@ fn expand_base64(
         let layer: Vec<(ValueSource, String, String)> = decoded_values
             [layer_start..layer_end]
             .iter()
-            .filter(|v| v.field)
+            // Do not clone every field just to discover that it is not
+            // base64. The cheap alphabet/length prefilter keeps the common
+            // request (no encoded payloads) allocation-free here.
+            .filter(|v| {
+                v.field
+                    && v.decoded.len() >= 10
+                    && v.decoded.len() <= B64_MAX_VALUE_LEN
+                    && v.decoded.bytes().all(|b| {
+                        b.is_ascii_alphanumeric()
+                            || b == b'+'
+                            || b == b'/'
+                            || b == b'='
+                    })
+            })
             .map(|v| (v.source, v.name.clone(), v.decoded.clone()))
             .collect();
         for (source, name, value) in layer {
@@ -780,7 +797,12 @@ fn expand_b64_substrings(decoded_values: &mut Vec<DecodedValue>, strict: bool) {
     }
     let layer: Vec<(ValueSource, String, String)> = decoded_values
         .iter()
-        .filter(|v| v.field && !v.name.contains(".b64"))
+        .filter(|v| {
+            v.field
+                && !v.name.contains(".b64")
+                && v.decoded.len() >= 16
+                && (v.decoded.contains('"') || v.decoded.contains('\''))
+        })
         .map(|v| (v.source, v.name.clone(), v.decoded.clone()))
         .collect();
     for (source, name, value) in layer {
