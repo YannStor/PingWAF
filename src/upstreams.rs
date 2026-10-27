@@ -19,7 +19,7 @@ use pingap_core::{Error, NotificationSender};
 use pingap_upstream::{
     Upstream, UpstreamProvider, Upstreams, new_ahash_upstreams,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::LazyLock;
 use tracing::error;
@@ -104,9 +104,14 @@ pub async fn try_update_upstreams(
     .map_err(|e| Error::Invalid {
         message: e.to_string(),
     })?;
+    let mut checked = HashSet::new();
     for (name, up) in upstreams.iter() {
         // no need to run health check if not new upstream
         if !updated_upstreams.contains(name) {
+            continue;
+        }
+        // Aliases with the same config share one Arc; probe it once.
+        if !checked.insert(Arc::as_ptr(up) as usize) {
             continue;
         }
         // run health check before switch to new upstream

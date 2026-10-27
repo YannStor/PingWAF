@@ -1218,6 +1218,33 @@ pub fn new_ahash_upstreams(
 ) -> Result<(Upstreams, Vec<String>)> {
     let mut upstreams = AHashMap::new();
     let mut updated_upstreams = vec![];
+
+    // Sites often point at the same origin with the same TLS/health
+    // configuration. Upstream names are per-site routing aliases, so the
+    // config hash is the safe identity: reuse one Arc (and therefore one
+    // health-check/LB state) for aliases with an identical configuration.
+    //
+    // Only reuse within this build, or from the same name's existing entry.
+    // Reusing an old upstream under a new name would leave its stale name on
+    // stats/health notifications; a renamed alias gets a fresh Arc.
+    let mut shared_by_key: HashMap<String, Arc<Upstream>> = HashMap::new();
+
+    // Seed only from names that still exist in this config. Seeding from an
+    // old name that disappeared would reuse its stale identity after a
+    // rename; this pre-pass is independent of HashMap iteration order.
+    for (name, conf) in upstream_configs.iter() {
+        let mut conf = conf.clone();
+        if conf.verify_cert.is_none() {
+            conf.verify_cert = default_verify_cert;
+        }
+        let key = conf.hash_key();
+        if let Some(found) = upstream_provider.get(name)
+            && found.key == key
+        {
+            shared_by_key.entry(key).or_insert(found);
+        }
+    }
+
     for (name, conf) in upstream_configs.iter() {
         let mut conf = conf.clone();
         if conf.verify_cert.is_none() {
@@ -1227,11 +1254,31 @@ pub fn new_ahash_upstreams(
         if let Some(found) = upstream_provider.get(name) {
             // not modified
             if found.key == key {
-                upstreams.insert(name.to_string(), found);
+                if let Some(shared) = shared_by_key.get(&key) {
+                    // Two existing aliases may predate the sharing change;
+                    // converge them on the first one so later reloads and
+                    // health checks see a single instance.
+                    if !Arc::ptr_eq(shared, &found) {
+                        updated_upstreams.push(name.to_string());
+                    }
+                    upstreams.insert(name.to_string(), shared.clone());
+                } else {
+                    shared_by_key.insert(key, found.clone());
+                    upstreams.insert(name.to_string(), found);
+                }
                 continue;
             }
         }
+        if let Some(found) = shared_by_key.get(&key) {
+            upstreams.insert(name.to_string(), found.clone());
+            // Keep the config-update contract: a newly introduced alias is
+            // reported so the caller stores the map and runs a health check.
+            // The shared Arc itself is not rebuilt.
+            updated_upstreams.push(name.to_string());
+            continue;
+        }
         let up = Arc::new(Upstream::new(name, &conf, sender.clone())?);
+        shared_by_key.insert(key, up.clone());
         upstreams.insert(name.to_string(), up);
         updated_upstreams.push(name.to_string());
     }
@@ -1244,6 +1291,10 @@ impl BackgroundTask for HealthCheckTask {
         // get upstream names
         let mut upstreams = self.upstream_provider.list();
         upstreams.retain(|(_, up)| !up.is_transparent());
+        // Upstream aliases with the same config share one Arc. Probe each
+        // physical upstream once instead of once per site alias.
+        let mut seen = std::collections::HashSet::new();
+        upstreams.retain(|(_, up)| seen.insert(Arc::as_ptr(up) as usize));
         let interval = frequency_millis(self.interval);
         // run health check for each upstream
         let jobs: Vec<_> = upstreams
@@ -2100,6 +2151,42 @@ mod tests {
         assert_eq!(1, status.len());
         // no health check, so is healthy
         assert_eq!(1, status.get("ip").unwrap().healthy);
+    }
+
+    #[test]
+    fn aliases_with_the_same_config_share_one_upstream() {
+        let existing = Arc::new(
+            Upstream::new(
+                "site-a",
+                &UpstreamConf {
+                    addrs: vec!["127.0.0.1:5001".to_string()],
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let provider = Arc::new(TmpProvider {
+            upstream: existing.clone(),
+        });
+        let conf = UpstreamConf {
+            addrs: vec!["127.0.0.1:5001".to_string()],
+            ..Default::default()
+        };
+        let configs = HashMap::from([
+            ("site-a".to_string(), conf.clone()),
+            ("site-b".to_string(), conf),
+        ]);
+
+        let (upstreams, updated) =
+            new_ahash_upstreams(&configs, provider, None, None).unwrap();
+        assert_eq!(vec!["site-b".to_string()], updated);
+        assert_eq!(2, upstreams.len());
+        assert!(Arc::ptr_eq(
+            upstreams.get("site-a").unwrap(),
+            upstreams.get("site-b").unwrap()
+        ));
+        assert!(Arc::ptr_eq(upstreams.get("site-a").unwrap(), &existing));
     }
 
     #[test]
