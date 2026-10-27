@@ -18,6 +18,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -41,6 +42,104 @@ use crate::rules::signatures::{
 use crate::rules::{CompiledRule, RuleAction};
 use crate::score::{AnomalyScorer, ScoreBreakdown, ScoreClass};
 use crate::{CategorySet, StackSet, WafAction, WafLevel, WafVerdict};
+
+/// Process-wide ceiling for memory reserved by concurrent inspections.
+///
+/// The individual body caps (1 MiB decompressed, 64 KiB default staging)
+/// bound one request; they do not bound 100 or 1,000 concurrent requests
+/// building decoded/JSON structures at once. This budget is deliberately
+/// generous for normal traffic but makes the tail explicit instead of
+/// letting the allocator decide. Override with
+/// `PINGWAF_MAX_TOTAL_SCAN_BYTES` for a smaller host.
+const DEFAULT_MAX_TOTAL_SCAN_BYTES: usize = 128 * 1024 * 1024;
+const MIN_TOTAL_SCAN_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TOTAL_SCAN_BYTES: usize = 1024 * 1024 * 1024;
+
+static TOTAL_SCAN_BUDGET: OnceLock<usize> = OnceLock::new();
+static TOTAL_SCAN_USED: AtomicUsize = AtomicUsize::new(0);
+
+fn max_total_scan_bytes() -> usize {
+    *TOTAL_SCAN_BUDGET.get_or_init(|| {
+        std::env::var("PINGWAF_MAX_TOTAL_SCAN_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_MAX_TOTAL_SCAN_BYTES)
+            .clamp(MIN_TOTAL_SCAN_BYTES, MAX_TOTAL_SCAN_BYTES)
+    })
+}
+
+/// Conservative pre-allocation estimate for one inspection. The decoder and
+/// normalizer can expand a body several times; the multiplier keeps the
+/// reservation ahead of that without treating every request as its 1 MiB
+/// worst case.
+fn estimated_scan_bytes(request: &RequestData) -> usize {
+    let header_bytes: usize = request
+        .headers
+        .iter()
+        .map(|(name, value)| name.len() + value.len())
+        .sum();
+    let body_bytes = request.body.as_ref().map_or(0, |body| {
+        if body.is_empty() {
+            return 0;
+        }
+        body.len()
+            .saturating_mul(8)
+            .clamp(1024 * 1024, 4 * 1024 * 1024)
+    });
+    request
+        .path
+        .len()
+        .saturating_add(request.query.len())
+        .saturating_add(header_bytes)
+        .saturating_add(body_bytes)
+}
+
+struct ScanBudgetGuard(usize);
+
+impl ScanBudgetGuard {
+    fn try_acquire(bytes: usize) -> Option<Self> {
+        let limit = max_total_scan_bytes();
+        let bytes = bytes.min(limit);
+        let mut used = TOTAL_SCAN_USED.load(Ordering::Relaxed);
+        loop {
+            if used.saturating_add(bytes) > limit {
+                return None;
+            }
+            match TOTAL_SCAN_USED.compare_exchange_weak(
+                used,
+                used + bytes,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Some(Self(bytes)),
+                Err(current) => used = current,
+            }
+        }
+    }
+}
+
+impl Drop for ScanBudgetGuard {
+    fn drop(&mut self) {
+        TOTAL_SCAN_USED.fetch_sub(self.0, Ordering::AcqRel);
+    }
+}
+
+fn scan_budget_verdict(mode: WafMode) -> WafVerdict {
+    let action = if mode == WafMode::Monitor {
+        WafAction::Monitor
+    } else {
+        WafAction::Block
+    };
+    WafVerdict {
+        action,
+        score: 0,
+        matched_rules: vec!["scan_budget".to_string()],
+        enforced_rule_id: Some("scan_budget".to_string()),
+        details: "WAF scan memory budget exhausted; request not inspected"
+            .to_string(),
+        breakdown: ScoreBreakdown::clean(),
+    }
+}
 
 /// Operating mode for the engine.
 #[derive(
@@ -564,6 +663,15 @@ impl WafEngine {
         if self.mode == WafMode::Off {
             return WafVerdict::pass();
         }
+
+        // Reserve before normalization: this is the point where decoded and
+        // JSON structures are built, and where a concurrent fan-out can
+        // otherwise exceed the per-request caps by orders of magnitude.
+        let _scan_budget =
+            match ScanBudgetGuard::try_acquire(estimated_scan_bytes(request)) {
+                Some(guard) => guard,
+                None => return scan_budget_verdict(self.mode),
+            };
 
         let normalize_started = Instant::now();
         let normalized = normalize_request(
@@ -3970,6 +4078,18 @@ mod tests {
             ),
         ));
         assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn scan_budget_verdict_is_explicit_and_mode_aware() {
+        let blocked = scan_budget_verdict(WafMode::Block);
+        assert_eq!(WafAction::Block, blocked.action);
+        assert_eq!(Some("scan_budget"), blocked.enforced_rule_id.as_deref());
+        assert_eq!(vec!["scan_budget"], blocked.matched_rules);
+        assert!(!blocked.details.is_empty());
+
+        let monitored = scan_budget_verdict(WafMode::Monitor);
+        assert_eq!(WafAction::Monitor, monitored.action);
     }
 
     #[test]
