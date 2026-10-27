@@ -15,8 +15,10 @@
 //! Internally the engine runs the multi-stage pipeline documented on
 //! [`WafEngine::inspect`].
 
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::str::FromStr;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use pingwaf_profiler::{record_method, track_memory, Method, Module};
@@ -292,9 +294,72 @@ struct RuleRec<'a> {
 /// CRLF) as attacks.
 const FIELD_STRONG_MAX_LEN: usize = 256;
 
+/// Immutable per-profile WAF material shared by every site with the same
+/// detection level and stack set. The Aho-Corasick automaton and the compiled
+/// managed rules are identical across those sites; only custom rules and
+/// overrides differ.
+type ManagedRules = Arc<[Arc<CompiledRule>]>;
+type RulesCache = Mutex<HashMap<WafLevel, ManagedRules>>;
+type BaseCache = Mutex<HashMap<(WafLevel, StackSet), Arc<WafBase>>>;
+
+struct WafBase {
+    signatures: Arc<SignatureEngine>,
+    managed_rules: ManagedRules,
+}
+
+fn managed_rules(level: WafLevel) -> ManagedRules {
+    static RULES: OnceLock<RulesCache> = OnceLock::new();
+    let cache = RULES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(rules) = cache.get(&level) {
+        return Arc::clone(rules);
+    }
+    let rules: Arc<[Arc<CompiledRule>]> = default_managed_rules(level)
+        .into_iter()
+        .map(Arc::new)
+        .collect::<Vec<_>>()
+        .into();
+    cache.insert(level, Arc::clone(&rules));
+    rules
+}
+
+impl WafBase {
+    fn new(level: WafLevel, stacks: StackSet, shared_rules: bool) -> Self {
+        let managed_rules = if shared_rules {
+            managed_rules(level)
+        } else {
+            default_managed_rules(level)
+                .into_iter()
+                .map(Arc::new)
+                .collect::<Vec<_>>()
+                .into()
+        };
+        Self {
+            signatures: Arc::new(SignatureEngine::for_profile(level, stacks)),
+            managed_rules,
+        }
+    }
+}
+
+fn waf_base(level: WafLevel, stacks: StackSet) -> Arc<WafBase> {
+    static BASES: OnceLock<BaseCache> = OnceLock::new();
+    let registry = BASES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut registry = registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(base) = registry.get(&(level, stacks)) {
+        return Arc::clone(base);
+    }
+    let base = Arc::new(WafBase::new(level, stacks, true));
+    registry.insert((level, stacks), Arc::clone(&base));
+    base
+}
+
 pub struct WafEngine {
-    signatures: SignatureEngine,
-    rules: Vec<CompiledRule>,
+    signatures: Arc<SignatureEngine>,
+    rules: Vec<Arc<CompiledRule>>,
     scorer: AnomalyScorer,
     mode: WafMode,
     level: WafLevel,
@@ -336,28 +401,44 @@ struct RuleHits {
 
 impl WafEngine {
     pub fn new(config: &WafEngineConfig) -> Self {
-        let mut rules = Vec::with_capacity(config.rules.len() + 16);
+        Self::build(config, true)
+    }
+
+    /// Build a legacy, non-shared engine. Used only by the scale benchmark;
+    /// production callers must use [`WafEngine::new`] so sites with the same
+    /// profile share the automaton and managed rules.
+    #[doc(hidden)]
+    pub fn new_unshared(config: &WafEngineConfig) -> Self {
+        Self::build(config, false)
+    }
+
+    fn build(config: &WafEngineConfig, shared: bool) -> Self {
+        let base = if shared {
+            waf_base(config.level, config.stacks)
+        } else {
+            Arc::new(WafBase::new(config.level, config.stacks, false))
+        };
+        let mut rules =
+            Vec::with_capacity(base.managed_rules.len() + config.rules.len());
         if config.enable_managed_rules {
-            rules.extend(default_managed_rules(config.level));
+            rules.extend(
+                base.managed_rules
+                    .iter()
+                    .filter(|r| {
+                        !config.disabled_managed_rules.contains(r.id.as_str())
+                    })
+                    .cloned(),
+            );
         }
         // Site-level `RuleOverride` off: the rule is not compiled, not
         // evaluated and never produces an event or score. Removal happens
         // before any request ever sees the engine, so `rule_monitored` does
         // not need an off branch. Custom rules cannot match the
         // `PINGWAF-` guard and are left untouched.
-        if !config.disabled_managed_rules.is_empty() {
-            rules.retain(|r| {
-                !r.id.starts_with("PINGWAF-")
-                    || !config.disabled_managed_rules.contains(r.id.as_str())
-            });
-        }
-        rules.extend(config.rules.iter().cloned());
+        rules.extend(config.rules.iter().cloned().map(Arc::new));
 
         Self {
-            signatures: SignatureEngine::for_profile(
-                config.level,
-                config.stacks,
-            ),
+            signatures: Arc::clone(&base.signatures),
             rules,
             scorer: AnomalyScorer::new(config.threshold, config.paranoia_level),
             mode: config.mode,
@@ -418,18 +499,18 @@ impl WafEngine {
 
     /// Hot-reload the user rule set. Managed defaults are preserved.
     pub fn update_rules(&mut self, user_rules: Vec<CompiledRule>) {
-        let managed: Vec<CompiledRule> = self
+        let managed: Vec<Arc<CompiledRule>> = self
             .rules
             .drain(..)
             .filter(|r| r.id.starts_with("PINGWAF-"))
             .collect();
         self.rules = managed;
-        self.rules.extend(user_rules);
+        self.rules.extend(user_rules.into_iter().map(Arc::new));
     }
 
     /// Replace the entire rule set, including managed defaults.
     pub fn replace_all_rules(&mut self, rules: Vec<CompiledRule>) {
-        self.rules = rules;
+        self.rules = rules.into_iter().map(Arc::new).collect();
     }
 
     pub fn set_mode(&mut self, mode: WafMode) {
