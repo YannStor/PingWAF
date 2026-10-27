@@ -1223,7 +1223,7 @@ async fn persist_site_certificates(
     }
 
     // A steady fleet reports the same certificate on every heartbeat. One
-    // batched read lets us skip the per-site UPDATEs entirely; the previous
+    // batched read lets us skip the per-site UPDATE statements entirely; the previous
     // shape issued one UPDATE per site per heartbeat even when nothing
     // changed. The UPDATE guard below still protects against a concurrent
     // change after this snapshot.
@@ -1255,7 +1255,7 @@ async fn persist_site_certificates(
     {
         Ok(rows) => rows,
         Err(err) => {
-            // Fall back to the guarded per-site UPDATEs: correctness does not
+            // Fall back to the guarded per-site UPDATE statements: correctness does not
             // depend on this optional read.
             tracing::warn!(error = %err, "could not read current certificate state");
             Vec::new()
