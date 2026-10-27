@@ -1208,6 +1208,8 @@ async fn persist_heartbeat(
 /// issuance happens entirely on the edge — the control plane never sees the
 /// certificate, so without this write-back the row would read "pending" with no
 /// expiry forever, even after the certificate went live.
+type CertStateBySite = HashMap<Uuid, Vec<(String, Option<DateTime<Utc>>)>>;
+
 async fn persist_site_certificates(
     db: &DatabaseConnection,
     statuses: &[SiteStatus],
@@ -1219,23 +1221,62 @@ async fn persist_site_certificates(
             "persisting edge certificate state"
         );
     }
-    for status in statuses {
-        let row_status = match status.ssl_status.as_str() {
-            "valid" | "expiring_soon" => cert_status::ACTIVE,
-            "expired" => cert_status::EXPIRED,
-            // "none" or empty: nothing has been issued yet, and an unreadable
-            // site id cannot be attributed to a row.
-            _ => continue,
-        };
-        let Ok(site_id) = Uuid::parse_str(&status.site_id) else {
+
+    // A steady fleet reports the same certificate on every heartbeat. One
+    // batched read lets us skip the per-site UPDATEs entirely; the previous
+    // shape issued one UPDATE per site per heartbeat even when nothing
+    // changed. The UPDATE guard below still protects against a concurrent
+    // change after this snapshot.
+    let targets: Vec<(Uuid, &str, DateTime<Utc>)> = statuses
+        .iter()
+        .filter_map(|status| {
+            let row_status = match status.ssl_status.as_str() {
+                "valid" | "expiring_soon" => cert_status::ACTIVE,
+                "expired" => cert_status::EXPIRED,
+                _ => return None,
+            };
+            let site_id = Uuid::parse_str(&status.site_id).ok()?;
+            let expires_at = status
+                .ssl_expires_at
+                .and_then(|ts| DateTime::from_timestamp(ts.seconds, 0))?;
+            Some((site_id, row_status, expires_at))
+        })
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
+
+    let site_ids: Vec<Uuid> = targets.iter().map(|(id, _, _)| *id).collect();
+    let current = match site_certificates::Entity::find()
+        .filter(site_certificates::Column::SiteId.is_in(site_ids))
+        .filter(site_certificates::Column::CertPem.is_null())
+        .all(db)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            // Fall back to the guarded per-site UPDATEs: correctness does not
+            // depend on this optional read.
+            tracing::warn!(error = %err, "could not read current certificate state");
+            Vec::new()
+        },
+    };
+    let mut current_by_site: CertStateBySite = HashMap::new();
+    for row in current {
+        current_by_site
+            .entry(row.site_id)
+            .or_default()
+            .push((row.status, row.expires_at));
+    }
+
+    for (site_id, row_status, expires_at) in targets {
+        if current_by_site.get(&site_id).is_some_and(|rows| {
+            rows.iter().all(|(status, expiry)| {
+                status == row_status && *expiry == Some(expires_at)
+            })
+        }) {
             continue;
-        };
-        let Some(expires_at) = status
-            .ssl_expires_at
-            .and_then(|ts| DateTime::from_timestamp(ts.seconds, 0))
-        else {
-            continue;
-        };
+        }
 
         // The guard keeps a steady fleet from writing the same values every
         // heartbeat: only rows whose status or expiry actually change match.
