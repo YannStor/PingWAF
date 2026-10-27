@@ -1947,6 +1947,17 @@ fn effective_body_stage_timeout(site: Option<u32>, global: Option<i64>) -> u32 {
 /// (fail-open), the same outcome as the inspect timeout.
 const DEFERRED_BODY_MAX_ENTRIES: usize = 1024;
 
+/// Hard ceiling for bytes held by all deferred body stages. The entry limit
+/// is derived from this and the configured per-request cap: with an 8 MiB
+/// cap at most 8 bodies are staged, instead of the old 1024 × 8 MiB worst
+/// case (~8 GiB) that the fixed entry count allowed.
+const DEFERRED_BODY_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+fn deferred_body_max_entries(max_body_size: usize) -> usize {
+    (DEFERRED_BODY_MAX_BYTES / max_body_size.max(1))
+        .clamp(1, DEFERRED_BODY_MAX_ENTRIES)
+}
+
 static DEFERRED_BODY: LazyLock<DashMap<String, DeferredBody>> =
     LazyLock::new(DashMap::new);
 
@@ -3896,11 +3907,12 @@ impl Plugin for WafPlugin {
                 EngineChoice::Disabled | EngineChoice::FailClosed => false,
             };
             let inspect = should_inspect && engine_runs;
-            if DEFERRED_BODY.len() >= DEFERRED_BODY_MAX_ENTRIES {
+            let max_entries = deferred_body_max_entries(self.max_body_size);
+            if DEFERRED_BODY.len() >= max_entries {
                 DEFERRED_BODY
                     .retain(|_, v| v.created_at.elapsed() < PENDING_ACCESS_TTL);
             }
-            if DEFERRED_BODY.len() >= DEFERRED_BODY_MAX_ENTRIES {
+            if DEFERRED_BODY.len() >= max_entries {
                 // Fail-open: no staging, the body streams through
                 // uninspected (matches the timeout path).
                 if let Some(agent) = &agent {
@@ -4341,6 +4353,14 @@ pub(crate) mod tests {
     use pingwaf_challenge::ClearanceLevel;
     use pingwaf_proto::control_plane as proto;
     use tokio_test::io::Builder;
+
+    #[test]
+    fn deferred_body_entry_limit_tracks_the_per_request_cap() {
+        assert_eq!(deferred_body_max_entries(64 * 1024), 1024);
+        assert_eq!(deferred_body_max_entries(8 * 1024 * 1024), 8);
+        assert_eq!(deferred_body_max_entries(0), 1024);
+        assert_eq!(deferred_body_max_entries(usize::MAX), 1);
+    }
 
     #[test]
     fn request_body_staging_withholds_until_the_cap() {
