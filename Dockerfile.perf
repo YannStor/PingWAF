@@ -47,6 +47,7 @@ WORKDIR /app
 
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY pingwaf-proto/proto/ pingwaf-proto/proto/
+COPY vendor/ vendor/
 
 # Copy all workspace member Cargo.toml files for dependency resolution
 COPY pingap-core/Cargo.toml pingap-core/
@@ -104,6 +105,7 @@ RUN cargo build --locked --profile release-perf --features full || true; \
 
 COPY src/ src/
 COPY benches/ benches/
+COPY vendor/ vendor/
 # src/plugin/admin.rs embeds dist/ via rust-embed (resolved against the root
 # crate's manifest dir /app), so the folder must exist at compile time.
 COPY dist/ dist/
@@ -136,7 +138,7 @@ COPY pingwaf-challenge/ pingwaf-challenge/
 
 COPY --from=frontend-builder /app/web/dist/ web/dist/
 
-RUN find . -path ./target -prune -o -name '*.rs' -print0 | xargs -0 --no-run-if-empty touch \
+RUN find . -path ./target -prune -o -path ./vendor -prune -o -name '*.rs' -print0 | xargs -0 --no-run-if-empty touch \
     && cargo build --locked --profile release-perf --bin pingwaf --features full
 
 # ─── Stage 3: Runtime ────────────────────────────────────────────────────────

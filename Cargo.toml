@@ -86,10 +86,7 @@ anyhow = { workspace = true }
 pingora = { workspace = true }
 regex = { workspace = true }
 rustls = { workspace = true, features = ["ring"] }
-rust-embed = { version = "8.12.0", features = [
-    "mime-guess",
-    "compression",
-], default-features = false }
+rust-embed = { version = "8.12.0", features = ["mime-guess"], default-features = false }
 sea-orm = { workspace = true }
 serde_qs = { workspace = true }
 sysinfo = { workspace = true }
@@ -261,6 +258,9 @@ enable = false
 start = false
 
 [workspace]
+# The local pingora-header-serde patch is a path dependency, not a workspace
+# member: its upstream unit tests need fixtures that crates.io excludes.
+exclude = ["vendor/*"]
 members = [
     "pingap-acme",
     "pingap-cache",
@@ -291,6 +291,13 @@ members = [
 ]
 [workspace.package]
 version = "0.32.0"
+
+[patch.crates-io]
+# Pingora 0.9 pins zstd ^0.13.1, whose zstd-safe 7.3.0 carries the October
+# 2026 RUSTSEC unsound set. The crate's API usage is unchanged on 0.14; patch
+# only this small header codec so the workspace resolves zstd 0.14.3 and
+# zstd-safe 8.2.0. Remove when Pingora ships a release using zstd 0.14.
+pingora-header-serde = { path = "vendor/pingora-header-serde" }
 
 [workspace.dependencies]
 aes-gcm-siv = { version = "0.12.1", default-features = false, features = [

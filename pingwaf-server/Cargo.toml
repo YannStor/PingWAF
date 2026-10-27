@@ -59,7 +59,7 @@ prost-types = { workspace = true }
 # chat-completions endpoint. In reqwest 0.13 the workspace's `default-tls`
 # already maps to rustls, so no OpenSSL is pulled in.
 reqwest = { workspace = true, features = ["stream"] }
-rust-embed = { version = "8.12.0", features = ["mime-guess", "compression"], default-features = false }
+rust-embed = { version = "8.12.0", features = ["mime-guess"], default-features = false }
 sea-orm = { workspace = true }
 sea-orm-migration = { workspace = true }
 serde = { workspace = true }

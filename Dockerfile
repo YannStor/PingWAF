@@ -54,6 +54,7 @@ WORKDIR /app
 #     - 根 Cargo.toml/lock + 全部 25 个成员的 Cargo.toml
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY pingwaf-proto/proto/ pingwaf-proto/proto/
+COPY vendor/ vendor/
 
 # Copy all workspace member Cargo.toml files for dependency resolution
 COPY pingap-core/Cargo.toml pingap-core/
@@ -116,6 +117,7 @@ RUN cargo build --locked --release --features full || true; \
 # 2e. 拷真实源码（任何源码变化让此层及以下失效，但 2d 的缓存层仍命中）
 COPY src/ src/
 COPY benches/ benches/
+COPY vendor/ vendor/
 # src/plugin/admin.rs embeds dist/ via rust-embed (resolved against the root
 # crate's manifest dir /app), so the folder must exist at compile time.
 COPY dist/ dist/
@@ -152,7 +154,7 @@ COPY --from=frontend-builder /app/web/dist/ web/dist/
 # 2g. 最终构建：touch 使 workspace crate 的 mtime 指纹失效（排除 target/ 避免污染生成代码），
 #     触发 25 个 workspace crate 重编，而第三方 .rlib 从预热层继承、不受影响
 #     （Docker 层叠加：target/ 存在于 2d 预热层的文件系统中，后续 COPY 源码层不会覆盖它）
-RUN find . -path ./target -prune -o -name '*.rs' -print0 | xargs -0 --no-run-if-empty touch \
+RUN find . -path ./target -prune -o -path ./vendor -prune -o -name '*.rs' -print0 | xargs -0 --no-run-if-empty touch \
     && cargo build --locked --release --bin pingwaf --features full
 
 # ─── Stage 3: Runtime（行为契约保持不变）─────────────────────────────────────
