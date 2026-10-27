@@ -165,21 +165,26 @@ pub fn normalize_request<'a>(
         decode_escapes,
         &mut decoded_values,
     );
-    let full_uri = if query_params.is_empty() {
-        normalized_path.clone()
-    } else {
-        let qs: Vec<String> = query_params
-            .iter()
-            .map(|(k, v)| {
-                if v.is_empty() {
-                    k.clone()
-                } else {
-                    format!("{}={}", k, v)
-                }
-            })
-            .collect();
-        format!("{}?{}", normalized_path, qs.join("&"))
-    };
+    // Build the decoded URI in one allocation. The old shape allocated one
+    // String per parameter, a Vec of them, and the final joined String; a
+    // 100-parameter request paid 202 allocations for a value the detectors
+    // usually only read once.
+    let mut full_uri =
+        String::with_capacity(normalized_path.len() + raw_query.len() + 1);
+    full_uri.push_str(&normalized_path);
+    if !query_params.is_empty() {
+        full_uri.push('?');
+        for (index, (key, value)) in query_params.iter().enumerate() {
+            if index > 0 {
+                full_uri.push('&');
+            }
+            full_uri.push_str(key);
+            if !value.is_empty() {
+                full_uri.push('=');
+                full_uri.push_str(value);
+            }
+        }
+    }
 
     // The method only needs re-allocating when the wire form was not already
     // uppercase; proxy stacks hand us uppercase methods ~always.
@@ -1423,5 +1428,20 @@ mod tests {
             .find(|v| v.name == "q.b64.policy.b64")
             .expect("layer-2 expansion");
         assert_eq!(layer2.decoded, "; echo `/bin/cat /etc/hosts`");
+    }
+
+    #[test]
+    fn full_uri_is_built_without_changing_query_shape() {
+        let req = normalize_request(
+            "GET",
+            "/a%2Fb",
+            "x=1&flag&y=%2F",
+            &[],
+            None,
+            3,
+            false,
+        );
+        assert_eq!(req.full_uri, "/a/b?x=1&flag&y=/");
+        assert_eq!(req.query_params.len(), 3);
     }
 }

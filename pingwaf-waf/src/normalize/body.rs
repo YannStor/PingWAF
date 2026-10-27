@@ -52,7 +52,13 @@ pub fn decode_body<'a>(
     body: &'a [u8],
 ) -> Option<Cow<'a, str>> {
     if let Some(decoded) = decompress(headers, body) {
-        return Some(Cow::Owned(bytes_to_scannable(&decoded)));
+        // `String::from_utf8` consumes the decompressed Vec without copying
+        // when the bytes are valid UTF-8, which is the normal JSON/form case.
+        // Only the invalid-UTF-8 fallback pays for the Latin-1 mapping.
+        return Some(Cow::Owned(match String::from_utf8(decoded) {
+            Ok(text) => text,
+            Err(err) => bytes_to_scannable(err.as_bytes()),
+        }));
     }
     // No (supported) `Content-Encoding`: borrow the wire bytes when they
     // already are UTF-8, which is the overwhelmingly common case and keeps
@@ -71,22 +77,31 @@ pub fn decode_body<'a>(
 /// browsers produce, and a decoder for them is not pulled in for that.
 fn decode_one(encoding: &str, bytes: &[u8]) -> Option<Vec<u8>> {
     match encoding {
-        "gzip" | "x-gzip" => read_bounded(GzDecoder::new(bytes)),
+        "gzip" | "x-gzip" => read_bounded(GzDecoder::new(bytes), bytes.len()),
         // `deflate` means zlib-wrapped per RFC 9110, but a long tail of
         // clients (and older proxies) emit a bare deflate stream. Try the
         // spec form first, then the raw form.
-        "deflate" => read_bounded(ZlibDecoder::new(bytes))
-            .or_else(|| read_bounded(DeflateDecoder::new(bytes))),
+        "deflate" => read_bounded(ZlibDecoder::new(bytes), bytes.len())
+            .or_else(|| read_bounded(DeflateDecoder::new(bytes), bytes.len())),
         _ => None,
     }
 }
 
 /// Read a decoder to the end, stopping at [`MAX_DECOMPRESSED_BODY`].
 ///
+/// The initial capacity is derived from the compressed input, but capped:
+/// a 64 KiB gzip body usually expands to far less than a megabyte, and
+/// preallocating the full scan ceiling for every request would raise the
+/// concurrent RSS more than it saves in reallocation.
+///
 /// `None` when the stream is corrupt: partial output from a broken stream
 /// is not something to hand to the detectors as if it were the payload.
-fn read_bounded<R: Read>(reader: R) -> Option<Vec<u8>> {
-    let mut out = Vec::new();
+fn read_bounded<R: Read>(reader: R, input_len: usize) -> Option<Vec<u8>> {
+    let initial = input_len
+        .saturating_mul(4)
+        .clamp(4 * 1024, 64 * 1024)
+        .min(MAX_DECOMPRESSED_BODY);
+    let mut out = Vec::with_capacity(initial);
     reader
         .take(MAX_DECOMPRESSED_BODY as u64)
         .read_to_end(&mut out)
