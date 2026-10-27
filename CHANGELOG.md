@@ -8,6 +8,44 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.32.0] — 2026-10-27
+
+Major update: the control-plane listener, WAF resource bounds, site-level
+timeouts and the dashboard ranking surfaces all move together in this release.
+
+### Added
+
+- **Per-site downstream timeout.** Site → Basic configures a 1–3600s read/write
+  budget (default 60s), persisted on the site and delivered over proto tag 11.
+  It applies after the Location matches; HTTP/1.1 keep-alive restores the
+  listener default before the next request's headers, and HTTP/2 write budgets
+  are per stream.
+- **Shared dashboard ranking tables.** The dashboard's top threat IPs/rules and
+  the traffic page now use one table implementation with a window-aware log
+  drill-down, loading/empty/error states and a consistent action tone map.
+- **Response replacement on the Rewrite Rules page.** The policy moved next to
+  the other response-rewriting controls; the stored field and API are unchanged.
+
+### Fixed
+
+- **Control-plane admin listener cannot be wedged by silent clients.**
+  `MixedListener` now accepts in a dedicated task and performs protocol
+  detection/TLS handshakes in bounded per-connection tasks, with 5s peek, 10s
+  TLS handshake, 128 pre-handshakes, 512 active connections, a 60s idle
+  deadline and a reserved loopback pool. Health checks and readiness reporting
+  are bounded as well.
+- **WAF resource bounds and normalization cost.** Expression depth/token/length
+  limits, bounded query/JSON/decompression surfaces, multipart field scanning,
+  ACME token validation, `max_body_size`/threshold clamps and per-request
+  `Cow` normalization reduce both crash and memory-amplification risk.
+- **Heartbeat persistence.** Added migration 082 indexes, hourly certificate
+  sweep throttling, empty blocked-IP fast deletion and monotonic conditional
+  `mark_offline`, so a stale heartbeat cannot overwrite a newer one.
+- **Proxy safety defaults.** Public listeners get 60s downstream timeouts and
+  keepalive/H2 bounds, generated locations get a 16MB body cap, upstream
+  certificate verification defaults to strict, and retries are capped at three
+  for idempotent methods only.
+
 ## [PingWAF 0.31.2] — 2026-10-27
 
 Patch release for the control-plane admin listener stall. No schema or API
