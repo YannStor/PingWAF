@@ -8,6 +8,30 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.32.1] — 2026-10-28
+
+Patch release focused on WAF memory amplification and control-plane write
+amplification. No API, proto or database schema changes.
+
+### Fixed
+
+- **WAF disabled/off sites no longer compile an engine.** `SiteContext` only
+  builds the per-site engine when `enabled` is true and `mode` is not `off`;
+  off sites still run IP/geo/mTLS/basic-auth/bot/rate-limit controls and keep
+  their access-log body prefix.
+- **Site contexts are shared per site id.** Alternate/wildcard hosts now point
+  at the same `Arc<SiteContext>`; cache invalidation uses the immutable
+  `Arc<SiteRules>` identity instead of the global config hash. The by-id table
+  has its own TTL/entry sweep.
+- **Regex compilation is bounded and cached.** Parsed expressions are cached
+  by expression text (512 entries; no id/name key), and regex construction has
+  a 4MiB size/DFA limit with fallback to the previous builder.
+- **Heartbeat certificate writes are coalesced.** A heartbeat reads current
+  certificate rows once and only updates sites whose status or expiry changed,
+  instead of issuing one UPDATE per site per heartbeat.
+- **SQLx pool acquisition is bounded.** Requests now fail within 5s when the
+  pool is saturated instead of waiting out the 30s default.
+
 ## [PingWAF 0.32.0] — 2026-10-27
 
 Major update: the control-plane listener, WAF resource bounds, site-level
