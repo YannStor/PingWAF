@@ -524,7 +524,7 @@ impl WafEngine {
         // ----- Stage 1: signatures + libinjection over every decoded value -----
         let stage1_started = Instant::now();
         for value in &normalized.decoded_values {
-            let needle = value.decoded.as_str();
+            let needle = value.decoded.as_ref();
             if needle.is_empty() {
                 continue;
             }

@@ -4,6 +4,8 @@
 //! double- or triple-encoded to slip past naive filters, so we keep decoding
 //! until the value stops changing (bounded by `max_layers`).
 
+use std::borrow::Cow;
+
 /// Percent-decode into raw bytes (`None` when there is nothing to decode).
 fn percent_to_bytes(s: &str) -> Option<Vec<u8>> {
     let b = s.as_bytes();
@@ -69,11 +71,11 @@ pub(super) fn bytes_to_scannable(bytes: &[u8]) -> String {
 /// sequence (overlong-UTF-8 obfuscation such as `%C0%BCscript%3E`) does not
 /// abort the pass — it is restored through [`bytes_to_scannable`] so the
 /// payload behind it stays visible to the detectors.
-pub fn multi_decode(input: &str, max_layers: usize) -> String {
+pub fn multi_decode<'a>(input: &'a str, max_layers: usize) -> Cow<'a, str> {
     if max_layers == 0 || !input.contains('%') {
-        return input.to_string();
+        return Cow::Borrowed(input);
     }
-    let mut current = input.to_string();
+    let mut current = Cow::Borrowed(input);
     for _ in 0..max_layers {
         let Some(bytes) = percent_to_bytes(&current) else {
             break;
@@ -82,7 +84,7 @@ pub fn multi_decode(input: &str, max_layers: usize) -> String {
         if decoded == current {
             break;
         }
-        current = decoded;
+        current = Cow::Owned(decoded);
         if !current.contains('%') {
             break;
         }

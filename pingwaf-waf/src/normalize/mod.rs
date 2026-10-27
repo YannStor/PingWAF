@@ -49,13 +49,14 @@ impl ValueSource {
 
 /// A single normalized field of the request, paired with its decoded form.
 #[derive(Debug, Clone)]
-pub struct DecodedValue {
+pub struct DecodedValue<'a> {
     pub source: ValueSource,
     /// Parameter / header / cookie name (empty for the path itself).
     pub name: String,
     /// Value after URL-decoding, entity decoding and (optionally) escape
-    /// decoding.
-    pub decoded: String,
+    /// decoding. Borrowed when the wire form needed no transformation, which
+    /// is the common case and avoids one String per field.
+    pub decoded: Cow<'a, str>,
     /// `true` when the value is a discrete input field (query param, cookie,
     /// header, form member, JSON member) rather than an opaque body blob.
     /// Typed fields are the classic injection surface and carry full
@@ -75,7 +76,7 @@ pub struct NormalizedRequest<'a> {
     pub path: String,
     /// Path plus `?query`, with the path portion normalized.
     pub full_uri: String,
-    pub query_params: Vec<(String, String)>,
+    pub query_params: Vec<(String, Cow<'a, str>)>,
     /// The request's own header list, borrowed verbatim. Header lookups are
     /// ASCII case-insensitive.
     pub headers: &'a [(String, String)],
@@ -86,7 +87,7 @@ pub struct NormalizedRequest<'a> {
     pub body_text: Option<Cow<'a, str>>,
     pub cookies: Vec<(String, String)>,
     /// Flat list of every decoded value the detectors should scan.
-    pub decoded_values: Vec<DecodedValue>,
+    pub decoded_values: Vec<DecodedValue<'a>>,
 }
 
 impl NormalizedRequest<'_> {
@@ -138,8 +139,8 @@ const SKIP_HEADERS: &[&str] = &[
 #[allow(clippy::too_many_arguments)]
 pub fn normalize_request<'a>(
     method: &'a str,
-    raw_path: &str,
-    raw_query: &str,
+    raw_path: &'a str,
+    raw_query: &'a str,
     headers: &'a [(String, String)],
     body: Option<&'a [u8]>,
     max_decode_layers: usize,
@@ -226,6 +227,7 @@ pub fn normalize_request<'a>(
     // than skipped — see `normalize::body` for why the old early exit was an
     // evasion.
     let body_text = body.and_then(|bytes| decode_body(headers, bytes));
+    let body_values_start = decoded_values.len();
 
     if let Some(text) = body_text.as_deref() {
         // Form-encoded bodies are split into parameters so each value is
@@ -251,7 +253,7 @@ pub fn normalize_request<'a>(
             decoded_values.push(DecodedValue {
                 source: ValueSource::Body,
                 name: String::new(),
-                decoded,
+                decoded: Cow::Owned(decoded.into_owned()),
                 field: false,
             });
             unpack_json(
@@ -265,9 +267,23 @@ pub fn normalize_request<'a>(
             decoded_values.push(DecodedValue {
                 source: ValueSource::Body,
                 name: String::new(),
-                decoded,
+                decoded: Cow::Owned(decoded.into_owned()),
                 field: false,
             });
+        }
+    }
+
+    // Body values may borrow `body_text`, which is a local Cow (and may be
+    // owned after decompression). Copy only the borrowed body entries before
+    // moving `body_text` into the returned struct; query/header/path values
+    // keep their zero-copy borrows.
+    for value in &mut decoded_values[body_values_start..] {
+        let owned = match &value.decoded {
+            Cow::Borrowed(text) => Some(text.to_string()),
+            Cow::Owned(_) => None,
+        };
+        if let Some(text) = owned {
+            value.decoded = Cow::Owned(text);
         }
     }
 
@@ -290,19 +306,19 @@ pub fn normalize_request<'a>(
 /// Run URL multi-decoding plus HTML entity decoding, returning a stable form
 /// safe for signature matching. With `decode_escapes`, `\xHH` / `\uHHHH`
 /// sequences are resolved as well.
-pub fn decode_value(
-    input: &str,
+pub fn decode_value<'a>(
+    input: &'a str,
     max_decode_layers: usize,
     decode_escapes: bool,
-) -> String {
+) -> Cow<'a, str> {
     let url_decoded = multi_decode(input, max_decode_layers);
     let out = if url_decoded.contains('&') {
-        decode_entities(&url_decoded)
+        Cow::Owned(decode_entities(&url_decoded))
     } else {
         url_decoded
     };
     let out = if decode_escapes {
-        decode_escapes_owned(&out)
+        Cow::Owned(decode_escapes_owned(&out))
     } else {
         out
     };
@@ -310,7 +326,7 @@ pub fn decode_value(
     // → `%25`) that the pre-escape multi_decode never saw; re-run the bounded
     // percent pass so the innermost form is readable to the detectors.
     if out.contains('%') {
-        multi_decode(&out, max_decode_layers)
+        Cow::Owned(multi_decode(&out, max_decode_layers).into_owned())
     } else {
         out
     }
@@ -323,16 +339,19 @@ pub fn decode_value(
 /// whitespace-sensitive detector (fingerprinting, regexes) sees one token and
 /// walks past. Literal `+` stays reachable via `%2B`, and header / cookie /
 /// path values use plain [`decode_value`] because there `+` is a literal.
-fn decode_value_form(
-    input: &str,
+fn decode_value_form<'a>(
+    input: &'a str,
     max_decode_layers: usize,
     decode_escapes: bool,
-) -> String {
+) -> Cow<'a, str> {
     if input.contains('+') {
-        return decode_value(
-            &input.replace('+', " "),
-            max_decode_layers,
-            decode_escapes,
+        return Cow::Owned(
+            decode_value(
+                &input.replace('+', " "),
+                max_decode_layers,
+                decode_escapes,
+            )
+            .into_owned(),
         );
     }
     decode_value(input, max_decode_layers, decode_escapes)
@@ -393,12 +412,12 @@ fn decode_escapes_owned(input: &str) -> String {
 
 /// Split a query string on `&` and decode each key/value pair, pushing
 /// every value into `decoded_values` for downstream scanning.
-fn parse_query(
-    query: &str,
+fn parse_query<'a>(
+    query: &'a str,
     max_decode_layers: usize,
     decode_escapes: bool,
-    decoded_values: &mut Vec<DecodedValue>,
-) -> Vec<(String, String)> {
+    decoded_values: &mut Vec<DecodedValue<'a>>,
+) -> Vec<(String, Cow<'a, str>)> {
     if query.is_empty() {
         return Vec::new();
     }
@@ -437,10 +456,10 @@ fn parse_query(
         {
             // Nothing below uses the key on this branch (the JSON unpack
             // already recorded its members), so move it into `out`.
-            out.push((key_decoded, val_decoded));
+            out.push((key_decoded.to_string(), val_decoded));
             continue;
         }
-        out.push((key_decoded.clone(), val_decoded.clone()));
+        out.push((key_decoded.to_string(), val_decoded.clone()));
         // The key itself is request input too: `?redirect:%24%7B%23a%3D%23…`
         // carries the whole OGNL payload in an *encoded* key with an empty
         // value, invisible to the detectors unless the key joins the scan
@@ -451,13 +470,13 @@ fn parse_query(
             decoded_values.push(DecodedValue {
                 source: ValueSource::QueryParam,
                 name: String::new(),
-                decoded: key_decoded.clone(),
+                decoded: Cow::Owned(key_decoded.to_string()),
                 field: true,
             });
         }
         decoded_values.push(DecodedValue {
             source: ValueSource::QueryParam,
-            name: key_decoded,
+            name: key_decoded.into_owned(),
             decoded: val_decoded,
             field: true,
         });
@@ -472,7 +491,7 @@ fn parse_form_body(
     body: &str,
     max_decode_layers: usize,
     decode_escapes: bool,
-    decoded_values: &mut Vec<DecodedValue>,
+    decoded_values: &mut Vec<DecodedValue<'_>>,
 ) {
     if body.is_empty() {
         return;
@@ -515,14 +534,14 @@ fn parse_form_body(
             decoded_values.push(DecodedValue {
                 source: ValueSource::Body,
                 name: String::new(),
-                decoded: key_decoded.clone(),
+                decoded: Cow::Owned(key_decoded.to_string()),
                 field: true,
             });
         }
         decoded_values.push(DecodedValue {
             source: ValueSource::Body,
-            name: key_decoded,
-            decoded: val_decoded,
+            name: key_decoded.into_owned(),
+            decoded: Cow::Owned(val_decoded.into_owned()),
             field: true,
         });
     }
@@ -551,11 +570,11 @@ fn looks_like_json(text: &str) -> bool {
 /// the escape-obfuscation gap without turning on the Strict escape pass.
 /// Bounded by [`JSON_MAX_DEPTH`], [`JSON_MAX_VALUE_LEN`] and
 /// [`JSON_MAX_VALUES`]; a parse failure simply yields nothing.
-fn unpack_json(
+fn unpack_json<'a>(
     body: &str,
     max_decode_layers: usize,
     decode_escapes: bool,
-    decoded_values: &mut Vec<DecodedValue>,
+    decoded_values: &mut Vec<DecodedValue<'a>>,
 ) {
     if body.len() > JSON_MAX_VALUE_LEN * 64 {
         return;
@@ -581,13 +600,13 @@ fn unpack_json(
 /// the container string itself (the `"key":value` shape trips libinjection's
 /// quote-keyword fingerprint on benign structured payloads). Depth shares
 /// the [`JSON_MAX_DEPTH`] budget of the surrounding walk.
-fn unpack_string_json(
+fn unpack_string_json<'a>(
     s: &str,
     depth: usize,
     path: &str,
     max_decode_layers: usize,
     decode_escapes: bool,
-    decoded_values: &mut Vec<DecodedValue>,
+    decoded_values: &mut Vec<DecodedValue<'a>>,
 ) -> bool {
     if depth >= JSON_MAX_DEPTH || s.is_empty() || s.len() > JSON_MAX_VALUE_LEN {
         return false;
@@ -648,8 +667,8 @@ const B64_MAX_VALUE_LEN: usize = 16384;
 /// decoded text is structured, and one URL-decode when it carries `%`
 /// escapes. Values that decode to non-text (hashes, binary tokens) stay
 /// untouched. Bounded by [`B64_MAX_DEPTH`] and [`B64_MAX_VALUE_LEN`].
-fn expand_base64(
-    decoded_values: &mut Vec<DecodedValue>,
+fn expand_base64<'a>(
+    decoded_values: &mut Vec<DecodedValue<'a>>,
     max_decode_layers: usize,
     decode_escapes: bool,
 ) {
@@ -658,7 +677,7 @@ fn expand_base64(
     let mut depth = 0usize;
     while layer_start < layer_end && depth < B64_MAX_DEPTH {
         // Snapshot the layer: expanding pushes into the same vector.
-        let layer: Vec<(ValueSource, String, String)> = decoded_values
+        let layer: Vec<(ValueSource, String, Cow<'_, str>)> = decoded_values
             [layer_start..layer_end]
             .iter()
             // Do not clone every field just to discover that it is not
@@ -698,7 +717,8 @@ fn expand_base64(
             }
             if decoded.contains('%') || decoded.contains("&#") {
                 decoded =
-                    decode_value(&decoded, max_decode_layers, decode_escapes);
+                    decode_value(&decoded, max_decode_layers, decode_escapes)
+                        .into_owned();
             }
             if decoded.is_empty() || decoded.len() > B64_MAX_VALUE_LEN {
                 continue;
@@ -772,7 +792,7 @@ fn expand_base64(
             decoded_values.push(DecodedValue {
                 source,
                 name,
-                decoded,
+                decoded: Cow::Owned(decoded),
                 field: true,
             });
         }
@@ -791,11 +811,14 @@ fn expand_base64(
 /// the charset + printability gates inside [`b64_decode_value`] reject hex
 /// hashes and camelCase words. Strict-only: the escape pass that exposes
 /// these runs does not run below Strict.
-fn expand_b64_substrings(decoded_values: &mut Vec<DecodedValue>, strict: bool) {
+fn expand_b64_substrings<'a>(
+    decoded_values: &mut Vec<DecodedValue<'a>>,
+    strict: bool,
+) {
     if !strict {
         return;
     }
-    let layer: Vec<(ValueSource, String, String)> = decoded_values
+    let layer: Vec<(ValueSource, String, Cow<'_, str>)> = decoded_values
         .iter()
         .filter(|v| {
             v.field
@@ -842,7 +865,7 @@ fn expand_b64_substrings(decoded_values: &mut Vec<DecodedValue>, strict: bool) {
                         } else {
                             format!("{name}.b64q")
                         },
-                        decoded,
+                        decoded: Cow::Owned(decoded),
                         field: true,
                     });
                     pushed += 1;
@@ -908,13 +931,13 @@ fn b64_decode_value(s: &str) -> Option<String> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn walk_json(
+fn walk_json<'a>(
     value: &serde_json::Value,
     depth: usize,
     path: String,
     max_decode_layers: usize,
     decode_escapes: bool,
-    decoded_values: &mut Vec<DecodedValue>,
+    decoded_values: &mut Vec<DecodedValue<'a>>,
     count: &mut usize,
 ) {
     if *count >= JSON_MAX_VALUES {
@@ -944,7 +967,7 @@ fn walk_json(
             decoded_values.push(DecodedValue {
                 source: ValueSource::Body,
                 name: path,
-                decoded,
+                decoded: Cow::Owned(decoded.into_owned()),
                 field: true,
             });
             *count += 1;
@@ -997,7 +1020,7 @@ fn walk_json(
             decoded_values.push(DecodedValue {
                 source: ValueSource::Body,
                 name: path,
-                decoded: n.to_string(),
+                decoded: Cow::Owned(n.to_string()),
                 field: true,
             });
             *count += 1;
@@ -1009,7 +1032,7 @@ fn walk_json(
             decoded_values.push(DecodedValue {
                 source: ValueSource::Body,
                 name: path,
-                decoded: b.to_string(),
+                decoded: Cow::Owned(b.to_string()),
                 field: true,
             });
             *count += 1;
@@ -1019,12 +1042,12 @@ fn walk_json(
 }
 
 /// Parse a `Cookie:` header value (`a=b; c=d`) and decode each pair.
-fn parse_cookies(
-    header: &str,
+fn parse_cookies<'a>(
+    header: &'a str,
     max_decode_layers: usize,
     decode_escapes: bool,
     cookies: &mut Vec<(String, String)>,
-    decoded_values: &mut Vec<DecodedValue>,
+    decoded_values: &mut Vec<DecodedValue<'a>>,
 ) {
     for pair in header.split(';') {
         let pair = pair.trim();
@@ -1037,10 +1060,10 @@ fn parse_cookies(
         };
         let key_decoded = multi_decode(k, max_decode_layers);
         let val_decoded = decode_value(v, max_decode_layers, decode_escapes);
-        cookies.push((key_decoded.clone(), val_decoded.clone()));
+        cookies.push((key_decoded.to_string(), val_decoded.to_string()));
         decoded_values.push(DecodedValue {
             source: ValueSource::Cookie,
-            name: key_decoded,
+            name: key_decoded.into_owned(),
             decoded: val_decoded,
             field: true,
         });
@@ -1407,15 +1430,8 @@ mod tests {
         let inner = r#"{"id":"1 un\u0069on select password from users"}"#;
         let wrapped =
             base64::engine::general_purpose::STANDARD.encode(inner.as_bytes());
-        let req = normalize_request(
-            "GET",
-            "/",
-            &format!("q={wrapped}"),
-            &[],
-            None,
-            3,
-            false,
-        );
+        let query = format!("q={wrapped}");
+        let req = normalize_request("GET", "/", &query, &[], None, 3, false);
         let member = req
             .decoded_values
             .iter()
@@ -1435,21 +1451,36 @@ mod tests {
         let inner = "{\r\t\"trajectory\"\r:false,\"policy\":\t\"OyBlY2hvIGAvYmluL2NhdCAvZXRjL2hvc3RzYA==\"\x00} ";
         let wrapped =
             base64::engine::general_purpose::STANDARD.encode(inner.as_bytes());
-        let req = normalize_request(
-            "GET",
-            "/",
-            &format!("q={wrapped}"),
-            &[],
-            None,
-            3,
-            false,
-        );
+        let query = format!("q={wrapped}");
+        let req = normalize_request("GET", "/", &query, &[], None, 3, false);
         let layer2 = req
             .decoded_values
             .iter()
             .find(|v| v.name == "q.b64.policy.b64")
             .expect("layer-2 expansion");
         assert_eq!(layer2.decoded, "; echo `/bin/cat /etc/hosts`");
+    }
+
+    #[test]
+    fn unencoded_query_and_header_values_are_borrowed() {
+        let query = "q=plain-value";
+        let headers = vec![("x-test".to_string(), "plain-header".to_string())];
+        let req =
+            normalize_request("GET", "/", query, &headers, None, 3, false);
+        let query_value = req
+            .decoded_values
+            .iter()
+            .find(|value| {
+                value.source == ValueSource::QueryParam && value.name == "q"
+            })
+            .expect("query value");
+        assert!(matches!(query_value.decoded, Cow::Borrowed(_)));
+        let header_value = req
+            .decoded_values
+            .iter()
+            .find(|value| value.source == ValueSource::Header)
+            .expect("header value");
+        assert!(matches!(header_value.decoded, Cow::Borrowed(_)));
     }
 
     #[test]
