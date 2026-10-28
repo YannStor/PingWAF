@@ -37,7 +37,7 @@ WORKDIR /var/lib/pingwaf
 USER pingwaf
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD-SHELL 'if grep -qaE "all-in-one|server" /proc/1/cmdline; then \
+    CMD sh -c 'if grep -qaE "all-in-one|server" /proc/1/cmdline; then \
         curl --connect-timeout 2 --max-time 3 -sf http://localhost:9080/healthz || exit 1; \
     else \
         pgrep -f "pingwaf agent" >/dev/null || exit 1; \
