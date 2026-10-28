@@ -17,14 +17,14 @@
 //! These are additive to the existing pingap CLI and are detected before
 //! the normal argument parsing runs.
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 /// PingWAF top-level CLI wrapper.
 ///
 /// When the first positional argument is one of the PingWAF subcommand
 /// names — the three run modes (`server`, `agent`, `all-in-one`) or a
-/// maintenance command (`user`, `mode`, `security`) — the binary switches to
-/// PingWAF mode.
+/// maintenance command (`user`, `mode`, `security`, `config`) — the binary
+/// switches to PingWAF mode.
 #[derive(Parser, Debug)]
 #[command(
     name = "pingwaf",
@@ -480,14 +480,23 @@ pub enum OnOff {
 }
 
 /// The run modes: the subcommands that start a long-running process.
+///
+/// Test-only: production mode detection comes from clap via [`is_mode`], and
+/// the parity test keeps this list honest.
+#[cfg(test)]
 pub const RUN_MODES: [&str; 3] = ["server", "agent", "all-in-one"];
 
 /// The maintenance commands: they run against the database and exit.
+#[cfg(test)]
 const MAINTENANCE_MODES: [&str; 4] = ["user", "mode", "security", "config"];
 
 /// Whether `value` names a PingWAF subcommand.
+///
+/// Derived from clap rather than from a second list: a subcommand added to
+/// `PingWafCommand` is then recognised automatically. The arrays above stay
+/// for the tests and documentation, and a parity test pins them to clap.
 fn is_mode(value: &str) -> bool {
-    RUN_MODES.contains(&value) || MAINTENANCE_MODES.contains(&value)
+    PingWafCli::command().find_subcommand(value).is_some()
 }
 
 /// The mode named by `PINGWAF_MODE`, when it names one.
@@ -736,8 +745,30 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_commands_are_recognised_as_pingwaf_invocations() {
-        for mode in RUN_MODES.into_iter().chain(MAINTENANCE_MODES) {
+    fn mode_registries_match_the_clap_subcommands() {
+        // `is_mode` now derives from clap; the arrays are still used by docs
+        // and by this test, so pin them to the real command tree. Without
+        // this, a new subcommand was silently invisible to `PINGWAF_MODE`
+        // and to argv-derived mode selection.
+        let mut declared: Vec<String> = PingWafCli::command()
+            .get_subcommands()
+            .map(|command| command.get_name().to_string())
+            .filter(|name| name != "help")
+            .collect();
+        declared.sort();
+
+        let mut registered: Vec<String> = RUN_MODES
+            .into_iter()
+            .chain(MAINTENANCE_MODES)
+            .map(str::to_string)
+            .collect();
+        registered.sort();
+        assert_eq!(
+            declared, registered,
+            "RUN_MODES/MAINTENANCE_MODES drifted from the clap subcommands"
+        );
+
+        for mode in &registered {
             assert!(is_mode(mode), "{mode} must select PingWAF mode");
         }
         assert!(!is_mode("reset-password"));

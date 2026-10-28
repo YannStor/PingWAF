@@ -1,8 +1,14 @@
 pub mod page;
 pub mod verify;
 
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
+use hmac::{Hmac, KeyInit, Mac};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 
 use crate::cookie::{ClearanceLevel, ClearancePayload, CookieManager};
 use crate::fingerprint::BrowserFingerprint;
@@ -156,7 +162,7 @@ impl ChallengeEngine {
         request_id: &str,
         original_url: &str,
     ) -> ChallengeResponse {
-        let challenge_nonce = generate_nonce();
+        let challenge_nonce = issue_nonce(self.config.cookie_secret.as_bytes());
         let params = ChallengePageParams {
             request_id: request_id.to_string(),
             challenge_nonce,
@@ -191,7 +197,7 @@ impl ChallengeEngine {
         request_id: &str,
         original_url: &str,
     ) -> ChallengeResponse {
-        let challenge_nonce = generate_nonce();
+        let challenge_nonce = issue_nonce(self.config.cookie_secret.as_bytes());
         let params = ChallengePageParams {
             request_id: request_id.to_string(),
             challenge_nonce,
@@ -238,7 +244,32 @@ impl ChallengeEngine {
             };
         }
 
-        // 2. Verify proof-of-work
+        // 2. The nonce must be one this engine issued and has not expired:
+        // otherwise a client can pick its own nonce, solve once offline and
+        // replay the pair forever.
+        if !verify_nonce(
+            self.config.cookie_secret.as_bytes(),
+            &submission.challenge_nonce,
+            self.config.submission_max_age_secs,
+        ) {
+            return VerifyResult::Failed {
+                reason: "challenge nonce is invalid or expired".to_string(),
+            };
+        }
+        // 3. A nonce is single-use: replaying a solved pair must not mint a
+        // second clearance cookie.
+        if !consume_nonce(
+            &submission.challenge_nonce,
+            Duration::from_secs(
+                self.config.submission_max_age_secs.max(1) as u64
+            ),
+        ) {
+            return VerifyResult::Failed {
+                reason: "challenge nonce was already used".to_string(),
+            };
+        }
+
+        // 4. Verify proof-of-work
         if !verify_proof_of_work(
             &submission.challenge_nonce,
             &submission.solution,
@@ -503,11 +534,78 @@ pub enum VerifyResult {
     Failed { reason: String },
 }
 
-/// Generate a random nonce string (32 hex chars = 16 bytes)
-fn generate_nonce() -> String {
+type HmacSha256 = Hmac<Sha256>;
+
+/// Upper bound on remembered nonces; reaching it rejects new submissions
+/// rather than growing without bound.
+const MAX_USED_NONCES: usize = 100_000;
+
+static USED_NONCES: LazyLock<Mutex<HashMap<String, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn nonce_signature(secret: &[u8], body: &str) -> String {
+    // HMAC accepts keys of any length; the guard only satisfies the API.
+    let Ok(mut mac) = HmacSha256::new_from_slice(secret) else {
+        return String::new();
+    };
+    mac.update(body.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Issues a nonce the client cannot forge: `<random>.<unix-seconds>.<hmac>`.
+fn issue_nonce(secret: &[u8]) -> String {
     let mut rng = rand::rng();
     let bytes: Vec<u8> = (0..16).map(|_| rng.random()).collect();
-    hex::encode(bytes)
+    let issued_at = chrono::Utc::now().timestamp();
+    let body = format!("{}.{}", hex::encode(bytes), issued_at);
+    let signature = nonce_signature(secret, &body);
+    format!("{body}.{signature}")
+}
+
+/// Whether `nonce` was issued by this engine and is still fresh.
+fn verify_nonce(secret: &[u8], nonce: &str, max_age_secs: i64) -> bool {
+    let mut parts = nonce.rsplitn(3, '.');
+    let (Some(signature), Some(issued_at), Some(random)) =
+        (parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    if random.is_empty() || signature.is_empty() {
+        return false;
+    }
+    let Ok(issued_at) = issued_at.parse::<i64>() else {
+        return false;
+    };
+    let now = chrono::Utc::now().timestamp();
+    // A little clock skew is tolerable; anything older than the submission
+    // window is not.
+    if issued_at > now + 30 || now.saturating_sub(issued_at) > max_age_secs {
+        return false;
+    }
+    let expected = nonce_signature(secret, &format!("{random}.{issued_at}"));
+    if expected.len() != signature.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (left, right) in expected.as_bytes().iter().zip(signature.as_bytes()) {
+        diff |= left ^ right;
+    }
+    diff == 0
+}
+
+/// Marks `nonce` as used. Returns false when it was already spent (replay) or
+/// the table is saturated (fail closed).
+fn consume_nonce(nonce: &str, ttl: Duration) -> bool {
+    let now = Instant::now();
+    let mut used = USED_NONCES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    used.retain(|_, seen| now.duration_since(*seen) < ttl);
+    if used.len() >= MAX_USED_NONCES || used.contains_key(nonce) {
+        return false;
+    }
+    used.insert(nonce.to_string(), now);
+    true
 }
 
 /// Generate a random request ID (shorter, for display)
@@ -714,7 +812,9 @@ mod tests {
 
         let submission = ChallengeSubmission {
             request_id: "test-ray".to_string(),
-            challenge_nonce: "nonce123".to_string(),
+            challenge_nonce: issue_nonce(
+                engine.config.cookie_secret.as_bytes(),
+            ),
             solution: "anything".to_string(), // difficulty=0, any solution passes
             fingerprint_json: r#"{"user_agent":"Mozilla/5.0 Chrome/120","screen_width":1920,"screen_height":1080,"timezone_offset":-480,"language":"en-US","platform":"Win32","canvas_hash":"abc","webgl_vendor":"Google","webgl_renderer":"ANGLE","plugins_count":3,"touch_support":false,"hardware_concurrency":8,"device_memory":8.0}"#.to_string(),
             timestamp: chrono::Utc::now().timestamp(),
@@ -735,8 +835,19 @@ mod tests {
             },
         }
 
+        // The same solved pair must not mint a second cookie.
+        match engine.verify_solution(&submission, true) {
+            VerifyResult::Failed { reason } => {
+                assert!(reason.contains("already used"));
+            },
+            _ => panic!("a replayed nonce must be rejected"),
+        }
+
         // A plain HTTP origin gets a storable cookie: no Secure attribute.
-        match engine.verify_solution(&submission, false) {
+        let mut second = submission.clone();
+        second.challenge_nonce =
+            issue_nonce(engine.config.cookie_secret.as_bytes());
+        match engine.verify_solution(&second, false) {
             VerifyResult::Success {
                 cookie_attributes, ..
             } => {

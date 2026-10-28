@@ -163,7 +163,6 @@ async fn upload_geoip(
     Ok(Json(json!({
         "uploaded": true,
         "bytes": bytes.len(),
-        "path": path.to_string_lossy(),
     })))
 }
 

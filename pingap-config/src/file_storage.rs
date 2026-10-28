@@ -184,7 +184,26 @@ impl Storage for FileStorage {
                 file: file.to_string_lossy().to_string(),
             })?;
         }
-        fs::write(&file, value).await.map_err(|e| Error::Io {
+        // Write to a sibling and rename, so a crash mid-write cannot leave a
+        // truncated config (which holds the ACME key) behind. The file is
+        // private: it carries TLS private keys.
+        let temp = file.with_extension("tmp");
+        fs::write(&temp, value).await.map_err(|e| Error::Io {
+            source: e,
+            file: temp.to_string_lossy().to_string(),
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = std::fs::Permissions::from_mode(0o600);
+            fs::set_permissions(&temp, permissions).await.map_err(|e| {
+                Error::Io {
+                    source: e,
+                    file: temp.to_string_lossy().to_string(),
+                }
+            })?;
+        }
+        fs::rename(&temp, &file).await.map_err(|e| Error::Io {
             source: e,
             file: file.to_string_lossy().to_string(),
         })?;

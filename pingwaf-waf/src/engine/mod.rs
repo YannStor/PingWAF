@@ -70,8 +70,8 @@ fn max_total_scan_bytes() -> usize {
 
 /// Conservative pre-allocation estimate for one inspection. The decoder and
 /// normalizer can expand a body several times; the multiplier keeps the
-/// reservation ahead of that without treating every request as its 1 MiB
-/// worst case.
+/// reservation ahead of that. A small body reserves only a few KiB — a 1 MiB
+/// floor would let ~128 tiny POSTs exhaust the default budget.
 fn estimated_scan_bytes(request: &RequestData) -> usize {
     let header_bytes: usize = request
         .headers
@@ -84,7 +84,7 @@ fn estimated_scan_bytes(request: &RequestData) -> usize {
         }
         body.len()
             .saturating_mul(8)
-            .clamp(1024 * 1024, 4 * 1024 * 1024)
+            .clamp(4 * 1024, 4 * 1024 * 1024)
     });
     request
         .path
@@ -92,6 +92,17 @@ fn estimated_scan_bytes(request: &RequestData) -> usize {
         .saturating_add(request.query.len())
         .saturating_add(header_bytes)
         .saturating_add(body_bytes)
+}
+
+/// Strips control characters from attacker-influenced fragments before they
+/// reach `details` (persisted as `waf_details` and rendered in the console).
+/// Keeps the value readable without allowing CRLF log forging, and bounds it.
+fn detail_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(80)
+        .collect()
 }
 
 struct ScanBudgetGuard(usize);
@@ -121,23 +132,6 @@ impl ScanBudgetGuard {
 impl Drop for ScanBudgetGuard {
     fn drop(&mut self) {
         TOTAL_SCAN_USED.fetch_sub(self.0, Ordering::AcqRel);
-    }
-}
-
-fn scan_budget_verdict(mode: WafMode) -> WafVerdict {
-    let action = if mode == WafMode::Monitor {
-        WafAction::Monitor
-    } else {
-        WafAction::Block
-    };
-    WafVerdict {
-        action,
-        score: 0,
-        matched_rules: vec!["scan_budget".to_string()],
-        enforced_rule_id: Some("scan_budget".to_string()),
-        details: "WAF scan memory budget exhausted; request not inspected"
-            .to_string(),
-        breakdown: ScoreBreakdown::clean(),
     }
 }
 
@@ -667,11 +661,41 @@ impl WafEngine {
         // Reserve before normalization: this is the point where decoded and
         // JSON structures are built, and where a concurrent fan-out can
         // otherwise exceed the per-request caps by orders of magnitude.
-        let _scan_budget =
-            match ScanBudgetGuard::try_acquire(estimated_scan_bytes(request)) {
-                Some(guard) => guard,
-                None => return scan_budget_verdict(self.mode),
-            };
+        //
+        // An exhausted budget must never fail closed: one burst of cheap
+        // requests would otherwise switch the whole deployment to "block
+        // everything". Skip the body instead, keep scanning the headers/URL,
+        // and mark the verdict so the gap is visible.
+        match ScanBudgetGuard::try_acquire(estimated_scan_bytes(request)) {
+            Some(_scan_budget) => self.inspect_reserved(request),
+            None => self.inspect_without_body(request),
+        }
+    }
+
+    /// Inspects `request` with the body removed, after the scan budget was
+    /// found exhausted. Header/URL/query rules still apply; the skipped body
+    /// is recorded in the verdict instead of turning into a global Block.
+    fn inspect_without_body(&self, request: &RequestData) -> WafVerdict {
+        let mut stripped = request.clone();
+        stripped.body = None;
+        let mut verdict = self.inspect_reserved(&stripped);
+        verdict
+            .matched_rules
+            .push("scan_budget_body_skipped".to_string());
+        if !verdict.details.is_empty() {
+            verdict.details.push_str("; ");
+        }
+        verdict
+            .details
+            .push_str("body skipped: concurrent scan budget exhausted");
+        verdict
+    }
+
+    /// Inspects `request` with the scan budget already reserved by [`inspect`].
+    fn inspect_reserved(&self, request: &RequestData) -> WafVerdict {
+        if self.mode == WafMode::Off {
+            return WafVerdict::pass();
+        }
 
         let normalize_started = Instant::now();
         let normalized = normalize_request(
@@ -687,6 +711,9 @@ impl WafEngine {
             Method::WafNormalize,
             normalize_started.elapsed().as_nanos() as u64,
         );
+        // Kept for the verdict: a body that was only partly inspected must
+        // not read as a clean pass in the event stream.
+        let body_inspection = normalized.body_inspection.clone();
         // The decoded values are the biggest structure the inspection builds;
         // report what they hold for as long as this inspection owns them.
         let decoded_bytes: usize = normalized
@@ -1404,13 +1431,17 @@ impl WafEngine {
 
         // ----- Fast-path Block on critical Stage-1 hit -----
         if self.fast_path_block_on_critical && critical_hit {
+            let mut details = self.details_from(&recs, &[]);
+            if let Some(note) = body_inspection.detail() {
+                details.push(note);
+            }
             return self.finalize_verdict(
                 &mut breakdown,
                 RuleHits {
                     matched: self.matched_from(&recs, &[]),
                     enforced: None,
                 },
-                self.details_from(&recs, &[]),
+                details,
                 Some(WafAction::Block),
                 "stage1-critical",
                 &surfaces,
@@ -1523,7 +1554,14 @@ impl WafEngine {
         // fired anywhere (any hit or Log rule would have raised the score).
         if action == WafAction::Pass {
             debug_assert!(recs.is_empty() && rule_recs.is_empty());
-            return WafVerdict::pass();
+            let mut verdict = WafVerdict::pass();
+            // A clean verdict must still carry the fact that the body was
+            // only partly inspected; otherwise a blind spot is indistinguish-
+            // able from a genuinely clean request.
+            if let Some(note) = body_inspection.detail() {
+                verdict.details = note;
+            }
+            return verdict;
         }
 
         let reason = match breakdown.overall_class {
@@ -1537,13 +1575,17 @@ impl WafEngine {
             Some(WafAction::Challenge) => enforced_challenge,
             _ => None,
         };
+        let mut details = self.details_from(&recs, &rule_recs);
+        if let Some(note) = body_inspection.detail() {
+            details.push(note);
+        }
         self.finalize_verdict(
             &mut breakdown,
             RuleHits {
                 matched: self.matched_from(&recs, &rule_recs),
                 enforced,
             },
-            self.details_from(&recs, &rule_recs),
+            details,
             Some(action),
             reason,
             &surfaces,
@@ -1605,7 +1647,7 @@ impl WafEngine {
                         p.category,
                         severity,
                         source,
-                        name,
+                        detail_text(name),
                         monitored_suffix
                     ));
                 },
@@ -1618,7 +1660,11 @@ impl WafEngine {
                 } => {
                     details.push(format!(
                         "{} [{}] in {} '{}'{}",
-                        kind, fingerprint, source, name, monitored_suffix
+                        kind,
+                        fingerprint,
+                        source,
+                        detail_text(name),
+                        monitored_suffix
                     ));
                 },
                 HitRec::Expr {
@@ -1629,7 +1675,10 @@ impl WafEngine {
                 } => {
                     details.push(format!(
                         "expr-injection [{}] in {} '{}'{}",
-                        container, source, name, monitored_suffix
+                        container,
+                        source,
+                        detail_text(name),
+                        monitored_suffix
                     ));
                 },
             }
@@ -1643,7 +1692,7 @@ impl WafEngine {
             details.push(format!(
                 "{} [{}] rule_action={} sev={}{}",
                 rule.id,
-                rule.name,
+                detail_text(rule.name),
                 rule.action.as_str(),
                 rule.severity,
                 suffix
@@ -1768,6 +1817,57 @@ mod tests {
             scheme: "https".into(),
             protocol: "HTTP/1.1".into(),
         }
+    }
+
+    #[test]
+    fn small_bodies_reserve_kib_not_a_mib() {
+        let mut request = req("POST", "/login", "");
+        request.body = Some(vec![b'a'; 1024]);
+        let estimate = estimated_scan_bytes(&request);
+        assert!(
+            estimate < 1024 * 1024,
+            "a small body must not reserve a 1 MiB floor: {estimate}"
+        );
+    }
+
+    #[test]
+    fn exhausted_budget_skips_the_body_instead_of_blocking() {
+        let engine = engine();
+        let mut request = req("POST", "/login", "");
+        request.body = Some(b"username=1' OR '1'='1".to_vec());
+        let verdict = engine.inspect_without_body(&request);
+        assert_ne!(
+            verdict.action,
+            WafAction::Block,
+            "budget exhaustion must not fail closed: {}",
+            verdict.details
+        );
+        assert!(
+            verdict
+                .matched_rules
+                .iter()
+                .any(|rule| rule == "scan_budget_body_skipped"),
+            "the skipped body must be visible in the verdict: {}",
+            verdict.details
+        );
+        assert!(verdict.details.contains("scan budget exhausted"));
+    }
+
+    #[test]
+    fn undecodable_body_encoding_is_visible_in_a_clean_verdict() {
+        let engine = engine();
+        let mut request = req("POST", "/api/login", "");
+        request
+            .headers
+            .push(("Content-Encoding".into(), "br".into()));
+        request.body = Some(b"abc".to_vec());
+        let verdict = engine.inspect(&request);
+        assert_eq!(verdict.action, WafAction::Pass);
+        assert!(
+            verdict.details.contains("body=uninspected"),
+            "a clean pass must still say the body was not inspected: {}",
+            verdict.details
+        );
     }
 
     #[test]
@@ -4078,18 +4178,6 @@ mod tests {
             ),
         ));
         assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
-    }
-
-    #[test]
-    fn scan_budget_verdict_is_explicit_and_mode_aware() {
-        let blocked = scan_budget_verdict(WafMode::Block);
-        assert_eq!(WafAction::Block, blocked.action);
-        assert_eq!(Some("scan_budget"), blocked.enforced_rule_id.as_deref());
-        assert_eq!(vec!["scan_budget"], blocked.matched_rules);
-        assert!(!blocked.details.is_empty());
-
-        let monitored = scan_budget_verdict(WafMode::Monitor);
-        assert_eq!(WafAction::Monitor, monitored.action);
     }
 
     #[test]

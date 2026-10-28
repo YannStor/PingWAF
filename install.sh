@@ -43,10 +43,13 @@ SERVICE_NAME="pingwaf"
 SUPPORTED_PLATFORMS="linux/amd64 linux/arm64"
 
 # ─── Default Configuration ────────────────────────────────────────────────────
+# Empty on purpose: the environment fallbacks below can only take effect when
+# these are unset. Assigning the defaults here made `PINGWAF_MODE` and
+# `PINGWAF_DB_URL` silently dead.
 VERSION=""
-MODE="all-in-one"
+MODE=""
 SKIP_SYSTEMD=false
-DB_URL="postgres://pingwaf:pingwaf@localhost:5432/pingwaf"
+DB_URL=""
 SERVER_URL=""
 API_KEY=""
 
@@ -111,7 +114,7 @@ done
 # Environment variable fallbacks
 VERSION="${VERSION:-${PINGWAF_VERSION:-}}"
 MODE="${MODE:-${PINGWAF_MODE:-all-in-one}}"
-DB_URL="${DB_URL:-${PINGWAF_DB_URL:-$DB_URL}}"
+DB_URL="${DB_URL:-${PINGWAF_DB_URL:-postgres://pingwaf:pingwaf@localhost:5432/pingwaf}}"
 # Agent mode reads its settings from the command line or the environment, so
 # these are what the systemd unit is built from.
 SERVER_URL="${SERVER_URL:-${PINGWAF_SERVER_URL:-}}"

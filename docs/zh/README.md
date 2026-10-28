@@ -44,7 +44,7 @@ Agent（`agent`）拆开部署。
 
 ## 📦 Crate 文档
 
-PingWAF 在 `pingap` 代理基础之上新增了 **6 个 WAF 专属 crate**。
+PingWAF 在 `pingap` 代理基础之上新增了 **7 个 WAF 专属 crate**。
 
 **WAF crate：**
 
@@ -92,6 +92,6 @@ PingWAF 在 `pingap` 代理基础之上新增了 **6 个 WAF 专属 crate**。
 
 - [modules.md](./guide/modules.md) — 本仓库的模块关系图（`pingap-*` 与 `pingwaf-*`）。
 - [examples.md](./guide/examples.md) — 仓库内可直接运行的配置示例。
-- [reverse-proxy-settings.md](./guide/reverse-proxy-settings.md) — 上游 Host 覆盖、downstream 超时与连接寿命、节点名称变更、缓存边界。
+- [reverse-proxy-settings.md](./guide/reverse-proxy-settings.md) — 上游 Host 覆盖、downstream 超时与连接寿命、节点名称变更、缓存边界、维护命令（`user`/`mode`/`security`/`config`）。
 - [acme_chart.md](../acme_chart.md) — ACME / Let's Encrypt 签发流程。
 - **英文文档** — [docs/README.md](../README.md)（home、plugins、crates、guide、[http-lifecycle](../http-lifecycle.md)）。

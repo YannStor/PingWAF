@@ -13,7 +13,7 @@ use axum::Router;
 use chrono::{DateTime, Utc};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
-    PaginatorTrait, QueryFilter, QueryOrder, Set,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -23,7 +23,9 @@ use crate::api::common::{
 };
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
-use crate::auth::password::{hash_password_with_cost, verify_password};
+use crate::auth::password::{
+    hash_password_with_cost, verify_password_offloaded,
+};
 use crate::auth::AuthUser;
 use crate::models::{api_key, permission, role, user};
 
@@ -320,6 +322,20 @@ fn normalise_permissions(raw: &[String]) -> Result<Vec<String>, ApiError> {
     Ok(out)
 }
 
+/// Returns the indexed prefix of a raw API key.
+///
+/// The prefix is a byte slice into a caller-supplied string. `len()` counts
+/// bytes, so a multi-byte character straddling the eighth byte used to panic
+/// — fatal in release builds (`panic = "abort"`). Reject non-ASCII outright
+/// and use `get`, which returns `None` instead of panicking.
+fn key_prefix(raw_key: &str) -> Option<&str> {
+    let raw_key = raw_key.trim();
+    if raw_key.len() < KEY_PREFIX_LENGTH || !raw_key.is_ascii() {
+        return None;
+    }
+    raw_key.get(..KEY_PREFIX_LENGTH)
+}
+
 /// Resolves a raw API key to the key row and its owning user.
 ///
 /// The key prefix narrows the candidate set (it is indexed) and each candidate is
@@ -330,23 +346,29 @@ pub async fn authenticate_api_key(
     raw_key: &str,
 ) -> Result<(api_key::Model, user::Model), ApiError> {
     let raw_key = raw_key.trim();
-    if raw_key.len() < KEY_PREFIX_LENGTH {
+    let Some(prefix) = key_prefix(raw_key) else {
         return Err(ApiError::Unauthorized("invalid API key".to_string()));
-    }
+    };
 
+    // A prefix collision should be rare; capping the candidates keeps a
+    // pathological prefix from turning one unauthenticated attempt into an
+    // unbounded number of bcrypt verifications.
+    const MAX_CANDIDATES: u64 = 8;
     let candidates = api_key::Entity::find()
-        .filter(api_key::Column::KeyPrefix.eq(&raw_key[..KEY_PREFIX_LENGTH]))
+        .filter(api_key::Column::KeyPrefix.eq(prefix))
+        .limit(MAX_CANDIDATES)
         .all(db)
         .await?;
 
     for candidate in candidates {
-        let raw = raw_key.to_string();
-        let stored = candidate.key_hash.clone();
-        let matches =
-            tokio::task::spawn_blocking(move || verify_password(&raw, &stored))
-                .await
-                .map_err(|err| ApiError::Internal(err.to_string()))?
-                .map_err(|err| ApiError::Internal(err.to_string()))?;
+        // Bounded by the shared bcrypt semaphore, so a burst of registration
+        // attempts cannot occupy every worker.
+        let matches = verify_password_offloaded(
+            raw_key.to_string(),
+            candidate.key_hash.clone(),
+        )
+        .await
+        .map_err(|err| ApiError::Internal(err.to_string()))?;
         if !matches {
             continue;
         }
@@ -400,6 +422,17 @@ pub fn key_allows_agent(key: &api_key::Model) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_key_prefix_is_boundary_safe() {
+        assert_eq!(key_prefix("pwk_abcd"), Some("pwk_abcd"));
+        assert_eq!(key_prefix("  pwk_abcd  "), Some("pwk_abcd"));
+        assert_eq!(key_prefix("pwk_ab"), None);
+        // Nine bytes, but the eighth falls inside the two-byte `é`. Slicing
+        // at a fixed byte offset used to panic and abort the control plane.
+        assert_eq!(key_prefix("pwk_abcdé"), None);
+        assert_eq!(key_prefix("pwk_abcé1"), None);
+    }
 
     #[test]
     fn generated_keys_have_a_stable_prefix() {

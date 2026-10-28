@@ -46,6 +46,22 @@ pub struct SystemMetrics {
     pub memory: pingwaf_system::MemorySnapshot,
 }
 
+/// `GET /api/v1/system/status` — degraded-mode flags for the dashboard.
+#[derive(Debug, Serialize)]
+pub struct SystemStatus {
+    /// False when the gRPC control plane serves plaintext.
+    pub grpc_tls: bool,
+}
+
+async fn status(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+) -> Json<SystemStatus> {
+    Json(SystemStatus {
+        grpc_tls: state.config.grpc_tls_enabled(),
+    })
+}
+
 async fn metrics(_admin: AdminUser) -> Result<Json<SystemMetrics>, ApiError> {
     // Both snapshots touch /proc (or the platform equivalent): keep that off
     // the async workers.
@@ -635,6 +651,7 @@ pub fn routes() -> Router<AppState> {
         .route("/system/metrics", get(metrics))
         .route("/system/profile", get(profile))
         .route("/system/nodes", get(nodes))
+        .route("/system/status", get(status))
 }
 
 #[cfg(test)]

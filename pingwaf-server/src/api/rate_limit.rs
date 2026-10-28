@@ -52,6 +52,19 @@ const PASSWORD: Rate = Rate {
     window: Duration::from_secs(60),
     limit: 10,
 };
+/// `/mcp` calls per minute. API-key callers still cost a bcrypt verify, and
+/// the endpoint sits outside `/api/v1`, so it needs its own bucket.
+const MCP: Rate = Rate {
+    window: Duration::from_secs(60),
+    limit: 60,
+};
+/// `RegisterAgent` attempts per minute per peer. The RPC is unauthenticated
+/// by design (the key is the credential), so each attempt costs a DB lookup
+/// plus a bcrypt verify without a cap.
+const AGENT_REGISTRATION: Rate = Rate {
+    window: Duration::from_secs(60),
+    limit: 20,
+};
 
 #[derive(Clone, Copy)]
 struct Rate {
@@ -97,6 +110,9 @@ fn bucket_for(
     path: &str,
 ) -> Option<(&'static str, Rate)> {
     match (method.as_str(), path) {
+        // The hosted MCP endpoint lives outside `/api/v1` but performs the
+        // same API-key verification, so it gets the same treatment.
+        (_, "/mcp") => Some(("mcp", MCP)),
         ("POST", "/auth/login")
         | ("POST", "/auth/passkey/login/begin")
         | ("POST", "/auth/passkey/login/finish") => Some(("login", LOGIN)),
@@ -172,6 +188,22 @@ fn consume(
         return Err(remaining.as_secs().max(1));
     }
     Ok(())
+}
+
+/// Counts one gRPC `RegisterAgent` attempt for `ip`.
+///
+/// Returns the retry hint (seconds) once the peer exceeds the bucket.
+pub(crate) fn consume_agent_registration(ip: IpAddr) -> Result<(), u64> {
+    let mut counters = COUNTERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    consume(
+        &mut counters,
+        "agent-register",
+        AGENT_REGISTRATION,
+        ip,
+        Instant::now(),
+    )
 }
 
 /// `axum` middleware limiting the credential endpoints; see the module docs.

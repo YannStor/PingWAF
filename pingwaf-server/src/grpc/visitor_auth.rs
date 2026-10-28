@@ -50,7 +50,9 @@ use tonic::{Request, Response, Status};
 use tracing::debug;
 use uuid::Uuid;
 
-use crate::auth::password::{hash_password, verify_password};
+use crate::auth::password::{
+    hash_password, hash_password_offloaded, verify_password_offloaded,
+};
 use crate::grpc::control_plane::ControlPlaneService;
 use crate::models::{
     site, site_oidc, site_visitor, visitor_auth_state, visitor_passkey,
@@ -319,14 +321,22 @@ pub(crate) async fn visitor_login(
     // hash is a valid bcrypt string whose plaintext is not the submitted
     // password, so the comparison fails as it would for a wrong password.
     let Some(visitor) = found else {
-        let _ = verify_password(&payload.password, &DUMMY_HASH);
+        let _ = verify_password_offloaded(
+            payload.password.clone(),
+            DUMMY_HASH.clone(),
+        )
+        .await;
         return Ok(Response::new(refusal(
             error_code::INVALID_CREDENTIALS,
             GENERIC_CREDENTIALS_MESSAGE,
         )));
     };
-    let matches = verify_password(&payload.password, &visitor.password_hash)
-        .unwrap_or(false);
+    let matches = verify_password_offloaded(
+        payload.password.clone(),
+        visitor.password_hash.clone(),
+    )
+    .await
+    .unwrap_or(false);
     if !matches {
         return Ok(Response::new(refusal(
             error_code::INVALID_CREDENTIALS,
@@ -444,9 +454,12 @@ pub(crate) async fn visitor_change_password(
             "This account is disabled.",
         )));
     }
-    let matches =
-        verify_password(&payload.current_password, &visitor.password_hash)
-            .unwrap_or(false);
+    let matches = verify_password_offloaded(
+        payload.current_password.clone(),
+        visitor.password_hash.clone(),
+    )
+    .await
+    .unwrap_or(false);
     if !matches {
         return Ok(Response::new(password_refusal(
             error_code::WRONG_PASSWORD,
@@ -455,7 +468,8 @@ pub(crate) async fn visitor_change_password(
     }
     // `hash_password` enforces the same minimum length and 72-byte
     // truncation as the console's own accounts.
-    let Ok(hash) = hash_password(&payload.new_password) else {
+    let Ok(hash) = hash_password_offloaded(payload.new_password.clone()).await
+    else {
         return Ok(Response::new(password_refusal(
             error_code::WEAK_PASSWORD,
             "The new password is too short.",
@@ -1307,6 +1321,7 @@ fn db_status(err: sea_orm::DbErr) -> Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::password::verify_password;
 
     /// A host matches a site's primary domain or any of its alternates.
     ///

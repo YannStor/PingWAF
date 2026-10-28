@@ -46,6 +46,11 @@ pub struct Claims {
     /// as 0 — the pre-revocation epoch.
     #[serde(default)]
     pub ver: i64,
+    /// Unique id of a refresh token, used to make it single-use. Absent on
+    /// access/agent tokens and on refresh tokens minted before rotation
+    /// existed (those keep working, for compatibility).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jti: Option<String>,
 }
 
 impl Claims {
@@ -132,6 +137,7 @@ fn build_claims(
         iss: ISSUER.to_string(),
         typ: typ.to_string(),
         ver: token_version,
+        jti: None,
     }
 }
 
@@ -202,7 +208,7 @@ fn create_token_with_type(
     secret: &str,
     expiration_hours: i64,
 ) -> Result<String, JwtError> {
-    let claims = build_claims(
+    let mut claims = build_claims(
         subject.to_string(),
         email.to_string(),
         role.to_string(),
@@ -210,6 +216,10 @@ fn create_token_with_type(
         token_version,
         expiration_hours,
     );
+    if typ == TOKEN_TYPE_REFRESH {
+        // Single-use marker: the refresh handler remembers it until expiry.
+        claims.jti = Some(Uuid::new_v4().to_string());
+    }
     encode(
         &Header::new(Algorithm::HS256),
         &claims,
@@ -335,6 +345,11 @@ mod tests {
         assert!(verify_user_token(&refresh, SECRET).is_err());
         let claims = verify_token(&refresh, SECRET).unwrap();
         assert_eq!(claims.ver, 3);
+        // Refresh tokens carry a single-use marker; access tokens do not.
+        assert!(claims.jti.is_some());
+        let access =
+            create_token(id, "a@b.c", role::ADMIN, 3, SECRET, 1).unwrap();
+        assert!(verify_token(&access, SECRET).unwrap().jti.is_none());
     }
 
     /// Tokens minted before `ver` existed deserialize as version 0, so a

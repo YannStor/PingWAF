@@ -54,6 +54,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Verify the tag matches the workspace version
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          MANIFEST="$(awk -F'"' '
+            /^\[workspace.package\]/ { in_section = 1; next }
+            /^\[/ { in_section = 0 }
+            in_section && /^version *=/ { print $2; exit }
+          ' Cargo.toml)"
+          if [ "$VERSION" != "$MANIFEST" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match the workspace version ${MANIFEST}" >&2
+            exit 1
+          fi
+
       - name: Extract the CHANGELOG section for this tag
         id: notes
         run: |

@@ -1020,11 +1020,13 @@ impl Plugin for Cache {
             // Cached GET and HEAD responses are separate entries (the method
             // is part of the key); purge both so a HEAD variant cannot keep
             // answering for a url that was just purged.
+            let host = get_host(session.req_header()).unwrap_or_default();
             for method in [Method::GET, Method::HEAD] {
                 let key = get_cache_key(
                     ctx,
                     method.as_ref(),
                     &session.req_header().uri,
+                    &host,
                 );
                 self.http_cache
                     .cache

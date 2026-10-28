@@ -2630,6 +2630,12 @@ function AboutCard() {
     queryFn: () => systemApi.version(),
   })
 
+  // `grpc_tls` moved off the unauthenticated /version endpoint.
+  const status = useQuery({
+    queryKey: ['system-status'],
+    queryFn: () => systemApi.status(),
+  })
+
   const view = version.data
 
   const copy = async (value: string) => {
@@ -2656,7 +2662,7 @@ function AboutCard() {
           <SkeletonRows rows={3} columns={2} />
         ) : (
           <>
-            {!view.grpc_tls && (
+            {status.data && !status.data.grpc_tls && (
               <p className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/8 px-3 py-2 text-[13px] leading-relaxed text-fg">
                 <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg-warning" />
                 {t('pages.settings.aboutGrpcPlaintext')}

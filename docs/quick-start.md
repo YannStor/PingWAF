@@ -369,8 +369,13 @@ Install it system-wide if you like:
 
 ```bash
 sudo install -m 0755 target/release/pingwaf /usr/local/bin/pingwaf
-pingwaf --help
+pingwaf --version          # the installed build
+pingwaf config --help      # PingWAF subcommands
 ```
+
+> The top-level `pingwaf --help` answers with the `pingap`-compatible options
+> (the two entry points share one binary); the PingWAF subcommand tree is
+> reached through a subcommand, e.g. `pingwaf config --help`.
 
 ### Step 5 — Prepare PostgreSQL
 

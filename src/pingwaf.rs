@@ -196,6 +196,25 @@ pub(crate) fn env_flag_is_true(value: Option<&str>) -> bool {
     })
 }
 
+/// Whether `command` is a maintenance command.
+///
+/// Maintenance commands run against the database and exit, so [`main`] sends
+/// them to [`crate::admin::run`] instead of building a run mode. The match is
+/// deliberately exhaustive: a new subcommand has to be classified here, which
+/// keeps it from falling through to [`build_run_mode`]'s `unreachable!`
+/// arm at runtime.
+fn is_maintenance_command(command: &PingWafCommand) -> bool {
+    match command {
+        PingWafCommand::Server(_)
+        | PingWafCommand::Agent(_)
+        | PingWafCommand::AllInOne(_) => false,
+        PingWafCommand::User { .. }
+        | PingWafCommand::Mode { .. }
+        | PingWafCommand::Security { .. }
+        | PingWafCommand::Config { .. } => true,
+    }
+}
+
 /// Build the `RunMode` from the parsed CLI.
 ///
 /// The maintenance commands never reach this: [`main`] routes them to
@@ -2054,12 +2073,7 @@ pub fn main() {
 
     // Maintenance commands run against the database and exit; only the three
     // run modes start the long-running process.
-    let is_maintenance = matches!(
-        &cli.command,
-        PingWafCommand::User { .. }
-            | PingWafCommand::Mode { .. }
-            | PingWafCommand::Security { .. }
-    );
+    let is_maintenance = is_maintenance_command(&cli.command);
     let result = if is_maintenance {
         rt.block_on(crate::admin::run(cli))
     } else {
@@ -2115,11 +2129,66 @@ fn log_directives(rust_log: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser as _;
     use pingwaf_agent::cache::{
         CacheRule as AgentCacheRule, CachedRules, GlobalCacheSettings,
         OidcAccessRule, OidcHeaderClaim, ProxyTrustConfig, ResponseReplaceRule,
         RouteConfig, SiteRules, UpstreamConfig, UpstreamPeer,
     };
+
+    /// Parses an invocation the way [`crate::cli::parse_pingwaf_cli`] does,
+    /// without reading the process arguments.
+    fn parse_command(args: &[&str]) -> PingWafCommand {
+        PingWafCli::try_parse_from(args)
+            .expect("the invocation must parse")
+            .command
+    }
+
+    #[test]
+    fn config_subcommands_are_maintenance_commands() {
+        // Every `config` subcommand talks to PostgreSQL and exits; routing one
+        // of them to `build_run_mode` would hit its `unreachable!` arm.
+        let cases: [&[&str]; 3] = [
+            &["pingwaf", "config", "history"],
+            &["pingwaf", "config", "show", "42"],
+            &["pingwaf", "config", "rollback", "7", "--yes"],
+        ];
+        for args in cases {
+            let command = parse_command(args);
+            assert!(
+                matches!(&command, PingWafCommand::Config { .. }),
+                "{args:?} must parse as the config command"
+            );
+            assert!(
+                is_maintenance_command(&command),
+                "{args:?} must be routed to admin::run"
+            );
+        }
+    }
+
+    #[test]
+    fn only_maintenance_commands_skip_building_a_run_mode() {
+        for mode in crate::cli::RUN_MODES {
+            let command = parse_command(&["pingwaf", mode]);
+            assert!(
+                !is_maintenance_command(&command),
+                "{mode} must start a run mode"
+            );
+        }
+
+        let cases: [&[&str]; 3] = [
+            &["pingwaf", "user", "list"],
+            &["pingwaf", "mode", "observe"],
+            &["pingwaf", "security", "allowlist", "off"],
+        ];
+        for args in cases {
+            let command = parse_command(args);
+            assert!(
+                is_maintenance_command(&command),
+                "{args:?} must be routed to admin::run"
+            );
+        }
+    }
 
     #[test]
     fn log_directives_keep_sqlx_quiet_unless_named() {

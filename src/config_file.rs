@@ -40,7 +40,10 @@ fn sections(mode: &str) -> &'static [&'static str] {
     match mode {
         "server" => &["server"],
         "agent" => &["agent"],
-        _ => &["server", "agent"],
+        "all-in-one" => &["server", "agent"],
+        // Unknown modes contribute nothing: guessing "all-in-one" used to
+        // inject server/agent keys into a command that never declared them.
+        _ => &[],
     }
 }
 

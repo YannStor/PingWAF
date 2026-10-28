@@ -38,7 +38,7 @@ use pingap_core::new_internal_error;
 use pingap_core::{
     CompressionStat, Ctx, PluginStep, RequestPluginResult,
     ResponseBodyPluginResult, ResponsePluginResult, ensure_client_ip,
-    get_cache_key,
+    get_cache_key, get_host,
 };
 use pingap_core::{HTTP_HEADER_NAME_X_REQUEST_ID, get_digest_detail};
 use pingap_location::LocationProvider;
@@ -1112,10 +1112,11 @@ pub(crate) fn validate_request_head(
         return Err((405, format!("method not allowed: {method}")));
     }
     for (name, value) in header.headers.iter() {
-        let Ok(value) = value.to_str() else {
-            continue;
-        };
-        if name.as_str().len() + value.len() > MAX_SINGLE_REQUEST_HEADER_BYTES {
+        // Byte length, not `to_str`: a non-UTF-8 header value used to skip
+        // the check entirely and let an oversized field through.
+        if name.as_str().len() + value.as_bytes().len()
+            > MAX_SINGLE_REQUEST_HEADER_BYTES
+        {
             return Err((
                 431,
                 format!("request header field too large: {}", name.as_str()),
@@ -1841,10 +1842,12 @@ impl ProxyHttp for Server {
     ) -> pingora::Result<CacheKey> {
         debug!(target: LOG_TARGET, "--> cache key callback");
         defer!(debug!(target: LOG_TARGET, "<-- cache key callback"););
+        let host = get_host(session.req_header()).unwrap_or_default();
         let key = get_cache_key(
             ctx,
             session.req_header().method.as_ref(),
             &session.req_header().uri,
+            &host,
         );
         debug!(
             target: LOG_TARGET,
@@ -1963,6 +1966,19 @@ impl ProxyHttp for Server {
                 NoCacheReason::OriginNotCache,
             ));
         } else if !has_expires && let Some(d) = max_ttl {
+            // A request carrying a cookie usually gets a personalised
+            // response. With no origin freshness information there is no
+            // basis for sharing it, and the `max_ttl` floor would otherwise
+            // cache it for every later visitor of the same URL.
+            if session
+                .req_header()
+                .headers
+                .contains_key(http::header::COOKIE)
+            {
+                return Ok(RespCacheable::Uncacheable(NoCacheReason::Custom(
+                    "cookie-without-freshness",
+                )));
+            }
             // No Cache-Control and no Expires: floor the freshness with the
             // configured ceiling rather than pingora's 1-second default.
             let cc = crate::cache::floor_cache_control(d);

@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 # publish order
 CRATES=(
@@ -25,15 +26,12 @@ CRATES=(
 
 for crate in "${CRATES[@]}"; do
     echo "Publishing $crate..."
-    cd "$crate"
-    cargo publish --registry crates-io 
-    if [ $? -ne 0 ]; then
-        echo "Failed to publish $crate"
-        exit 1
-    fi
-    cd ..
+    # A subshell keeps the working directory correct even when a publish
+    # fails; with `set -e` the script stops at the first failure instead of
+    # continuing from the wrong directory.
+    (cd "$crate" && cargo publish --registry crates-io)
     # wait for crates.io to process
     sleep 60
 done
 
-echo "All crates published successfully!" 
+echo "All crates published successfully!"

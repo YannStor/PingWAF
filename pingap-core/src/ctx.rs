@@ -1138,7 +1138,12 @@ impl Ctx {
 ///
 /// Returns: A CacheKey whose primary is the namespace, custom keys (if any),
 /// method and URI concatenated, and whose `user_tag` is the namespace.
-pub fn get_cache_key(ctx: &Ctx, method: &str, uri: &Uri) -> CacheKey {
+pub fn get_cache_key(
+    ctx: &Ctx,
+    method: &str,
+    uri: &Uri,
+    host: &str,
+) -> CacheKey {
     let Some(cache_info) = &ctx.cache else {
         // Return an empty key if cache is not configured for this context.
         return CacheKey::new("", "");
@@ -1165,7 +1170,13 @@ pub fn get_cache_key(ctx: &Ctx, method: &str, uri: &Uri) -> CacheKey {
         .as_ref()
         .map_or(0, |keys| keys.iter().map(|s| s.len() + 1).sum::<usize>());
     let mut key_buf = String::with_capacity(
-        namespace.len() + keys_len + method.len() + 1 + uri_len,
+        namespace.len()
+            + keys_len
+            + host.len()
+            + 1
+            + method.len()
+            + 1
+            + uri_len,
     );
     key_buf.push_str(namespace);
     // Custom key components first, each followed by ':'.
@@ -1174,6 +1185,13 @@ pub fn get_cache_key(ctx: &Ctx, method: &str, uri: &Uri) -> CacheKey {
             key_buf.push_str(k);
             key_buf.push(':');
         }
+    }
+    // The host comes next. Two virtual hosts can share one cache plugin (or
+    // one `directory`) and the same path; without it, one site's response
+    // could be served to another.
+    if !host.is_empty() {
+        key_buf.push_str(host);
+        key_buf.push(':');
     }
     // Then "METHOD:URI".
     key_buf.push_str(method);
@@ -1317,7 +1335,7 @@ mod tests {
 
         // Case 1: No cache info in context.
         let ctx_no_cache = Ctx::new();
-        let key1 = get_cache_key(&ctx_no_cache, method, &uri);
+        let key1 = get_cache_key(&ctx_no_cache, method, &uri, "");
         assert_eq!(key1.user_tag, "");
         assert_eq!(key1.primary_key_str(), Some(""));
 
@@ -1327,7 +1345,7 @@ mod tests {
             namespace: Some("my-ns".to_string()),
             ..Default::default()
         }));
-        let key2 = get_cache_key(&ctx_with_ns, method, &uri);
+        let key2 = get_cache_key(&ctx_with_ns, method, &uri, "");
         assert_eq!(key2.user_tag, "my-ns");
         assert_eq!(
             key2.primary_key_str(),
@@ -1345,7 +1363,7 @@ mod tests {
             keys: Some(vec!["user-123".to_string(), "desktop".to_string()]),
             ..Default::default()
         }));
-        let key3 = get_cache_key(&ctx_with_keys, method, &uri);
+        let key3 = get_cache_key(&ctx_with_keys, method, &uri, "");
         assert_eq!(key3.user_tag, "my-ns");
         assert_eq!(
             key3.primary_key_str(),
@@ -1448,9 +1466,21 @@ mod tests {
             &ctx,
             "GET",
             &Uri::from_static("https://example.com/path"),
+            "",
         );
         assert_eq!(key.user_tag, "");
         assert_eq!(key.primary_key_str(), Some("GET:https://example.com/path"));
+    }
+
+    #[test]
+    fn cache_key_separates_virtual_hosts() {
+        let mut ctx = Ctx::new();
+        ctx.cache.get_or_insert_default();
+        let uri = Uri::from_static("/index.html");
+        let a = get_cache_key(&ctx, "GET", &uri, "a.example.com");
+        let b = get_cache_key(&ctx, "GET", &uri, "b.example.com");
+        assert_ne!(a.combined(), b.combined());
+        assert_eq!(a.primary_key_str(), Some("a.example.com:GET:/index.html"));
     }
 
     #[test]

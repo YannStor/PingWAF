@@ -81,6 +81,10 @@ const BLOCK_SWEEP_INTERVAL_SECS: u64 = 60;
 /// `RuleCache::flush_blocked_ips`). Blocks take effect in memory instantly;
 /// this only bounds how far a crash can set the disk copy back.
 const BLOCK_FLUSH_INTERVAL_SECS: u64 = 5;
+/// Upper bound on `blocked_ips` entries per heartbeat. The full list may hold
+/// 100 000 rows; a heartbeat that big exceeds tonic's 4 MiB frame limit, and
+/// every reconnect then fails on its first frame.
+const MAX_HEARTBEAT_BLOCKED_IPS: usize = 4096;
 
 /// Callback types for server commands that affect the host application.
 #[derive(Default)]
@@ -202,10 +206,20 @@ impl ControlPlaneClient {
     ///
     /// If the log buffer is full, the entry is dropped with a warning.
     pub fn send_log(&self, entry: LogEntry) {
+        static DROPPED: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
         if let Err(e) = self.log_sender.try_send(entry) {
             match e {
                 mpsc::error::TrySendError::Full(_) => {
-                    warn!("Log buffer full, dropping entry");
+                    // One warning per drop made an unreachable control plane
+                    // flood the agent's own log. Report on the first drop and
+                    // then every 1024th, with the running total.
+                    let dropped = DROPPED
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        + 1;
+                    if dropped == 1 || dropped.is_multiple_of(1024) {
+                        warn!(dropped, "Log buffer full, dropping entries");
+                    }
                 },
                 mpsc::error::TrySendError::Closed(_) => {
                     debug!("Log channel closed, dropping entry");
@@ -406,8 +420,16 @@ impl ControlPlaneClient {
 
             self.connected.store(false, Ordering::Relaxed);
 
-            // Wait before reconnecting with exponential backoff
-            tokio::time::sleep(retry_delay).await;
+            // Wait before reconnecting with exponential backoff. The wait
+            // must be interruptible: a shutdown should not sit through the
+            // maximum 60 s backoff before the process can exit.
+            tokio::select! {
+                _ = tokio::time::sleep(retry_delay) => {},
+                _ = self.wait_for_shutdown() => {
+                    info!("Agent shutting down during reconnect backoff");
+                    break;
+                },
+            }
             let next = next_backoff(
                 retry_delay.as_millis() as u64,
                 self.config.reconnect_max_delay_ms,
@@ -632,6 +654,13 @@ impl ControlPlaneClient {
 
                 let system_metrics = metrics.collect();
                 let addresses = probe.addresses();
+                // A big block list must not push the heartbeat past tonic's
+                // frame limit: the first frame would fail on every reconnect
+                // and the control-plane link would never recover. Ship a
+                // deterministic prefix and say it is partial, so the server
+                // keeps the rows it did not see.
+                let (blocked_ips, blocked_ips_truncated) =
+                    heartbeat_blocked_ips(rule_cache.blocked_ips_snapshot());
                 let hb = proto::AgentHeartbeat {
                     agent_id: agent_id.clone(),
                     agent_token: agent_token.clone(),
@@ -662,11 +691,8 @@ impl ControlPlaneClient {
                     private_ip: addresses.private_ip,
                     // Dynamic IP blocks in force at this tick; the control
                     // plane reconciles its copy against every heartbeat.
-                    blocked_ips: rule_cache
-                        .blocked_ips_snapshot()
-                        .iter()
-                        .map(to_proto_blocked_ip)
-                        .collect(),
+                    blocked_ips,
+                    blocked_ips_truncated,
                     last_config_sync_at: rule_cache.config_synced_at().map(
                         |at| prost_types::Timestamp {
                             seconds: at.timestamp(),
@@ -1637,6 +1663,22 @@ fn to_proto_sample(sample: &HostSample) -> proto::HostSample {
 }
 
 /// Convert a dynamic IP block into its wire representation.
+/// Bounds the block list shipped in one heartbeat.
+///
+/// Returns the deterministic prefix and whether anything was dropped; the
+/// control plane uses the flag to keep the rows it did not see this round.
+fn heartbeat_blocked_ips(
+    mut entries: Vec<BlockedIpEntry>,
+) -> (Vec<proto::BlockedIp>, bool) {
+    entries.sort_by(|a, b| {
+        (a.site_id.as_str(), a.ip.as_str())
+            .cmp(&(b.site_id.as_str(), b.ip.as_str()))
+    });
+    let truncated = entries.len() > MAX_HEARTBEAT_BLOCKED_IPS;
+    entries.truncate(MAX_HEARTBEAT_BLOCKED_IPS);
+    (entries.iter().map(to_proto_blocked_ip).collect(), truncated)
+}
+
 fn to_proto_blocked_ip(entry: &BlockedIpEntry) -> proto::BlockedIp {
     proto::BlockedIp {
         ip: entry.ip.clone(),
@@ -1738,6 +1780,29 @@ mod tests {
             request.metadata().get("x-agent-token").unwrap(),
             "abc.def.ghi"
         );
+    }
+
+    #[test]
+    fn heartbeat_block_list_is_bounded_and_marked() {
+        let entries: Vec<BlockedIpEntry> = (0..MAX_HEARTBEAT_BLOCKED_IPS + 1)
+            .map(|index| BlockedIpEntry {
+                ip: format!("10.0.{}.{}", index / 256, index % 256),
+                site_id: "00000000-0000-0000-0000-000000000001".to_string(),
+                reason: "test".to_string(),
+                blocked_at: chrono::Utc::now(),
+                expires_at: None,
+            })
+            .collect();
+        let (shipped, truncated) = heartbeat_blocked_ips(entries);
+        assert!(truncated, "an over-long list must be marked as truncated");
+        assert_eq!(MAX_HEARTBEAT_BLOCKED_IPS, shipped.len());
+
+        let mut sorted = shipped.clone();
+        sorted.sort_by(|a, b| {
+            (a.site_id.as_str(), a.ip.as_str())
+                .cmp(&(b.site_id.as_str(), b.ip.as_str()))
+        });
+        assert_eq!(shipped, sorted, "the shipped prefix must be deterministic");
     }
 
     // A disabled metric shipper must never complete: inside

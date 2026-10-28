@@ -171,13 +171,33 @@ impl ControlPlaneService {
             .subject_id()
             .map_err(|_| Status::unauthenticated(INVALID_CREDENTIALS))?;
 
-        agent::Entity::find_by_id(agent_id)
+        let row = agent::Entity::find_by_id(agent_id)
             .one(&self.db)
             .await
             .map_err(db_status)?
             .ok_or_else(|| {
                 Status::unauthenticated("agent is no longer registered")
-            })
+            })?;
+
+        // Re-check the key the token was minted from on every call: a key can
+        // be deleted or lose the agent permission while the token is still
+        // inside its (long) lifetime, and that must take effect immediately.
+        let Some(key_id) = row.api_key_id else {
+            return Err(Status::unauthenticated(INVALID_CREDENTIALS));
+        };
+        let key = api_key::Entity::find_by_id(key_id)
+            .one(&self.db)
+            .await
+            .map_err(db_status)?
+            .ok_or_else(|| {
+                Status::unauthenticated("the API key was revoked")
+            })?;
+        if !key_allows_agent(&key) {
+            return Err(Status::permission_denied(
+                "this API key is no longer allowed to act as an agent",
+            ));
+        }
+        Ok(row)
     }
 
     /// Reads the agent token from the `x-agent-token` request metadata, the
@@ -244,6 +264,17 @@ impl ControlPlaneTrait for ControlPlaneService {
         &self,
         request: Request<RegisterAgentRequest>,
     ) -> Result<Response<RegisterAgentResponse>, Status> {
+        // The RPC is unauthenticated until the key is verified; cap attempts
+        // per peer so the DB lookup plus bcrypt cannot be driven unbounded.
+        if let Some(addr) = request.remote_addr() {
+            if let Err(retry_after) =
+                crate::api::rate_limit::consume_agent_registration(addr.ip())
+            {
+                return Err(Status::resource_exhausted(format!(
+                    "too many registration attempts; retry in {retry_after} seconds"
+                )));
+            }
+        }
         let payload = request.into_inner();
         if payload.hostname.trim().is_empty() {
             return Err(Status::invalid_argument("hostname is required"));
@@ -421,7 +452,13 @@ impl ControlPlaneTrait for ControlPlaneService {
         tokio::spawn(async move {
             persist_heartbeat(&db, agent_id, &first, &registry).await;
             persist_host_samples(&db, agent_id, &first.host_samples).await;
-            persist_blocked_ips(&db, agent_id, &first.blocked_ips).await;
+            persist_blocked_ips(
+                &db,
+                agent_id,
+                &first.blocked_ips,
+                first.blocked_ips_truncated,
+            )
+            .await;
             record_upstream_health(&db, agent_id, &first.upstream_health).await;
             while let Some(message) = match inbound.message().await {
                 Ok(Some(message)) => Some(message),
@@ -443,7 +480,13 @@ impl ControlPlaneTrait for ControlPlaneService {
                 persist_heartbeat(&db, agent_id, &message, &registry).await;
                 persist_host_samples(&db, agent_id, &message.host_samples)
                     .await;
-                persist_blocked_ips(&db, agent_id, &message.blocked_ips).await;
+                persist_blocked_ips(
+                    &db,
+                    agent_id,
+                    &message.blocked_ips,
+                    message.blocked_ips_truncated,
+                )
+                .await;
                 record_upstream_health(&db, agent_id, &message.upstream_health)
                     .await;
             }
@@ -1878,6 +1921,7 @@ async fn persist_blocked_ips(
     db: &DatabaseConnection,
     agent_id: Uuid,
     blocked_ips: &[BlockedIp],
+    truncated: bool,
 ) {
     use std::collections::HashSet;
 
@@ -1924,11 +1968,18 @@ async fn persist_blocked_ips(
         },
     };
 
-    let stale: Vec<i64> = existing
-        .iter()
-        .filter(|row| !reported.contains(&(row.site_id, row.ip.clone())))
-        .map(|row| row.id)
-        .collect();
+    // A truncated report is a bounded prefix, not the agent's full set:
+    // deleting the rows it did not mention would revoke blocks the edge is
+    // still enforcing. Only a complete report reconciles deletions.
+    let stale: Vec<i64> = if truncated {
+        Vec::new()
+    } else {
+        existing
+            .iter()
+            .filter(|row| !reported.contains(&(row.site_id, row.ip.clone())))
+            .map(|row| row.id)
+            .collect()
+    };
     if !stale.is_empty() {
         if let Err(err) = agent_blocked_ip::Entity::delete_many()
             .filter(agent_blocked_ip::Column::Id.is_in(stale))

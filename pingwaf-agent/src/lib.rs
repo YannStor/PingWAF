@@ -136,6 +136,10 @@ pub struct AccessLogEntry {
 /// ```
 pub struct PingWafAgent {
     pub config: AgentConfig,
+    /// The id resolved once at startup. Recomputing it from an empty
+    /// `config.agent_id` minted a new UUID per call, so every visitor-auth
+    /// request claimed a different agent.
+    pub agent_id: String,
     pub client: Arc<ControlPlaneClient>,
     pub rule_cache: Arc<RuleCache>,
     pub metrics: Arc<MetricsCollector>,
@@ -168,6 +172,7 @@ impl PingWafAgent {
 
         let agent = Arc::new(Self {
             config,
+            agent_id: agent_id.clone(),
             client: Arc::clone(&client),
             rule_cache,
             metrics,
@@ -191,7 +196,7 @@ impl PingWafAgent {
     /// The visitor-auth RPCs carry it alongside the token; it is derived the
     /// same way the connection loop derives it, so the two cannot disagree.
     pub fn agent_id(&self) -> String {
-        self.config.resolved_agent_id()
+        self.agent_id.clone()
     }
 
     /// The visitor-authentication client, for the data plane's login page.
@@ -514,8 +519,10 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
+        let agent_id = config.resolved_agent_id();
         PingWafAgent {
             config,
+            agent_id,
             client,
             rule_cache,
             metrics,

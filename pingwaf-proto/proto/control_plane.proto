@@ -156,6 +156,11 @@ message AgentHeartbeat {
   // sustained all-backends-down into `site.upstream_offline` alerts and
   // partial loss into `site.upstream_abnormal`. Absent on older agents.
   repeated UpstreamHealth upstream_health = 20;
+
+  // True when `blocked_ips` is a bounded prefix of the agent's list rather
+  // than the full set. The control plane must then keep the rows it did not
+  // see instead of treating them as revoked.
+  bool blocked_ips_truncated = 21;
 }
 
 // Backend health of one upstream, reported per heartbeat.

@@ -1460,8 +1460,10 @@ cookie_secret = "test-secret"
             Arc::clone(&rule_cache),
             Arc::clone(&metrics),
         ));
+        let agent_id = config.resolved_agent_id();
         let agent = Arc::new(PingWafAgent {
             config,
+            agent_id,
             client,
             rule_cache,
             metrics,

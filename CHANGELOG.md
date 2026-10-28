@@ -8,6 +8,62 @@ PingWAF entries are listed first. The `pingap` history below the divider is
 inherited from the upstream proxy that provides PingWAF's data plane; it is kept
 verbatim for reference and attribution, and is not maintained here.
 
+## [PingWAF 0.32.2] — 2026-10-28
+
+Security and robustness release. One new table (`refresh_tokens`) ships with
+the automatic migration; `/api/v1/version` no longer exposes deployment posture.
+
+### Security
+
+- **Unauthenticated control-plane crash fixed.** An API key whose prefix was
+  sliced on a non-UTF-8 boundary panicked; release builds abort on panic, so a
+  single `RegisterAgent` call could stop the process. The prefix is now
+  ASCII-checked and sliced with `get`.
+- **Cross-tenant log read fixed.** Listing logs with an explicit site id now
+  validates site ownership, as every other site-scoped handler already did.
+- **WAF request-body coverage.** Unknown `Content-Encoding` (br/zstd/chained)
+  is reported as uninspected instead of silently scanning compressed bytes;
+  UTF-16 bodies are transcoded before scanning; multipart text parts are
+  inspected as fields; h2/h3 GET/HEAD bodies are staged lazily.
+- **Body staging is bounded and observable.** Per-site quotas, deadline-driven
+  sweep with a fail-closed tombstone, `body_prefix_only` /
+  `body_encoded_uninspected` / `body_expanded_cap` events, and opt-in
+  `body_stage_policy=strict` (413/408) / `encoded_body_policy=reject` (415).
+- **bcrypt is offloaded and capped**, and `/mcp` plus gRPC `RegisterAgent` are
+  rate-limited per peer.
+- **Refresh tokens are single-use.** Every refresh token carries a `jti`; the
+  new `refresh_tokens` table makes replay fail across restarts and instances.
+- **Smaller hardening:** control-plane WAF skips large upload bodies (no more
+  413 on GeoIP/backup upload), API allowlist keeps its last known-good set when
+  a referenced group disappears, access-log query strings redact known secrets,
+  and configuration rollback is serialised with an advisory lock.
+
+### Fixed
+
+- Heartbeats cap `blocked_ips` (4096, with a `blocked_ips_truncated` flag) so a
+  large block list cannot exceed the gRPC frame limit and wedge the link;
+  truncation no longer revokes unseen rows.
+- Agent id is resolved once (empty config no longer mints a new UUID per call).
+- cgroup memory pressure no longer falls back to host-wide free memory.
+- Domain index removal only deletes entries still owned by the site.
+- Custom WAF rules that fail to compile are logged instead of dropped silently.
+- Config files are written atomically with mode 0600; header size limits count
+  bytes; least-connections counters recover from a poisoned lock.
+- Cache keys include the request host; circuit breakers return to OPEN when a
+  half-open probe is never answered; responses with cookies and no freshness
+  are not cached via `max_ttl`.
+- CLI: `config history/show/rollback` are routed to maintenance mode; registry
+  lists are pinned to clap; unknown config categories return 400.
+- Release: tag/version mismatch aborts before the release is created;
+  `install.sh` honours `PINGWAF_MODE`/`PINGWAF_DB_URL`; the runtime image's
+  healthcheck handles agent mode; `publish.sh` stops on the first failure.
+
+### Changed
+
+- `GET /api/v1/version` no longer returns `grpc_tls`. The flag moved to the
+  admin-only `GET /api/v1/system/status`, and the console fetches it there.
+- New migration `refresh_tokens`.
+
 ## [PingWAF 0.32.1] — 2026-10-28
 
 Patch release focused on WAF memory amplification and control-plane write

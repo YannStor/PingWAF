@@ -358,14 +358,13 @@ Build metadata.
   "name": "pingwaf-server",
   "version": "0.25.0",
   "api": "/api/v1",
-  "registration_open": true,
-  "grpc_tls": true
+  "registration_open": true
 }
 ```
 
-`grpc_tls` reports whether the gRPC control plane serves TLS. `false` means
-plaintext traffic (degraded mode) — agents connect unencrypted; the console
-surfaces this as a warning on the agents page and the settings "About" card.
+`/version` is unauthenticated, so it deliberately carries no deployment
+posture: the plaintext-gRPC flag moved to the admin-only
+[`GET /system/status`](#get-systemstatus).
 
 ---
 
@@ -3314,6 +3313,8 @@ rolling back a rollback works and the history stays linear.
 
 `scope` is `"global"` for shared settings, `"deployment"` for a full-deployment rollback, otherwise the site UUID. The live state is archived before a rollback is applied. Secret fields in the detail response are sanitized, including snapshots recorded before that rule existed.
 
+The same history is reachable from a shell — `pingwaf config history|show|rollback` — but that path writes straight to PostgreSQL and does not notify a running control plane; see [deployment.md → Maintenance CLI](./deployment.md#maintenance-cli-break-glass).
+
 ### POST /config-versions/prune
 
 Immediately applies retention to every scope: versions older than 30 days are deleted and only the newest 50 rows are kept per `(scope, site_id)` partition. The same policy also runs at startup and once per day, including scopes that have not changed recently.
@@ -3761,6 +3762,19 @@ Read-only self-observation of the process (successor of the removed pprof
 endpoints — see [Profiling](profiling.md#what-changed-vs-pprof) for the
 migration table). Both endpoints require an admin token, work on every
 platform and in every build, and have no enable switch.
+
+### GET /system/status
+
+Degraded-mode flags for the console (admin only).
+
+**Response (200):**
+```json
+{"grpc_tls": true}
+```
+
+`grpc_tls: false` means the gRPC control plane serves plaintext traffic
+(degraded mode): agents connect unencrypted, and the console shows a warning
+on the agents page and the settings "About" card.
 
 ### GET /system/nodes
 

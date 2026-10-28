@@ -55,7 +55,10 @@ fn cgroup_v2() -> Option<u64> {
         .trim()
         .parse()
         .ok()?;
-    max.checked_sub(current)
+    // `current > max` means the cgroup is already over its limit. Returning
+    // `None` here made the caller fall back to host-wide free memory, which
+    // reported "plenty" exactly when the container was about to be killed.
+    Some(max.saturating_sub(current))
 }
 
 fn cgroup_v1() -> Option<u64> {
@@ -66,7 +69,7 @@ fn cgroup_v1() -> Option<u64> {
             .trim()
             .parse()
             .ok()?;
-    limit.checked_sub(usage)
+    Some(limit.saturating_sub(usage))
 }
 
 fn sysinfo_available() -> Option<u64> {

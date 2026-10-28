@@ -11,7 +11,7 @@ PingWAF 是 [`vicanso/pingap`](https://github.com/vicanso/pingap) 的**硬分叉
 | 归属 | 模块 | 说明 |
 |---|---|---|
 | **上游继承**（深度改造后维护） | `pingap-{acme,cache,certificate,config,core,discovery,health,imageoptim,location,logger,otel,performance,plugin,proxy,pyroscope,sentry,upstream,util,webhook}` | 反向代理底座：Pingora 生命周期、TLS/ACME、上游 LB、边缘缓存、插件框架及 `pingap-plugin/src/` 下的约 30 个内置插件 |
-| **PingWAF 自有** | `pingwaf-{server,proto,agent,waf,challenge,pprof}` | 控制面（Axum API + SeaORM + gRPC 服务）、协议真源、数据面 agent、WAF 检测引擎、挑战子系统、剖析工具 |
+| **PingWAF 自有** | `pingwaf-{server,proto,agent,waf,challenge,profiler,system}` | 控制面（Axum API + SeaORM + gRPC 服务）、协议真源、数据面 agent、WAF 检测引擎、挑战子系统、插桩归因与系统观测 |
 | **PingWAF 自有** | `web/` | 内嵌管理控制台（PingWAF DB-backed 界面；`pingap-*` 配置结构体的管理页属 pingap 兼容模式遗留） |
 | **PingWAF 自有** | `src/`（根 bin） | CLI 装配：`pingwaf`（对外发布）与 `pingap`（兼容模式入口）共用 `src/main.rs` |
 

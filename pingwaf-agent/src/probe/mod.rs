@@ -153,16 +153,46 @@ fn egress_ip() -> Option<IpAddr> {
     None
 }
 
+/// Runs `command`, killing it once `timeout` elapses.
+///
+/// The probe shells out to `ip` and `df`; a hung mount or network namespace
+/// would otherwise block the sampling thread forever and the heartbeat would
+/// silently stop carrying host samples.
+fn output_with_timeout(
+    command: &mut std::process::Command,
+    timeout: Duration,
+) -> Option<std::process::Output> {
+    let mut child = command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            },
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            },
+        }
+    }
+}
+
 /// Physical interfaces and their addresses, in kernel order.
 ///
 /// Uses `ip -j addr show`; on a host without iproute2, or off Linux, this
 /// yields nothing and the egress probe above still finds the primary address.
 fn interface_addresses() -> Vec<(String, IpAddr)> {
-    let output = match std::process::Command::new("ip")
-        .args(["-j", "addr", "show"])
-        .output()
+    let mut command = std::process::Command::new("ip");
+    command.args(["-j", "addr", "show"]);
+    let output = match output_with_timeout(&mut command, Duration::from_secs(3))
     {
-        Ok(output) if output.status.success() => output,
+        Some(output) if output.status.success() => output,
         _ => return Vec::new(),
     };
 
@@ -627,11 +657,11 @@ fn read_uptime() -> u64 {
 
 /// Total and used bytes of the filesystem holding `path`.
 fn disk_usage(path: &str) -> (u64, u64) {
-    let output = match std::process::Command::new("df")
-        .args(["-kP", path])
-        .output()
+    let mut command = std::process::Command::new("df");
+    command.args(["-kP", path]);
+    let output = match output_with_timeout(&mut command, Duration::from_secs(3))
     {
-        Ok(output) if output.status.success() => output,
+        Some(output) if output.status.success() => output,
         _ => return (0, 0),
     };
     let text = String::from_utf8_lossy(&output.stdout);

@@ -1042,7 +1042,12 @@ async fn list(
         condition = condition.add(site::Column::Status.eq(status));
     }
     if let Some(search) = non_empty(&query.search) {
-        let pattern = format!("%{}%", search.to_lowercase());
+        // `%` and `_` are wildcards in LIKE; escaping them keeps an operator's
+        // literal search from turning into a full-table scan.
+        let pattern = format!(
+            "%{}%",
+            crate::api::logs::escape_like(&search.to_lowercase())
+        );
         condition = condition.add(
             Condition::any()
                 .add(site::Column::Domain.like(&pattern))

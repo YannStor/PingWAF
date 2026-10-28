@@ -92,9 +92,9 @@ export function AgentsPage() {
   const total = agentsQuery.data?.total ?? 0
   const counts = useMemo(() => countByStatus(agents), [agents])
 
-  const versionQuery = useQuery({
-    queryKey: ['version'],
-    queryFn: () => systemApi.version(),
+  const statusQuery = useQuery({
+    queryKey: ['system-status'],
+    queryFn: () => systemApi.status(),
     staleTime: 60_000,
   })
 
@@ -442,7 +442,7 @@ export function AgentsPage() {
         </div>
       )}
 
-      {versionQuery.data && !versionQuery.data.grpc_tls && (
+      {statusQuery.data && !statusQuery.data.grpc_tls && (
         <p className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/8 px-3 py-2 text-[13px] leading-relaxed text-fg">
           <Warning weight="duotone" className="mt-0.5 h-4 w-4 shrink-0 text-fg-warning" />
           {t('pages.agents.grpcPlaintext')}

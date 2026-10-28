@@ -562,7 +562,7 @@ key. An explicitly configured secret always wins.
 1. Generate an API key: **Account → API keys → Create**
 2. Install the agent on the edge server:
    ```bash
-   pingwaf agent --server-url http://control-plane:9090 --api-key YOUR_KEY
+   pingwaf agent --server-url https://control-plane:9090 --server-ca-cert /var/lib/pingwaf/data/grpc-ca.pem --api-key YOUR_KEY
    ```
 3. The agent appears automatically in **Agents**
 

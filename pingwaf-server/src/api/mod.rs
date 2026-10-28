@@ -196,7 +196,10 @@ pub fn build_router(state: AppState) -> Router {
         // `/mcp` to the base URL), and hanging off the root router is what
         // makes the self-protection stack below (access log, IP allowlist,
         // WAF) cover it automatically.
-        .merge(crate::mcp::routes())
+        .merge(
+            crate::mcp::routes()
+                .layer(middleware::from_fn(rate_limit::auth_rate_limit)),
+        )
         // Load balancers and container probes usually hit the root path.
         .route("/healthz", get(health));
     // Serve the embedded React frontend for all non-API routes (SPA)
@@ -490,9 +493,6 @@ async fn version(State(state): State<AppState>) -> Json<serde_json::Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "api": API_PREFIX,
         "registration_open": state.config.allow_registration,
-        // False = the gRPC control plane serves plaintext (degraded mode);
-        // the dashboard shows a banner so the operator notices.
-        "grpc_tls": state.config.grpc_tls_enabled(),
     }))
 }
 

@@ -9,8 +9,9 @@ use axum::Json;
 use axum::Router;
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait,
-    PaginatorTrait, QueryFilter, Set, TransactionError, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection,
+    EntityTrait, PaginatorTrait, QueryFilter, Set, TransactionError,
+    TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -20,11 +21,65 @@ use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::auth::middleware::AuthUser;
 use crate::auth::password::{
-    hash_password, validate_password, verify_password,
+    hash_password, hash_password_with_cost, validate_password, verify_password,
+    DEFAULT_COST,
 };
 use crate::auth::token_version_valid;
 use crate::auth::{create_refresh_token, create_token, verify_refresh_token};
-use crate::models::{role, user};
+use crate::models::{refresh_token, role, user};
+
+/// Claims `jti` for this refresh exchange.
+///
+/// Returns `false` when the token was already exchanged (replay). The insert
+/// is the serialisation point: concurrent refreshes of the same token race on
+/// the primary key and exactly one wins, across restarts and across control
+/// plane instances. Tokens minted before `jti` existed never reach here and
+/// keep working for compatibility.
+async fn claim_refresh_jti(
+    db: &DatabaseConnection,
+    jti: &str,
+    user_id: Uuid,
+    expires_at: DateTime<Utc>,
+) -> Result<bool, ApiError> {
+    use sea_orm::sea_query::OnConflict;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // Prune expired rows occasionally instead of on every refresh; the index
+    // on `expires_at` keeps the scan small.
+    static PRUNE_TICK: AtomicU64 = AtomicU64::new(0);
+    if PRUNE_TICK
+        .fetch_add(1, Ordering::Relaxed)
+        .is_multiple_of(64)
+    {
+        let now = Utc::now();
+        let _ = refresh_token::Entity::delete_many()
+            .filter(refresh_token::Column::ExpiresAt.lt(now))
+            .exec(db)
+            .await;
+    }
+
+    let now = Utc::now();
+    let insert = refresh_token::ActiveModel {
+        jti: Set(jti.to_string()),
+        user_id: Set(user_id),
+        expires_at: Set(expires_at),
+        used_at: Set(now),
+        created_at: Set(now),
+    };
+    match refresh_token::Entity::insert(insert)
+        .on_conflict(
+            OnConflict::column(refresh_token::Column::Jti)
+                .do_nothing()
+                .to_owned(),
+        )
+        .exec(db)
+        .await
+    {
+        Ok(_) => Ok(true),
+        Err(sea_orm::DbErr::RecordNotInserted) => Ok(false),
+        Err(err) => Err(err.into()),
+    }
+}
 
 /// Public information about a dashboard account. The password hash never leaves
 /// the process (see [`crate::models::users`], which deliberately does not derive
@@ -182,7 +237,7 @@ async fn login(
         // so it runs on the blocking pool.
         let password = payload.password.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            verify_password(&password, DUMMY_HASH)
+            verify_password(&password, DUMMY_HASH.as_str())
         })
         .await;
         tracing::debug!(%email, "login failed: unknown account");
@@ -345,6 +400,18 @@ async fn refresh(
         )));
     }
 
+    // Rotation: a refresh token may be exchanged exactly once. A replayed
+    // token is refused even though it is still cryptographically valid.
+    if let Some(jti) = claims.jti.as_deref() {
+        let expires_at = DateTime::from_timestamp(claims.exp, 0)
+            .unwrap_or_else(|| Utc::now() + chrono::Duration::hours(1));
+        if !claim_refresh_jti(&state.db, jti, user_id, expires_at).await? {
+            return Err(ApiError::Unauthorized(
+                "refresh token has already been used".to_string(),
+            ));
+        }
+    }
+
     tracing::debug!(%user_id, "refreshed access token");
     Ok(Json(issue_tokens(&state, account)?))
 }
@@ -496,10 +563,21 @@ async fn change_password(
 
 const INVALID_CREDENTIALS: &str = "invalid e-mail or password";
 
-/// A precomputed bcrypt hash that matches nothing; used to equalise the cost of
-/// a failed login for unknown accounts.
-const DUMMY_HASH: &str =
-    "$2b$10$Q9V0Z7rQZ3h8YqQZQZQZQeQ9V0Z7rQZ3h8YqQZQZQZQZQZQZQZQZu";
+/// A bcrypt hash that matches nothing; used to equalise the cost of a failed
+/// login for unknown accounts.
+///
+/// It is generated at the application cost rather than hard-coded at cost 10:
+/// bcrypt stores its cost in the hash, so a cheaper dummy made "unknown
+/// account" measurably faster and re-opened the e-mail enumeration the dummy
+/// exists to close.
+static DUMMY_HASH: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| {
+        hash_password_with_cost(
+            "\u{0}not-a-submittable-password\u{0}",
+            DEFAULT_COST,
+        )
+        .unwrap_or_default()
+    });
 
 /// Lower-cases and structurally validates an e-mail address.
 pub(crate) fn normalise_email(raw: &str) -> Result<String, ApiError> {

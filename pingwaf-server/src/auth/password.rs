@@ -1,6 +1,10 @@
 //! Password hashing helpers built on bcrypt.
 
-use bcrypt::{BcryptError, DEFAULT_COST};
+use std::sync::OnceLock;
+
+use bcrypt::BcryptError;
+pub use bcrypt::DEFAULT_COST;
+use tokio::sync::Semaphore;
 
 /// bcrypt only ever looks at the first 72 bytes of the input. Instead of
 /// letting longer secrets fail at hash time we truncate on a character
@@ -80,6 +84,51 @@ pub fn verify_password(plain: &str, hash: &str) -> Result<bool, PasswordError> {
     }
 }
 
+/// Ceiling on concurrent bcrypt work. One call at the default cost spends
+/// hundreds of milliseconds of CPU; running it inline on the async runtime (or
+/// letting an unbounded number of blocking tasks through) starves the reactor.
+const BCRYPT_CONCURRENCY: usize = 4;
+
+static BCRYPT_PERMITS: OnceLock<Semaphore> = OnceLock::new();
+
+fn bcrypt_permits() -> &'static Semaphore {
+    BCRYPT_PERMITS.get_or_init(|| Semaphore::new(BCRYPT_CONCURRENCY))
+}
+
+/// [`verify_password`] on the blocking pool, bounded by a process-wide
+/// semaphore so a burst of visitor logins cannot occupy every worker.
+pub async fn verify_password_offloaded(
+    plain: String,
+    hash: String,
+) -> Result<bool, PasswordError> {
+    let permit = bcrypt_permits()
+        .acquire()
+        .await
+        .map_err(|err| PasswordError::Backend(err.to_string()))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        verify_password(&plain, &hash)
+    })
+    .await
+    .map_err(|err| PasswordError::Backend(err.to_string()))?
+}
+
+/// [`hash_password`] on the blocking pool, under the same ceiling.
+pub async fn hash_password_offloaded(
+    plain: String,
+) -> Result<String, PasswordError> {
+    let permit = bcrypt_permits()
+        .acquire()
+        .await
+        .map_err(|err| PasswordError::Backend(err.to_string()))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        hash_password(&plain)
+    })
+    .await
+    .map_err(|err| PasswordError::Backend(err.to_string()))?
+}
+
 /// Cheap structural check used by the registration endpoints: rejects empty and
 /// obviously weak secrets before spending CPU on bcrypt.
 pub fn validate_password(plain: &str) -> Result<(), PasswordError> {
@@ -112,6 +161,24 @@ mod tests {
     #[test]
     fn garbage_hash_is_not_a_match() {
         assert!(!verify_password("whatever", "not-a-bcrypt-hash").unwrap());
+    }
+
+    #[tokio::test]
+    async fn offloaded_helpers_match_the_sync_ones() {
+        let hash = hash_password_offloaded("correct horse battery".to_string())
+            .await
+            .unwrap();
+        assert!(verify_password_offloaded(
+            "correct horse battery".to_string(),
+            hash.clone()
+        )
+        .await
+        .unwrap());
+        assert!(
+            !verify_password_offloaded("wrong password".to_string(), hash)
+                .await
+                .unwrap()
+        );
     }
 
     #[test]

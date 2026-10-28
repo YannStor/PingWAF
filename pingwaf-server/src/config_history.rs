@@ -6,9 +6,9 @@
 
 use chrono::Utc;
 use sea_orm::{
-    AccessMode, ActiveModelTrait, ColumnTrait, ConnectionTrait,
-    DatabaseConnection, DbErr, EntityTrait, IsolationLevel, QueryFilter,
-    QueryOrder, QuerySelect, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr,
+    EntityTrait, IsolationLevel, QueryFilter, QueryOrder, QuerySelect, Set,
+    TransactionTrait,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -90,22 +90,37 @@ pub async fn record_version(
     actor: Option<&str>,
     config_hash: &str,
 ) -> Result<Option<i64>, DbErr> {
+    // Every table in one snapshot comes from the same PostgreSQL view. The
+    // previous sequence of independent reads could mix two concurrent edits.
+    // Read-write: the snapshot and its insert now share this transaction.
+    let txn = db
+        .begin_with_config(Some(IsolationLevel::RepeatableRead), None)
+        .await?;
+    let recorded =
+        record_version_in(&txn, scope, source, actor, config_hash).await?;
+    txn.commit().await?;
+    Ok(recorded)
+}
+
+/// [`record_version`] on a caller-owned connection or transaction.
+///
+/// Rollback uses this to record its pre-rollback snapshot inside the same
+/// transaction that holds the advisory lock, so the archived version and the
+/// restore cannot observe different states.
+async fn record_version_in<C: ConnectionTrait>(
+    db: &C,
+    scope: VersionScope,
+    source: &str,
+    actor: Option<&str>,
+    config_hash: &str,
+) -> Result<Option<i64>, DbErr> {
     if let Some(latest) = latest_version(db, scope).await? {
         if !config_hash.is_empty() && latest.config_hash == config_hash {
             return Ok(None);
         }
     }
 
-    // Every table in one snapshot comes from the same PostgreSQL view. The
-    // previous sequence of independent reads could mix two concurrent edits.
-    let txn = db
-        .begin_with_config(
-            Some(IsolationLevel::RepeatableRead),
-            Some(AccessMode::ReadOnly),
-        )
-        .await?;
-    let snapshot = config_catalog::capture(&txn, scope, false).await?;
-    txn.commit().await?;
+    let snapshot = config_catalog::capture(db, scope, false).await?;
 
     let snapshot_bytes = serde_json::to_vec(&snapshot)
         .map(|bytes| bytes.len())
@@ -143,8 +158,8 @@ pub async fn record_version(
     Ok(Some(row.id))
 }
 
-pub async fn latest_version(
-    db: &DatabaseConnection,
+pub async fn latest_version<C: ConnectionTrait>(
+    db: &C,
     scope: VersionScope,
 ) -> Result<Option<config_version::Model>, DbErr> {
     let mut query = config_version::Entity::find()
@@ -182,7 +197,7 @@ pub async fn prune_expired(db: &DatabaseConnection) -> Result<u64, DbErr> {
     Ok(result.rows_affected())
 }
 
-async fn prune_scope(db: &DatabaseConnection, scope: VersionScope) {
+async fn prune_scope<C: ConnectionTrait>(db: &C, scope: VersionScope) {
     let cutoff = Utc::now() - chrono::Duration::days(VERSION_RETENTION_DAYS);
     let sql = "\
         DELETE FROM config_versions \
@@ -228,13 +243,25 @@ pub async fn rollback(
         None => VersionScope::Global,
     };
 
-    // Archive the live state before changing it. If this fails, the rollback
-    // stops here rather than proceeding without a way back.
+    let txn = db.begin().await?;
+    // Serialise rollbacks per scope: a second rollback waits here instead of
+    // recording and applying against a state the first one is about to
+    // replace. The lock is released when the transaction ends.
+    txn.execute(sea_orm::Statement::from_sql_and_values(
+        txn.get_database_backend(),
+        "SELECT pg_advisory_xact_lock(hashtext($1))",
+        [scope.describe().to_string().into()],
+    ))
+    .await?;
+
+    // Archive the live state before changing it, inside the locked
+    // transaction: the archived "before" snapshot and the restore then see
+    // the same state. If this fails, the rollback stops here rather than
+    // proceeding without a way back.
     let before_hash = config_hash_after(db, scope).await.unwrap_or_default();
     let pre_rollback_version =
-        record_version(db, scope, "pre-rollback", actor, &before_hash).await?;
-
-    let txn = db.begin().await?;
+        record_version_in(&txn, scope, "pre-rollback", actor, &before_hash)
+            .await?;
     let plan = config_restore::prepare_restore(
         &txn,
         scope,

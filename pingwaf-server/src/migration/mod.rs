@@ -87,6 +87,7 @@ pub mod m20240101_000079_config_version_scope;
 pub mod m20240101_000080_config_backups;
 pub mod m20240101_000081_backup_upload_lease;
 pub mod m20240101_000082_site_downstream_timeout;
+pub mod m20240101_000083_refresh_tokens;
 
 use sea_orm_migration::prelude::*;
 
@@ -189,6 +190,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000080_config_backups::Migration),
             Box::new(m20240101_000081_backup_upload_lease::Migration),
             Box::new(m20240101_000082_site_downstream_timeout::Migration),
+            Box::new(m20240101_000083_refresh_tokens::Migration),
         ]
     }
 }
@@ -200,7 +202,7 @@ mod tests {
     #[test]
     fn migrations_are_ordered_and_unique() {
         let migrations = Migrator::migrations();
-        assert_eq!(migrations.len(), 82);
+        assert_eq!(migrations.len(), 83);
         let names: Vec<String> =
             migrations.iter().map(|m| m.name().to_owned()).collect();
         let mut sorted = names.clone();

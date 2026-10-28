@@ -63,6 +63,9 @@ struct BreakerStateData {
     open_until: Instant,
     /// The number of probes sent in the half-open state
     probes_sent: u32,
+    /// When the half-open probes stop being waited for. A probe whose
+    /// response never arrives must not strand the breaker in HALF_OPEN.
+    half_open_until: Instant,
 }
 
 impl BreakerStateData {
@@ -70,6 +73,7 @@ impl BreakerStateData {
         Self {
             open_until: Instant::now() + open_duration,
             probes_sent: 0,
+            half_open_until: Instant::now(),
         }
     }
 }
@@ -91,6 +95,7 @@ impl BackendCircuitState {
             data: Mutex::new(BreakerStateData {
                 open_until: Instant::now(),
                 probes_sent: 0,
+                half_open_until: Instant::now(),
             }),
         }
     }
@@ -169,8 +174,12 @@ impl BackendCircuitStates {
         };
 
         // The lock was successfully acquired, check the timer
-        if Instant::now() >= data.open_until {
+        let now = Instant::now();
+        if now >= data.open_until {
             data.probes_sent = 1; // Send the first probe
+            // Probes must produce a verdict within one open window; otherwise
+            // a dropped probe leaves the breaker stuck in HALF_OPEN.
+            data.half_open_until = now + self.config.open_duration;
             state
                 .current_state
                 .store(STATE_HALF_OPEN, Ordering::Relaxed);
@@ -186,6 +195,16 @@ impl BackendCircuitStates {
         let Ok(mut data) = state.data.try_lock() else {
             return false; // The lock is being contested, reject
         };
+
+        let now = Instant::now();
+        if now >= data.half_open_until {
+            // No probe was answered in time: return to OPEN and start a new
+            // cooling window instead of rejecting forever.
+            data.probes_sent = 0;
+            data.open_until = now + self.config.open_duration;
+            state.current_state.store(STATE_OPEN, Ordering::Relaxed);
+            return false;
+        }
 
         if data.probes_sent
             < self.config.half_open_consecutive_success_threshold
@@ -343,6 +362,33 @@ mod tests {
     use super::*;
     use http::StatusCode;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn unanswered_half_open_probe_returns_to_open() {
+        let addr = "127.0.0.1:8081";
+        let stats = BackendStats::new(Duration::from_secs(60), vec![]);
+        let states = BackendCircuitStates::new(CircuitBreakerConfig {
+            max_consecutive_failures: 1,
+            max_failure_percent: 0.0,
+            min_requests_threshold: 1,
+            half_open_consecutive_success_threshold: 2,
+            open_duration: Duration::from_millis(30),
+        });
+        stats.on_transport_failure(addr);
+        states.update_state_after_request(addr, true, &stats);
+        assert_eq!(STATE_OPEN, states.get_state_code(addr));
+
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(states.is_backend_acceptable(addr));
+        assert_eq!(STATE_HALF_OPEN, states.get_state_code(addr));
+
+        // The probe is never answered. Without a half-open deadline the
+        // breaker would reject every request forever; it must return to OPEN
+        // and start a fresh cooling window instead.
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(!states.is_backend_acceptable(addr));
+        assert_eq!(STATE_OPEN, states.get_state_code(addr));
+    }
 
     /// Closed -> open on consecutive failures, half-open after the open
     /// duration with a bounded number of probes, closed again after enough

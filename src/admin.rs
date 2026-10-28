@@ -14,10 +14,11 @@
 
 //! Maintenance commands of the `pingwaf` binary.
 //!
-//! [`run`] serves the `user`, `mode` and `security` subcommands. They talk
-//! straight to PostgreSQL instead of the REST API, so they keep working when
-//! the control plane is down, not yet seeded, or its IP allowlist has locked
-//! the operator out — which is exactly when they are needed.
+//! [`run`] serves the `user`, `mode`, `security` and `config` subcommands.
+//! They talk straight to PostgreSQL instead of the REST API, so they keep
+//! working when the control plane is down, not yet seeded, or its IP
+//! allowlist has locked the operator out — which is exactly when they are
+//! needed.
 //!
 //! A *running* control plane notices these writes on its own: the
 //! self-protection refresher and the observation-mode watcher poll their
@@ -603,9 +604,10 @@ async fn config_rollback(opts: ConfigRollbackOpts) -> anyhow::Result<()> {
             format!("no configuration version {}", opts.version)
         })?;
 
-    let scope_label = match row.site_id {
-        Some(id) => format!("site {id}"),
-        None => "the global settings".to_string(),
+    let scope_label = match (row.scope.as_str(), row.site_id) {
+        ("deployment", _) => "the deployment-wide settings".to_string(),
+        (_, Some(id)) => format!("site {id}"),
+        _ => "the global settings".to_string(),
     };
     if !opts.yes {
         println!(
@@ -647,7 +649,7 @@ async fn config_rollback(opts: ConfigRollbackOpts) -> anyhow::Result<()> {
         println!("recorded as new version {new_version}");
     }
     println!(
-        "note: a running control plane is not pushed this change; agents \
+        "note: this change is not pushed to a running control plane; agents \
          pick it up on their next full sync or restart. Use the console \
          rollback for an immediate push."
     );

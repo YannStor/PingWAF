@@ -46,7 +46,7 @@ Run everything in one process with `all-in-one`, or split the control plane
 
 ## 📦 Crate documentation
 
-PingWAF adds six WAF-specific crates on top of the `pingap` proxy foundation.
+PingWAF adds seven WAF-specific crates on top of the `pingap` proxy foundation.
 
 **WAF crates:**
 

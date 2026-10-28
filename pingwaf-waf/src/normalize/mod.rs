@@ -19,7 +19,7 @@ use std::borrow::Cow;
 
 use once_cell::sync::Lazy;
 
-use crate::normalize::body::decode_body;
+use crate::normalize::body::{decode_body, BodyInspection};
 use crate::normalize::html::decode_entities;
 use crate::normalize::path::normalize as normalize_path;
 use crate::normalize::url::multi_decode;
@@ -85,6 +85,10 @@ pub struct NormalizedRequest<'a> {
     /// non-UTF-8 bytes mapped through Latin-1 instead of dropping the whole
     /// body. Borrows the wire bytes when they were already plain UTF-8.
     pub body_text: Option<Cow<'a, str>>,
+    /// Whether `body_text` covers the whole body or only a prefix. The engine
+    /// copies this into the verdict so a truncated/undecoded body can never
+    /// look like a clean pass.
+    pub body_inspection: BodyInspection,
     pub cookies: Vec<(String, String)>,
     /// Flat list of every decoded value the detectors should scan.
     pub decoded_values: Vec<DecodedValue<'a>>,
@@ -226,18 +230,84 @@ pub fn normalize_request<'a>(
     // is undone first, and a body that is not valid UTF-8 is mapped rather
     // than skipped — see `normalize::body` for why the old early exit was an
     // evasion.
-    let body_text = body.and_then(|bytes| decode_body(headers, bytes));
+    let decoded_body = body.and_then(|bytes| decode_body(headers, bytes));
+    let (body_text, body_inspection) = match decoded_body {
+        Some(decoded) => (Some(decoded.text), decoded.inspection),
+        None => (None, BodyInspection::Inspected),
+    };
     let body_values_start = decoded_values.len();
 
     if let Some(text) = body_text.as_deref() {
         // Form-encoded bodies are split into parameters so each value is
         // inspected separately; anything else is scanned as a single blob.
-        let ctype = headers
+        let content_type = headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-            .map(|(_, v)| v.to_ascii_lowercase())
+            .map(|(_, v)| v.as_str())
             .unwrap_or_default();
-        if ctype.contains("application/x-www-form-urlencoded") {
+        let ctype = content_type.to_ascii_lowercase();
+        if ctype.contains("multipart/form-data") {
+            // Boundaries are case-sensitive, so the parser takes the original
+            // header value rather than the lower-cased copy. Textual parts
+            // become typed fields; without that the whole body stayed one
+            // `field: false` blob and a single SQLi/XSS hit only scored 2.
+            if let Some(boundary) = multipart_boundary(content_type) {
+                let delimiter = format!("--{boundary}");
+                for part in text.split(&delimiter) {
+                    let part = part.strip_prefix("\r\n").unwrap_or(part);
+                    if part.is_empty() || part.starts_with("--") {
+                        continue;
+                    }
+                    let Some((head, content)) = part
+                        .split_once("\r\n\r\n")
+                        .or_else(|| part.split_once("\n\n"))
+                    else {
+                        continue;
+                    };
+                    let head_lower = head.to_ascii_lowercase();
+                    // File parts are bytes, not form input: the blob below
+                    // still scans them.
+                    if head_lower.contains("filename=") {
+                        continue;
+                    }
+                    if head_lower.contains("content-type:")
+                        && !head_lower.contains("text/")
+                        && !head_lower.contains("json")
+                        && !head_lower.contains("xml")
+                    {
+                        continue;
+                    }
+                    let content =
+                        content.strip_suffix("\r\n").unwrap_or(content);
+                    let content = content.strip_suffix('\n').unwrap_or(content);
+                    decoded_values.push(DecodedValue {
+                        source: ValueSource::Body,
+                        name: multipart_part_name(head),
+                        // Owned: the part slices borrow the temporarily
+                        // decompressed body, which is moved into the result
+                        // further down.
+                        decoded: Cow::Owned(
+                            decode_value_form(
+                                content,
+                                max_decode_layers,
+                                decode_escapes,
+                            )
+                            .into_owned(),
+                        ),
+                        field: true,
+                    });
+                }
+            }
+            // Keep the raw body as a blob too: file parts are not form
+            // fields, and the blob scan still covers them.
+            let decoded = decode_value(text, max_decode_layers, decode_escapes);
+            decoded_values.push(DecodedValue {
+                source: ValueSource::Body,
+                name: String::new(),
+                decoded: Cow::Owned(decoded.into_owned()),
+                field: false,
+            });
+        } else if ctype.contains("application/x-www-form-urlencoded") {
             parse_form_body(
                 text,
                 max_decode_layers,
@@ -298,6 +368,7 @@ pub fn normalize_request<'a>(
         headers,
         body,
         body_text,
+        body_inspection,
         cookies,
         decoded_values,
     }
@@ -482,6 +553,33 @@ fn parse_query<'a>(
         });
     }
     out
+}
+
+/// The `boundary` parameter of a `multipart/form-data` content type.
+fn multipart_boundary(content_type: &str) -> Option<String> {
+    content_type.split(';').skip(1).find_map(|param| {
+        let (name, value) = param.split_once('=')?;
+        if !name.trim().eq_ignore_ascii_case("boundary") {
+            return None;
+        }
+        let value = value.trim().trim_matches('"');
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
+/// The `name` attribute of a part's `Content-Disposition` header.
+fn multipart_part_name(head: &str) -> String {
+    for line in head.lines() {
+        let lower = line.to_ascii_lowercase();
+        let Some(pos) = lower.find("name=") else {
+            continue;
+        };
+        let rest = line[pos + 5..].trim_start();
+        let rest = rest.strip_prefix('"').unwrap_or(rest);
+        let end = rest.find('"').unwrap_or(rest.len());
+        return rest[..end].to_string();
+    }
+    String::new()
 }
 
 /// Parse a `application/x-www-form-urlencoded` body. Same shape as
@@ -1334,6 +1432,42 @@ mod tests {
         // Incomplete / invalid escapes stay verbatim.
         assert_eq!(decode_escapes(r"\xzz"), r"\xzz");
         assert_eq!(decode_escapes(r"\uD83D"), r"\uD83D");
+    }
+
+    #[test]
+    fn multipart_text_parts_are_typed_fields() {
+        let body = "--XyZ\r\n\
+            Content-Disposition: form-data; name=\"q\"\r\n\r\n\
+            1' OR '1'='1\r\n\
+            --XyZ\r\n\
+            Content-Disposition: form-data; name=\"upload\"; filename=\"a.bin\"\r\n\
+            Content-Type: application/octet-stream\r\n\r\n\
+            BINARY\r\n\
+            --XyZ--\r\n";
+        let headers = vec![(
+            "content-type".to_string(),
+            "multipart/form-data; boundary=XyZ".to_string(),
+        )];
+        let req = normalize_request(
+            "POST",
+            "/upload",
+            "",
+            &headers,
+            Some(body.as_bytes()),
+            3,
+            true,
+        );
+        let field = req
+            .decoded_values
+            .iter()
+            .find(|value| value.field && value.name == "q")
+            .expect("the text part must be a typed field");
+        assert!(field.decoded.contains("1' OR '1'='1"));
+        // The file part is not a form field; it stays in the blob scan.
+        assert!(!req
+            .decoded_values
+            .iter()
+            .any(|value| value.field && value.name == "upload"));
     }
 
     #[test]

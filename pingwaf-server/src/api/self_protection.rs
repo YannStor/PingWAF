@@ -70,6 +70,17 @@ pub const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 /// inspection.
 const WAF_BODY_LIMIT: usize = 128 * 1024;
 
+/// Paths whose handlers accept bodies far larger than [`WAF_BODY_LIMIT`].
+///
+/// The guard must not read these bodies: doing so answers 413 before the
+/// handler runs. They are inspected on metadata only and the body is passed
+/// through untouched (the route's own `DefaultBodyLimit` still applies).
+fn body_inspection_skipped(path: &str) -> bool {
+    path == "/api/v1/login-security/geoip"
+        || (path.starts_with("/api/v1/config-backups/")
+            && path.ends_with("/upload"))
+}
+
 /// Queue depth of the access-log writer. Logging never blocks the request
 /// path: a full queue drops records (with a warning) instead.
 const LOG_QUEUE_CAPACITY: usize = 4096;
@@ -85,11 +96,20 @@ const REQUEST_ID_HEADER: &str = "x-request-id";
 // ─────────────────────────────────────────────────────────────
 
 /// The allowlist: parsed ranges plus a set of single addresses.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Allowlist {
     networks: Vec<IpNet>,
     addresses: HashSet<IpAddr>,
 }
+
+/// Last allowlist that actually contained entries.
+///
+/// A referenced group can be disabled or deleted while the allowlist stays
+/// on; resolving to an empty set would then reject every API caller and lock
+/// the operator out. Keeping the previous set keeps the control plane
+/// reachable, and the warning says why the on-disk config no longer matches.
+static LAST_GOOD_ALLOWLIST: std::sync::LazyLock<Mutex<Option<Allowlist>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
 
 impl Allowlist {
     /// Parses every entry; entries that are neither an address nor a CIDR
@@ -301,6 +321,7 @@ pub async fn effective_allowlist(
     settings: &api_protection_setting::Model,
 ) -> Result<Allowlist, DbErr> {
     let mut ranges = settings.ip_allowlist_ranges.clone();
+    let mut group_unavailable = false;
     if let Some(group_id) = settings.ip_allowlist_group_id {
         let group = ip_groups::Entity::find_by_id(group_id)
             .filter(ip_groups::Column::Enabled.eq(true))
@@ -308,10 +329,13 @@ pub async fn effective_allowlist(
             .await?;
         match group {
             Some(group) => ranges.extend(group.ip_ranges),
-            None => tracing::warn!(
-                group_id = %group_id,
-                "API allowlist references a missing or disabled ip group; only the inline ranges apply"
-            ),
+            None => {
+                group_unavailable = true;
+                tracing::warn!(
+                    group_id = %group_id,
+                    "API allowlist references a missing or disabled ip group; only the inline ranges apply"
+                );
+            },
         }
     }
     let (allowlist, invalid) = Allowlist::parse(ranges);
@@ -320,6 +344,24 @@ pub async fn effective_allowlist(
             invalid = ?invalid,
             "ignoring invalid API allowlist entries"
         );
+    }
+    if allowlist.is_empty() && group_unavailable {
+        let previous = LAST_GOOD_ALLOWLIST
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(previous) = previous {
+            tracing::warn!(
+                "API allowlist would be empty; keeping the last known-good entries to avoid locking the operator out"
+            );
+            return Ok(previous);
+        }
+    }
+    if !allowlist.is_empty() {
+        *LAST_GOOD_ALLOWLIST
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(allowlist.clone());
     }
     Ok(allowlist)
 }
@@ -587,7 +629,7 @@ pub async fn access_log(
     };
     let method = request.method().as_str().to_string();
     let path = request.uri().path().to_string();
-    let query = request.uri().query().map(|value| value.to_string());
+    let query = request.uri().query().map(redact_query);
     let host = header_text(request.headers(), HOST);
     let user_agent = header_text(request.headers(), USER_AGENT);
     let referer = header_text(request.headers(), REFERER);
@@ -702,6 +744,40 @@ pub async fn ip_allowlist(
     response
 }
 
+/// Query parameter names whose values must never be persisted verbatim.
+///
+/// MCP and webhook clients routinely put credentials in the query string; a
+/// control-plane access log that stores it raw leaks them into every backup.
+const SENSITIVE_QUERY_KEYS: [&str; 6] = [
+    "token",
+    "access_token",
+    "api_key",
+    "key",
+    "secret",
+    "password",
+];
+
+/// Replaces the value of known-sensitive query parameters with `[redacted]`.
+fn redact_query(query: &str) -> String {
+    query
+        .split('&')
+        .map(|pair| {
+            let Some((name, _)) = pair.split_once('=') else {
+                return pair.to_string();
+            };
+            if SENSITIVE_QUERY_KEYS
+                .iter()
+                .any(|key| name.eq_ignore_ascii_case(key))
+            {
+                format!("{name}=[redacted]")
+            } else {
+                pair.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
 // ─────────────────────────────────────────────────────────────
 // WAF
 // ─────────────────────────────────────────────────────────────
@@ -736,23 +812,31 @@ pub async fn waf_guard(
     };
 
     let (parts, body) = request.into_parts();
-    let bytes = match axum::body::to_bytes(body, WAF_BODY_LIMIT).await {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            tracing::warn!(error = %err, "control plane request body exceeded the WAF inspection limit");
-            let mut response = error_response(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "request_body_too_large",
-                "request body exceeds the control plane WAF inspection limit",
-            );
-            response.extensions_mut().insert(ProtectionOutcome {
-                action: action::BLOCKED_WAF,
-                reason: Some(format!(
-                    "body larger than {WAF_BODY_LIMIT} bytes was not inspected"
-                )),
-            });
-            return response;
-        },
+    // Upload routes accept bodies far larger than `WAF_BODY_LIMIT`; reading
+    // one here would answer 413 before the handler ever runs. Inspect their
+    // metadata only and hand the untouched body back to the handler.
+    let metadata_only = body_inspection_skipped(parts.uri.path());
+    let (bytes, replay) = if metadata_only {
+        (None, Some(body))
+    } else {
+        match axum::body::to_bytes(body, WAF_BODY_LIMIT).await {
+            Ok(bytes) => (Some(bytes), None),
+            Err(err) => {
+                tracing::warn!(error = %err, "control plane request body exceeded the WAF inspection limit");
+                let mut response = error_response(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "request_body_too_large",
+                    "request body exceeds the control plane WAF inspection limit",
+                );
+                response.extensions_mut().insert(ProtectionOutcome {
+                    action: action::BLOCKED_WAF,
+                    reason: Some(format!(
+                        "body larger than {WAF_BODY_LIMIT} bytes was not inspected"
+                    )),
+                });
+                return response;
+            },
+        }
     };
 
     let request_data = RequestData {
@@ -769,7 +853,10 @@ pub async fn waf_guard(
                     .map(|value| (name.as_str().to_string(), value.to_string()))
             })
             .collect(),
-        body: (!bytes.is_empty()).then(|| bytes.to_vec()),
+        body: bytes
+            .as_ref()
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| bytes.to_vec()),
         client_ip,
         country_code: None,
         scheme,
@@ -777,7 +864,13 @@ pub async fn waf_guard(
     };
     let verdict = engine.inspect(&request_data);
 
-    let request = Request::from_parts(parts, axum::body::Body::from(bytes));
+    let request = match replay {
+        Some(body) => Request::from_parts(parts, body),
+        None => Request::from_parts(
+            parts,
+            axum::body::Body::from(bytes.unwrap_or_default()),
+        ),
+    };
     let blocking = policy.waf_blocking
         && matches!(verdict.action, WafAction::Block | WafAction::Challenge);
     if blocking {
@@ -826,4 +919,30 @@ pub async fn waf_guard(
         });
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{body_inspection_skipped, redact_query};
+
+    #[test]
+    fn large_upload_routes_skip_body_inspection() {
+        assert!(body_inspection_skipped("/api/v1/config-backups/upload"));
+        assert!(body_inspection_skipped("/api/v1/config-backups/abc/upload"));
+        assert!(body_inspection_skipped("/api/v1/login-security/geoip"));
+        assert!(!body_inspection_skipped("/api/v1/config-backups"));
+        assert!(!body_inspection_skipped(
+            "/api/v1/config-backups/abc/download"
+        ));
+        assert!(!body_inspection_skipped("/api/v1/sites"));
+    }
+
+    #[test]
+    fn sensitive_query_values_are_redacted() {
+        assert_eq!(
+            redact_query("a=1&token=secret&api_key=k"),
+            "a=1&token=[redacted]&api_key=[redacted]"
+        );
+        assert_eq!(redact_query("flag"), "flag");
+    }
 }

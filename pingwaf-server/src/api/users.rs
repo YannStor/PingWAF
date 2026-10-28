@@ -19,12 +19,12 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::api::auth::{create_user, normalise_email, UserResponse};
-use crate::api::common::{parse_uuid, Page, Pagination};
+use crate::api::common::{parse_uuid, query_all, Page, Pagination};
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::auth::middleware::AdminUser;
 use crate::auth::password::validate_password;
-use crate::models::{login_history, role, user};
+use crate::models::{role, user};
 
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
@@ -88,15 +88,27 @@ async fn list(
         (chrono::DateTime<chrono::Utc>, String),
     > = std::collections::HashMap::new();
     if !ids.is_empty() {
-        let histories = login_history::Entity::find()
-            .filter(login_history::Column::UserId.is_in(ids))
-            .order_by_desc(login_history::Column::CreatedAt)
-            .all(&state.db)
-            .await?;
-        for entry in histories {
-            latest
-                .entry(entry.user_id)
-                .or_insert((entry.created_at, entry.ip));
+        // `DISTINCT ON` returns one (newest) row per account in a single
+        // query. Fetching the whole history and keeping the first row per
+        // user grew with the audit trail — one page could pull every login
+        // ever recorded for up to 200 accounts.
+        let placeholders = (1..=ids.len())
+            .map(|index| format!("${index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT DISTINCT ON (user_id) user_id, created_at, ip \
+             FROM login_history WHERE user_id IN ({placeholders}) \
+             ORDER BY user_id, created_at DESC"
+        );
+        let values: Vec<sea_orm::Value> =
+            ids.iter().map(|id| (*id).into()).collect();
+        for row in query_all(&state.db, &sql, values).await? {
+            let user_id: Uuid = row.try_get("", "user_id")?;
+            let created_at: chrono::DateTime<chrono::Utc> =
+                row.try_get("", "created_at")?;
+            let ip: String = row.try_get("", "ip")?;
+            latest.insert(user_id, (created_at, ip));
         }
     }
 

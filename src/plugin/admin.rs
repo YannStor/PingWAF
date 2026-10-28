@@ -31,9 +31,9 @@ use humantime::parse_duration;
 use pingap_config::hcl::convert_toml_to_hcl;
 use pingap_config::kdl::convert_toml_to_kdl;
 use pingap_config::{
-    BasicConf, CATEGORY_CERTIFICATE, CATEGORY_STORAGE, Category,
-    CertificateConf, ConfigManager, LocationConf, PluginCategory, PluginConf,
-    ServerConf, StorageConf, UpstreamConf, Validate, format_category,
+    CATEGORY_CERTIFICATE, CATEGORY_STORAGE, Category, CertificateConf,
+    ConfigManager, LocationConf, PluginCategory, PluginConf, ServerConf,
+    StorageConf, UpstreamConf, Validate, format_category,
 };
 use pingap_config::{
     CATEGORY_LOCATION, CATEGORY_PLUGIN, CATEGORY_SERVER, CATEGORY_UPSTREAM,
@@ -630,13 +630,13 @@ impl AdminServe {
                 )
                 .await?;
             },
-            _ => {
-                self.handle_update_config::<BasicConf>(
-                    "",
-                    &buf,
-                    Category::Basic,
-                )
-                .await?;
+            other => {
+                // Treating an unknown category as `basic` silently
+                // overwrote `basic.toml` with the payload meant for
+                // something else.
+                return Err(AdminError::bad_request(format!(
+                    "unknown config category: {other}"
+                )));
             },
         };
 

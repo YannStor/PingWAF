@@ -43,6 +43,7 @@ pub mod oidc_providers;
 pub mod origin_settings;
 pub mod passkeys;
 pub mod rate_limit_stats;
+pub mod refresh_tokens;
 pub mod rewrite_rules;
 pub mod rules;
 pub mod security_events;
@@ -93,6 +94,7 @@ pub use oidc_providers::oidc_providers as oidc_provider;
 pub use passkeys::{
     passkey_credentials as passkey_credential, passkey_states as passkey_state,
 };
+pub use refresh_tokens::refresh_token;
 pub use rules::{
     action, cache_rules, characteristic, mode, rate_limit_rules, rule_groups,
     rules as rule,

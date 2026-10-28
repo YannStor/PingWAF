@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::common::{
-    non_empty, parse_optional_datetime, parse_uuid, query_all, scope_site,
-    Page, Pagination,
+    load_site_read, non_empty, parse_optional_datetime, parse_uuid, query_all,
+    scope_site, Page, Pagination,
 };
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
@@ -161,7 +161,12 @@ async fn resolve_scope(
     scope_site(requested_id, current)?;
 
     if let Some(id) = requested_id {
-        return Ok(Some(vec![id]));
+        // `scope_site` only enforces "non-admins must name a site"; it does
+        // not check ownership. Validate the site here the same way every
+        // other site-scoped handler does, otherwise any viewer can read
+        // another tenant's logs by naming its id.
+        let site = load_site_read(db, id, current).await?;
+        return Ok(Some(vec![site.id]));
     }
     if current.is_admin() {
         return Ok(None);

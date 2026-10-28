@@ -46,15 +46,21 @@ pub struct InflightCounters {
 impl InflightCounters {
     /// Marks one in-flight request for the backend.
     pub fn acquire(&self, addr: &str) {
-        let mut counts =
-            self.counts.lock().expect("inflight counters poisoned");
+        // Recover from a poisoned lock instead of panicking on every later
+        // request; the counter is advisory and a torn update is harmless.
+        let mut counts = self
+            .counts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         *counts.entry(addr.to_string()).or_insert(0) += 1;
     }
 
     /// Marks one finished request for the backend.
     pub fn release(&self, addr: &str) {
-        let mut counts =
-            self.counts.lock().expect("inflight counters poisoned");
+        let mut counts = self
+            .counts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(count) = counts.get_mut(addr) {
             *count -= 1;
         }

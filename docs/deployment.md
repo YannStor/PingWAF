@@ -270,7 +270,7 @@ pingwaf server --db-url "postgres://..." --admin-addr 0.0.0.0:9080 --grpc-addr 0
 
 **Edge Agent:**
 ```bash
-pingwaf agent --server-url "http://control-plane:9090" --api-key "your-agent-key"
+pingwaf agent --server-url "https://control-plane:9090" --server-ca-cert /var/lib/pingwaf/data/grpc-ca.pem --api-key "your-agent-key"
 ```
 
 Generate an agent API key from the dashboard: **Settings → API Keys → Create Key**.
@@ -616,8 +616,8 @@ A hardening pass before exposing the control plane beyond localhost:
 - **Change the default administrator.** First boot seeds
   `admin@pingwaf.local` / `pingwaf123` — the server logs a warning while that
   password is active, and the dashboard forces a password change on first
-  login, but do not leave the seed in place. `pingwaf user add` can create
-  administrators before boot instead.
+  login, but do not leave the seed in place. `pingwaf user add-admin` can
+  create administrators before boot instead.
 - **Give the control plane a real JWT secret.** A placeholder secret (the
   `change-me-…` default or the compose value) makes the server generate and
   persist a random one on first boot, which is safe but rotates whenever the
@@ -692,6 +692,47 @@ tar -czf pingwaf_config_backup.tar.gz /etc/pingwaf/ /var/lib/pingwaf/certs/
 # Remove backups older than 30 days
 0 3 * * * find /backups -name "pingwaf_*.dump" -mtime +30 -delete
 ```
+
+## Maintenance CLI (break-glass)
+
+`pingwaf` carries four maintenance command families that talk **straight to
+PostgreSQL** instead of the REST API, so they keep working when the control
+plane is down, has not been seeded yet, or its own IP allowlist has locked the
+operator out — which is exactly when they are needed. Each one connects with
+`--db-url` (env `PINGWAF_DB_URL`, default
+`postgres://pingwaf:pingwaf@localhost:5432/pingwaf`), does its work and exits.
+Run `pingwaf <command> --help` for the exact options of any of them — plain
+`pingwaf --help` answers with the `pingap`-compatible options of the shared
+binary, not with this subcommand tree.
+
+| Command | Purpose |
+| --- | --- |
+| `pingwaf user list` · `add-admin --email <addr> [--name <name>] [--password <pw>]` · `reset-password --email <addr> [--password <pw>]` | Dashboard accounts. An omitted password is generated and printed once; `reset-password` also revokes that account's sessions. |
+| `pingwaf mode observe` · `mode enforce` · `mode status` | The global observation mode: detect everything, block nothing. |
+| `pingwaf security status` · `security allowlist on\|off [--force]` | The 9080 self-protection switches. `--force` enables the allowlist even when it is empty, which refuses every API caller. |
+| `pingwaf config history` · `config show` · `config rollback` | The configuration version history (see below). |
+
+### `pingwaf config`
+
+```bash
+pingwaf config history [--site <uuid|global>] [--limit <n>]   # newest first, default 20
+pingwaf config show <version> [--json]                        # metadata + snapshot summary
+pingwaf config rollback <version> [--yes]                     # prompts unless --yes
+```
+
+`history` lists recorded versions newest first and filters them to one site
+(its UUID) or to the deployment-wide settings (`--site global`); `--limit`
+caps how many are printed (default 20). `show` prints one version's metadata
+plus a snapshot summary, or the whole snapshot as JSON with `--json`.
+`rollback` restores a version and records the restore as a new version
+attributed to `cli`, so rolling back a rollback works and the history stays
+linear.
+
+**A CLI rollback does not notify a running control plane.** It writes the rows
+directly to PostgreSQL, so agents pick the restored configuration up on their
+next full sync or restart — use the console rollback
+(`POST /config-versions/{id}/rollback`, see [docs/api.md](./api.md)) when the
+change has to reach the fleet immediately.
 
 ## Upgrade Procedure
 

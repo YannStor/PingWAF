@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-PingWAF is a distributed, centrally-controlled Web Application Firewall built on `pingap`, a Cloudflare-Pingora-based reverse proxy. The `pingap` proxy engine plus all reusable logic lives in the `pingap-*` workspace crates; the WAF layer adds six `pingwaf-*` crates (`proto`, `server`, `agent`, `waf`, `challenge`, `pprof`). The binary lives in `src/`; the top-level `src/pingwaf.rs` translates the DB-backed control-plane model into a `pingap` config. MSRV is `1.96.0` (Rust edition 2024). Pingora is `0.9.0` from crates.io; only the `lb`/`cache` features are enabled there, and the TLS backend feature (pingora's `openssl` or `rustls`) is added by pingap's own top-level `openssl` / `tls-rustls` features. The three `pingora*` entries in `[workspace.dependencies]` must always name the same version, or cargo resolves two copies of `pingora-core`.
+PingWAF is a distributed, centrally-controlled Web Application Firewall built on `pingap`, a Cloudflare-Pingora-based reverse proxy. The `pingap` proxy engine plus all reusable logic lives in the `pingap-*` workspace crates; the WAF layer adds seven `pingwaf-*` crates (`proto`, `server`, `agent`, `waf`, `challenge`, `profiler`, `system`). The binary lives in `src/`; the top-level `src/pingwaf.rs` translates the DB-backed control-plane model into a `pingap` config. MSRV is `1.96.0` (Rust edition 2024). Pingora is `0.9.0` from crates.io; only the `lb`/`cache` features are enabled there, and the TLS backend feature (pingora's `openssl` or `rustls`) is added by pingap's own top-level `openssl` / `tls-rustls` features. The three `pingora*` entries in `[workspace.dependencies]` must always name the same version, or cargo resolves two copies of `pingora-core`.
 
 The workspace is a **hard fork** of upstream `pingap`: inherited crates are maintained here, synced from upstream manually per fix. Ownership, sync procedure and test ownership are documented in [UPSTREAM.md](./UPSTREAM.md).
 
@@ -156,29 +156,30 @@ CLI flags worth knowing: `-c/--conf <url>`, `-d/--daemon`, `-u/--upgrade` (hot u
 
 ## CI gates
 
-`.github/workflows/ci.yml` runs every gate listed below on pushes to `main` and on pull requests; any one of them failing breaks the build. It has three jobs: `rust` (fmt / clippy `--features full -D warnings` / `cargo build --release --bin pingwaf --features full` / `cargo test --workspace --features full --no-fail-fast` / `cargo check --workspace --no-default-features --features tls-rustls,full` / `typos`), `web` (`npm ci` / `npm run lint` / `npm test` / `npm run build` in `web/`), and `docker`, which builds the amd64 image and pushes the `ghcr.io/shuaizend/pingwaf:main` **snapshot** tag — the `docker` job only runs on pushes to `main`, never on a PR. The versioned `:latest` / `:<major.minor>` / `:<version>` multi-arch manifests are published by `release.yml` (tag-triggered), which also builds the tarballs `install.sh` downloads.
+`.github/workflows/ci.yml` runs every gate listed below on pushes to `main` and on pull requests; any one of them failing breaks the build. It has eight jobs: `changes` (paths filter), `rust` (fmt / clippy `--features full -D warnings` / `cargo nextest run --workspace --features full --no-fail-fast` plus `cargo test --doc` / `typos`, on the MSRV and stable legs), `rustls` (clippy + nextest with `--no-default-features --features tls-rustls,full`), `web` (`npm ci` / `npm run lint` / `npm test` / `npm run build` in `web/`), `dockerfile` (builds only the `frontend-builder` stage of `Dockerfile` and `Dockerfile.perf`, `push: false`), `release-binary` (`cargo build --release --bin pingwaf --features full`), `docs` (`./scripts/check-docs-prompts.sh`, always runs, even on docs-only PRs), and `docker`, which packs the `release-binary` artifact into the amd64 image and pushes the `ghcr.io/shuaizend/pingwaf:main` **snapshot** tag — `release-binary` and `docker` only run on pushes to `main`, never on a PR. The versioned `:latest` / `:<major.minor>` / `:<version>` multi-arch manifests are published by `release.yml` (tag-triggered), which also builds the tarballs `install.sh` downloads.
 
 Every cargo build in `ci.yml`, `release.yml`, `Dockerfile` and `Dockerfile.perf` carries `--locked`, so a manifest that no longer agrees with the committed `Cargo.lock` fails the build instead of silently resolving a different dependency set — the failure mode behind a security floor that exists in the manifest but not in what actually gets compiled. `cargo fmt` and `cargo audit` are deliberately unchanged: fmt does not resolve dependencies, and `cargo audit` reads the committed lock file rather than re-resolving the graph. Reproduce locally with the corresponding command (`make lint` / `make test` wrap the same cargo calls without `--locked`; add it when running cargo directly):
 
-Note that the source-build `Dockerfile` is not exercised by any workflow — CI and the release pipeline build `Dockerfile.runtime` from a prebuilt binary, and only `release-perf.yml` (manual dispatch) builds `Dockerfile.perf`. A change to the source `Dockerfile` therefore reaches production without a CI check; verify it with `docker build .` locally.
+Note that CI and the release pipeline build `Dockerfile.runtime` from a prebuilt binary, and only `release-perf.yml` (manual dispatch) builds `Dockerfile.perf` in full. The source `Dockerfile`'s Rust build stage is therefore never built by a workflow — the `dockerfile` job compiles only its `frontend-builder` stage, which is where the cheap mistakes live (the `.npmrc` COPY, the pinned Node tag, `npm ci` under `engine-strict`). A change to the Rust stage reaches production without a CI check; verify it with `docker build .` locally.
 
-| CI step | Local equivalent |
+| Gate | Local equivalent |
 |---|---|
 | `cargo fmt --all -- --check` | `make fmt` (auto-fixes) or run the check directly |
 | `make lint` (typos + clippy `--features=full -D warnings`) | `make lint` |
-| `cargo machete` | `cargo install cargo-machete@0.9.1 && cargo machete` — `Cargo.toml` whitelists `humantime-serde`, `hcl-rs`, `kdl` in `[package.metadata.cargo-machete]` |
-| `make test` (`cargo test --workspace --features=full`) | `make test` |
-| `make lint-rustls` + `make test-rustls` (rustls TLS backend; full suite on stable, `cargo check --features tls-rustls,full` on MSRV) | `make lint-rustls && make test-rustls` |
-| `cargo msrv list` | `cargo install cargo-msrv --version 0.18.4 && cargo msrv list` |
-| `cargo llvm-cov` | `make cov` |
-| `make release-all` (builds both `pingap` and `pingap-full`) | `make release-all` |
-| `make build-web` (web assets) | `make build-web` |
+| `cargo machete` (local only — no workflow runs it) | `cargo install cargo-machete@0.9.1 && cargo machete` — `Cargo.toml` whitelists `humantime-serde`, `hcl-rs`, `kdl` in `[package.metadata.cargo-machete]` |
+| `cargo nextest run --workspace --features full` + `cargo test --doc` | `make test` (`cargo test --workspace --features=full`) |
+| `cargo clippy` + `cargo nextest run` with `--no-default-features --features tls-rustls,full` | `make lint-rustls && make test-rustls` |
+| `cargo msrv list` (local only — no workflow runs it) | `cargo install cargo-msrv --version 0.18.4 && cargo msrv list` |
+| `cargo llvm-cov` (local only — no workflow runs it) | `make cov` |
+| `cargo build --release --bin pingwaf --features full` (`release-binary` job) | `make release-full` |
+| `make release-all` (builds `pingwaf-full`, then `pingwaf`) | `make release-all` |
+| `make build-web` (web assets; the `web` job runs the same npm steps in `web/`, without the copy to the repo root) | `make build-web` |
 
 ### Release toolchain vs MSRV
 
 The MSRV (`rust-version` in `Cargo.toml`, `msrv` in `clippy.toml`) is a floor that CI proves on `stable`. Release binaries are built with a **pinned recent stable**, deliberately newer: the `dtolnay/rust-toolchain@1.98.1` pin in `.github/workflows/release.yml` and the `FROM rust:1.98.1-bookworm` line in the `Dockerfile` are one setting and move together.
 
-`release.yml` triggers on a `v*` tag and releases **Linux only** (`shuaiZend/PingWAF` does not ship macOS or Windows binaries). Two matrix legs (`linux/amd64`, `linux/arm64`) each build `--features tracing` with the default OpenSSL backend and publish **two tarballs per arch**: `pingwaf-linux-amd64.tar.gz` and `pingwaf-linux-arm64.tar.gz`, each with a `.sha256` sidecar. `install.sh` resolves exactly those names as `pingwaf-${OS}-${ARCH}.tar.gz` from the release URL — the names must not drift. There is no rustls tarball and no `PINGAP_TLS` selection in `install.sh`.
+`release.yml` triggers on a `v*` tag and releases **Linux only** (`shuaiZend/PingWAF` does not ship macOS or Windows binaries). Two matrix legs (`linux/amd64`, `linux/arm64`) each build `--features tracing` with the default OpenSSL backend and publish **two archives per arch**: `pingwaf-linux-<arch>.tar.xz` (primary, smaller) and `pingwaf-linux-<arch>.tar.gz` (legacy fallback), each with a `.sha256` sidecar. `install.sh` resolves `pingwaf-${OS}-${ARCH}.${ext}` for `ext` in `tar.xz` then `tar.gz` from the release URL — the names must not drift. There is no rustls tarball and no `PINGAP_TLS` selection in `install.sh`.
 
 The `docker` and `docker-manifest` jobs then build per-arch images from `Dockerfile.runtime` and merge them into `ghcr.io/shuaizend/pingwaf:{<version>,<major.minor>,latest}`.
 
@@ -253,11 +254,11 @@ The Chinese tree is a **maintained translation**, not a generated one: adding an
 
 ```bash
 ./scripts/build-website.sh
-python3 -m http.server -d website 8080   # /en/ and /zh/
+cd website && npm run docs:dev        # VitePress dev server; / is English, /zh/ is Chinese
 ```
 
-Generated (gitignored — never edit directly): `website/index.md`, `website/plugins/`, `website/crates/`, `website/guide/`, `website/zh/`, `website/en/`, `website/README.md`, `website/_sidebar.md`, `website/_navbar.md`, `website/assets/docsify-app.js`, `website/assets/style.css`.
+Generated (gitignored — never edit directly): `website/index.md`, `website/plugins/`, `website/crates/`, `website/guide/`, `website/zh/`. The `website/en/`, `website/README.md`, `website/_sidebar.md`, `website/_navbar.md` and `website/assets/*` entries that `.gitignore` still lists are docsify leftovers the script only deletes.
 
-Hand-maintained and tracked: `website/index.html`, `website/BUILD.md`, `website/package.json`, `website/.nojekyll`, `website/public/`, and the VitePress config `website/.vitepress/config.mts` plus `website/.vitepress/theme/`. Only `website/.vitepress/{dist,cache}/` and `website/node_modules/` are ignored.
+Hand-maintained and tracked: `website/BUILD.md`, `website/package.json`, `website/package-lock.json`, `website/.nojekyll`, `website/public/`, and the VitePress config `website/.vitepress/config.mts` plus `website/.vitepress/theme/`. Only `website/.vitepress/{dist,cache}/` and `website/node_modules/` are ignored.
 
 A Pages deploy would need to rerun the script and publish on pushes that touch `website/**`, `scripts/build-website.sh`, `pingap-*/README.md`, `pingap-plugin/docs/**`, `docs/**`, `examples/README.md`, `README.md` or `README_zh.md`. **No workflow does this today** — `website/BUILD.md` documents the manual steps and flags the missing `pages.yml`.

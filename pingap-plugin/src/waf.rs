@@ -1967,6 +1967,23 @@ fn deferred_body_max_entries(max_body_size: usize) -> usize {
 static DEFERRED_BODY: LazyLock<DashMap<String, DeferredBody>> =
     LazyLock::new(DashMap::new);
 
+/// Request ids whose staged body expired before it finished. A chunk that
+/// arrives afterwards must be rejected, not passed upstream uninspected.
+static SWEPT_BODIES: LazyLock<DashMap<String, Instant>> =
+    LazyLock::new(DashMap::new);
+
+/// Verdict snapshots parked for requests whose body cannot be predicted from
+/// the headers — h2/h3 GET/HEAD carry a body with neither `Content-Length`
+/// nor `Transfer-Encoding`, and the body is delimited by END_STREAM. The
+/// entry is created only when the first chunk actually arrives, so a bodyless
+/// GET never pays for a staging slot.
+static LAZY_WAF_STAGE: LazyLock<DashMap<String, (Instant, DeferredVerdict)>> =
+    LazyLock::new(DashMap::new);
+
+/// Upper bound on parked verdicts, so a flood of bodyless h2 GETs cannot turn
+/// the lazy table into an unbounded map.
+const LAZY_WAF_STAGE_MAX: usize = 4096;
+
 /// Decides what happens to one streaming body chunk. Pure so the staging
 /// state machine is unit-testable without a proxy session.
 ///
@@ -2033,12 +2050,74 @@ pub fn sweep_stale_access(ttl: Duration) -> usize {
             emit_access(agent, &request_id, pending, facts);
         }
     }
-    // Body-staging entries abandoned mid-exchange — a client that vanished
-    // while sending, or an upstream that answered before the body was fully
-    // read — hold staged bytes hostage. Drop them on the same window.
-    let before = DEFERRED_BODY.len();
-    DEFERRED_BODY.retain(|_, v| v.created_at.elapsed() < ttl);
-    swept + (before - DEFERRED_BODY.len())
+    // Body-staging entries expire on their own deadline, not on a second,
+    // longer timer. `created_at + ttl` used to remove them silently before
+    // the deadline branch could run, so a client that sent headers and then
+    // waited got an uninspected body with no event. The tombstone makes a
+    // late chunk fail closed instead of flowing through.
+    let now = Instant::now();
+    SWEPT_BODIES.retain(|_, expires| *expires > now);
+    let expired_bodies: Vec<String> = DEFERRED_BODY
+        .iter()
+        .filter(|entry| now >= entry.value().deadline)
+        .map(|entry| entry.key().clone())
+        .collect();
+    for request_id in &expired_bodies {
+        let Some((_, body)) = DEFERRED_BODY.remove(request_id) else {
+            continue;
+        };
+        if !body.inspect || body.passthrough {
+            continue;
+        }
+        warn!(
+            request_id = %request_id,
+            "body stage expired; a late chunk will be rejected"
+        );
+        SWEPT_BODIES.insert(request_id.clone(), now + Duration::from_secs(300));
+    }
+    LAZY_WAF_STAGE.retain(|_, (created, _)| created.elapsed() < ttl);
+    swept + expired_bodies.len()
+}
+
+/// Security event for a body that was only partly inspected.
+///
+/// The prefix cap is a deliberate trade-off, but it must be visible: without
+/// this event an operator cannot tell "checked and clean" from "checked the
+/// first 64 KiB and forwarded the rest".
+fn body_prefix_event(
+    dv: &DeferredVerdict,
+    request_id: &str,
+    details: &str,
+) -> SecurityEvent {
+    SecurityEvent {
+        site_id: dv.site_id.clone(),
+        request_id: request_id.to_string(),
+        client_ip: dv.request_data.client_ip.clone(),
+        method: dv.request_data.method.clone(),
+        scheme: dv.request_data.scheme.clone(),
+        protocol: dv.request_data.protocol.clone(),
+        host: dv.host.clone(),
+        path: dv.request_data.path.clone(),
+        query_string: dv.request_data.query.clone(),
+        rule_id: String::new(),
+        enforced_rule_id: String::new(),
+        rule_name: String::new(),
+        event_type: "body_prefix_only".to_string(),
+        action: "pass".to_string(),
+        score: 0,
+        details: details.to_string(),
+        response_status: 0,
+        user_agent: dv
+            .request_data
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default(),
+        country_code: dv.request_data.country_code.clone().unwrap_or_default(),
+        matched_tags: Vec::new(),
+        user_identity: String::new(),
+    }
 }
 
 /// Emit an access log entry, either when the response is complete or
@@ -2351,6 +2430,14 @@ pub struct WafPlugin {
     /// Max time a body may stay withheld from the upstream before the
     /// fail-open flush (`min(configured, 30s)`, default 30s).
     body_stage_timeout: Duration,
+    /// What to do when the staging budget runs out. `balanced` (default)
+    /// forwards the checked prefix and emits `body_prefix_only`; `strict`
+    /// rejects instead of forwarding an uninspected tail.
+    body_stage_policy: BodyStagePolicy,
+    /// What to do when `Content-Encoding` cannot be undone. `inspect_wire`
+    /// (default) scans the encoded bytes and marks the body uninspected;
+    /// `reject` answers 415.
+    encoded_body_policy: EncodedBodyPolicy,
     hash_value: String,
     /// Per-domain engines built from agent rules, keyed by host.
     site_contexts: DashMap<String, CachedSite>,
@@ -2366,6 +2453,45 @@ pub struct WafPlugin {
     /// Rate limit counters, keyed by rule id and characteristic values. Kept
     /// on the plugin so they survive per-site context rebuilds.
     rate_counters: DashMap<String, RateCounter>,
+}
+
+/// How a body whose staging budget ran out is handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyStagePolicy {
+    /// Inspect the prefix, forward the rest, emit an event (default).
+    Balanced,
+    /// Reject instead of forwarding an uninspected tail.
+    Strict,
+    /// Do not withhold bytes at all; the body is marked uninspected.
+    Throughput,
+}
+
+impl BodyStagePolicy {
+    fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "strict" | "fail_closed" | "fail-closed" => Self::Strict,
+            "throughput" => Self::Throughput,
+            _ => Self::Balanced,
+        }
+    }
+}
+
+/// How a body with an encoding we cannot undo is handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncodedBodyPolicy {
+    /// Scan the wire bytes and mark the body uninspected (default).
+    InspectWire,
+    /// Reject with 415.
+    Reject,
+}
+
+impl EncodedBodyPolicy {
+    fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "reject" | "fail_closed" | "fail-closed" => Self::Reject,
+            _ => Self::InspectWire,
+        }
+    }
 }
 
 fn parse_mode(value: &str) -> WafMode {
@@ -2487,15 +2613,27 @@ fn build_site_engine(cfg: &CacheWafConfig) -> WafEngine {
                     return None;
                 },
             };
-            CompiledRule::compile(
+            match CompiledRule::compile(
                 r.id.clone(),
                 r.name.clone(),
                 &r.expression,
                 action,
                 r.severity as u8,
                 r.tags.clone(),
-            )
-            .ok()
+            ) {
+                Ok(rule) => Some(rule),
+                Err(err) => {
+                    // Dropping a rule silently means the console shows it in
+                    // force while nothing matches: say so, loudly and once per
+                    // rebuild.
+                    warn!(
+                        rule_id = %r.id,
+                        error = %err,
+                        "custom WAF rule skipped: the expression could not be compiled"
+                    );
+                    None
+                },
+            }
         })
         .collect();
 
@@ -2684,6 +2822,21 @@ impl WafPlugin {
         match verdict.matched_rules.first() {
             Some(id) if id.starts_with("PINGWAF-") => "managed",
             _ => "waf",
+        }
+    }
+
+    /// Event type for a body that was not fully inspected.
+    ///
+    /// A clean verdict still carries the inspection marker in `details`;
+    /// without this event the operator could not tell a fully inspected body
+    /// from one that was decoded only in part.
+    fn body_inspection_event(verdict: &WafVerdict) -> Option<&'static str> {
+        if verdict.details.contains("body=uninspected") {
+            Some("body_encoded_uninspected")
+        } else if verdict.details.contains("body=prefix") {
+            Some("body_expanded_cap")
+        } else {
+            None
         }
     }
 
@@ -2992,6 +3145,21 @@ impl WafPlugin {
             },
         };
 
+        // An encoding we cannot undo means the body was never really
+        // inspected. `reject` turns that into a 415 instead of a clean pass.
+        if self.encoded_body_policy == EncodedBodyPolicy::Reject
+            && verdict.details.contains("body=uninspected")
+        {
+            if let Some(agent) = agent {
+                agent.record_request(false);
+            }
+            return VerdictOutcome::Respond(
+                HttpResponse::builder(http::StatusCode::UNSUPPORTED_MEDIA_TYPE)
+                    .no_store()
+                    .finish(),
+            );
+        }
+
         // Custom rule ids carry no name of their own; the site context maps
         // the one that fired back to its configured name.
         let rule_name_of = |verdict: &WafVerdict| -> String {
@@ -3013,6 +3181,17 @@ impl WafPlugin {
         };
 
         if verdict.action == WafAction::Pass {
+            if let Some(event_type) = Self::body_inspection_event(&verdict) {
+                Self::log_event(
+                    site_id,
+                    request_id,
+                    host,
+                    request_data,
+                    &verdict,
+                    "body_inspection",
+                    event_type,
+                );
+            }
             if let Some(agent) = agent {
                 agent.record_request(false);
             }
@@ -3174,6 +3353,12 @@ impl TryFrom<&PluginConf> for WafPlugin {
         // Mirrors the site's `downstream_read_timeout`: withheld bodies are
         // released once the client stops making progress. Hard-capped at
         // 30s; unset means 30s.
+        let body_stage_policy =
+            BodyStagePolicy::parse(&get_str_conf(value, "body_stage_policy"));
+        let encoded_body_policy = EncodedBodyPolicy::parse(&get_str_conf(
+            value,
+            "encoded_body_policy",
+        ));
         let body_stage_timeout =
             stage_deadline_timeout(Some(Duration::from_secs(
                 get_int_conf_or_default(
@@ -3231,6 +3416,8 @@ impl TryFrom<&PluginConf> for WafPlugin {
             max_body_size,
             pow_difficulty,
             body_stage_timeout,
+            body_stage_policy,
+            encoded_body_policy,
             hash_value,
             site_contexts: DashMap::new(),
             site_contexts_by_id: DashMap::new(),
@@ -3966,17 +4153,47 @@ impl Plugin for WafPlugin {
             };
             let inspect = should_inspect && engine_runs;
             let max_entries = deferred_body_max_entries(self.max_body_size);
+            // One site must not be able to exhaust the process-wide pool and
+            // turn every other site into a 503. The per-site scan is only
+            // paid for once the pool is under pressure; below that the global
+            // limit already bounds memory.
+            let site_quota = (max_entries / 4).max(1);
+            let site_saturated = DEFERRED_BODY.len() >= max_entries / 2
+                && DEFERRED_BODY
+                    .iter()
+                    .filter(|entry| {
+                        entry
+                            .value()
+                            .deferred
+                            .as_ref()
+                            .is_some_and(|dv| dv.site_id == site_id)
+                    })
+                    .count()
+                    >= site_quota;
             if DEFERRED_BODY.len() >= max_entries {
                 DEFERRED_BODY
                     .retain(|_, v| v.created_at.elapsed() < PENDING_ACCESS_TTL);
             }
-            if DEFERRED_BODY.len() >= max_entries {
-                // Fail-open: no staging, the body streams through
-                // uninspected (matches the timeout path).
+            if site_saturated || DEFERRED_BODY.len() >= max_entries {
+                // The staging pool is saturated: inspecting this body is not
+                // possible, and forwarding it uninspected would hand an
+                // attacker a process-wide bypass. Fail closed instead, and
+                // only for the site that exceeded its own quota.
                 if let Some(agent) = &agent {
                     agent.record_request(false);
                 }
-                return Ok(RequestPluginResult::Continue);
+                warn!(
+                    request_id = %request_id,
+                    site_id = %site_id,
+                    "body stage pool exhausted; rejecting request"
+                );
+                return Ok(RequestPluginResult::Respond(
+                    HttpResponse::builder(
+                        http::StatusCode::SERVICE_UNAVAILABLE,
+                    )
+                    .no_store()
+                    .finish(),
+                ));
             }
             DEFERRED_BODY.insert(
                 request_id.clone(),
@@ -4003,6 +4220,40 @@ impl Plugin for WafPlugin {
                         ) as u64),
                 },
             );
+        } else if wants_body
+            && !(request_data.method == "POST"
+                && request_data.path == VERIFY_ENDPOINT)
+        {
+            // GET/HEAD without CL/TE: h2/h3 may still carry a body. Park the
+            // verdict and let the first chunk decide whether to stage it.
+            let engine_runs = match &choice {
+                EngineChoice::Site(_) => true,
+                EngineChoice::Base => self.mode != WafMode::Off,
+                EngineChoice::Disabled | EngineChoice::FailClosed => false,
+            };
+            if should_inspect && engine_runs {
+                if LAZY_WAF_STAGE.len() >= LAZY_WAF_STAGE_MAX {
+                    warn!(
+                        request_id = %request_id,
+                        "lazy body stage table full; h2/h3 body cannot be staged"
+                    );
+                    return Ok(RequestPluginResult::Continue);
+                }
+                LAZY_WAF_STAGE.insert(
+                    request_id.clone(),
+                    (
+                        Instant::now(),
+                        DeferredVerdict {
+                            choice: choice.clone(),
+                            context: context.clone(),
+                            observe,
+                            site_id: site_id.clone(),
+                            host: host.clone(),
+                            request_data: request_data.clone(),
+                        },
+                    ),
+                );
+            }
         }
 
         Ok(match outcome {
@@ -4026,9 +4277,54 @@ impl Plugin for WafPlugin {
         };
         // Take the entry out: every path below either completes it (and
         // leaves it out) or re-inserts it for the next chunk.
-        let Some(mut entry) = DEFERRED_BODY.remove(&request_id).map(|e| e.1)
-        else {
-            return Ok(None);
+        let mut entry = match DEFERRED_BODY.remove(&request_id).map(|e| e.1) {
+            Some(entry) => entry,
+            None => {
+                // h2/h3 GET/HEAD: the verdict was parked because the headers
+                // could not tell whether a body would follow.
+                if let Some((_, (created_at, dv))) =
+                    LAZY_WAF_STAGE.remove(&request_id)
+                {
+                    let timeout = effective_body_stage_timeout(
+                        dv.context.as_ref().map(|c| c.body_stage_timeout_secs),
+                        Some(self.body_stage_timeout.as_secs() as i64),
+                    ) as u64;
+                    DeferredBody {
+                        buffer: BytesMut::new(),
+                        passthrough: false,
+                        inspect: true,
+                        log_prefix: LogBodyPrefix::new(log_body_limit()),
+                        deferred: Some(dv),
+                        created_at,
+                        deadline: Instant::now() + Duration::from_secs(timeout),
+                    }
+                } else {
+                    // The stage expired (see `sweep_stale_access`): the body
+                    // that arrives now can no longer be inspected, so it must
+                    // not reach the upstream. Reject instead of silently
+                    // passing it through.
+                    let expired = SWEPT_BODIES
+                        .get(&request_id)
+                        .map(|expires| *expires.value());
+                    if let Some(expires) = expired
+                        && Instant::now() < expires
+                    {
+                        warn!(
+                            request_id = %request_id,
+                            "body arrived after its stage expired; rejecting"
+                        );
+                        return Ok(Some(
+                            HttpResponse::builder(
+                                http::StatusCode::REQUEST_TIMEOUT,
+                            )
+                            .no_store()
+                            .finish(),
+                        ));
+                    }
+                    SWEPT_BODIES.remove(&request_id);
+                    return Ok(None);
+                }
+            },
         };
         // Body staging is the one WAF stage that can hold megabytes per
         // in-flight request, so it gets its own module and method row.
@@ -4050,6 +4346,17 @@ impl Plugin for WafPlugin {
             && !entry.passthrough
             && Instant::now() >= entry.deadline
         {
+            if self.body_stage_policy == BodyStagePolicy::Strict {
+                warn!(
+                    request_id = %request_id,
+                    "body stage timeout; rejecting (strict policy)"
+                );
+                return Ok(Some(
+                    HttpResponse::builder(http::StatusCode::REQUEST_TIMEOUT)
+                        .no_store()
+                        .finish(),
+                ));
+            }
             warn!(
                 request_id = %request_id,
                 "body stage timeout; flushing withheld body upstream (fail-open)"
@@ -4136,6 +4443,32 @@ impl Plugin for WafPlugin {
                         *body = Some(Bytes::new());
                     },
                     StageAction::Flush(staged) => {
+                        if self.body_stage_policy == BodyStagePolicy::Strict {
+                            warn!(
+                                request_id = %request_id,
+                                "body exceeded the inspection cap; rejecting (strict policy)"
+                            );
+                            return Ok(Some(
+                                HttpResponse::builder(
+                                    http::StatusCode::PAYLOAD_TOO_LARGE,
+                                )
+                                .no_store()
+                                .finish(),
+                            ));
+                        }
+                        warn!(
+                            request_id = %request_id,
+                            "body exceeded the inspection cap; only the prefix is inspected"
+                        );
+                        if let Some(agent) = PingWafAgent::instance()
+                            && let Some(dv) = entry.deferred.as_ref()
+                        {
+                            agent.log_security_event(body_prefix_event(
+                                dv,
+                                &request_id,
+                                "request body exceeded max_body_size; only the prefix was inspected",
+                            ));
+                        }
                         // The cap was hit mid-body: what is staged (prefix
                         // plus this chunk) is inspected once, here, while
                         // the upstream still has no body byte; the rest of
@@ -4689,6 +5022,49 @@ ml_threshold = 0.75
         // Block rule: fully enforced.
         let v = engine.inspect(&probe("?q=blkmark"));
         assert_eq!(v.action, WafAction::Block, "details: {}", v.details);
+    }
+
+    #[test]
+    fn body_policies_parse_with_safe_defaults() {
+        assert_eq!(BodyStagePolicy::parse(""), BodyStagePolicy::Balanced);
+        assert_eq!(BodyStagePolicy::parse("STRICT"), BodyStagePolicy::Strict);
+        assert_eq!(
+            BodyStagePolicy::parse("fail-closed"),
+            BodyStagePolicy::Strict
+        );
+        assert_eq!(
+            EncodedBodyPolicy::parse(""),
+            EncodedBodyPolicy::InspectWire
+        );
+        assert_eq!(
+            EncodedBodyPolicy::parse("reject"),
+            EncodedBodyPolicy::Reject
+        );
+    }
+
+    #[test]
+    fn body_inspection_event_names_the_reason() {
+        let pass = |details: &str| WafVerdict {
+            action: WafAction::Pass,
+            score: 0,
+            matched_rules: Vec::new(),
+            enforced_rule_id: None,
+            details: details.to_string(),
+            breakdown: ScoreBreakdown::clean(),
+        };
+        assert_eq!(WafPlugin::body_inspection_event(&pass("")), None);
+        assert_eq!(
+            WafPlugin::body_inspection_event(&pass(
+                "body=uninspected(unsupported-content-encoding:br)"
+            )),
+            Some("body_encoded_uninspected")
+        );
+        assert_eq!(
+            WafPlugin::body_inspection_event(&pass(
+                "body=prefix(checked=1048576, reason=DecompressedCap)"
+            )),
+            Some("body_expanded_cap")
+        );
     }
 
     #[test]
@@ -5686,8 +6062,10 @@ inspect_body = true"###,
             Arc::clone(&rule_cache),
             Arc::clone(&metrics),
         ));
+        let agent_id = config.resolved_agent_id();
         let agent = Arc::new(PingWafAgent {
             config,
+            agent_id,
             client,
             rule_cache,
             metrics,

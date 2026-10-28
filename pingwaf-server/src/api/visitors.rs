@@ -36,7 +36,7 @@ use uuid::Uuid;
 
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
-use crate::auth::password::{hash_password, MIN_PASSWORD_LENGTH};
+use crate::auth::password::{hash_password_offloaded, MIN_PASSWORD_LENGTH};
 use crate::auth::AdminUser;
 use crate::models::{site, site_visitor, visitor_site_grant};
 
@@ -171,11 +171,13 @@ async fn create(
         validate_remark(payload.remark.as_deref().unwrap_or_default())?;
     // `hash_password` enforces the same minimum length and 72-byte truncation
     // the console's own accounts use, so one policy governs both.
-    let hash = hash_password(&payload.password).map_err(|error| {
-        ApiError::BadRequest(format!(
-            "password must be at least {MIN_PASSWORD_LENGTH} characters ({error})"
-        ))
-    })?;
+    let hash = hash_password_offloaded(payload.password.clone())
+        .await
+        .map_err(|error| {
+            ApiError::BadRequest(format!(
+                "password must be at least {MIN_PASSWORD_LENGTH} characters ({error})"
+            ))
+        })?;
 
     // A unique email is what makes a sign-in unambiguous; the database would
     // answer a 500 for the constraint, and this says what happened.
@@ -254,11 +256,13 @@ async fn update(
         touched = true;
     }
     if let Some(password) = payload.password {
-        let hash = hash_password(&password).map_err(|error| {
-            ApiError::BadRequest(format!(
-                "password must be at least {MIN_PASSWORD_LENGTH} characters ({error})"
-            ))
-        })?;
+        let hash = hash_password_offloaded(password.clone())
+            .await
+            .map_err(|error| {
+                ApiError::BadRequest(format!(
+                    "password must be at least {MIN_PASSWORD_LENGTH} characters ({error})"
+                ))
+            })?;
         active.password_hash = Set(hash);
         // Bumping the version invalidates every session already issued, which
         // is what makes an operator's password reset actually end the sessions

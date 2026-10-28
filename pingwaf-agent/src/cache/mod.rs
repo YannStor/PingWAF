@@ -1544,11 +1544,20 @@ impl RuleCache {
             // are normalised the same way as insertion keys below, so an
             // entry written as `EXAMPLE.com` is still findable for cleanup.
             if let Some(old_site) = updated.sites.get(&site_id) {
-                updated
-                    .domain_index
-                    .remove(normalize_host(&old_site.domain).as_str());
-                for alt in &old_site.alternate_domains {
-                    updated.domain_index.remove(normalize_host(alt).as_str());
+                // A domain can be shared by several sites; only drop the
+                // index entry when it still points at *this* site, otherwise
+                // updating one site silently unhooks the other.
+                let domains = std::iter::once(&old_site.domain)
+                    .chain(old_site.alternate_domains.iter());
+                for domain in domains {
+                    let key = normalize_host(domain);
+                    if updated
+                        .domain_index
+                        .get(key.as_str())
+                        .is_some_and(|id| id.as_ref() == site_id.as_str())
+                    {
+                        updated.domain_index.remove(key.as_str());
+                    }
                 }
             }
             // Insert new site. The site id is shared between the index

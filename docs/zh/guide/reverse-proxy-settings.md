@@ -1,7 +1,7 @@
 # 反向代理基础设置（中文补充）
 
-> 本页补充 2026-10-19 版本新增/变更的反向代理与缓存配置项。英文完整说明见
-> [deployment（英文）](../../deployment.md) 与 [api（英文）](../../api.md)；本站其余页面结构与英文站一致。
+> 本页补充 2026-10-19 版本新增/变更的反向代理与缓存配置项，以及运维（break-glass）命令。
+> 英文完整说明见 [deployment（英文）](../../deployment.md) 与 [api（英文）](../../api.md)；本站其余页面结构与英文站一致。
 
 ## 1. 转发到上游的 Host（`upstream_host`）
 
@@ -62,3 +62,26 @@ upstream_host = "origin.internal.example.com"
 | `GET /api/v1/system/profile` | 管理员 | 按模块（proxy/waf/cache/plugin/db/control/other）与方法聚合的 CPU/内存归因 |
 
 全部 pprof 端点、MCP `profile_cpu`/`profile_memory` 工具、`PINGWAF_PPROF_ENABLED`、`[basic] pprof_enabled`、仅回环诊断监听与 `mem-prof` 诊断镜像均已移除。迁移说明见 [profiling](../profiling.md)。
+
+## 6. 维护命令（break-glass CLI）
+
+`pingwaf` 的四组维护命令**直连 PostgreSQL**，不走 REST API，因此控制面停机、尚未初始化，或被自身 IP 白名单锁死时仍然可用——那正是需要它们的时候。四组都用 `--db-url` 连接（环境变量 `PINGWAF_DB_URL`，默认 `postgres://pingwaf:pingwaf@localhost:5432/pingwaf`），执行完即退出。任一命令的具体参数用 `pingwaf <command> --help` 查看——顶层 `pingwaf --help` 展示的是共享二进制的 `pingap` 兼容模式选项，并不列出这些子命令。
+
+| 命令 | 用途 |
+|---|---|
+| `pingwaf user list` · `add-admin --email <addr> [--name <name>] [--password <pw>]` · `reset-password --email <addr> [--password <pw>]` | 控制台账号。省略密码时随机生成并只打印一次；`reset-password` 同时吊销该账号的会话 |
+| `pingwaf mode observe` · `mode enforce` · `mode status` | 全局观察模式：全量检测、不拦截 |
+| `pingwaf security status` · `security allowlist on\|off [--force]` | 9080 自我保护开关。`--force` 允许在白名单为空时启用（此时拒绝所有 API 调用方） |
+| `pingwaf config history` · `config show` · `config rollback` | 配置版本历史（见下） |
+
+### `pingwaf config`
+
+```bash
+pingwaf config history [--site <uuid|global>] [--limit <n>]   # 倒序，默认 20 条
+pingwaf config show <version> [--json]                        # 元信息 + 快照摘要
+pingwaf config rollback <version> [--yes]                     # 否则交互确认
+```
+
+`history` 按版本号倒序列出，可用 `--site` 过滤到单个站点（填站点 UUID）或整站部署级设置（填 `global`），`--limit` 控制打印条数（默认 20）。`show` 打印某版本的元信息与快照摘要，加 `--json` 输出完整快照。`rollback` 恢复某版本，并把这次恢复记为一个来源为 `cli` 的新版本，因此"回滚的回滚"同样成立、历史保持线性。
+
+**CLI 回滚不会通知运行中的控制面。** 它直接写 PostgreSQL，agent 在下次全量同步或重启后才拿到恢复后的配置；需要立即下发到整个集群时，用控制台回滚（`POST /config-versions/{id}/rollback`，见 [api（英文）](../../api.md)）。

@@ -1428,6 +1428,10 @@ export interface VersionResponse {
   version: string
   api: string
   registration_open: boolean
+}
+
+/** `GET /api/v1/system/status` (admin) */
+export interface SystemStatusResponse {
   /** Whether the gRPC control plane serves TLS; false = plaintext (degraded). */
   grpc_tls: boolean
 }
