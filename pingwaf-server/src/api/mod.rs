@@ -487,13 +487,18 @@ where
 }
 
 /// `GET /api/v1/version` — build metadata the frontend shows in the footer.
-async fn version(State(state): State<AppState>) -> Json<serde_json::Value> {
-    Json(json!({
-        "name": env!("CARGO_PKG_NAME"),
-        "version": env!("CARGO_PKG_VERSION"),
-        "api": API_PREFIX,
-        "registration_open": state.config.allow_registration,
-    }))
+async fn version(State(state): State<AppState>) -> impl IntoResponse {
+    // No caching: after an upgrade the console's "About" card used to keep
+    // showing the previous version because the browser cached this response.
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(json!({
+            "name": env!("CARGO_PKG_NAME"),
+            "version": env!("CARGO_PKG_VERSION"),
+            "api": API_PREFIX,
+            "registration_open": state.config.allow_registration,
+        })),
+    )
 }
 
 /// JSON 404 for unmatched API routes, so the frontend never has to

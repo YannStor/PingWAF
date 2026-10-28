@@ -56,10 +56,16 @@ pub struct SystemStatus {
 async fn status(
     State(state): State<AppState>,
     _admin: AdminUser,
-) -> Json<SystemStatus> {
-    Json(SystemStatus {
-        grpc_tls: state.config.grpc_tls_enabled(),
-    })
+) -> (
+    [(axum::http::HeaderName, &'static str); 1],
+    Json<SystemStatus>,
+) {
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(SystemStatus {
+            grpc_tls: state.config.grpc_tls_enabled(),
+        }),
+    )
 }
 
 async fn metrics(_admin: AdminUser) -> Result<Json<SystemMetrics>, ApiError> {
