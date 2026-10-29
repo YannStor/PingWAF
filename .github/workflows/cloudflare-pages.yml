@@ -1,11 +1,12 @@
-name: Deploy site to Cloudflare Pages
+name: Deploy site to Cloudflare Pages (manual)
+
+# Cloudflare's Git integration is the primary deployment path: it builds
+# `site/` and runs `wrangler pages deploy` on every push, so nothing here runs
+# automatically. This workflow is a manual fallback only (repository
+# unreachable from Cloudflare, or a rebuild of an older commit) and needs the
+# `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` secrets.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "site/**"
-      - ".github/workflows/cloudflare-pages.yml"
   workflow_dispatch:
 
 permissions:

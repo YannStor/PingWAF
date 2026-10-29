@@ -109,40 +109,48 @@ npm run preview    # serve dist locally at http://localhost:4321/
 
 ## Deployment
 
-The production deployment is project **`pingwaf`** on Cloudflare Pages.
+Production is the Cloudflare **Pages** project `pingwaf`, connected to the
+GitHub repository. Cloudflare builds and deploys on its own — there is no
+GitHub Actions deployment in the normal flow.
 
-### Continuous deployment (default)
+### Build settings (Dashboard → Workers & Pages → pingwaf → Settings → Build)
 
-`.github/workflows/cloudflare-pages.yml` runs `npm ci`, `check:content`, `build`
-and `check:links` in `site/`, then uploads `site/dist` with
-`wrangler pages deploy`. It triggers on pushes to `main` that touch `site/**`,
-plus manual `workflow_dispatch`.
+| Setting | Value |
+| --- | --- |
+| Git branch | `main` (production branch) |
+| Root directory | `site` |
+| Build command | `npm run build` |
+| Build output directory | `dist` |
+| Deploy command | `npx wrangler pages deploy dist --project-name=pingwaf` |
 
-Two repository secrets are required:
+Two details that break the deploy if they drift:
+
+- **Deploy command must be the Pages one.** The dashboard default is
+  `npx wrangler deploy`, which is the Workers command: on a Pages project it
+  warns and then fails with `Missing entry-point to Worker script or to assets
+  directory`.
+- **`wrangler.toml` `name` must equal the project name** (`pingwaf`); Pages
+  rejects a config that points at a different project.
+
+Because the root directory is `site`, `dist` is passed relative to it and
+`wrangler.toml` is discovered there (`pages_build_output_dir = "./dist"`).
+
+Pushes to `main` deploy to production; pushes to other branches produce preview
+URLs, which is a cheap way to review a locale or layout change before merging.
+
+### Optional: manual deploy from GitHub Actions
+
+`.github/workflows/cloudflare-pages.yml` is **manual only**
+(`workflow_dispatch`) so it never races the Git integration. Use it when the
+Cloudflare connection is unavailable or when an older commit has to be rebuilt;
+it needs two repository secrets:
 
 | Secret | Value |
 | --- | --- |
 | `CLOUDFLARE_API_TOKEN` | API token with **Cloudflare Pages: Edit** on the account |
 | `CLOUDFLARE_ACCOUNT_ID` | Account id (visible in the dashboard URL) |
 
-### Git integration (alternative)
-
-Connect the repository in **Cloudflare Dashboard → Workers & Pages → Create →
-Pages → Connect to Git** and use:
-
-| Setting | Value |
-| --- | --- |
-| Framework preset | Astro |
-| Root directory | `site` |
-| Build command | `npm run build` |
-| Build output directory | `dist` |
-| Node version | 22 (`NODE_VERSION=22`) |
-
-With this mode Cloudflare builds every branch: `main` becomes production and
-other branches get preview URLs — no GitHub secret and no workflow needed. Pick
-one mode per project; running both deploys twice.
-
-### Manual deploy
+### Manual deploy from a workstation
 
 ```bash
 cd site
@@ -153,11 +161,13 @@ npx wrangler pages deploy dist --project-name pingwaf
 ### Custom domain
 
 Attach it in **Pages → pingwaf → Custom domains**. Cloudflare issues the
-certificate automatically; then set `SITE_URL` (workflow env or dashboard build
-variable) so canonical/hreflang/OG URLs use the new hostname:
+certificate automatically. Then add a **build environment variable**
+`SITE_URL=https://pingwaf.example.com` (Settings → Environment variables, for
+both production and preview) and redeploy, so canonical, hreflang and OG URLs
+use the new hostname:
 
 ```bash
-SITE_URL=https://pingwaf.example.com npm run build
+SITE_URL=https://pingwaf.example.com npm run build   # same result locally
 ```
 
 ## Troubleshooting
@@ -168,4 +178,6 @@ SITE_URL=https://pingwaf.example.com npm run build
 | `check:content` reports an unexpected key | A locale file drifted from `src/content/schema.ts`; change the schema first |
 | Canonical URLs point at `*.pages.dev` on the custom domain | `SITE_URL` is not set for the build |
 | Screenshots look stale | Re-run `npm run capture` after `make build-web` |
-| Deploy fails with 401 | `CLOUDFLARE_API_TOKEN` lacks the Pages: Edit permission |
+| Deploy fails with `Missing entry-point to Worker script` | The dashboard deploy command is `npx wrangler deploy`; use `npx wrangler pages deploy dist --project-name=pingwaf` |
+| Deploy fails with 401 (manual workflow) | `CLOUDFLARE_API_TOKEN` lacks the Pages: Edit permission |
+| Pages rejects the build with a project-name mismatch | `wrangler.toml` `name` differs from the Pages project name |
