@@ -1,0 +1,22 @@
+---
+import Icon from "./Icon.astro";
+import type { IconName } from "../data/icons";
+
+interface Props {
+  variant?: "info" | "warning" | "danger";
+  title?: string;
+  icon?: IconName;
+  class?: string;
+}
+
+const { variant = "info", title, icon, class: className = "" } = Astro.props;
+const defaultIcon: IconName =
+  variant === "warning" ? "alert-triangle" : variant === "danger" ? "shield-alert" : "info";
+---
+<div class:list={["notice", `notice--${variant}`, className]} role={variant === "info" ? undefined : "note"}>
+  <Icon name={icon ?? defaultIcon} />
+  <div>
+    {title && <p class="notice__title">{title}</p>}
+    <slot />
+  </div>
+</div>

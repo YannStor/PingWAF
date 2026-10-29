@@ -18,4 +18,15 @@ FO = "FO"
 PN = "PN"
 
 [files]
-extend-exclude = ["*.md", "*.toml"]
+# The portal ships translated copy; the spell checker only understands English.
+# `*.md` already covers the documentation markdown, so only the typed content
+# modules and the shared UI dictionary need explicit exclusions.
+extend-exclude = [
+  "*.md",
+  "*.toml",
+  "site/src/i18n/ui.ts",
+  "site/src/content/es/**",
+  "site/src/content/fr/**",
+  "site/src/content/ja/**",
+  "site/src/content/zh/**",
+]

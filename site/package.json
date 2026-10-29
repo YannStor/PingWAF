@@ -1,0 +1,24 @@
+{
+  "name": "pingwaf-site",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Official PingWAF portal — static, multilingual, GitHub Pages ready",
+  "scripts": {
+    "dev": "astro dev",
+    "start": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "check": "astro check",
+    "check:content": "node --experimental-strip-types scripts/check-content.ts",
+    "check:links": "node scripts/check-links.mjs",
+    "verify": "npm run check:content && npm run check && npm run build && npm run check:links",
+    "capture": "node scripts/capture-screenshots.mjs"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.12",
+    "@types/node": "^24.19.2",
+    "astro": "^5.18.2",
+    "typescript": "^5.9.3"
+  }
+}

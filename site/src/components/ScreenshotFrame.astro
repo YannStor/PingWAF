@@ -1,0 +1,76 @@
+---
+import { Picture } from "astro:assets";
+import Icon from "./Icon.astro";
+import { SCREENSHOT_IMAGES } from "../data/screenshots";
+import type { Shot } from "../content/schema";
+
+interface Props {
+  shot: Shot;
+  /** Hero images load eagerly with high priority; everything else is lazy. */
+  priority?: boolean;
+  float?: boolean;
+  class?: string;
+  /** Hide browser chrome for compact grids. */
+  chrome?: boolean;
+  /** Hide the caption when the surrounding layout already explains the shot. */
+  showCaption?: boolean;
+  sizes?: string;
+}
+
+const {
+  shot,
+  priority = false,
+  float = false,
+  class: className = "",
+  chrome = true,
+  showCaption = true,
+  sizes = "(max-width: 640px) 92vw, (max-width: 1080px) 88vw, 620px",
+} = Astro.props;
+
+const image = SCREENSHOT_IMAGES[shot.key];
+---
+<figure class:list={["shot", { "shot--float": float }, className]}>
+  {
+    chrome && (
+      <div class="shot__bar">
+        <div class="shot__dots" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </div>
+        <span class="shot__url">
+          <Icon name="lock" size={10} />
+          {shot.url}
+        </span>
+      </div>
+    )
+  }
+  <a class="shot__link" href={image.src} target="_blank" rel="noopener noreferrer">
+    <Picture
+      src={image}
+      formats={["avif", "webp"]}
+      widths={[560, 840, 1120, 1680]}
+      sizes={sizes}
+      alt={shot.alt}
+      loading={priority ? "eager" : "lazy"}
+      decoding={priority ? "sync" : "async"}
+      fetchpriority={priority ? "high" : "auto"}
+      class="shot__img"
+    />
+  </a>
+  {
+    showCaption && (
+      <figcaption class="shot__caption">
+        <Icon name="info" />
+        <span>{shot.caption}</span>
+      </figcaption>
+    )
+  }
+</figure>
+
+<style>
+  .shot__link {
+    display: block;
+    background: var(--site-surface-inset);
+  }
+</style>

@@ -1,0 +1,201 @@
+import type { FeaturesContent } from "../schema";
+
+const features = {
+  meta: {
+    title: "Funciones — PingWAF",
+    description:
+      "Detección WAF semántica, defensa CC y de bots, control de acceso por IP y geografía, grupos de origen, caché en el edge, TLS automático y observabilidad completa.",
+  },
+  hero: {
+    eyebrow: "Capacidades",
+    title: "Todo lo que un WAF de edge necesita, nada activado por ti",
+    lead: "PingWAF entrega las protecciones desactivadas por sitio. Activa lo que tu tráfico necesite, en el orden que necesites, y cada cambio queda versionado.",
+    toc: [
+      { id: "waf-engine", label: "Motor WAF" },
+      { id: "cc-bot", label: "CC y bots" },
+      { id: "access-control", label: "Control de acceso" },
+      { id: "traffic-caching", label: "Tráfico y caché" },
+      { id: "tls", label: "TLS" },
+      { id: "observability", label: "Observabilidad" },
+      { id: "operations", label: "Operación" },
+    ],
+  },
+  groups: [
+    {
+      id: "waf-engine",
+      icon: "shield",
+      kicker: "Detección",
+      title: "Un motor semántico, no una lista de regex",
+      lead: "Las peticiones se normalizan, se puntúan con firmas, heurísticas y expresiones, y solo entonces producen un veredicto.",
+      points: [
+        "La normalización ocurre antes que cualquier regla, así que las codificaciones no ocultan cargas.",
+        "Heurísticas libinjection para SQLi y XSS más coincidencia multipatrón con Aho-Corasick.",
+        "Expresiones estilo Cloudflare como http.request.uri.path contains \"/admin\".",
+        "La puntuación de anomalía agrega todas las coincidencias en un veredicto por petición.",
+      ],
+      note: "normalizar → firmas → expresiones → puntuación",
+      shot: {
+        key: "waf",
+        url: "localhost:9080/sites/example.com/security/protection",
+        caption: "Reglas personalizadas y conjuntos gestionados se activan por sitio.",
+        alt: "Editor de reglas WAF en la consola de PingWAF",
+      },
+    },
+    {
+      id: "cc-bot",
+      icon: "bot",
+      kicker: "Disponibilidad",
+      title: "Absorbe picos y deja pasar a las personas",
+      lead: "Desafíos en capas frenan las avalanchas de peticiones sin poner un CAPTCHA delante de tus usuarios.",
+      points: [
+        "Escudo JavaScript de 5 segundos, proof of work y desafíos interactivos.",
+        "Las cookies de paso están firmadas con HMAC y ligadas al sitio que las emitió.",
+        "Listas de bots verificados y navegadores conocidos para no romper rastreadores ni monitorización.",
+        "Los desafíos se aplican por sitio, sin afectar a otros dominios.",
+      ],
+      note: "La huella TLS y el análisis de comportamiento están en la hoja de ruta.",
+      shot: {
+        key: "bot",
+        url: "localhost:9080/sites/example.com/security/bot",
+        caption: "Política de bots, bots verificados y acciones por sitio.",
+        alt: "Ajustes de protección de bots en la consola",
+      },
+    },
+    {
+      id: "access-control",
+      icon: "key",
+      kicker: "Acceso",
+      title: "Decide quién alcanza el origen",
+      lead: "Bloquea, permite o desafía por dirección y región, y limita el abuso por dimensión de la petición.",
+      points: [
+        "Reglas IP con acciones block, allow, challenge y js_challenge, rangos CIDR e importación CSV.",
+        "Grupos IP globales desde listas de texto, JSON o los rangos de Cloudflare, sincronizados con informe de errores.",
+        "Restricciones geográficas por país y ASN, con opción de bloquear países desconocidos.",
+        "Límites por IP, host, ruta, ASN, país, cabecera, cookie o parámetro de consulta.",
+      ],
+      shot: {
+        key: "access",
+        url: "localhost:9080/sites/example.com/security/access",
+        caption: "Reglas IP y política geográfica en la misma página.",
+        alt: "Página de control de acceso con reglas IP y restricciones geográficas",
+      },
+    },
+    {
+      id: "traffic-caching",
+      icon: "route",
+      kicker: "Tráfico",
+      title: "Enruta, balancea y cachea en el edge",
+      lead: "Los grupos de origen, las rutas y la caché conviven con la política de seguridad, de modo que regla y ruta cambian juntas.",
+      points: [
+        "Grupos de origen con round-robin, least connections, random y hash consistente por IP, URL, ruta, cabecera, cookie o consulta.",
+        "Rutas por prefijo, coincidencia exacta o regex, opcionalmente limitadas a un grupo IP.",
+        "Caché en el edge con cuotas por sitio, evicción LRU, stale-while-revalidate y TTL de navegador.",
+        "Reescritura de cabeceras, rutas, consultas y cuerpo, páginas de error Tera y pausa por sitio con 503.",
+      ],
+      shot: {
+        key: "caching",
+        url: "localhost:9080/sites/example.com/caching",
+        caption: "Reglas de caché, TTL y cuota del sitio.",
+        alt: "Configuración de caché en el edge dentro de la consola",
+      },
+    },
+    {
+      id: "tls",
+      icon: "lock",
+      kicker: "TLS",
+      title: "Certificados emitidos y rotados en el edge",
+      lead: "ACME se ejecuta en el plano de datos y el plano de control siempre sabe qué tiene cada agente.",
+      points: [
+        "Emisión y renovación automática ACME / Let's Encrypt con retos HTTP-01 y DNS-01.",
+        "DNS-01 mediante Aliyun, Cloudflare, Tencent Cloud DNSPod, Huawei Cloud o DNS manual.",
+        "Estado del certificado por sitio (válido, por caducar, caducado) en el heartbeat y registro ACME consultable.",
+        "HSTS y HTTPS forzado en el edge, mTLS con certificados de cliente emitidos desde la consola y revocación inmediata.",
+      ],
+      note: "La verificación del certificado de origen es un interruptor explícito, global o por grupo.",
+      shot: {
+        key: "ssl",
+        url: "localhost:9080/sites/example.com/ssl",
+        caption: "Estado del certificado e historial ACME de un sitio.",
+        alt: "Página TLS con estado del certificado y eventos ACME",
+      },
+    },
+    {
+      id: "observability",
+      icon: "activity",
+      kicker: "Observabilidad",
+      title: "Cada veredicto deja rastro",
+      lead: "Los logs viven donde tus herramientas ya consultan, y una petición bloqueada se puede reproducir como comando curl.",
+      points: [
+        "Registro completo de peticiones en Elasticsearch con truncado de cuerpo y búfer WAL.",
+        "Captura de petición y respuesta en PostgreSQL: cabeceras literales, prefijos de cuerpo, tamaños reales.",
+        "Paneles de tráfico y ataques construidos con las métricas que envían los agentes.",
+        "Salud de agentes, aciertos de caché y contadores de evicción visibles desde el plano de control.",
+      ],
+      shot: {
+        key: "logs",
+        url: "localhost:9080/logs",
+        caption: "Log de peticiones consultable con veredictos y reglas aplicadas.",
+        alt: "Lista de logs con veredictos, puntuaciones y reglas coincidentes",
+      },
+    },
+    {
+      id: "operations",
+      icon: "sliders",
+      kicker: "Operación",
+      title: "Gestiona la flota desde una consola",
+      lead: "La configuración está versionada, los agentes son observables y la consola se compila dentro del binario.",
+      points: [
+        "Autenticación JWT + bcrypt, aislamiento multiinquilino y acceso con passkey (WebAuthn).",
+        "Versionado de configuración: listar instantáneas, comparar tabla por tabla y revertir con confirmación.",
+        "Consola en inglés, 简体中文 y 日本語 integrada con rust-embed, sin despliegue de frontend aparte.",
+        "Vista de flota con estado en vivo y atribución de CPU y memoria desde los endpoints del sistema.",
+      ],
+      shot: {
+        key: "agents",
+        url: "localhost:9080/agents",
+        caption: "Estado de la flota de agentes y actividad de heartbeat.",
+        alt: "Página de agentes con los nodos edge conectados",
+      },
+    },
+  ],
+  verdicts: {
+    eyebrow: "Puntuación",
+    title: "De la puntuación de anomalía a un único veredicto",
+    lead: "Cada petición sale del pipeline con exactamente un veredicto, y ese es el que registra el log.",
+    columns: ["Veredicto", "Qué significa", "Qué hace el edge"],
+    rows: [
+      {
+        verdict: "pass",
+        label: "Pass",
+        meaning: "Ninguna regla cruzó el umbral.",
+        action: "Se reenvía al origen sin cambios.",
+      },
+      {
+        verdict: "monitor",
+        label: "Monitor",
+        meaning: "Sospechosa pero por debajo del umbral de bloqueo.",
+        action: "Se reenvía y se registra para ajustar la regla antes de aplicarla.",
+      },
+      {
+        verdict: "block",
+        label: "Block",
+        meaning: "La puntuación cruzó el umbral de bloqueo.",
+        action: "Se rechaza con una página de bloqueo y se registra la regla aplicada.",
+      },
+      {
+        verdict: "challenge",
+        label: "Challenge",
+        meaning: "La petición debe demostrar que es un navegador.",
+        action: "Se sirve un desafío JS o de proof of work; al superarlo continúa con cookie de paso.",
+      },
+    ],
+  },
+  cta: {
+    title: "Descubre cómo se produce un veredicto",
+    lead: "Los documentos de arquitectura y motor WAF recorren el ciclo de vida de la petición, la evaluación de reglas y la puntuación.",
+    primary: { label: "Documentación del motor", path: "/docs/waf-engine/" },
+    secondary: { label: "Inicio rápido", path: "/quickstart/" },
+  },
+} satisfies FeaturesContent;
+
+export default features;

@@ -1,0 +1,86 @@
+---
+import Icon from "./Icon.astro";
+import LanguageSwitcher from "./LanguageSwitcher.astro";
+import ThemeToggle from "./ThemeToggle.astro";
+import { ROUTES } from "../content/schema";
+import { href } from "../i18n/utils";
+import { t } from "../i18n/ui";
+import type { Locale } from "../i18n/config";
+
+interface Props {
+  locale: Locale;
+  /** Locale-less path of the current page. */
+  path: string;
+}
+
+const { locale, path } = Astro.props;
+const ui = t(locale);
+const GITHUB = "https://github.com/shuaiZend/PingWAF";
+
+const current = (target: string) =>
+  target === "/" ? path === "/" : path.startsWith(target);
+
+const links = [
+  { href: href(ROUTES.home, locale), label: ui.nav.overview, route: ROUTES.home },
+  { href: href(ROUTES.features, locale), label: ui.nav.features, route: ROUTES.features },
+  { href: href(ROUTES.quickstart, locale), label: ui.nav.quickstart, route: ROUTES.quickstart },
+  { href: href(ROUTES.docs, locale), label: ui.nav.docs, route: ROUTES.docs },
+];
+---
+<header class="site-header">
+  <div class="container site-header__inner">
+    <a class="brand" href={href(ROUTES.home, locale)} aria-label="PingWAF">
+      <span class="brand__mark">
+        <Icon name="shield-check" size={17} strokeWidth={2} />
+      </span>
+      <span class="brand__name">PingWAF</span>
+      <span class="brand__badge">WAF</span>
+    </a>
+
+    <nav class="nav" aria-label={ui.common.primaryNav}>
+      {
+        links.map((link) => (
+          <a
+            class="nav__link"
+            href={link.href}
+            aria-current={current(link.route) ? "page" : undefined}
+          >
+            {link.label}
+          </a>
+        ))
+      }
+    </nav>
+
+    <div class="header-actions">
+      <LanguageSwitcher locale={locale} path={path} />
+      <ThemeToggle locale={locale} />
+      <a
+        class="btn btn--outline btn--ghost btn--github"
+        href={GITHUB}
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        <Icon name="github" />
+        <span class="btn--github-label">{ui.cta.viewGithub}</span>
+      </a>
+
+      <details class="mobile-menu">
+        <summary class="icon-btn" aria-label={ui.common.menu}>
+          <Icon name="menu" />
+        </summary>
+        <div class="mobile-menu__panel">
+          {
+            links.map((link) => (
+              <a href={link.href} aria-current={current(link.route) ? "page" : undefined}>
+                {link.label}
+              </a>
+            ))
+          }
+          <a href={GITHUB} target="_blank" rel="noopener noreferrer">
+            GitHub ↗
+          </a>
+        </div>
+      </details>
+    </div>
+  </div>
+</header>

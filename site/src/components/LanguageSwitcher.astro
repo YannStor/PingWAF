@@ -1,0 +1,148 @@
+---
+import Icon from "./Icon.astro";
+import { LOCALES, LOCALE_META, type Locale } from "../i18n/config";
+import { href } from "../i18n/utils";
+import { t } from "../i18n/ui";
+
+interface Props {
+  locale: Locale;
+  /** Locale-less path of the current page, e.g. `/features/`. */
+  path: string;
+  variant?: "header" | "footer";
+}
+
+const { locale, path, variant = "header" } = Astro.props;
+const ui = t(locale);
+const current = LOCALE_META[locale];
+---
+<details class:list={["lang", `lang--${variant}`]} data-lang-switcher>
+  <summary aria-label={`${ui.common.language}: ${current.label}`}>
+    <Icon name="globe" />
+    <span class="lang__label">{current.label}</span>
+    <Icon name="chevron-down" />
+  </summary>
+  <div class="lang__menu" role="group" aria-label={ui.common.language}>
+    {
+      LOCALES.map((code) => (
+        <a
+          class="lang__item"
+          href={href(path, code)}
+          hreflang={LOCALE_META[code].htmlLang}
+          lang={LOCALE_META[code].htmlLang}
+          data-locale-link
+          data-locale={code}
+          aria-current={code === locale ? "true" : undefined}
+        >
+          <span>{LOCALE_META[code].label}</span>
+          <span class="lang__code">{LOCALE_META[code].code}</span>
+        </a>
+      ))
+    }
+  </div>
+</details>
+
+<style>
+  .lang {
+    position: relative;
+  }
+
+  .lang > summary {
+    list-style: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 34px;
+    padding: 0 9px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--color-border-line);
+    color: var(--color-text-subtle);
+    font-size: var(--site-text-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition: color var(--site-duration) var(--site-ease),
+      border-color var(--site-duration) var(--site-ease),
+      background-color var(--site-duration) var(--site-ease);
+  }
+
+  .lang > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .lang > summary:hover,
+  .lang[open] > summary {
+    color: var(--color-text-strong);
+    border-color: var(--color-border-fill);
+    background: var(--site-surface-hover);
+  }
+
+  .lang > summary :global(.icon) {
+    width: 15px;
+    height: 15px;
+  }
+
+  .lang__menu {
+    display: none;
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    min-width: 188px;
+    padding: 6px;
+    background: var(--color-bg-elevated);
+    border: 1px solid var(--color-border-line);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--site-shadow-float);
+    z-index: 30;
+  }
+
+  .lang[open] .lang__menu,
+  .lang:hover .lang__menu {
+    display: block;
+  }
+
+  .lang__item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 7px 10px;
+    border-radius: var(--radius-sm);
+    font-size: var(--site-text-sm);
+    color: var(--color-text-default);
+    transition: background-color 120ms var(--site-ease);
+  }
+
+  .lang__item:hover {
+    background: var(--site-surface-hover);
+  }
+
+  .lang__item[aria-current="true"] {
+    color: var(--color-bg-brand);
+    font-weight: 600;
+  }
+
+  .lang__code {
+    font-family: var(--site-font-mono);
+    font-size: 11px;
+    color: var(--color-text-subtle);
+    letter-spacing: 0.04em;
+  }
+
+  .lang__item[aria-current="true"] .lang__code {
+    color: var(--color-bg-brand);
+  }
+
+  .lang--footer > summary {
+    height: 30px;
+    font-size: 13px;
+  }
+
+  @media (max-width: 620px) {
+    .lang__label {
+      display: none;
+    }
+
+    .lang > summary {
+      padding: 0 8px;
+    }
+  }
+</style>

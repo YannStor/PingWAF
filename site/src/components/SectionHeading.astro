@@ -1,0 +1,19 @@
+---
+interface Props {
+  eyebrow?: string;
+  title: string;
+  lead?: string;
+  /** Renders the title as an h1 with the larger display size. */
+  as?: "h1" | "h2";
+  size?: "sm" | "md" | "xl";
+  class?: string;
+}
+
+const { eyebrow, title, lead, as = "h2", size = "md", class: className = "" } = Astro.props;
+const Tag = as;
+---
+<div class:list={["section__head", className]}>
+  {eyebrow && <p class="eyebrow">{eyebrow}</p>}
+  <Tag class:list={["title", { "title--sm": size === "sm", "title--xl": size === "xl" }]}>{title}</Tag>
+  {lead && <p class="lead">{lead}</p>}
+</div>

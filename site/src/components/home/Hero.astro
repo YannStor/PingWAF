@@ -1,0 +1,97 @@
+---
+import Icon from "../Icon.astro";
+import ScreenshotFrame from "../ScreenshotFrame.astro";
+import type { IntroContent } from "../../content/schema";
+import { href } from "../../i18n/utils";
+import type { Locale } from "../../i18n/config";
+
+interface Props {
+  locale: Locale;
+  hero: IntroContent["hero"];
+}
+
+const { locale, hero } = Astro.props;
+---
+<section class="hero">
+  <div class="hero__bg" aria-hidden="true"></div>
+  <div class="hero__glow" aria-hidden="true"></div>
+  <div class="container hero__inner">
+    <div class="hero__copy">
+      <div class="hero__badges">
+        {
+          hero.badges.map((badge, index) => (
+            <span class:list={["badge", { "badge--brand": index === 0 }]}>
+              {index === 0 && <span class="badge__dot" aria-hidden="true" />}
+              {badge}
+            </span>
+          ))
+        }
+      </div>
+
+      <h1 class="hero__title">
+        {hero.title}
+        <em>{hero.titleAccent}</em>
+      </h1>
+
+      <p class="hero__lead">{hero.lead}</p>
+
+      <div class="hero__actions">
+        <a class="btn btn--primary btn--lg" href={href(hero.primary.path, locale)}>
+          {hero.primary.label}
+          <Icon name="arrow-right" />
+        </a>
+        <a class="btn btn--outline btn--lg" href={href(hero.secondary.path, locale)}>
+          {hero.secondary.label}
+        </a>
+      </div>
+
+      <dl class="hero__stats">
+        {
+          hero.stats.map((stat) => (
+            <div class="stat">
+              <dt class="visually-hidden">{stat.label}</dt>
+              <dd>
+                <span class="stat__value">{stat.value}</span>
+                <span class="stat__label">{stat.label}</span>
+              </dd>
+            </div>
+          ))
+        }
+      </dl>
+    </div>
+
+    <div class="hero__media">
+      {
+        hero.pills[0] && (
+          <span class="float-pill float-pill--top">
+            <Icon name={hero.pills[0].icon} />
+            {hero.pills[0].text}
+          </span>
+        )
+      }
+      <ScreenshotFrame shot={hero.shot} priority float showCaption={false} />
+      {
+        hero.pills[1] && (
+          <span class="float-pill float-pill--bottom">
+            <Icon name={hero.pills[1].icon} />
+            {hero.pills[1].text}
+          </span>
+        )
+      }
+    </div>
+  </div>
+</section>
+
+<style>
+  .stat dd {
+    margin: 0;
+  }
+
+  .stat__label {
+    display: block;
+  }
+
+  .hero__media :global(.shot) {
+    border-radius: var(--radius-xl);
+  }
+</style>

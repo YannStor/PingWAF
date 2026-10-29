@@ -1,0 +1,80 @@
+---
+import Icon from "../Icon.astro";
+import type { IntroContent } from "../../content/schema";
+import { href } from "../../i18n/utils";
+import type { Locale } from "../../i18n/config";
+
+interface Props {
+  locale: Locale;
+  architecture: IntroContent["architecture"];
+}
+
+const { locale, architecture } = Astro.props;
+const { lanes, links } = architecture.diagram;
+---
+<section class="section" id="architecture">
+  <div class="container arch">
+    <div class="reveal">
+      <p class="eyebrow">{architecture.eyebrow}</p>
+      <h2 class="title">{architecture.title}</h2>
+      <p class="lead">{architecture.lead}</p>
+
+      <div class="arch__points">
+        {
+          architecture.points.map((point, index) => (
+            <div class="arch__point">
+              <span class="arch__point-index" aria-hidden="true">
+                {String(index + 1).padStart(2, "0")}
+              </span>
+              <div>
+                <h3>{point.title}</h3>
+                <p>{point.body}</p>
+              </div>
+            </div>
+          ))
+        }
+      </div>
+
+      <p style="margin-top: 26px;">
+        <a class="card__link" href={href(architecture.link.path, locale)}>
+          {architecture.link.label}
+          <Icon name="arrow-right" />
+        </a>
+      </p>
+    </div>
+
+    <div class="diagram reveal" role="img" aria-label="PingWAF architecture diagram">
+      {
+        lanes.map((lane, index) => (
+          <>
+            <div class="diagram__lane">
+              <p class="diagram__lane-label">{lane.label}</p>
+              <div class="diagram__nodes">
+                {lane.nodes.map((node) => (
+                  <div class:list={["diagram__node", { "diagram__node--accent": node.accent }]}>
+                    <p class="diagram__node-title">{node.title}</p>
+                    <p class="diagram__node-meta">{node.meta}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+            {index < lanes.length - 1 && (
+              <div class="diagram__link">
+                <span class="diagram__arrow">
+                  <Icon name="arrow-right" size={11} />
+                  {links[index]}
+                </span>
+              </div>
+            )}
+          </>
+        ))
+      }
+    </div>
+  </div>
+</section>
+
+<style>
+  .diagram__node p {
+    margin: 0;
+  }
+</style>

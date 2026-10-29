@@ -1,0 +1,297 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import CtaBand from "../CtaBand.astro";
+import CodeBlock from "../CodeBlock.astro";
+import Icon from "../Icon.astro";
+import Notice from "../Notice.astro";
+import ScreenshotFrame from "../ScreenshotFrame.astro";
+import StepList from "../StepList.astro";
+import { getContent } from "../../content";
+import { resolveLink } from "../../i18n/utils";
+import type { Locale } from "../../i18n/config";
+import type { QuickStartContent } from "../../content/schema";
+
+interface Props {
+  locale: Locale;
+}
+
+const { locale } = Astro.props;
+const { quickstart } = getContent(locale);
+
+const paths: QuickStartContent["paths"]["docker"][] = [
+  quickstart.paths.docker,
+  quickstart.paths.source,
+];
+---
+<BaseLayout
+  locale={locale}
+  path="/quickstart/"
+  title={quickstart.meta.title}
+  description={quickstart.meta.description}
+>
+  <header class="page-head">
+    <div class="container page-head__inner">
+      <p class="eyebrow">{quickstart.hero.eyebrow}</p>
+      <h1 class="title title--xl">{quickstart.hero.title}</h1>
+      <p class="lead">{quickstart.hero.lead}</p>
+      <div class="page-head__meta">
+        {
+          quickstart.hero.badges.map((badge) => (
+            <span class="badge">
+              <Icon name={badge.icon} size={13} />
+              <span class="badge__label">{badge.label}</span>
+              <strong class="badge__value">{badge.value}</strong>
+            </span>
+          ))
+        }
+      </div>
+    </div>
+  </header>
+
+  <nav class="toc-pills" aria-label={quickstart.hero.eyebrow}>
+    <div class="container toc-pills__inner">
+      {
+        quickstart.hero.toc.map((entry) => (
+          <a href={`#${entry.id}`}>{entry.label}</a>
+        ))
+      }
+    </div>
+  </nav>
+
+  <div class="container">
+    <section class="section" id="prerequisites">
+      <div class="section__head reveal">
+        <h2 class="title title--sm">{quickstart.prereq.title}</h2>
+        <p class="lead">{quickstart.prereq.lead}</p>
+      </div>
+      <div class="prereq reveal">
+        {
+          quickstart.prereq.items.map((item) => (
+            <div class="prereq__item">
+              <p class="prereq__label">{item.label}</p>
+              <p class="prereq__value">{item.value}</p>
+              <p class="prereq__note">{item.note}</p>
+            </div>
+          ))
+        }
+      </div>
+    </section>
+
+    {
+      paths.map((path) => (
+        <section class="path" id={path.id}>
+          <div class="path__grid">
+            <div>
+              <p class="eyebrow">{quickstart.hero.eyebrow}</p>
+              <h2 class="title title--sm">{path.title}</h2>
+              <p class="lead">{path.lead}</p>
+              <div class="path__steps">
+                <StepList steps={path.steps} locale={locale} />
+              </div>
+              {path.note && (
+                <Notice variant="info" class="path__note">
+                  <span class="mono">{path.note}</span>
+                </Notice>
+              )}
+            </div>
+            <div class="path__media">
+              <ScreenshotFrame shot={path.shot} sizes="(max-width: 1080px) 92vw, 560px" />
+            </div>
+          </div>
+        </section>
+      ))
+    }
+
+    <section class="section" id="credentials">
+      <div class="section__head reveal">
+        <h2 class="title title--sm">{quickstart.credentials.title}</h2>
+        <p class="lead">{quickstart.credentials.lead}</p>
+      </div>
+
+      <div class="credentials__grid">
+        <div class="reveal">
+          <div class="credentials">
+            <div class="credentials__head">
+              <p class="mono text-sm muted">defaults.env</p>
+            </div>
+            <div class="credentials__rows">
+              {
+                quickstart.credentials.rows.map((row) => (
+                  <div class="credentials__row">
+                    <span class="credentials__label">{row.label}</span>
+                    <span class="credentials__value">{row.value}</span>
+                  </div>
+                ))
+              }
+            </div>
+          </div>
+
+          <Notice variant="warning" title={quickstart.credentials.warning.title} class="credentials__warning">
+            {quickstart.credentials.warning.body}
+          </Notice>
+
+          <CodeBlock
+            locale={locale}
+            lang="bash"
+            code={"export PINGWAF_JWT_SECRET=\"$(openssl rand -hex 32)\"\nexport PINGWAF_ADMIN_PASSWORD=\"$(openssl rand -hex 16)\"\nexport PINGWAF_ALLOW_REGISTRATION=false"}
+          />
+        </div>
+
+        <div class="reveal">
+          <ScreenshotFrame shot={quickstart.credentials.shot} sizes="(max-width: 1080px) 92vw, 520px" />
+        </div>
+      </div>
+    </section>
+
+    <section class="section section--recessed" id="next">
+      <div class="section__head reveal">
+        <h2 class="title title--sm">{quickstart.next.title}</h2>
+        <p class="lead">{quickstart.next.lead}</p>
+      </div>
+      <div class="grid grid--2">
+        {
+          quickstart.next.cards.map((card) => (
+            <article class="card card--hover reveal">
+              <span class="card__icon">
+                <Icon name={card.icon} />
+              </span>
+              <h3 class="card__title">{card.title}</h3>
+              <p class="card__body">{card.body}</p>
+              <a class="card__link" href={resolveLink(card.link.path, locale)}>
+                {card.link.label}
+                <Icon name="arrow-right" />
+              </a>
+            </article>
+          ))
+        }
+      </div>
+    </section>
+
+    <section class="section" id="troubleshooting">
+      <div class="section__head reveal">
+        <h2 class="title title--sm">{quickstart.troubleshooting.title}</h2>
+      </div>
+      <div class="faq reveal">
+        {
+          quickstart.troubleshooting.items.map((item) => (
+            <details class="faq__item">
+              <summary>
+                <span>{item.q}</span>
+                <Icon name="chevron-down" />
+              </summary>
+              <p>{item.a}</p>
+            </details>
+          ))
+        }
+      </div>
+    </section>
+
+    <section class="section section--tight">
+      <CtaBand cta={quickstart.cta} locale={locale} />
+    </section>
+  </div>
+</BaseLayout>
+
+<style>
+  .toc-pills__inner {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .toc-pills__inner::-webkit-scrollbar {
+    display: none;
+  }
+
+  .badge__label {
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    opacity: 0.7;
+  }
+
+  .badge__value {
+    font-weight: 600;
+    color: var(--color-text-default);
+  }
+
+  .path__media {
+    position: sticky;
+    top: calc(var(--site-header-height) + 28px);
+  }
+
+  .path__note {
+    margin-top: 24px;
+    font-size: 12.5px;
+    overflow-wrap: anywhere;
+  }
+
+  .credentials__grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 36px;
+    align-items: start;
+  }
+
+  .credentials__warning {
+    margin-top: 18px;
+    margin-bottom: 18px;
+  }
+
+  .faq {
+    display: grid;
+    gap: 10px;
+    border-top: 1px solid var(--color-border-line);
+  }
+
+  .faq__item {
+    border-bottom: 1px solid var(--color-border-line);
+  }
+
+  .faq__item summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px 2px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 14.5px;
+    color: var(--color-text-strong);
+    list-style: none;
+  }
+
+  .faq__item summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .faq__item summary :global(.icon) {
+    transition: transform 180ms var(--site-ease);
+    color: var(--color-text-subtle);
+  }
+
+  .faq__item[open] summary :global(.icon) {
+    transform: rotate(180deg);
+  }
+
+  .faq__item p {
+    padding: 0 2px 16px;
+    font-size: var(--site-text-sm);
+    color: var(--color-text-subtle);
+    line-height: 1.65;
+    max-width: 78ch;
+  }
+
+  @media (max-width: 1080px) {
+    .path__media,
+    .credentials__grid {
+      position: static;
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .credentials__grid {
+      gap: 24px;
+    }
+  }
+</style>

@@ -1,0 +1,201 @@
+import type { FeaturesContent } from "../schema";
+
+const features = {
+  meta: {
+    title: "Fonctionnalités — PingWAF",
+    description:
+      "Détection WAF sémantique, défense CC et anti-bots, contrôle d'accès par IP et géographie, pools d'origine, cache en périphérie, TLS automatique et observabilité complète.",
+  },
+  hero: {
+    eyebrow: "Capacités",
+    title: "Tout ce qu'un WAF de périphérie doit offrir, sans rien activer à votre place",
+    lead: "PingWAF livre ses protections désactivées par site. Activez ce dont votre trafic a besoin, dans l'ordre qui vous convient, et chaque changement est versionné.",
+    toc: [
+      { id: "waf-engine", label: "Moteur WAF" },
+      { id: "cc-bot", label: "CC et bots" },
+      { id: "access-control", label: "Contrôle d'accès" },
+      { id: "traffic-caching", label: "Trafic et cache" },
+      { id: "tls", label: "TLS" },
+      { id: "observability", label: "Observabilité" },
+      { id: "operations", label: "Exploitation" },
+    ],
+  },
+  groups: [
+    {
+      id: "waf-engine",
+      icon: "shield",
+      kicker: "Détection",
+      title: "Un moteur sémantique, pas une liste d'expressions",
+      lead: "Les requêtes sont normalisées, puis évaluées par signatures, heuristiques et expressions avant de produire un verdict.",
+      points: [
+        "La normalisation précède toute règle : les encodages ne cachent plus de charge utile.",
+        "Heuristiques libinjection pour SQLi et XSS, plus correspondance multi-motifs Aho-Corasick.",
+        "Expressions façon Cloudflare comme http.request.uri.path contains \"/admin\".",
+        "Le score d'anomalie agrège toutes les correspondances en un seul verdict.",
+      ],
+      note: "normaliser → signatures → expressions → score",
+      shot: {
+        key: "waf",
+        url: "localhost:9080/sites/example.com/security/protection",
+        caption: "Règles personnalisées et ensembles gérés s'activent par site.",
+        alt: "Éditeur de règles WAF dans la console PingWAF",
+      },
+    },
+    {
+      id: "cc-bot",
+      icon: "bot",
+      kicker: "Disponibilité",
+      title: "Absorber les pics, laisser passer les humains",
+      lead: "Des défis successifs arrêtent les avalanches de requêtes sans mur CAPTCHA devant vos utilisateurs.",
+      points: [
+        "Bouclier JavaScript de 5 secondes, preuve de travail et défis interactifs.",
+        "Cookies de passage signés en HMAC et liés au site émetteur.",
+        "Listes de bots vérifiés et navigateurs connus pour préserver robots et supervision.",
+        "Les défis s'appliquent par site : une politique stricte n'affecte pas les autres domaines.",
+      ],
+      note: "Empreinte TLS et analyse comportementale sont sur la feuille de route.",
+      shot: {
+        key: "bot",
+        url: "localhost:9080/sites/example.com/security/bot",
+        caption: "Politique anti-bots, robots vérifiés et actions par site.",
+        alt: "Réglages de protection anti-bots dans la console",
+      },
+    },
+    {
+      id: "access-control",
+      icon: "key",
+      kicker: "Accès",
+      title: "Décider qui atteint l'origine",
+      lead: "Bloquez, autorisez ou défiez par adresse et région, et plafonnez les abus par dimension de requête.",
+      points: [
+        "Règles IP avec block, allow, challenge et js_challenge, plages CIDR et import CSV.",
+        "Groupes IP globaux depuis du texte, du JSON ou les plages Cloudflare, synchronisés avec rapport d'erreur.",
+        "Restrictions géographiques par pays et ASN, avec blocage optionnel des pays inconnus.",
+        "Limitation par IP, hôte, chemin, ASN, pays, en-tête, cookie ou paramètre.",
+      ],
+      shot: {
+        key: "access",
+        url: "localhost:9080/sites/example.com/security/access",
+        caption: "Règles IP et politique géographique sur la même page.",
+        alt: "Page de contrôle d'accès avec règles IP et restrictions géographiques",
+      },
+    },
+    {
+      id: "traffic-caching",
+      icon: "route",
+      kicker: "Trafic",
+      title: "Router, répartir et cacher en périphérie",
+      lead: "Les pools d'origine, les routes et le cache vivent à côté de la politique de sécurité : règle et route évoluent ensemble.",
+      points: [
+        "Pools d'origine : round-robin, least connections, aléatoire et hachage cohérent par IP, URL, chemin, en-tête, cookie ou requête.",
+        "Routes par préfixe, exactes ou regex, limitables à un groupe IP.",
+        "Cache en périphérie avec quotas par site, éviction LRU, stale-while-revalidate et TTL navigateur.",
+        "Réécriture d'en-têtes, chemins, requêtes et corps, pages d'erreur Tera et mise en pause par site (503).",
+      ],
+      shot: {
+        key: "caching",
+        url: "localhost:9080/sites/example.com/caching",
+        caption: "Règles de cache, TTL et quota du site.",
+        alt: "Configuration du cache en périphérie dans la console",
+      },
+    },
+    {
+      id: "tls",
+      icon: "lock",
+      kicker: "TLS",
+      title: "Des certificats émis et renouvelés en périphérie",
+      lead: "ACME s'exécute sur le plan de données, et le plan de contrôle sait toujours ce que chaque agent détient.",
+      points: [
+        "Émission et renouvellement ACME / Let's Encrypt avec défis HTTP-01 et DNS-01.",
+        "DNS-01 via Aliyun, Cloudflare, Tencent Cloud DNSPod, Huawei Cloud ou DNS manuel.",
+        "État du certificat par site (valide, bientôt expiré, expiré) remonté par heartbeat et journal ACME consultable.",
+        "HSTS et HTTPS forcé en périphérie, mTLS avec certificats clients émis depuis la console et révocation immédiate.",
+      ],
+      note: "La vérification du certificat d'origine est un commutateur explicite, global ou par pool.",
+      shot: {
+        key: "ssl",
+        url: "localhost:9080/sites/example.com/ssl",
+        caption: "État du certificat et historique ACME d'un site.",
+        alt: "Page TLS avec état du certificat et événements ACME",
+      },
+    },
+    {
+      id: "observability",
+      icon: "activity",
+      kicker: "Observabilité",
+      title: "Chaque verdict laisse une trace",
+      lead: "Les journaux restent là où vos outils interrogent déjà, et une requête bloquée peut être rejouée en commande curl.",
+      points: [
+        "Journalisation complète dans Elasticsearch avec troncature du corps et tampon WAL.",
+        "Capture des requêtes et réponses dans PostgreSQL : en-têtes bruts, préfixes de corps, tailles réelles.",
+        "Tableaux de bord trafic et attaques construits sur les métriques envoyées par les agents.",
+        "Santé des agents, taux de cache et compteurs d'éviction visibles depuis le plan de contrôle.",
+      ],
+      shot: {
+        key: "logs",
+        url: "localhost:9080/logs",
+        caption: "Journal de requêtes interrogeable avec verdicts et règles appliquées.",
+        alt: "Liste des journaux avec verdicts, scores et règles déclenchées",
+      },
+    },
+    {
+      id: "operations",
+      icon: "sliders",
+      kicker: "Exploitation",
+      title: "Piloter la flotte depuis une console",
+      lead: "La configuration est versionnée, les agents sont observables et la console est compilée dans le binaire.",
+      points: [
+        "Authentification JWT + bcrypt, isolation multi-locataire et connexion par passkey (WebAuthn).",
+        "Versionnage de configuration : lister les instantanés, comparer table par table, restaurer après confirmation.",
+        "Console en anglais, 简体中文 et 日本語 intégrée via rust-embed, sans déploiement frontend séparé.",
+        "Vue de flotte en direct et attribution CPU/mémoire via les endpoints système.",
+      ],
+      shot: {
+        key: "agents",
+        url: "localhost:9080/agents",
+        caption: "État de la flotte d'agents et activité de heartbeat.",
+        alt: "Page des agents avec les nœuds de périphérie connectés",
+      },
+    },
+  ],
+  verdicts: {
+    eyebrow: "Score",
+    title: "Du score d'anomalie à un verdict unique",
+    lead: "Chaque requête sort du pipeline avec exactement un verdict, et c'est celui-là que le journal enregistre.",
+    columns: ["Verdict", "Signification", "Action en périphérie"],
+    rows: [
+      {
+        verdict: "pass",
+        label: "Pass",
+        meaning: "Aucune règle n'a franchi le seuil.",
+        action: "Transmise à l'origine sans modification.",
+      },
+      {
+        verdict: "monitor",
+        label: "Monitor",
+        meaning: "Suspecte mais sous le seuil de blocage.",
+        action: "Transmise et enregistrée pour ajuster la règle avant de l'appliquer.",
+      },
+      {
+        verdict: "block",
+        label: "Block",
+        meaning: "Le score a franchi le seuil de blocage.",
+        action: "Rejetée avec une page de blocage et journalisée avec la règle appliquée.",
+      },
+      {
+        verdict: "challenge",
+        label: "Challenge",
+        meaning: "La requête doit prouver qu'elle vient d'un navigateur.",
+        action: "Défi JS ou preuve de travail ; en cas de succès, cookie de passage.",
+      },
+    ],
+  },
+  cta: {
+    title: "Voir comment un verdict est produit",
+    lead: "Les documents architecture et moteur WAF décrivent le cycle de vie des requêtes, l'évaluation des règles et le score.",
+    primary: { label: "Documentation du moteur", path: "/docs/waf-engine/" },
+    secondary: { label: "Démarrage", path: "/quickstart/" },
+  },
+} satisfies FeaturesContent;
+
+export default features;

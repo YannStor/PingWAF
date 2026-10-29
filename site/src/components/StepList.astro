@@ -1,0 +1,37 @@
+---
+import CodeBlock from "./CodeBlock.astro";
+import type { Step } from "../content/schema";
+import type { Locale } from "../i18n/config";
+
+interface Props {
+  steps: Step[];
+  locale: Locale;
+  /** Highlight the first step (used when a path is the recommended one). */
+  highlightFirst?: boolean;
+}
+
+const { steps, locale, highlightFirst = true } = Astro.props;
+---
+<ol class="steps">
+  {
+    steps.map((step, index) => (
+      <li class:list={["step", { "step--active": highlightFirst && index === 0 }]}>
+        <span class="step__index" aria-hidden="true">
+          {String(index + 1).padStart(2, "0")}
+        </span>
+        <div>
+          <h3 class="step__title">{step.title}</h3>
+          {step.body && <p class="step__body">{step.body}</p>}
+          {step.code && (
+            <CodeBlock
+              code={step.code.code}
+              lang={step.code.lang}
+              filename={step.code.filename}
+              locale={locale}
+            />
+          )}
+        </div>
+      </li>
+    ))
+  }
+</ol>

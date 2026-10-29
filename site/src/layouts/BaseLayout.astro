@@ -1,0 +1,189 @@
+---
+import Header from "../components/Header.astro";
+import Footer from "../components/Footer.astro";
+import { DEFAULT_LOCALE, LOCALE_META, type Locale } from "../i18n/config";
+import {
+  absoluteUrl,
+  alternates,
+  localeDetectScript,
+  localePersistScript,
+  themeInitScript,
+} from "../i18n/utils";
+import { t } from "../i18n/ui";
+import "../styles/global.css";
+
+interface Props {
+  locale: Locale;
+  /** Locale-less path of the current page, e.g. `/features/`. */
+  path: string;
+  title: string;
+  description: string;
+  /** Absolute or site-relative social image; defaults to `og.png`. */
+  image?: string;
+  noindex?: boolean;
+}
+
+const { locale, path, title, description, image, noindex = false } = Astro.props;
+const meta = LOCALE_META[locale];
+const ui = t(locale);
+const canonical = absoluteUrl(path, locale);
+const social =
+  image ??
+  new URL(
+    `${import.meta.env.BASE_URL}og.png`,
+    import.meta.env.SITE ?? "https://shuaizend.github.io",
+  ).toString();
+const isLanding = path === "/" && locale === DEFAULT_LOCALE;
+
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  name: "PingWAF",
+  applicationCategory: "SecurityApplication",
+  operatingSystem: "Linux",
+  description:
+    "Distributed, centrally controlled Web Application Firewall built on pingap and Cloudflare Pingora.",
+  url: "https://github.com/shuaiZend/PingWAF",
+  codeRepository: "https://github.com/shuaiZend/PingWAF",
+  license: "https://www.apache.org/licenses/LICENSE-2.0",
+  offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+};
+---
+<!doctype html>
+<html lang={meta.htmlLang} dir={meta.dir} data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    {
+      alternates(path).map((alt) => (
+        <link rel="alternate" hreflang={alt.htmlLang} href={absoluteUrl(path, alt.locale)} />
+      ))
+    }
+    <link
+      rel="alternate"
+      hreflang="x-default"
+      href={absoluteUrl(path, DEFAULT_LOCALE)}
+    />
+    {noindex && <meta name="robots" content="noindex,nofollow" />}
+
+    <link rel="icon" type="image/svg+xml" href={`${import.meta.env.BASE_URL}favicon.svg`} />
+    <link rel="apple-touch-icon" href={`${import.meta.env.BASE_URL}apple-touch-icon.png`} />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#1d1d1d" media="(prefers-color-scheme: dark)" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="PingWAF" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={social} />
+    <meta property="og:image:alt" content="PingWAF console" />
+    <meta property="og:locale" content={meta.ogLocale} />
+    {
+      alternates(path)
+        .filter((alt) => alt.locale !== locale)
+        .map((alt) => (
+          <meta property="og:locale:alternate" content={LOCALE_META[alt.locale].ogLocale} />
+        ))
+    }
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={social} />
+
+    <script is:inline set:html={themeInitScript()} />
+    {isLanding && <script is:inline set:html={localeDetectScript()} />}
+    <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+  </head>
+
+  <body data-path={path} data-locale={locale}>
+    <a class="skip-link" href="#main">{ui.common.skipToContent}</a>
+    <Header locale={locale} path={path} />
+    <main id="main" class="main">
+      <slot />
+    </main>
+    <Footer locale={locale} path={path} />
+
+    <script is:inline set:html={localePersistScript()} />
+    <script is:inline>
+      (function () {
+        // Theme toggle
+        document.addEventListener("click", function (ev) {
+          var btn = ev.target.closest && ev.target.closest("[data-theme-toggle]");
+          if (btn) {
+            var next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+            document.documentElement.dataset.theme = next;
+            try {
+              localStorage.setItem("pw.theme", next);
+            } catch (e) {}
+            return;
+          }
+
+          // Copy buttons
+          var copy = ev.target.closest && ev.target.closest("[data-copy]");
+          if (copy) {
+            var id = copy.getAttribute("data-copy");
+            var source = id && id !== "true" ? document.getElementById(id) : copy.parentElement.nextElementSibling;
+            var text = source ? source.textContent || "" : "";
+            var label = copy.querySelector("[data-copy-label]");
+            var original = label ? label.textContent : null;
+            var done = function () {
+              if (!label) return;
+              label.textContent = label.getAttribute("data-copied") || "Copied";
+              setTimeout(function () {
+                label.textContent = original;
+              }, 1600);
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(text).then(done, function () {});
+            } else {
+              var area = document.createElement("textarea");
+              area.value = text;
+              document.body.appendChild(area);
+              area.select();
+              try {
+                document.execCommand("copy");
+                done();
+              } catch (e) {}
+              document.body.removeChild(area);
+            }
+          }
+        });
+
+        // Scroll reveal — respects prefers-reduced-motion through CSS.
+        var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        var nodes = document.querySelectorAll(".reveal");
+        if (!("IntersectionObserver" in window) || reduce) {
+          nodes.forEach(function (n) {
+            n.classList.add("is-inview");
+          });
+        } else {
+          var io = new IntersectionObserver(
+            function (entries) {
+              entries.forEach(function (entry) {
+                if (entry.isIntersecting) {
+                  entry.target.classList.add("is-inview");
+                  io.unobserve(entry.target);
+                }
+              });
+            },
+            { rootMargin: "0px 0px -8% 0px", threshold: 0.08 }
+          );
+          nodes.forEach(function (n) {
+            io.observe(n);
+          });
+        }
+
+        // Close the language dropdown / mobile menu after a click elsewhere.
+        document.addEventListener("click", function (ev) {
+          document.querySelectorAll("details[open]").forEach(function (details) {
+            if (!details.contains(ev.target)) details.removeAttribute("open");
+          });
+        });
+      })();
+    </script>
+  </body>
+</html>

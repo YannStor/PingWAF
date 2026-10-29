@@ -25,6 +25,10 @@ report.*
 Secrets*.toml
 .claude/settings.local.json
 
+# Official portal (Astro, deployed to GitHub Pages)
+site/.astro/
+site/.capture-tmp/
+
 # VitePress docs site
 website/node_modules/
 website/.vitepress/dist/

@@ -1,0 +1,33 @@
+---
+import ScreenshotFrame from "../ScreenshotFrame.astro";
+import type { IntroContent } from "../../content/schema";
+
+interface Props {
+  showcase: IntroContent["showcase"];
+}
+
+const { showcase } = Astro.props;
+const spans = ["showcase__item--wide", "showcase__item", "showcase__item--full"];
+---
+<section class="section">
+  <div class="container">
+    <div class="section__head reveal">
+      <p class="eyebrow">{showcase.eyebrow}</p>
+      <h2 class="title">{showcase.title}</h2>
+      <p class="lead">{showcase.lead}</p>
+    </div>
+
+    <div class="showcase">
+      {
+        showcase.shots.map((shot, index) => (
+          <div class:list={["showcase__item", spans[index] ?? "showcase__item"]}>
+            <ScreenshotFrame
+              shot={shot}
+              sizes={index === 2 ? "(max-width: 860px) 92vw, 1160px" : "(max-width: 860px) 92vw, 700px"}
+            />
+          </div>
+        ))
+      }
+    </div>
+  </div>
+</section>

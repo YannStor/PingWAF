@@ -1,0 +1,60 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import CtaBand from "../CtaBand.astro";
+import Hero from "./Hero.astro";
+import Architecture from "./Architecture.astro";
+import Capabilities from "./Capabilities.astro";
+import Showcase from "./Showcase.astro";
+import QuickStartTeaser from "./QuickStartTeaser.astro";
+import { getContent } from "../../content";
+import type { Locale } from "../../i18n/config";
+
+interface Props {
+  locale: Locale;
+}
+
+const { locale } = Astro.props;
+const { intro } = getContent(locale);
+---
+<BaseLayout
+  locale={locale}
+  path="/"
+  title={intro.meta.title}
+  description={intro.meta.description}
+>
+  <Hero locale={locale} hero={intro.hero} />
+
+  <section class="section section--tight">
+    <div class="container">
+      <dl class="proof reveal">
+        {
+          intro.proof.map((item) => (
+            <div class="proof__item">
+              <dd class="proof__value">{item.value}</dd>
+              <dt class="proof__label">{item.label}</dt>
+              <dd class="proof__note">{item.note}</dd>
+            </div>
+          ))
+        }
+      </dl>
+    </div>
+  </section>
+
+  <Architecture locale={locale} architecture={intro.architecture} />
+  <Capabilities locale={locale} capabilities={intro.capabilities} />
+  <Showcase showcase={intro.showcase} />
+  <QuickStartTeaser locale={locale} quickstart={intro.quickstart} />
+
+  <section class="section section--tight">
+    <div class="container">
+      <CtaBand cta={intro.cta} locale={locale} />
+    </div>
+  </section>
+</BaseLayout>
+
+<style>
+  .proof__item dd,
+  .proof__item dt {
+    margin: 0;
+  }
+</style>

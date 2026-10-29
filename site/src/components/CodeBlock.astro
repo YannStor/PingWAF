@@ -1,0 +1,33 @@
+---
+import Icon from "./Icon.astro";
+import { t } from "../i18n/ui";
+import type { Locale } from "../i18n/config";
+
+interface Props {
+  code: string;
+  lang?: string;
+  filename?: string;
+  locale: Locale;
+}
+
+const { code, lang = "bash", filename, locale } = Astro.props;
+const ui = t(locale);
+const id = `code-${Math.random().toString(36).slice(2, 9)}`;
+const trimmed = code.replace(/^\n+|\n+$/g, "");
+---
+<div class="code">
+  <div class="code__head">
+    <span class="code__lang">{filename ?? lang}</span>
+    <button
+      type="button"
+      class="code__copy"
+      data-copy={id}
+      data-copied={ui.common.copied}
+      aria-label={`${ui.common.copy} ${lang}`}
+    >
+      <Icon name="copy" />
+      <span data-copy-label>{ui.common.copy}</span>
+    </button>
+  </div>
+  <pre class="code__pre" id={id} data-lang={lang}><code>{trimmed}</code></pre>
+</div>

@@ -1,0 +1,201 @@
+import type { FeaturesContent } from "../schema";
+
+const features = {
+  meta: {
+    title: "機能 — PingWAF",
+    description:
+      "意味解析 WAF、CC・ボット対策、IP と地域のアクセス制御、オリジンプール、エッジキャッシュ、自動 TLS、そして完全な可観測性を 1 つのコンソールで。",
+  },
+  hero: {
+    eyebrow: "機能一覧",
+    title: "エッジ WAF に必要なものを、勝手に有効化せずに",
+    lead: "PingWAF の防御はサイト単位で無効のまま提供されます。必要なものを必要な順に有効化し、変更はすべてバージョン管理されます。",
+    toc: [
+      { id: "waf-engine", label: "WAF エンジン" },
+      { id: "cc-bot", label: "CC・ボット" },
+      { id: "access-control", label: "アクセス制御" },
+      { id: "traffic-caching", label: "トラフィックとキャッシュ" },
+      { id: "tls", label: "TLS" },
+      { id: "observability", label: "可観測性" },
+      { id: "operations", label: "運用" },
+    ],
+  },
+  groups: [
+    {
+      id: "waf-engine",
+      icon: "shield",
+      kicker: "検知",
+      title: "正規表現の羅列ではなく、意味解析エンジン",
+      lead: "リクエストはまず正規化され、シグネチャ・ヒューリスティック・式で評価されたうえで判定が出ます。",
+      points: [
+        "すべてのルールより先に正規化するため、エンコードでペイロードを隠せません。",
+        "SQLi と XSS は libinjection、その他は Aho-Corasick の多パターン一致で検知します。",
+        "http.request.uri.path contains \"/admin\" のような Cloudflare 風の式を利用できます。",
+        "異常スコアがすべての一致を集約し、リクエストごとに 1 つの判定を出します。",
+      ],
+      note: "正規化 → シグネチャ → 式 → 異常スコア",
+      shot: {
+        key: "waf",
+        url: "localhost:9080/sites/example.com/security/protection",
+        caption: "カスタムルールとマネージドルールセットはサイト単位で切り替えます。",
+        alt: "PingWAF コンソールの WAF ルール編集画面",
+      },
+    },
+    {
+      id: "cc-bot",
+      icon: "bot",
+      kicker: "可用性",
+      title: "急増を吸収し、人間はそのまま通す",
+      lead: "段階的なチャレンジでリクエスト洪水を止め、ユーザーの前に CAPTCHA の壁を立てません。",
+      points: [
+        "JavaScript 5 秒シールド、Proof of Work、対話型チャレンジ。",
+        "クリアランス Cookie は HMAC 署名で、発行サイトに紐づくため再利用できません。",
+        "検証済みボット許可リストと既知ブラウザの通過で、クローラーや監視を止めません。",
+        "チャレンジはサイト単位で適用され、他のドメインに影響しません。",
+      ],
+      note: "TLS フィンガープリントと挙動分析はロードマップにあります。",
+      shot: {
+        key: "bot",
+        url: "localhost:9080/sites/example.com/security/bot",
+        caption: "ボットポリシー、検証済みボット、サイト別のアクション。",
+        alt: "PingWAF コンソールのボット対策設定",
+      },
+    },
+    {
+      id: "access-control",
+      icon: "key",
+      kicker: "アクセス",
+      title: "オリジンへ到達できる相手を決める",
+      lead: "アドレスと地域で許可・拒否・チャレンジを行い、リクエストの観点で濫用を制限します。",
+      points: [
+        "block / allow / challenge / js_challenge に対応し、CIDR と CSV 一括取り込みも可能。",
+        "テキスト・JSON・Cloudflare の IP レンジからグローバル IP グループを同期し、エラーを報告。",
+        "国と ASN による地域制限。「未知の国を拒否」も選択可能。",
+        "IP・ホスト・パス・ASN・国・ヘッダー・Cookie・クエリでのレート制限。",
+      ],
+      shot: {
+        key: "access",
+        url: "localhost:9080/sites/example.com/security/access",
+        caption: "IP ルールと地域ポリシーを同じ画面で管理します。",
+        alt: "IP ルールと地域制限を表示するアクセス制御ページ",
+      },
+    },
+    {
+      id: "traffic-caching",
+      icon: "route",
+      kicker: "トラフィック",
+      title: "エッジでルーティング・分散・キャッシュ",
+      lead: "オリジンプール、ルート、キャッシュはセキュリティポリシーの隣にあり、ルールとルートを一緒に進化させられます。",
+      points: [
+        "ラウンドロビン、最小接続、ランダム、IP・URL・パス・ヘッダー・Cookie・クエリによる一貫性ハッシュ。",
+        "プレフィックス・完全一致・正規表現のルート。IP グループ限定も可能。",
+        "サイト別ディスククォータ、LRU 削除、stale-while-revalidate、ブラウザ TTL 制御。",
+        "ヘッダー・パス・クエリ・本文の書き換え、Tera エラーページ、サイト一時停止（503）。",
+      ],
+      shot: {
+        key: "caching",
+        url: "localhost:9080/sites/example.com/caching",
+        caption: "キャッシュルール、TTL、サイトクォータ。",
+        alt: "PingWAF コンソールのエッジキャッシュ設定",
+      },
+    },
+    {
+      id: "tls",
+      icon: "lock",
+      kicker: "TLS",
+      title: "証明書はエッジで発行・更新",
+      lead: "ACME はデータプレーンで動作し、コントロールプレーンは各エージェントの状態を常に把握します。",
+      points: [
+        "HTTP-01 と DNS-01 による ACME / Let's Encrypt の自動発行と更新。",
+        "DNS-01 は Aliyun、Cloudflare、Tencent Cloud DNSPod、Huawei Cloud、手動 DNS に対応。",
+        "サイト別の証明書状態（有効・期限間近・期限切れ）をハートビートで収集し、検索可能な ACME ログを提供。",
+        "HSTS と HTTPS 強制、コンソール発行のクライアント証明書による mTLS と即時失効。",
+      ],
+      note: "オリジン証明書の検証は明示的なスイッチで、デプロイ全体またはプール単位に設定します。",
+      shot: {
+        key: "ssl",
+        url: "localhost:9080/sites/example.com/ssl",
+        caption: "1 つのサイトの証明書状態と ACME 履歴。",
+        alt: "証明書状態と ACME イベントを表示する TLS ページ",
+      },
+    },
+    {
+      id: "observability",
+      icon: "activity",
+      kicker: "可観測性",
+      title: "すべての判定に痕跡を残す",
+      lead: "ログは既存ツールが問い合わせる場所に置かれ、ブロックされたリクエストは curl として再現できます。",
+      points: [
+        "本文の切り詰めと WAL バッファを備え、Elasticsearch へ完全なリクエストログを送信。",
+        "リクエストとレスポンスの生データを PostgreSQL に保存（ヘッダーはそのまま、本文は先頭のみ）。",
+        "エージェントが送るメトリクスによるトラフィックと攻撃の分析画面。",
+        "エージェントの健全性、キャッシュヒット率、削除件数をコントロールプレーンで確認。",
+      ],
+      shot: {
+        key: "logs",
+        url: "localhost:9080/logs",
+        caption: "判定と一致ルールを含む検索可能なリクエストログ。",
+        alt: "判定・スコア・一致ルールを表示するリクエストログ一覧",
+      },
+    },
+    {
+      id: "operations",
+      icon: "sliders",
+      kicker: "運用",
+      title: "1 つのコンソールでフリートを運用",
+      lead: "設定はバージョン管理され、エージェントは可観測で、コンソール自体がバイナリに含まれます。",
+      points: [
+        "JWT + bcrypt 認証、マルチテナント分離、パスキー（WebAuthn）ログイン。",
+        "設定のバージョン管理：スナップショット一覧、テーブル単位の差分、確認付きロールバック。",
+        "rust-embed で英語・簡体中文・日本語のコンソールを内蔵。フロントエンドの別デプロイは不要。",
+        "エージェントの一覧と状態、システムエンドポイントによる CPU・メモリの内訳。",
+      ],
+      shot: {
+        key: "agents",
+        url: "localhost:9080/agents",
+        caption: "エージェントフリートの状態とハートビート。",
+        alt: "接続済みエッジエージェントを表示するエージェントページ",
+      },
+    },
+  ],
+  verdicts: {
+    eyebrow: "スコアリング",
+    title: "異常スコアから 1 つの判定へ",
+    lead: "各リクエストはパイプラインを抜けるとき必ず 1 つの判定を持ち、ログに残るのもその判定です。",
+    columns: ["判定", "意味", "エッジの動作"],
+    rows: [
+      {
+        verdict: "pass",
+        label: "Pass",
+        meaning: "しきい値を超えたルールはありません。",
+        action: "そのままオリジンへ転送します。",
+      },
+      {
+        verdict: "monitor",
+        label: "Monitor",
+        meaning: "疑わしいがブロックしきい値未満です。",
+        action: "転送しつつ記録し、適用前にルールを調整できます。",
+      },
+      {
+        verdict: "block",
+        label: "Block",
+        meaning: "スコアがブロックしきい値に達しました。",
+        action: "WAF ブロックページを返し、一致ルールを記録します。",
+      },
+      {
+        verdict: "challenge",
+        label: "Challenge",
+        meaning: "ブラウザであることの証明が必要です。",
+        action: "JS または PoW チャレンジを返し、成功後はクリアランス Cookie で継続します。",
+      },
+    ],
+  },
+  cta: {
+    title: "判定が生まれる流れを見る",
+    lead: "アーキテクチャと WAF エンジンのドキュメントで、リクエストのライフサイクル、ルール評価、スコアリングを解説しています。",
+    primary: { label: "WAF エンジンのドキュメント", path: "/docs/waf-engine/" },
+    secondary: { label: "クイックスタート", path: "/quickstart/" },
+  },
+} satisfies FeaturesContent;
+
+export default features;

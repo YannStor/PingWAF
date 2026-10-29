@@ -1,0 +1,30 @@
+---
+import Icon from "./Icon.astro";
+import type { CtaContent } from "../content/schema";
+import { resolveLink } from "../i18n/utils";
+import type { Locale } from "../i18n/config";
+
+interface Props {
+  cta: CtaContent;
+  locale: Locale;
+}
+
+const { cta, locale } = Astro.props;
+---
+<section class="cta-band reveal">
+  <div>
+    <h2 class="cta-band__title">{cta.title}</h2>
+    <p class="cta-band__lead">{cta.lead}</p>
+  </div>
+  <div class="cta-band__actions">
+    <a class="btn btn--primary btn--lg" href={resolveLink(cta.primary.path, locale)}>
+      {cta.primary.label}
+      <Icon name="arrow-right" />
+    </a>
+    {cta.secondary.label && (
+      <a class="btn btn--outline btn--lg" href={resolveLink(cta.secondary.path, locale)}>
+        {cta.secondary.label}
+      </a>
+    )}
+  </div>
+</section>

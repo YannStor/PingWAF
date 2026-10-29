@@ -1,0 +1,102 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import Icon from "../Icon.astro";
+import ScreenshotFrame from "../ScreenshotFrame.astro";
+import { getContent } from "../../content";
+import { docPath } from "../../content/schema";
+import { href, resolveLink } from "../../i18n/utils";
+import { t } from "../../i18n/ui";
+import type { Locale } from "../../i18n/config";
+
+interface Props {
+  locale: Locale;
+}
+
+const { locale } = Astro.props;
+const docs = getContent(locale).docs;
+const ui = t(locale);
+---
+<BaseLayout
+  locale={locale}
+  path="/docs/"
+  title={docs.meta.title}
+  description={docs.meta.description}
+>
+  <header class="page-head">
+    <div class="container page-head__inner">
+      <p class="eyebrow">{docs.hero.eyebrow}</p>
+      <h1 class="title title--xl">{docs.hero.title}</h1>
+      <p class="lead">{docs.hero.lead}</p>
+    </div>
+  </header>
+
+  <section class="section">
+    <div class="container">
+      <div class="docs-hub">
+        {
+          docs.cards.map((card, index) => (
+            <a class="doc-card reveal" href={href(docPath(card.slug), locale)}>
+              <div class="doc-card__top">
+                <span class="card__icon" style="margin: 0;">
+                  <Icon name={card.icon} />
+                </span>
+                <span class="doc-card__index">
+                  {String(index + 1).padStart(2, "0")} · {card.minutes} {ui.common.minutes}
+                </span>
+              </div>
+              <h2 class="doc-card__title">{card.title}</h2>
+              <p class="doc-card__lead">{card.lead}</p>
+              <div class="doc-card__topics">
+                {card.topics.map((topic) => <span class="chip">{topic}</span>)}
+              </div>
+              <span class="doc-card__arrow">
+                {ui.cta.readDocs}
+                <Icon name="arrow-right" />
+              </span>
+            </a>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  <section class="section section--recessed">
+    <div class="container docs-hub__lower">
+      <div class="reveal">
+        <ScreenshotFrame shot={docs.screenshot} sizes="(max-width: 860px) 92vw, 660px" />
+      </div>
+      <aside class="card reveal">
+        <span class="card__icon">
+          <Icon name="github" />
+        </span>
+        <h2 class="card__title">{docs.github.title}</h2>
+        <p class="card__body">{docs.github.body}</p>
+        <a
+          class="btn btn--outline"
+          style="margin-top: 18px;"
+          href={resolveLink(docs.github.link.path, locale)}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          {docs.github.link.label}
+          <Icon name="external-link" />
+        </a>
+      </aside>
+    </div>
+  </section>
+</BaseLayout>
+
+<style>
+  .docs-hub__lower {
+    display: grid;
+    grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.75fr);
+    gap: 32px;
+    align-items: center;
+  }
+
+  @media (max-width: 1080px) {
+    .docs-hub__lower {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

@@ -1,0 +1,113 @@
+---
+import Icon from "./Icon.astro";
+import LanguageSwitcher from "./LanguageSwitcher.astro";
+import { ROUTES, DOC_SLUGS, docPath } from "../content/schema";
+import { getContent } from "../content";
+import { href } from "../i18n/utils";
+import { t } from "../i18n/ui";
+import type { Locale } from "../i18n/config";
+
+interface Props {
+  locale: Locale;
+  path: string;
+}
+
+const { locale, path } = Astro.props;
+const ui = t(locale);
+const docs = getContent(locale).docs;
+const GITHUB = "https://github.com/shuaiZend/PingWAF";
+
+const product = [
+  { label: ui.nav.features, href: href(ROUTES.features, locale) },
+  { label: ui.nav.quickstart, href: href(ROUTES.quickstart, locale) },
+  { label: ui.nav.docs, href: href(ROUTES.docs, locale) },
+  ...DOC_SLUGS.map((slug) => ({
+    label: docs.cards.find((card) => card.slug === slug)?.title ?? slug,
+    href: href(docPath(slug), locale),
+  })),
+];
+
+const resources = [
+  { label: "README", href: `${GITHUB}#readme` },
+  { label: "CHANGELOG", href: `${GITHUB}/blob/main/CHANGELOG.md` },
+  { label: "Docker image", href: "https://github.com/shuaiZend/PingWAF/pkgs/container/pingwaf" },
+  { label: "Releases", href: `${GITHUB}/releases` },
+];
+
+const community = [
+  { label: "Contributing", href: `${GITHUB}/blob/main/CONTRIBUTING.md` },
+  { label: "Security policy", href: `${GITHUB}/blob/main/SECURITY.md` },
+  { label: "Code of conduct", href: `${GITHUB}/blob/main/CODE_OF_CONDUCT.md` },
+  { label: "Issues", href: `${GITHUB}/issues` },
+];
+---
+<footer class="site-footer">
+  <div class="container">
+    <div class="footer__grid">
+      <div class="footer__brand">
+        <a class="brand" href={href(ROUTES.home, locale)}>
+          <span class="brand__mark">
+            <Icon name="shield-check" size={17} strokeWidth={2} />
+          </span>
+          <span class="brand__name">PingWAF</span>
+        </a>
+        <p class="footer__tagline">{ui.footer.tagline}</p>
+        <div class="footer__lang">
+          <LanguageSwitcher locale={locale} path={path} variant="footer" />
+        </div>
+      </div>
+
+      <nav class="footer__col" aria-label={ui.footer.product}>
+        <h2>{ui.footer.product}</h2>
+        <ul class="footer__links">
+          {product.map((item) => <li><a href={item.href}>{item.label}</a></li>)}
+        </ul>
+      </nav>
+
+      <nav class="footer__col" aria-label={ui.footer.resources}>
+        <h2>{ui.footer.resources}</h2>
+        <ul class="footer__links">
+          {
+            resources.map((item) => (
+              <li>
+                <a href={item.href} target="_blank" rel="noopener noreferrer">
+                  {item.label}
+                </a>
+              </li>
+            ))
+          }
+        </ul>
+      </nav>
+
+      <nav class="footer__col" aria-label={ui.footer.community}>
+        <h2>{ui.footer.community}</h2>
+        <ul class="footer__links">
+          {
+            community.map((item) => (
+              <li>
+                <a href={item.href} target="_blank" rel="noopener noreferrer">
+                  {item.label}
+                </a>
+              </li>
+            ))
+          }
+        </ul>
+      </nav>
+    </div>
+
+    <div class="footer__bottom">
+      <p>{ui.footer.copyright} · {ui.footer.license}</p>
+      <div class="footer__bottom-links">
+        <span class="mono">{ui.footer.builtWith}</span>
+        <a href={GITHUB} target="_blank" rel="noopener noreferrer">GitHub</a>
+        <a href={`${GITHUB}/blob/main/LICENSE`} target="_blank" rel="noopener noreferrer">Apache-2.0</a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<style>
+  .footer__lang {
+    margin-top: 16px;
+  }
+</style>

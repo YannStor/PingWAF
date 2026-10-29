@@ -1,0 +1,62 @@
+---
+import Icon from "../Icon.astro";
+import type { IntroContent } from "../../content/schema";
+import { href } from "../../i18n/utils";
+import type { Locale } from "../../i18n/config";
+
+interface Props {
+  locale: Locale;
+  capabilities: IntroContent["capabilities"];
+}
+
+const { locale, capabilities } = Astro.props;
+---
+<section class="section section--recessed" id="capabilities">
+  <div class="container">
+    <div class="section__head reveal">
+      <p class="eyebrow">{capabilities.eyebrow}</p>
+      <h2 class="title">{capabilities.title}</h2>
+      <p class="lead">{capabilities.lead}</p>
+    </div>
+
+    <div class="grid grid--3">
+      {
+        capabilities.items.map((item) => (
+          <article class="card card--hover reveal">
+            <span class="card__icon">
+              <Icon name={item.icon} />
+            </span>
+            <h3 class="card__title">{item.title}</h3>
+            <p class="card__body">{item.body}</p>
+            <ul class="card__list">
+              {item.points.map((point) => (
+                <li>{point}</li>
+              ))}
+            </ul>
+            {item.link && (
+              <a class="card__link" href={href(item.link.path, locale)}>
+                {item.link.label}
+                <Icon name="arrow-right" />
+              </a>
+            )}
+          </article>
+        ))
+      }
+    </div>
+
+    <p class="capabilities__more">
+      <a class="btn btn--outline" href={href(capabilities.link.path, locale)}>
+        {capabilities.link.label}
+        <Icon name="arrow-right" />
+      </a>
+    </p>
+  </div>
+</section>
+
+<style>
+  .capabilities__more {
+    margin-top: 28px;
+    display: flex;
+    justify-content: center;
+  }
+</style>

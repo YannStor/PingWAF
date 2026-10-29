@@ -1,0 +1,123 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import CtaBand from "../CtaBand.astro";
+import Icon from "../Icon.astro";
+import ScreenshotFrame from "../ScreenshotFrame.astro";
+import { getContent } from "../../content";
+import type { Locale } from "../../i18n/config";
+
+interface Props {
+  locale: Locale;
+}
+
+const { locale } = Astro.props;
+const { features } = getContent(locale);
+---
+<BaseLayout
+  locale={locale}
+  path="/features/"
+  title={features.meta.title}
+  description={features.meta.description}
+>
+  <header class="page-head">
+    <div class="container page-head__inner">
+      <p class="eyebrow">{features.hero.eyebrow}</p>
+      <h1 class="title title--xl">{features.hero.title}</h1>
+      <p class="lead">{features.hero.lead}</p>
+    </div>
+  </header>
+
+  <nav class="toc-pills" aria-label={features.hero.eyebrow}>
+    <div class="container toc-pills__inner">
+      {
+        features.hero.toc.map((entry) => (
+          <a href={`#${entry.id}`}>{entry.label}</a>
+        ))
+      }
+    </div>
+  </nav>
+
+  <div class="container">
+    {
+      features.groups.map((group, index) => (
+        <section
+          class:list={["feature-section", { "feature-section--reverse": index % 2 === 1 }]}
+          id={group.id}
+        >
+          <div class="feature__body reveal">
+            <p class="feature__kicker">
+              <Icon name={group.icon} />
+              {group.kicker}
+            </p>
+            <h2 class="feature__title">{group.title}</h2>
+            <p class="feature__lead">{group.lead}</p>
+            <ul class="feature__points">
+              {group.points.map((point) => (
+                <li>{point}</li>
+              ))}
+            </ul>
+            {group.note && <p class="feature__note">{group.note}</p>}
+          </div>
+
+          <div class="feature__media reveal">
+            <ScreenshotFrame shot={group.shot} sizes="(max-width: 1080px) 92vw, 620px" />
+          </div>
+        </section>
+      ))
+    }
+
+    <section class="section" id="verdicts">
+      <div class="section__head reveal">
+        <p class="eyebrow">{features.verdicts.eyebrow}</p>
+        <h2 class="title">{features.verdicts.title}</h2>
+        <p class="lead">{features.verdicts.lead}</p>
+      </div>
+
+      <div class="table-wrap reveal">
+        <table>
+          <thead>
+            <tr>
+              {features.verdicts.columns.map((column) => <th scope="col">{column}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {
+              features.verdicts.rows.map((row) => (
+                <tr>
+                  <td>
+                    <span class:list={["verdict", `verdict--${row.verdict}`]}>
+                      {row.label}
+                    </span>
+                  </td>
+                  <td>{row.meaning}</td>
+                  <td>{row.action}</td>
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section section--tight">
+      <CtaBand cta={features.cta} locale={locale} />
+    </section>
+  </div>
+</BaseLayout>
+
+<style>
+  .toc-pills__inner {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .toc-pills__inner::-webkit-scrollbar {
+    display: none;
+  }
+
+  .verdict {
+    white-space: nowrap;
+  }
+</style>

@@ -1,0 +1,201 @@
+import type { FeaturesContent } from "../schema";
+
+const features = {
+  meta: {
+    title: "核心特性 — PingWAF",
+    description:
+      "语义级 WAF 检测、CC 与 Bot 防护、IP 与地域访问控制、源站池、边缘缓存、自动 TLS 与完整可观测性——全部在一个控制台里完成。",
+  },
+  hero: {
+    eyebrow: "能力总览",
+    title: "边缘 WAF 该有的能力，且不会替你做任何决定",
+    lead: "PingWAF 的防护按站点默认关闭。你需要什么就开什么，按自己的节奏推进，每一次变更都会被版本化。",
+    toc: [
+      { id: "waf-engine", label: "WAF 引擎" },
+      { id: "cc-bot", label: "CC 与 Bot" },
+      { id: "access-control", label: "访问控制" },
+      { id: "traffic-caching", label: "流量与缓存" },
+      { id: "tls", label: "TLS" },
+      { id: "observability", label: "可观测性" },
+      { id: "operations", label: "运维" },
+    ],
+  },
+  groups: [
+    {
+      id: "waf-engine",
+      icon: "shield",
+      kicker: "检测",
+      title: "语义级引擎，而不是一长串正则",
+      lead: "请求先被归一化，再经过签名、启发式与表达式评分，最后产出一个判决。",
+      points: [
+        "任何规则执行前先做归一化，编码技巧无法隐藏 payload。",
+        "libinjection 负责 SQLi 与 XSS 启发式，其余交给 Aho-Corasick 多模式匹配。",
+        "支持 Cloudflare 风格表达式，例如 http.request.uri.path contains \"/admin\" 与 ip.src in {10.0.0.0/8}。",
+        "异常评分汇总所有命中，为每个请求给出唯一判决。",
+      ],
+      note: "归一化 → 签名 → 表达式 → 异常评分",
+      shot: {
+        key: "waf",
+        url: "localhost:9080/sites/example.com/security/protection",
+        caption: "自定义规则与托管规则集按站点独立开关。",
+        alt: "PingWAF 控制台中的 WAF 规则编辑界面",
+      },
+    },
+    {
+      id: "cc-bot",
+      icon: "bot",
+      kicker: "可用性",
+      title: "吸收洪峰，让真人继续访问",
+      lead: "分层挑战可以挡住请求洪峰，而不必在用户面前竖起 CAPTCHA 墙。",
+      points: [
+        "JavaScript 5 秒盾、工作量证明与交互式挑战。",
+        "放行 Cookie 使用 HMAC 签名，无法伪造，也无法跨站复用。",
+        "已验证 Bot 白名单与已知浏览器直通，保证爬虫与监控正常工作。",
+        "挑战策略按站点生效，某个域名的严格策略不会影响其他站点。",
+      ],
+      note: "TLS 指纹与行为分析在路线图中。",
+      shot: {
+        key: "bot",
+        url: "localhost:9080/sites/example.com/security/bot",
+        caption: "按站点配置 Bot 策略、已验证 Bot 与处置动作。",
+        alt: "PingWAF 控制台中的 Bot 防护设置",
+      },
+    },
+    {
+      id: "access-control",
+      icon: "key",
+      kicker: "访问",
+      title: "决定谁能到达源站",
+      lead: "按地址与地域放行、拦截或挑战，并按请求维度限制滥用。",
+      points: [
+        "IP 规则支持 block、allow、challenge 与 js_challenge，支持 CIDR、CSV 批量导入与命名规则。",
+        "全局 IP 组可由纯文本、JSON 或 Cloudflare IP 段订阅同步，按计划执行并上报错误。",
+        "按国家与 ASN 的地域限制，可选「未知国家一律拦截」。",
+        "按 IP、主机、路径、ASN、国家、请求头、Cookie 或查询参数限流。",
+      ],
+      shot: {
+        key: "access",
+        url: "localhost:9080/sites/example.com/security/access",
+        caption: "IP 规则与地域策略在同一个站点页面内维护。",
+        alt: "访问控制页面，展示 IP 规则与地域限制",
+      },
+    },
+    {
+      id: "traffic-caching",
+      icon: "route",
+      kicker: "流量",
+      title: "在边缘完成路由、负载均衡与缓存",
+      lead: "源站池、路由与缓存和安全策略放在一起，规则与路由可以同步演进。",
+      points: [
+        "源站池支持轮询、最少连接、随机，以及按 IP、URL、路径、请求头、Cookie 或查询参数的一致性哈希。",
+        "路由支持前缀、精确匹配与正则，并可限定 IP 组，让同一路径对内网与合作伙伴呈现不同后端。",
+        "边缘缓存支持按站点磁盘配额、LRU 淘汰、stale-while-revalidate 与浏览器 TTL 控制。",
+        "支持请求头/路径/查询/响应体重写、Tera 自定义错误页，以及站点暂停（返回 503，证书继续可用）。",
+      ],
+      shot: {
+        key: "caching",
+        url: "localhost:9080/sites/example.com/caching",
+        caption: "缓存规则、TTL 与站点级配额。",
+        alt: "PingWAF 控制台中的边缘缓存配置",
+      },
+    },
+    {
+      id: "tls",
+      icon: "lock",
+      kicker: "TLS",
+      title: "证书在边缘签发与轮转",
+      lead: "ACME 运行在数据面，而控制面始终掌握每个 Agent 当前持有什么证书。",
+      points: [
+        "通过 HTTP-01 与 DNS-01 自动签发并续期 ACME / Let's Encrypt 证书。",
+        "DNS-01 支持阿里云、Cloudflare、腾讯云 DNSPod、华为云与手工 DNS。",
+        "站点证书状态（有效、即将过期、已过期）通过心跳上报，并提供可搜索的 ACME 事件日志。",
+        "边缘强制 HSTS 与 HTTPS，双向 TLS 支持控制台签发客户端证书并即时吊销。",
+      ],
+      note: "源站证书校验是一个显式开关，可按部署或按源站池设置。",
+      shot: {
+        key: "ssl",
+        url: "localhost:9080/sites/example.com/ssl",
+        caption: "单个站点的证书状态与 ACME 历史。",
+        alt: "TLS 页面，展示证书状态与 ACME 事件",
+      },
+    },
+    {
+      id: "observability",
+      icon: "activity",
+      kicker: "可观测性",
+      title: "每个判决都留下痕迹",
+      lead: "日志存放在你现有工具能查询的地方，被拦截的请求还可以重放为 curl 命令。",
+      points: [
+        "完整请求日志写入 Elasticsearch，支持请求体截断与 WAL 缓冲。",
+        "原始请求与响应保存在 PostgreSQL：请求头原样保留、请求体前缀、真实大小与截断标记。",
+        "基于 Agent 心跳上报的指标构建流量与攻击分析面板。",
+        "在控制面即可查看 Agent 健康度、缓存命中率与淘汰计数。",
+      ],
+      shot: {
+        key: "logs",
+        url: "localhost:9080/logs",
+        caption: "可搜索的请求日志，包含判决与命中规则。",
+        alt: "请求日志列表，展示判决、评分与命中规则",
+      },
+    },
+    {
+      id: "operations",
+      icon: "sliders",
+      kicker: "运维",
+      title: "一个控制台管理整个集群",
+      lead: "配置有版本、Agent 可观测，控制台本身也被编译进二进制。",
+      points: [
+        "JWT + bcrypt 认证、多租户隔离，并支持 Passkey（WebAuthn）登录。",
+        "配置版本化：可按条件列出快照、逐表对比与上一版本的差异，并在二次确认后回滚。",
+        "通过 rust-embed 内嵌英文、简体中文与日文控制台，无需单独部署前端。",
+        "Agent 集群视图展示实时状态，系统接口可查看进程级 CPU 与内存归属。",
+      ],
+      shot: {
+        key: "agents",
+        url: "localhost:9080/agents",
+        caption: "Agent 集群状态与心跳活动。",
+        alt: "Agent 集群页面，展示已接入的边缘节点",
+      },
+    },
+  ],
+  verdicts: {
+    eyebrow: "评分",
+    title: "从异常评分到唯一判决",
+    lead: "每个请求离开流水线时只带一个判决，日志记录的也正是这个判决。",
+    columns: ["判决", "含义", "边缘行为"],
+    rows: [
+      {
+        verdict: "pass",
+        label: "Pass",
+        meaning: "没有规则越过阈值。",
+        action: "原样转发到源站。",
+      },
+      {
+        verdict: "monitor",
+        label: "Monitor",
+        meaning: "可疑，但低于拦截阈值。",
+        action: "继续转发并记录，便于在正式拦截前调优规则。",
+      },
+      {
+        verdict: "block",
+        label: "Block",
+        meaning: "评分越过拦截阈值。",
+        action: "返回 WAF 拦截页，并记录命中的规则。",
+      },
+      {
+        verdict: "challenge",
+        label: "Challenge",
+        meaning: "请求必须证明自己是浏览器。",
+        action: "下发 JS 或工作量证明挑战；通过后携带放行 Cookie 继续访问。",
+      },
+    ],
+  },
+  cta: {
+    title: "看看判决是怎么产生的",
+    lead: "架构与 WAF 引擎文档完整描述了请求生命周期、规则求值与评分过程。",
+    primary: { label: "WAF 引擎文档", path: "/docs/waf-engine/" },
+    secondary: { label: "快速上手", path: "/quickstart/" },
+  },
+} satisfies FeaturesContent;
+
+export default features;

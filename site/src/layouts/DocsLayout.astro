@@ -1,0 +1,139 @@
+---
+import type { MarkdownHeading } from "astro";
+import BaseLayout from "./BaseLayout.astro";
+import Icon from "../components/Icon.astro";
+import Prose from "../components/Prose.astro";
+import { getContent } from "../content";
+import { DOC_SLUGS, docPath, type DocSlug } from "../content/schema";
+import { href } from "../i18n/utils";
+import { t } from "../i18n/ui";
+import type { Locale } from "../i18n/config";
+
+interface Props {
+  locale: Locale;
+  slug: DocSlug;
+  title: string;
+  description: string;
+  minutes: number;
+  headings: MarkdownHeading[];
+}
+
+const { locale, slug, title, description, minutes, headings } = Astro.props;
+const ui = t(locale);
+const docs = getContent(locale).docs;
+const path = docPath(slug);
+
+const index = DOC_SLUGS.indexOf(slug);
+const previous = index > 0 ? DOC_SLUGS[index - 1] : undefined;
+const next = index >= 0 && index < DOC_SLUGS.length - 1 ? DOC_SLUGS[index + 1] : undefined;
+
+const cardFor = (target: DocSlug) => docs.cards.find((card) => card.slug === target);
+const toc = headings.filter((heading) => heading.depth === 2 || heading.depth === 3);
+const editUrl = `https://github.com/shuaiZend/PingWAF/edit/main/site/src/content/docs/${locale}/${slug}.md`;
+---
+<BaseLayout locale={locale} path={path} title={`${title} — PingWAF`} description={description}>
+  <div class="container docs">
+    <aside class="docs__aside">
+      <p class="docs__aside-title">{docs.sidebarLabel}</p>
+      <nav class="docs__nav" aria-label={docs.sidebarLabel}>
+        <a href={href("/docs/", locale)}>{docs.backToHub}</a>
+        {
+          DOC_SLUGS.map((target) => (
+            <a
+              href={href(docPath(target), locale)}
+              aria-current={target === slug ? "page" : undefined}
+            >
+              {cardFor(target)?.title ?? target}
+            </a>
+          ))
+        }
+      </nav>
+    </aside>
+
+    <article>
+      <nav class="breadcrumbs" aria-label="Breadcrumb">
+        <a href={href("/", locale)}>{ui.common.breadcrumbHome}</a>
+        <Icon name="chevron-right" />
+        <a href={href("/docs/", locale)}>{ui.nav.docs}</a>
+        <Icon name="chevron-right" />
+        <span aria-current="page">{title}</span>
+      </nav>
+
+      <h1 class="title title--sm doc-title">{title}</h1>
+      <p class="lead doc-description">{description}</p>
+      <p class="doc-meta">
+        <span class="mono">{minutes} {ui.common.minutes}</span>
+        <span class="doc-meta__dot" aria-hidden="true"></span>
+        <a href={editUrl} target="_blank" rel="noopener noreferrer">
+          {docs.editLabel}
+          <Icon name="external-link" size={12} />
+        </a>
+      </p>
+
+      <div class="doc-body">
+        <Prose>
+          <slot />
+        </Prose>
+      </div>
+
+      <nav class="pager" aria-label="Documentation pagination">
+        {
+          previous ? (
+            <a href={href(docPath(previous), locale)}>
+              <span>{ui.common.previous}</span>
+              <strong>{cardFor(previous)?.title ?? previous}</strong>
+            </a>
+          ) : (
+            <span />
+          )
+        }
+        {
+          next ? (
+            <a class="pager__next" href={href(docPath(next), locale)}>
+              <span>{ui.common.next}</span>
+              <strong>{cardFor(next)?.title ?? next}</strong>
+            </a>
+          ) : (
+            <span />
+          )
+        }
+      </nav>
+    </article>
+
+    {
+      toc.length > 0 && (
+        <aside class="docs__toc">
+          <p class="docs__aside-title">{ui.common.onThisPage}</p>
+          <nav aria-label={ui.common.onThisPage}>
+            {toc.map((heading) => (
+              <a class:list={[{ "is-nested": heading.depth === 3 }]} href={`#${heading.slug}`}>
+                {heading.text}
+              </a>
+            ))}
+          </nav>
+        </aside>
+      )
+    }
+  </div>
+</BaseLayout>
+
+<style>
+  .doc-title {
+    margin-bottom: 6px;
+  }
+
+  .doc-description {
+    margin-top: 8px;
+  }
+
+  .doc-meta a {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--color-text-link);
+  }
+
+  .doc-body {
+    margin-top: 30px;
+  }
+</style>
