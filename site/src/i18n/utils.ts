@@ -47,7 +47,7 @@ export function resolveLink(path: string, locale: Locale = DEFAULT_LOCALE): stri
 
 /** Absolute URL for canonical links / Open Graph. */
 export function absoluteUrl(path: string, locale: Locale = DEFAULT_LOCALE): string {
-  const site = import.meta.env.SITE ?? "https://pingwaf.pages.dev";
+  const site = import.meta.env.SITE ?? "https://pingwaf.example.com";
   return new URL(href(path, locale), site).toString();
 }
 

@@ -1,6 +1,13 @@
-# Cloudflare Pages project metadata, used by `wrangler pages deploy` (CI and
-# local manual deploys). The dashboard Git integration ignores this file and
-# reads the build settings instead — see site/README.md.
+# Cloudflare Workers configuration for the portal: a Worker that serves static
+# assets only (no script). The project is connected to GitHub through Workers
+# Builds, which runs `npm run build` in `site/` and then `npx wrangler deploy`.
+#
+# `name` must match the Cloudflare project name.
 name = "pingwaf"
-pages_build_output_dir = "./dist"
 compatibility_date = "2026-10-01"
+
+[assets]
+# Relative to this file, so workers builds and local runs both resolve it.
+directory = "./dist"
+# Serve the branded page emitted by `src/pages/404.astro`.
+not_found_handling = "404-page"

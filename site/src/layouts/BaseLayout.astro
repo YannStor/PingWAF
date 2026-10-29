@@ -33,7 +33,7 @@ const social =
   image ??
   new URL(
     `${import.meta.env.BASE_URL}og.png`,
-    import.meta.env.SITE ?? "https://pingwaf.pages.dev",
+    import.meta.env.SITE ?? "https://pingwaf.example.com",
   ).toString();
 const isLanding = path === "/" && locale === DEFAULT_LOCALE;
 

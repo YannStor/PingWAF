@@ -4,15 +4,26 @@ import { defineConfig } from "astro/config";
 /**
  * PingWAF official portal.
  *
- * Deployed to Cloudflare Pages, which serves the project at the domain root,
- * so `base` stays `/`. Override `SITE_URL` when the production hostname changes
- * (custom domain, preview branch, local `astro build` for checking canonicals).
+ * Deployed as a Cloudflare Worker that serves static assets from `dist/`
+ * (Workers Builds → GitHub integration → `wrangler deploy`). The project is
+ * served at the domain root, so `base` stays `/`.
+ *
+ * `SITE_URL` must be set to the production hostname (`*.workers.dev` or the
+ * custom domain) so canonical, hreflang and Open Graph URLs are absolute and
+ * correct; it is read from the build environment, not hard-coded.
  *
  * Nothing here may depend on a server: the output is a pure static directory
- * (`dist/`) served by Cloudflare's edge — no SSR adapter, no runtime.
+ * — no SSR adapter, no runtime.
  */
-const site = process.env.SITE_URL ?? "https://pingwaf.pages.dev";
+const FALLBACK_SITE = "https://pingwaf.example.com";
+const site = process.env.SITE_URL || FALLBACK_SITE;
 const base = process.env.SITE_BASE ?? "/";
+
+if (!process.env.SITE_URL) {
+  console.warn(
+    `[site] SITE_URL is not set — canonical/OG URLs fall back to ${FALLBACK_SITE}.`,
+  );
+}
 
 export default defineConfig({
   site,
