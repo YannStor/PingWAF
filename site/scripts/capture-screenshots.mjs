@@ -300,6 +300,22 @@ async function main() {
       }, shot.scroll);
       await active.waitForTimeout(500);
     }
+    // A missing fixture surfaces as the console's error boundary, which would
+    // otherwise be committed as a "screenshot". Fail loudly instead.
+    const errorPage = await active.evaluate(() => {
+      const text = document.body ? document.body.innerText : "";
+      if (!text.includes("Unexpected Application Error")) return "";
+      return text.split("\n").filter(Boolean).slice(0, 2).join(" — ");
+    });
+    if (errorPage) {
+      const debugDir = path.join(siteRoot, ".capture-tmp");
+      mkdirSync(debugDir, { recursive: true });
+      await active.screenshot({ path: path.join(debugDir, `${shot.key}.failed.png`) });
+      throw new Error(
+        `${shot.key} (${shot.path}) rendered the console error page: ${errorPage}`,
+      );
+    }
+
     const file = path.join(outDir, `${shot.key}.png`);
     await active.screenshot({ path: file, animations: "disabled", caret: "hide" });
     results.push({ key: shot.key, path: shot.path, file: path.relative(siteRoot, file) });

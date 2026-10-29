@@ -96,8 +96,9 @@ const ssl = {
   site_id: SITE_ID,
   domain: "example.com",
   issuer: "Let's Encrypt",
-  not_before: "2025-12-01T00:00:00Z",
-  expires_at: "2026-06-01T00:00:00Z",
+  not_before: ago(30 * 86400),
+  // Certificate shown as healthy: valid for another two months.
+  expires_at: ago(-60 * 86400),
   auto_renew: true,
   acme_email: "ops@example.com",
   acme_challenge_type: "http-01",
@@ -108,8 +109,8 @@ const ssl = {
   has_certificate: true,
   has_private_key: true,
   warnings: [],
-  created_at: "2025-12-01T00:00:00Z",
-  updated_at: "2026-01-15T00:00:00Z",
+  created_at: ago(30 * 86400),
+  updated_at: ago(3600),
 };
 
 const page = (items, total = items.length) => ({
@@ -653,6 +654,81 @@ const configVersions = [
   },
 ];
 
+const mtlsCas = [
+  {
+    id: "ca_demo0001",
+    site_id: SITE_ID,
+    name: "Partner client CA",
+    source: "generated",
+    cert_pem: "-----BEGIN CERTIFICATE-----\nMIIB…demo…\n-----END CERTIFICATE-----",
+    has_private_key: true,
+    subject_dn: "CN=PingWAF partner clients, O=Example Corp",
+    serial: "4F:2A:9C:1D:00:11",
+    fingerprint_sha256: "9C:1F:4E:2B:7A:88:03:DF:61:55:0E:9A:24:B7:1C:38",
+    expected_organization: "Example Corp",
+    not_before: ago(90 * 86400),
+    not_after: ago(-275 * 86400),
+    is_active: true,
+    created_at: ago(90 * 86400),
+    certificate_count: 2,
+  },
+];
+
+const mtlsCerts = [
+  {
+    id: "mcert_demo0001",
+    site_id: SITE_ID,
+    ca_id: "ca_demo0001",
+    ca_name: "Partner client CA",
+    name: "acme-sync client",
+    common_name: "acme-sync.example.com",
+    organization: "Example Corp",
+    serial: "7B:11:03:C4:9F:2E",
+    fingerprint_sha256: "3A:77:0C:51:E8:22:9B:4D:66:10:F3:8C:07:2A:5E:91",
+    cert_pem: "-----BEGIN CERTIFICATE-----\nMIIB…client…\n-----END CERTIFICATE-----",
+    has_private_key: false,
+    not_before: ago(30 * 86400),
+    not_after: ago(-150 * 86400),
+    status: "active",
+    revoked_at: null,
+    revocation_reason: null,
+    created_at: ago(30 * 86400),
+  },
+];
+
+const blockedIps = [
+  {
+    ip: "203.0.113.42",
+    kind: "single",
+    reason: "SQL injection (PINGWAF-1001)",
+    blocked_at: ago(1800),
+    expires_at: ago(-5400),
+    agent_count: 2,
+    attack_count: 37,
+    last_attack_at: ago(120),
+  },
+  {
+    ip: "198.51.100.0/24",
+    kind: "cidr",
+    reason: "Credential stuffing on /login",
+    blocked_at: ago(7200),
+    expires_at: null,
+    agent_count: 2,
+    attack_count: 412,
+    last_attack_at: ago(300),
+  },
+  {
+    ip: "192.0.2.77",
+    kind: "single",
+    reason: "Rate limit exceeded (120 req/min)",
+    blocked_at: ago(600),
+    expires_at: null,
+    agent_count: 1,
+    attack_count: 9,
+    last_attack_at: ago(90),
+  },
+];
+
 const backupTargets = [
   {
     id: "tgt_demo0001",
@@ -787,6 +863,15 @@ function routes(pathname) {
   if (pathname === `/api/v1/sites/${SITE_ID}/ip-rules`) return ipRules;
   if (pathname === `/api/v1/sites/${SITE_ID}/geo`) return geo;
   if (pathname === `/api/v1/sites/${SITE_ID}/geo/stats`) return geoStats;
+  if (pathname === `/api/v1/sites/${SITE_ID}/blocked-ips`) return blockedIps;
+  if (pathname === `/api/v1/sites/${SITE_ID}/mtls/cas`) return mtlsCas;
+  if (pathname === `/api/v1/sites/${SITE_ID}/mtls/certificates`) return mtlsCerts;
+  if (pathname === "/api/v1/blocked-ips")
+    return blockedIps.map((entry) => ({
+      ...entry,
+      site_id: SITE_ID,
+      site_name: "example.com",
+    }));
   if (pathname === `/api/v1/sites/${SITE_ID}/basic-auth`)
     return {
       id: "ba_demo0001",
