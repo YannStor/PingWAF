@@ -57,6 +57,11 @@ web/*.tsbuildinfo
 *.log
 data/
 
+# `data/` above only covers runtime state. The portal's typed data modules are
+# source: they must stay tracked or CI builds (case-sensitive, fresh clone) fail.
+!site/src/data/
+!site/src/data/**
+
 # Local certificates & private keys (the Let's Encrypt root certs in
 # pingap-certificate/assets/ are public and stay tracked by git)
 *.pem
