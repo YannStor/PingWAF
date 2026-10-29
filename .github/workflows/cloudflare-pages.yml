@@ -1,25 +1,23 @@
-name: Deploy site to GitHub Pages
+name: Deploy site to Cloudflare Pages
 
 on:
   push:
     branches: [main]
     paths:
       - "site/**"
-      - ".github/workflows/pages.yml"
+      - ".github/workflows/cloudflare-pages.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: cloudflare-pages
+  cancel-in-progress: true
 
 jobs:
-  build:
-    name: Build site
+  deploy:
+    name: Build and deploy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -29,8 +27,6 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: site/package-lock.json
-
-      - uses: actions/configure-pages@v5
 
       - name: Install dependencies
         working-directory: site
@@ -48,17 +44,15 @@ jobs:
         working-directory: site
         run: npm run check:links
 
-      - uses: actions/upload-pages-artifact@v3
+      # Requires two repository secrets:
+      #   CLOUDFLARE_API_TOKEN  — "Cloudflare Pages: Edit" scoped token
+      #   CLOUDFLARE_ACCOUNT_ID — account id from the dashboard URL
+      - name: Deploy
+        uses: cloudflare/wrangler-action@v3
         with:
-          path: site/dist
-
-  deploy:
-    name: Deploy to GitHub Pages
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: >-
+            pages deploy site/dist
+            --project-name=pingwaf
+            --branch=${{ github.ref_name }}

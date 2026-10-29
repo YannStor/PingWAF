@@ -4,15 +4,19 @@ import { defineConfig } from "astro/config";
 /**
  * PingWAF official portal.
  *
- * Deployed to GitHub Pages as a *project* page, so every URL and asset lives
- * under `/PingWAF/`. Keep this in sync with `.github/workflows/pages.yml`.
+ * Deployed to Cloudflare Pages, which serves the project at the domain root,
+ * so `base` stays `/`. Override `SITE_URL` when the production hostname changes
+ * (custom domain, preview branch, local `astro build` for checking canonicals).
  *
  * Nothing here may depend on a server: the output is a pure static directory
- * (`dist/`) served by GitHub Pages' CDN — no SSR adapter, no runtime.
+ * (`dist/`) served by Cloudflare's edge — no SSR adapter, no runtime.
  */
+const site = process.env.SITE_URL ?? "https://pingwaf.pages.dev";
+const base = process.env.SITE_BASE ?? "/";
+
 export default defineConfig({
-  site: "https://shuaizend.github.io",
-  base: "/PingWAF/",
+  site,
+  base,
   output: "static",
   trailingSlash: "always",
   build: {

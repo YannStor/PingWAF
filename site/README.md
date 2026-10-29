@@ -1,7 +1,8 @@
 # PingWAF official site
 
-Static, multilingual portal for PingWAF, built with [Astro](https://astro.build) and
-deployed to GitHub Pages as a project page: <https://shuaizend.github.io/PingWAF/>.
+Static, multilingual portal for PingWAF, built with [Astro](https://astro.build)
+and deployed to **Cloudflare Pages** as the project `pingwaf`:
+<https://pingwaf.pages.dev> (custom domains can be attached in the dashboard).
 
 Everything here is output as plain HTML/CSS with a few kilobytes of inline
 JavaScript — no server runtime, no API calls, no external fonts. The dashboard
@@ -11,8 +12,12 @@ screenshots are real captures of `web/dist` and are optimised at build time.
 
 | Path | Purpose |
 | --- | --- |
-| `astro.config.mjs` | Static output, `base: /PingWAF/`, Shiki themes |
+| `astro.config.mjs` | Static output, `site`/`base` env hooks, Shiki themes |
+| `wrangler.toml` | Pages project name and build output, used by `wrangler pages deploy` |
+| `public/_headers` | Security headers plus immutable caching for `/_astro/*` |
+| `public/_redirects` | Canonical entry point (`/index.html` → `/`) |
 | `src/pages/` | Routes: English at the root, `[locale]/` mirrors for zh/es/fr/ja |
+| `src/pages/404.astro` | Not-found page; Pages serves `dist/404.html` automatically |
 | `src/layouts/BaseLayout.astro` | `<head>`, hreflang/canonical/OG, theme + language scripts, header/footer |
 | `src/layouts/DocsLayout.astro` | Three-column documentation shell with sidebar and page TOC |
 | `src/components/` | Header, footer, screenshot frame, code block, section primitives |
@@ -27,14 +32,13 @@ screenshots are real captures of `web/dist` and are optimised at build time.
 | `scripts/capture-screenshots.mjs` | Serves `web/dist`, stubs `/api/v1`, captures the console |
 | `scripts/check-content.ts` | Five-locale key/shape parity, links, docs and screenshot checks |
 | `scripts/check-links.mjs` | Post-build internal link and asset audit |
-| `public/` | `favicon.svg`, `og.png`, `.nojekyll` |
 
 ## Local development
 
 ```bash
 cd site
 npm ci
-npm run dev          # http://localhost:4321/PingWAF/
+npm run dev          # http://localhost:4321/
 npm run verify       # content contract + type check + build + link audit
 ```
 
@@ -54,7 +58,7 @@ npm run verify       # content contract + type check + build + link audit
   `title`, `description` and `minutes` frontmatter. Slugs are defined once in
   `src/content/schema.ts` (`DOC_SLUGS`), which also drives routes and the sidebar.
 - Internal links are locale-less paths (`/features/`, `/docs/api/`) and are
-  resolved with `href()` / `resolveLink()` so the `/PingWAF/` base and locale
+  resolved with `href()` / `resolveLink()` so the deployment base and locale
   prefix are never dropped. Absolute URLs pass through untouched.
 
 ## Adding a language
@@ -92,26 +96,76 @@ Screenshots are committed, so the site build never needs a browser. They are
 imported through `src/data/screenshots.ts` and emitted as AVIF/WebP at build
 time — never put them in `public/`.
 
-## Build and deploy
+## Build
 
 ```bash
 npm run build      # → site/dist
-npm run preview    # serve dist locally under /PingWAF/
+npm run preview    # serve dist locally at http://localhost:4321/
 ```
 
-`.github/workflows/pages.yml` builds and deploys on every push to `main` that
-touches `site/**`, plus manual `workflow_dispatch`. It runs `check:content`,
-`build` and `check:links` before uploading `site/dist`.
+`dist/` is a self-contained static bundle: HTML, hashed `/_astro/*` assets,
+`404.html`, `_headers` and `_redirects`. It is served from the domain root, so
+`base` is `/`; set `SITE_BASE=/something/` when auditing a sub-path deployment.
 
-The base path is fixed to `/PingWAF/` because this is a project page. Serving it
-from a custom domain would require changing `base` in `astro.config.mjs` and the
-deployment base in the workflow.
+## Deployment
+
+The production deployment is project **`pingwaf`** on Cloudflare Pages.
+
+### Continuous deployment (default)
+
+`.github/workflows/cloudflare-pages.yml` runs `npm ci`, `check:content`, `build`
+and `check:links` in `site/`, then uploads `site/dist` with
+`wrangler pages deploy`. It triggers on pushes to `main` that touch `site/**`,
+plus manual `workflow_dispatch`.
+
+Two repository secrets are required:
+
+| Secret | Value |
+| --- | --- |
+| `CLOUDFLARE_API_TOKEN` | API token with **Cloudflare Pages: Edit** on the account |
+| `CLOUDFLARE_ACCOUNT_ID` | Account id (visible in the dashboard URL) |
+
+### Git integration (alternative)
+
+Connect the repository in **Cloudflare Dashboard → Workers & Pages → Create →
+Pages → Connect to Git** and use:
+
+| Setting | Value |
+| --- | --- |
+| Framework preset | Astro |
+| Root directory | `site` |
+| Build command | `npm run build` |
+| Build output directory | `dist` |
+| Node version | 22 (`NODE_VERSION=22`) |
+
+With this mode Cloudflare builds every branch: `main` becomes production and
+other branches get preview URLs — no GitHub secret and no workflow needed. Pick
+one mode per project; running both deploys twice.
+
+### Manual deploy
+
+```bash
+cd site
+npm run build
+npx wrangler pages deploy dist --project-name pingwaf
+```
+
+### Custom domain
+
+Attach it in **Pages → pingwaf → Custom domains**. Cloudflare issues the
+certificate automatically; then set `SITE_URL` (workflow env or dashboard build
+variable) so canonical/hreflang/OG URLs use the new hostname:
+
+```bash
+SITE_URL=https://pingwaf.example.com npm run build
+```
 
 ## Troubleshooting
 
 | Symptom | Cause |
 | --- | --- |
-| `check:links` reports "ignores the /PingWAF/ base path" | A raw `href="/…"` was used instead of `href()` / `resolveLink()` |
+| `check:links` reports "ignores the / base path" | A raw `href="/…"` was used instead of `href()` / `resolveLink()` |
 | `check:content` reports an unexpected key | A locale file drifted from `src/content/schema.ts`; change the schema first |
-| `hreflang` count mismatch | A page was added outside `BaseLayout` |
+| Canonical URLs point at `*.pages.dev` on the custom domain | `SITE_URL` is not set for the build |
 | Screenshots look stale | Re-run `npm run capture` after `make build-web` |
+| Deploy fails with 401 | `CLOUDFLARE_API_TOKEN` lacks the Pages: Edit permission |

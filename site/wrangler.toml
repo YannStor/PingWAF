@@ -1,0 +1,6 @@
+# Cloudflare Pages project metadata, used by `wrangler pages deploy` (CI and
+# local manual deploys). The dashboard Git integration ignores this file and
+# reads the build settings instead — see site/README.md.
+name = "pingwaf"
+pages_build_output_dir = "./dist"
+compatibility_date = "2026-10-01"

@@ -1,0 +1,126 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import { LOCALES, LOCALE_META, DEFAULT_LOCALE } from "../i18n/config";
+import { href } from "../i18n/utils";
+
+const locale = DEFAULT_LOCALE;
+const title = "Page not found — PingWAF";
+const description =
+  "This page does not exist. Jump back to the PingWAF overview, the documentation or the quick start guide.";
+---
+
+<!--
+  `path="/"` keeps every generated link (switcher, nav, footer) pointing at a
+  real page; canonical/hreflang are skipped because `noindex` is set.
+-->
+<BaseLayout locale={locale} path="/" title={title} description={description} noindex>
+  <section class="section section--tight">
+    <div class="container notfound">
+      <p class="eyebrow">404</p>
+      <h1 class="notfound__title">This page does not exist</h1>
+      <p class="notfound__lead">
+        The link may be outdated, or the page may have been renamed. The console
+        and the repository are both one click away.
+      </p>
+      <div class="notfound__actions">
+        <a class="btn btn--primary" href={href("/", locale)}>Back to overview</a>
+        <a class="btn btn--outline" href={href("/docs/", locale)}>Documentation</a>
+        <a
+          class="btn btn--outline"
+          href="https://github.com/shuaiZend/PingWAF"
+          rel="noopener">GitHub</a
+        >
+      </div>
+      <nav class="notfound__locales" aria-label="Other languages">
+        <span>Other languages</span>
+        <ul>
+          {
+            LOCALES.map((entry) => (
+              <li>
+                <a href={href("/", entry)} hreflang={LOCALE_META[entry].htmlLang}>
+                  {LOCALE_META[entry].label}
+                </a>
+              </li>
+            ))
+          }
+        </ul>
+      </nav>
+      <p class="notfound__hint">
+        Looking for the dashboard? It is served by your own control plane on port
+        <code>9080</code>.
+      </p>
+    </div>
+  </section>
+</BaseLayout>
+
+<style>
+  .notfound {
+    max-width: 640px;
+    padding: 72px 0 96px;
+  }
+
+  .notfound__title {
+    margin: 12px 0 0;
+    font-size: clamp(30px, 4vw, 40px);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+
+  .notfound__lead {
+    margin: 12px 0 0;
+    font-size: 16px;
+    line-height: 1.65;
+    color: var(--color-text-subtle);
+  }
+
+  .notfound__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 24px;
+  }
+
+  .notfound__locales {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    margin-top: 36px;
+    padding-top: 20px;
+    border-top: 1px solid var(--color-border-line);
+    font-size: 13px;
+    color: var(--color-text-subtle);
+  }
+
+  .notfound__locales ul {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .notfound__locales a {
+    color: var(--color-text-link);
+    text-decoration: none;
+  }
+
+  .notfound__locales a:hover {
+    text-decoration: underline;
+  }
+
+  .notfound__hint {
+    margin-top: 20px;
+    font-size: 13px;
+    color: var(--color-text-subtle);
+  }
+
+  .notfound__hint code {
+    padding: 1px 5px;
+    border: 1px solid var(--color-border-line);
+    border-radius: var(--radius-sm);
+    background: var(--color-bg-recessed);
+    font-family: var(--site-font-mono);
+  }
+</style>

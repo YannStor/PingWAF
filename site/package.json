@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Official PingWAF portal — static, multilingual, GitHub Pages ready",
+  "description": "Official PingWAF portal — static, multilingual, Cloudflare Pages ready",
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",

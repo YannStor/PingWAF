@@ -1,0 +1,3 @@
+# Cloudflare Pages redirects — https://developers.cloudflare.com/pages/configuration/redirects/
+# Keep the canonical entry point free of the index file.
+/index.html  /  301

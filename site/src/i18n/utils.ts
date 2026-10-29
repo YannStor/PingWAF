@@ -6,7 +6,7 @@ import {
   type Locale,
 } from "./config";
 
-/** Build-time base path, always with a trailing slash (`/PingWAF/`). */
+/** Build-time base path, always with a trailing slash (`/` on Cloudflare Pages). */
 const BASE = import.meta.env.BASE_URL.endsWith("/")
   ? import.meta.env.BASE_URL
   : `${import.meta.env.BASE_URL}/`;
@@ -26,8 +26,8 @@ export function normalizePath(path: string): string {
  * Turn a locale-less path into a fully qualified href for `locale`,
  * including the deployment base path.
  *
- *   href("/features/", "zh") → "/PingWAF/zh/features/"
- *   href("/", "en")          → "/PingWAF/"
+ *   href("/features/", "zh") → "/zh/features/"
+ *   href("/", "en")          → "/"
  */
 export function href(path: string, locale: Locale = DEFAULT_LOCALE): string {
   const normalized = normalizePath(path);
@@ -40,13 +40,14 @@ export function href(path: string, locale: Locale = DEFAULT_LOCALE): string {
  * site-relative paths get the locale prefix and deployment base.
  */
 export function resolveLink(path: string, locale: Locale = DEFAULT_LOCALE): string {
-  if (/^(?:[a-z]+:|#|\/\/)/i.test(path) && !path.startsWith("/PingWAF/")) return path;
+  const isAbsolute = /^(?:[a-z]+:|#|\/\/)/i.test(path);
+  if (isAbsolute && !path.startsWith(BASE)) return path;
   return href(path, locale);
 }
 
 /** Absolute URL for canonical links / Open Graph. */
 export function absoluteUrl(path: string, locale: Locale = DEFAULT_LOCALE): string {
-  const site = import.meta.env.SITE ?? "https://shuaizend.github.io";
+  const site = import.meta.env.SITE ?? "https://pingwaf.pages.dev";
   return new URL(href(path, locale), site).toString();
 }
 

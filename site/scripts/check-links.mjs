@@ -2,14 +2,18 @@
  * Post-build link and asset check against the static output.
  *
  * Catches the two failure modes that only appear after deployment: a link
- * missing the `/PingWAF/` base prefix, and a reference to an asset or page
+ * missing the deployment base prefix, and a reference to an asset or page
  * that the build did not emit. Run `npm run build && npm run check:links`.
+ *
+ * Cloudflare Pages serves the project at the domain root, so `BASE` is `/`;
+ * set `SITE_BASE` to audit a sub-path deployment instead.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
 const DIST = path.resolve("dist");
-const BASE = "/PingWAF/";
+const RAW_BASE = process.env.SITE_BASE ?? "/";
+const BASE = RAW_BASE.endsWith("/") ? RAW_BASE : `${RAW_BASE}/`;
 const EXPECTED_HREFLANG = 6; // en, zh, es, fr, ja + x-default
 
 if (!existsSync(DIST)) {
@@ -51,9 +55,15 @@ function resolveTarget(rawUrl) {
 for (const page of pages) {
   const html = readFileSync(page, "utf8");
   const relative = path.relative(DIST, page);
-  const hreflangs = [...html.matchAll(/<link[^>]+hreflang="[^"]+"[^>]*>/g)];
-  if (hreflangs.length !== EXPECTED_HREFLANG) {
-    errors.push(`${relative} — expected ${EXPECTED_HREFLANG} hreflang links, found ${hreflangs.length}`);
+  // Non-indexable pages (404) intentionally omit canonical and hreflang links.
+  const noindex = /<meta[^>]+name="robots"[^>]+noindex/.test(html);
+  if (!noindex) {
+    const hreflangs = [...html.matchAll(/<link[^>]+hreflang="[^"]+"[^>]*>/g)];
+    if (hreflangs.length !== EXPECTED_HREFLANG) {
+      errors.push(
+        `${relative} — expected ${EXPECTED_HREFLANG} hreflang links, found ${hreflangs.length}`,
+      );
+    }
   }
 
   const refs = [
